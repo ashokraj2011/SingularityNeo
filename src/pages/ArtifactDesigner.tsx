@@ -1,0 +1,446 @@
+import React, { useState, useMemo } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { 
+  FileText, 
+  Plus, 
+  Search, 
+  Filter, 
+  MoreVertical, 
+  ChevronRight, 
+  Cpu, 
+  User, 
+  ShieldCheck, 
+  Layers, 
+  CheckCircle2, 
+  AlertCircle, 
+  X, 
+  Compass, 
+  Terminal,
+  ArrowRight,
+  Share2,
+  Database,
+  BookOpen,
+  Settings2,
+  Lock,
+  History
+} from 'lucide-react';
+import { ARTIFACTS } from '../constants';
+import { cn } from '../lib/utils';
+import { useCapability } from '../context/CapabilityContext';
+import { Artifact } from '../types';
+
+const ArtifactDesigner = () => {
+  const { activeCapability } = useCapability();
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string>(ARTIFACTS[0].id);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeTab, setActiveTab] = useState<'definition' | 'sections' | 'governance'>('definition');
+
+  const filteredArtifacts = useMemo(() => {
+    return ARTIFACTS.filter(a => 
+      (a.capabilityId === activeCapability.id || a.type === 'Governance') &&
+      a.name.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+  }, [activeCapability, searchQuery]);
+
+  const selectedArtifact = useMemo(() => {
+    return ARTIFACTS.find(a => a.id === selectedArtifactId) || ARTIFACTS[0];
+  }, [selectedArtifactId]);
+
+  return (
+    <div className="flex flex-col h-[calc(100vh-160px)] gap-6">
+      <header className="flex justify-between items-center">
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[0.625rem] font-bold bg-primary/10 text-primary px-2 py-0.5 rounded uppercase tracking-widest">Governance & Design</span>
+            <span className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">{activeCapability.id}</span>
+          </div>
+          <h1 className="text-2xl font-extrabold text-on-surface tracking-tight">Artifact Template Designer</h1>
+        </div>
+        <div className="flex gap-3">
+          <button className="px-4 py-2 bg-white border border-outline-variant/10 rounded-xl text-xs font-bold text-secondary hover:bg-surface-container-low transition-all flex items-center gap-2">
+            <History size={14} />
+            Version History
+          </button>
+          <button className="px-6 py-2.5 bg-primary text-white text-sm font-bold rounded-xl shadow-lg shadow-primary/20 hover:brightness-110 transition-all flex items-center gap-2">
+            <Plus size={18} />
+            New Template
+          </button>
+        </div>
+      </header>
+
+      <div className="flex-1 flex gap-8 min-h-0">
+        {/* Left Sidebar: Template Library */}
+        <div className="w-80 flex flex-col gap-4">
+          <div className="bg-white rounded-3xl border border-outline-variant/15 shadow-sm flex flex-col overflow-hidden">
+            <div className="p-4 border-b border-outline-variant/10">
+              <div className="relative">
+                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input 
+                  type="text" 
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search templates..."
+                  className="w-full bg-surface-container-low border border-outline-variant/10 rounded-xl pl-10 pr-4 py-2 text-xs focus:ring-2 focus:ring-primary/20 transition-all outline-none"
+                />
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+              {filteredArtifacts.map((art) => (
+                <button 
+                  key={art.id} 
+                  onClick={() => setSelectedArtifactId(art.id)}
+                  className={cn(
+                    "w-full text-left p-3 rounded-xl transition-all group flex flex-col gap-1 border",
+                    selectedArtifactId === art.id 
+                      ? "bg-primary/5 border-primary/20 shadow-sm" 
+                      : "bg-transparent border-transparent hover:bg-surface-container-low"
+                  )}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <FileText size={14} className={selectedArtifactId === art.id ? "text-primary" : "text-slate-400"} />
+                      <span className={cn(
+                        "text-xs font-bold transition-colors",
+                        selectedArtifactId === art.id ? "text-primary" : "text-on-surface"
+                      )}>
+                        {art.name}
+                      </span>
+                    </div>
+                    {art.isMasterArtifact && (
+                      <span className="text-[0.5rem] font-bold text-primary bg-primary/10 px-1.5 py-0.5 rounded uppercase tracking-widest">Master</span>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between pl-6">
+                    <span className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">{art.type}</span>
+                    <span className="text-[0.625rem] text-slate-300">{art.version}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="p-6 bg-primary/5 rounded-3xl border border-primary/10">
+            <h4 className="text-[0.625rem] font-bold text-primary uppercase tracking-widest mb-2">Design Tip</h4>
+            <p className="text-[0.6875rem] text-secondary leading-relaxed">
+              Artifacts are the "contracts" between agents. Ensure your templates include all necessary context for the next agent in the sequence to succeed.
+            </p>
+          </div>
+        </div>
+
+        {/* Main Canvas: Designer */}
+        <div className="flex-1 flex flex-col bg-white rounded-3xl border border-outline-variant/15 shadow-sm overflow-hidden">
+          {/* Tabs */}
+          <div className="flex border-b border-outline-variant/10 px-6">
+            {(['definition', 'sections', 'governance'] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={cn(
+                  "px-6 py-4 text-xs font-bold uppercase tracking-widest transition-all border-b-2",
+                  activeTab === tab 
+                    ? "text-primary border-primary" 
+                    : "text-secondary border-transparent hover:text-primary"
+                )}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
+            <AnimatePresence mode="wait">
+              {activeTab === 'definition' && (
+                <motion.div
+                  key="definition"
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  className="space-y-8"
+                >
+                  <div className="flex justify-between items-start">
+                    <div className="flex items-center gap-4">
+                      <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center text-primary border border-primary/10 shadow-sm">
+                        <FileText size={32} />
+                      </div>
+                      <div>
+                        <h2 className="text-xl font-extrabold text-on-surface tracking-tight">{selectedArtifact.name}</h2>
+                        <p className="text-sm text-secondary font-medium">Core template metadata and agent contracts.</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button className="p-2 bg-surface-container-low rounded-lg text-secondary hover:text-primary transition-all">
+                        <Share2 size={18} />
+                      </button>
+                      <button className="p-2 bg-surface-container-low rounded-lg text-secondary hover:text-primary transition-all">
+                        <Settings2 size={18} />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Template Name</label>
+                      <input 
+                        type="text" 
+                        defaultValue={selectedArtifact.name}
+                        className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Category</label>
+                      <select className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all appearance-none">
+                        <option>{selectedArtifact.type}</option>
+                        <option>Technical</option>
+                        <option>Business</option>
+                        <option>Security</option>
+                        <option>Governance</option>
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Version</label>
+                      <input 
+                        type="text" 
+                        defaultValue={selectedArtifact.version}
+                        className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Description</label>
+                    <textarea 
+                      defaultValue={selectedArtifact.isMasterArtifact 
+                        ? "Consolidated governance record documenting all strategic decisions, system changes, and agent learning insights across the delivery lifecycle."
+                        : `Standardized artifact for ${selectedArtifact.name} generated during the ${selectedArtifact.type} phase.`}
+                      className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm text-secondary leading-relaxed h-24 resize-none focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-8">
+                    <section className="space-y-4">
+                      <h3 className="text-sm font-bold text-on-surface flex items-center gap-2 uppercase tracking-widest">
+                        <Cpu size={16} className="text-primary" />
+                        Producers (Agents)
+                      </h3>
+                      <div className="p-4 bg-surface-container-low rounded-2xl border border-outline-variant/10 space-y-3">
+                        <div className="flex items-center justify-between p-2 bg-white rounded-lg border border-outline-variant/5">
+                          <div className="flex items-center gap-2">
+                            <Cpu size={14} className="text-primary" />
+                            <span className="text-xs font-bold">{selectedArtifact.agent}</span>
+                          </div>
+                          <span className="text-[0.5rem] font-bold text-success uppercase tracking-widest">Primary</span>
+                        </div>
+                        <button className="w-full py-2 border border-dashed border-outline-variant/30 rounded-lg text-[0.625rem] font-bold text-slate-400 hover:text-primary hover:border-primary/30 transition-all">
+                          + Add Producer Agent
+                        </button>
+                      </div>
+                    </section>
+
+                    <section className="space-y-4">
+                      <h3 className="text-sm font-bold text-on-surface flex items-center gap-2 uppercase tracking-widest">
+                        <User size={16} className="text-secondary" />
+                        Consumers (Stakeholders)
+                      </h3>
+                      <div className="p-4 bg-surface-container-low rounded-2xl border border-outline-variant/10 space-y-2">
+                        {['Governance Board', 'Audit Team', 'Master Agent'].map(consumer => (
+                          <div key={consumer} className="flex items-center justify-between p-2 bg-white rounded-lg border border-outline-variant/5">
+                            <span className="text-xs font-bold text-secondary">{consumer}</span>
+                            <X size={12} className="text-slate-300 cursor-pointer hover:text-error" />
+                          </div>
+                        ))}
+                        <button className="w-full py-2 border border-dashed border-outline-variant/30 rounded-lg text-[0.625rem] font-bold text-slate-400 hover:text-primary hover:border-primary/30 transition-all">
+                          + Add Consumer
+                        </button>
+                      </div>
+                    </section>
+                  </div>
+                </motion.div>
+              )}
+
+              {activeTab === 'sections' && (
+                <motion.div
+                  key="sections"
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  className="space-y-6"
+                >
+                  <div className="flex justify-between items-center mb-6">
+                    <div>
+                      <h2 className="text-xl font-extrabold text-on-surface tracking-tight">Artifact Structure</h2>
+                      <p className="text-sm text-secondary font-medium">Define the data blocks and validation rules for this artifact.</p>
+                    </div>
+                    <button className="px-4 py-2 bg-primary text-white text-xs font-bold rounded-xl flex items-center gap-2">
+                      <Plus size={14} /> Add Section
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    {[
+                      { title: 'Title & Status', type: 'Free Text', req: true, icon: FileText },
+                      { title: 'Context & Rationale', type: 'Free Text', req: true, icon: Compass },
+                      { title: 'Strategic Decisions', type: 'Decision Box', req: true, icon: ShieldCheck, data: selectedArtifact.decisions },
+                      { title: 'System Changes', type: 'Change Log', req: true, icon: History, data: selectedArtifact.changes },
+                      { title: 'Agent Learning Insights', type: 'Learning Record', req: false, icon: Sparkles, data: selectedArtifact.learningInsights },
+                    ].map((section, i) => (
+                      <div key={i} className="flex items-center gap-4 p-4 bg-surface-container-low rounded-2xl border border-outline-variant/5 group hover:border-primary/20 transition-all">
+                        <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-outline group-hover:text-primary transition-colors shadow-sm">
+                          <section.icon size={20} />
+                        </div>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <p className="text-sm font-bold text-on-surface">{section.title}</p>
+                            {section.req && <span className="text-[0.5rem] font-bold text-primary uppercase tracking-widest bg-primary/5 px-1.5 py-0.5 rounded border border-primary/10">Required</span>}
+                          </div>
+                          <p className="text-[0.625rem] text-secondary font-medium uppercase tracking-tighter">{section.type}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button className="p-2 text-slate-300 hover:text-primary transition-colors">
+                            <Settings2 size={16} />
+                          </button>
+                          <button className="p-2 text-slate-300 hover:text-error transition-colors">
+                            <X size={16} />
+                          </button>
+                          <div className="p-2 text-slate-300 cursor-grab active:cursor-grabbing">
+                            <MoreVertical size={16} />
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+
+              {activeTab === 'governance' && (
+                <motion.div
+                  key="governance"
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  className="space-y-8"
+                >
+                  <div className="flex justify-between items-center mb-6">
+                    <div>
+                      <h2 className="text-xl font-extrabold text-on-surface tracking-tight">Governance Rules</h2>
+                      <p className="text-sm text-secondary font-medium">Policy-as-code for artifact validation and hand-off.</p>
+                    </div>
+                    <button className="px-4 py-2 bg-tertiary text-white text-xs font-bold rounded-xl flex items-center gap-2">
+                      <Lock size={14} /> Add Policy
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-8">
+                    <section className="space-y-4">
+                      <h3 className="text-sm font-bold text-on-surface flex items-center gap-2 uppercase tracking-widest">
+                        <ShieldCheck size={16} className="text-success" />
+                        Validation Rules
+                      </h3>
+                      <div className="space-y-3">
+                        {selectedArtifact.governanceRules?.map((rule, i) => (
+                          <div key={i} className="p-4 bg-surface-container-low rounded-xl border border-outline-variant/10 flex gap-3">
+                            <CheckCircle2 size={16} className="text-success shrink-0 mt-0.5" />
+                            <p className="text-xs text-secondary font-medium leading-relaxed">{rule}</p>
+                          </div>
+                        )) || (
+                          <div className="p-8 text-center border-2 border-dashed border-outline-variant/20 rounded-2xl">
+                            <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">No custom rules defined</p>
+                          </div>
+                        )}
+                        <button className="w-full py-3 border-2 border-dashed border-outline-variant/30 rounded-xl text-[0.625rem] font-bold text-slate-400 hover:text-primary hover:border-primary/30 transition-all">
+                          + Define New Validation Rule
+                        </button>
+                      </div>
+                    </section>
+
+                    <section className="space-y-4">
+                      <h3 className="text-sm font-bold text-on-surface flex items-center gap-2 uppercase tracking-widest">
+                        <BookOpen size={16} className="text-indigo-500" />
+                        Hand-off Handlers
+                      </h3>
+                      <div className="space-y-3">
+                        <div className="p-4 bg-surface-container-low rounded-xl border border-outline-variant/10 flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 bg-indigo-500 rounded-lg flex items-center justify-center text-white">
+                              <BookOpen size={20} />
+                            </div>
+                            <div>
+                              <p className="text-xs font-bold text-on-surface">Confluence Sync</p>
+                              <p className="text-[0.625rem] text-secondary">Auto-sync enabled</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 bg-success rounded-full" />
+                            <span className="text-[0.625rem] font-bold text-success uppercase">Active</span>
+                          </div>
+                        </div>
+                        <div className="p-4 bg-surface-container-low rounded-xl border border-outline-variant/10 flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center text-white">
+                              <Share2 size={20} />
+                            </div>
+                            <div>
+                              <p className="text-xs font-bold text-on-surface">Jira Integration</p>
+                              <p className="text-[0.625rem] text-secondary">Update task on completion</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 bg-success rounded-full" />
+                            <span className="text-[0.625rem] font-bold text-success uppercase">Active</span>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Footer Actions */}
+          <div className="p-6 border-t border-outline-variant/10 bg-surface-container-lowest flex justify-between items-center">
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-success rounded-full" />
+                <span className="text-[0.625rem] font-bold text-secondary uppercase tracking-widest">Template Validated</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-primary rounded-full" />
+                <span className="text-[0.625rem] font-bold text-secondary uppercase tracking-widest">Governance Approved</span>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button className="px-6 py-2 text-sm font-bold text-secondary hover:bg-surface-container-low rounded-xl transition-all">
+                Discard Changes
+              </button>
+              <button className="px-8 py-2 bg-primary text-white text-sm font-bold rounded-xl shadow-lg shadow-primary/20 hover:brightness-110 transition-all">
+                Save Template
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default ArtifactDesigner;
+
+const Sparkles = ({ size, className }: { size?: number; className?: string }) => (
+  <svg 
+    width={size || 24} 
+    height={size || 24} 
+    viewBox="0 0 24 24" 
+    fill="none" 
+    stroke="currentColor" 
+    strokeWidth="2" 
+    strokeLinecap="round" 
+    strokeLinejoin="round" 
+    className={className}
+  >
+    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
+    <path d="M5 3v4" />
+    <path d="M19 17v4" />
+    <path d="M3 5h4" />
+    <path d="M17 19h4" />
+  </svg>
+);

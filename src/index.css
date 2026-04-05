@@ -1,0 +1,65 @@
+@import url('https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-headline: "Public Sans", sans-serif;
+
+  /* Fidelity Investments Inspired Palette */
+  --color-primary: #00843D; /* Fidelity Green */
+  --color-primary-container: #006227;
+  --color-primary-fixed: #d1f7e0;
+  --color-primary-fixed-dim: #a3e9c1;
+  
+  --color-secondary: #004B8D; /* Fidelity Blue */
+  --color-secondary-container: #d9e9f6;
+  
+  --color-tertiary: #002014;
+  --color-tertiary-fixed: #85f8c4;
+  --color-tertiary-fixed-dim: #68dba9;
+  
+  --color-surface: #f8f9fa;
+  --color-surface-bright: #ffffff;
+  --color-surface-dim: #e9ecef;
+  --color-surface-container: #f1f3f5;
+  --color-surface-container-low: #f8f9fa;
+  --color-surface-container-high: #dee2e6;
+  --color-surface-container-highest: #ced4da;
+  --color-surface-container-lowest: #ffffff;
+  
+  --color-on-surface: #131b2e;
+  --color-on-surface-variant: #454652;
+  --color-outline: #767683;
+  --color-outline-variant: #c6c5d4;
+  
+  --color-error: #ba1a1a;
+  --color-error-container: #ffdad6;
+  --color-on-error-container: #93000a;
+
+  --radius-xl: 0.75rem;
+  --radius-full: 9999px;
+}
+
+@layer base {
+  body {
+    @apply bg-surface text-on-surface font-sans antialiased;
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-headline;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-white/80 backdrop-blur-xl;
+  }
+  
+  .ambient-shadow {
+    box-shadow: 0px 12px 32px rgba(19, 27, 46, 0.06);
+  }
+  
+  .ghost-border {
+    @apply outline-1 outline-outline-variant/15;
+  }
+}
