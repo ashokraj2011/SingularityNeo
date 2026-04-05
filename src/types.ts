@@ -8,16 +8,90 @@ export interface Skill {
   version: string;
 }
 
+export interface CapabilityStakeholder {
+  role: string;
+  name: string;
+  email: string;
+  teamName?: string;
+}
+
+export interface CapabilityMetadataEntry {
+  key: string;
+  value: string;
+}
+
 export interface Capability {
   id: string;
   name: string;
   description: string;
+  domain?: string;
+  parentCapabilityId?: string;
+  businessUnit?: string;
+  ownerTeam?: string;
+  confluenceLink?: string;
+  jiraBoardLink?: string;
+  documentationNotes?: string;
   applications: string[];
   apis: string[];
   databases: string[];
+  gitRepositories: string[];
+  localDirectories: string[];
+  teamNames: string[];
+  stakeholders: CapabilityStakeholder[];
+  additionalMetadata: CapabilityMetadataEntry[];
   status: Status;
   specialAgentId?: string;
   skillLibrary: Skill[];
+}
+
+export interface AgentUsage {
+  requestCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  lastRunAt?: string;
+}
+
+export interface AgentOutputRecord {
+  id: string;
+  title: string;
+  summary: string;
+  timestamp: string;
+  status: 'completed' | 'pending';
+  relatedTaskId?: string;
+  artifactId?: string;
+}
+
+export interface CapabilityAgent {
+  id: string;
+  capabilityId: string;
+  name: string;
+  role: string;
+  objective: string;
+  systemPrompt: string;
+  initializationStatus: 'NOT_STARTED' | 'READY';
+  documentationSources: string[];
+  inputArtifacts: string[];
+  outputArtifacts: string[];
+  isOwner?: boolean;
+  learningNotes?: string[];
+  skillIds: string[];
+  provider: 'GitHub Copilot API';
+  model: string;
+  tokenLimit: number;
+  usage: AgentUsage;
+  previousOutputs: AgentOutputRecord[];
+}
+
+export interface CapabilityChatMessage {
+  id: string;
+  capabilityId: string;
+  role: 'user' | 'agent';
+  content: string;
+  timestamp: string;
+  agentId?: string;
+  agentName?: string;
 }
 
 export interface WorkPackage {
@@ -73,6 +147,10 @@ export interface Artifact {
   changes?: string[];
   learningInsights?: string[];
   governanceRules?: string[];
+  description?: string;
+  direction?: 'INPUT' | 'OUTPUT';
+  connectedAgentId?: string;
+  sourceWorkflowId?: string;
 }
 
 export interface WorkflowStep {
@@ -89,6 +167,9 @@ export interface Workflow {
   capabilityId: string;
   steps: WorkflowStep[];
   status: Status;
+  workflowType?: 'SDLC' | 'Operational' | 'Governance' | 'Custom';
+  scope?: 'CAPABILITY' | 'GLOBAL';
+  summary?: string;
 }
 
 export interface ExecutionLog {
@@ -132,4 +213,18 @@ export interface WorkItem {
     requestedBy: string;
     timestamp: string;
   };
+}
+
+export interface CapabilityWorkspace {
+  capabilityId: string;
+  agents: CapabilityAgent[];
+  workflows: Workflow[];
+  artifacts: Artifact[];
+  tasks: AgentTask[];
+  executionLogs: ExecutionLog[];
+  learningUpdates: LearningUpdate[];
+  workItems: WorkItem[];
+  messages: CapabilityChatMessage[];
+  activeChatAgentId?: string;
+  createdAt: string;
 }

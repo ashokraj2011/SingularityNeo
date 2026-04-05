@@ -23,19 +23,100 @@ import {
   Lightbulb,
   History
 } from 'lucide-react';
-import { AGENT_TASKS, EXECUTION_LOGS, LEARNING_UPDATES } from '../constants';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
-import { AgentTask } from '../types';
+import { AgentTask, LearningUpdate, Skill } from '../types';
+
+const createTaskId = () => `TASK-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+const createLogId = () => `LOG-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+
+const mapArtifactTypeToLinkType = (artifactType: string) => {
+  const normalizedType = artifactType.toLowerCase();
+  if (normalizedType.includes('data')) {
+    return 'table' as const;
+  }
+  if (normalizedType.includes('governance') || normalizedType.includes('compliance')) {
+    return 'scale' as const;
+  }
+  return 'file' as const;
+};
+
+const formatLogTimestamp = (timestamp: string) => {
+  const parsedDate = new Date(timestamp);
+  if (!Number.isNaN(parsedDate.getTime())) {
+    return parsedDate.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+  return timestamp.includes(',') ? timestamp.split(',')[1].trim() : timestamp;
+};
+
+const createSkillId = (name: string) =>
+  `SKL-${name
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 18)}`;
+
+const inferSkillCategory = (value: string): Skill['category'] => {
+  const normalized = value.toLowerCase();
+  if (normalized.includes('security') || normalized.includes('vulnerability')) {
+    return 'Security';
+  }
+  if (normalized.includes('compliance') || normalized.includes('audit') || normalized.includes('policy')) {
+    return 'Compliance';
+  }
+  if (normalized.includes('autom') || normalized.includes('workflow') || normalized.includes('remediation')) {
+    return 'Automation';
+  }
+  if (normalized.includes('data') || normalized.includes('schema') || normalized.includes('mapping')) {
+    return 'Data';
+  }
+  return 'Analysis';
+};
+
+const buildSkillFromLearningUpdate = (update: LearningUpdate): Skill => {
+  const source = (update.skillUpdate || update.insight).trim();
+  const name = source
+    .split(/[.!?]/)[0]
+    .split(/\s+/)
+    .slice(0, 5)
+    .join(' ')
+    .replace(/\b\w/g, char => char.toUpperCase()) || 'Learning Skill';
+
+  return {
+    id: createSkillId(name),
+    name,
+    description: update.skillUpdate || update.insight,
+    category: inferSkillCategory(`${update.insight} ${update.skillUpdate || ''}`),
+    version: '1.0.0',
+  };
+};
 
 const Tasks = () => {
-  const { activeCapability } = useCapability();
+  const {
+    activeCapability,
+    getCapabilityWorkspace,
+    setCapabilityWorkspaceContent,
+    addCapabilitySkill,
+  } = useCapability();
+  const workspace = getCapabilityWorkspace(activeCapability.id);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'details' | 'logs'>('details');
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [draftTask, setDraftTask] = useState({
+    title: '',
+    agentId: workspace.agents[0]?.id || '',
+    priority: 'High' as AgentTask['priority'],
+    prompt: '',
+    artifactId: workspace.artifacts[0]?.id || '',
+  });
 
   const filteredTasks = useMemo(() => {
-    return AGENT_TASKS.filter(task => task.capabilityId === activeCapability.id);
-  }, [activeCapability]);
+    return workspace.tasks;
+  }, [workspace.tasks]);
 
   const selectedTask = useMemo(() => {
     return filteredTasks.find(t => t.id === selectedTaskId) || null;
@@ -47,6 +128,71 @@ const Tasks = () => {
       completed: filteredTasks.filter(t => t.status === 'COMPLETED').length
     };
   }, [filteredTasks]);
+  const capabilitySkillIds = useMemo(
+    () => new Set(activeCapability.skillLibrary.map(skill => skill.id)),
+    [activeCapability.skillLibrary],
+  );
+
+  const handleCreateTask = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!draftTask.title.trim() || !draftTask.agentId) {
+      return;
+    }
+
+    const selectedAgent = workspace.agents.find(agent => agent.id === draftTask.agentId);
+    if (!selectedAgent) {
+      return;
+    }
+
+    const selectedArtifact = workspace.artifacts.find(artifact => artifact.id === draftTask.artifactId);
+    const newTask: AgentTask = {
+      id: createTaskId(),
+      title: draftTask.title.trim(),
+      agent: selectedAgent.id,
+      capabilityId: activeCapability.id,
+      priority: draftTask.priority,
+      status: 'QUEUED',
+      timestamp: 'Just now',
+      prompt: draftTask.prompt.trim(),
+      executionNotes: `Queued inside ${activeCapability.name}. The assigned agent will inherit the capability metadata, team learning, and artifact hand-off rules.`,
+      linkedArtifacts: selectedArtifact
+        ? [
+            {
+              name: selectedArtifact.name,
+              size: selectedArtifact.version,
+              type: mapArtifactTypeToLinkType(selectedArtifact.type),
+            },
+          ]
+        : [],
+      producedOutputs: [],
+    };
+
+    setCapabilityWorkspaceContent(activeCapability.id, {
+      tasks: [...workspace.tasks, newTask],
+      executionLogs: [
+        ...workspace.executionLogs,
+        {
+          id: createLogId(),
+          taskId: newTask.id,
+          capabilityId: activeCapability.id,
+          agentId: selectedAgent.id,
+          timestamp: new Date().toISOString(),
+          level: 'INFO',
+          message: `Task queued for ${selectedAgent.name} inside ${activeCapability.name}.`,
+        },
+      ],
+    });
+
+    setSelectedTaskId(newTask.id);
+    setDraftTask({
+      title: '',
+      agentId: workspace.agents[0]?.id || '',
+      priority: 'High',
+      prompt: '',
+      artifactId: workspace.artifacts[0]?.id || '',
+    });
+    setIsCreateModalOpen(false);
+  };
 
   const getIconForType = (type: string) => {
     switch (type) {
@@ -68,7 +214,10 @@ const Tasks = () => {
           <h1 className="text-2xl font-extrabold text-on-surface tracking-tight">{activeCapability.name} Agent Tasks</h1>
           <p className="text-sm text-secondary font-medium">Focused workspace for orchestrating intelligent delivery agents for {activeCapability.name}.</p>
         </div>
-        <button className="bg-primary text-white px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 shadow-sm hover:brightness-110 transition-all">
+        <button
+          onClick={() => setIsCreateModalOpen(true)}
+          className="bg-primary text-white px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 shadow-sm hover:brightness-110 transition-all"
+        >
           <Plus size={18} />
           <span>+ New Agent Task</span>
         </button>
@@ -88,11 +237,13 @@ const Tasks = () => {
             </div>
             <div className="bg-white p-4 rounded-xl border border-outline-variant/10 shadow-sm flex flex-col gap-1">
               <span className="text-[0.6875rem] font-bold uppercase text-secondary">Active Agents</span>
-              <span className="text-2xl font-extrabold text-on-surface">3</span>
+              <span className="text-2xl font-extrabold text-on-surface">{workspace.agents.length}</span>
             </div>
             <div className="bg-white p-4 rounded-xl border border-outline-variant/10 shadow-sm flex flex-col gap-1">
               <span className="text-[0.6875rem] font-bold uppercase text-secondary">Avg. Execution</span>
-              <span className="text-2xl font-extrabold text-on-surface">4.2m</span>
+              <span className="text-2xl font-extrabold text-on-surface">
+                {filteredTasks.length === 0 ? '0m' : `${Math.max(1, Math.round(workspace.executionLogs.length / filteredTasks.length))}m`}
+              </span>
             </div>
           </div>
 
@@ -169,6 +320,129 @@ const Tasks = () => {
 
         {/* Task Detail Modal */}
         <AnimatePresence>
+          {isCreateModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsCreateModalOpen(false)}
+                className="absolute inset-0 bg-black/40 backdrop-blur-md"
+              />
+              <motion.form
+                initial={{ opacity: 0, y: 20, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 20, scale: 0.98 }}
+                onSubmit={handleCreateTask}
+                className="relative w-full max-w-2xl rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.2em] text-primary">Create task</p>
+                    <h3 className="mt-2 text-2xl font-extrabold text-primary">Launch a new agent task</h3>
+                    <p className="mt-2 text-sm text-secondary">
+                      This task will belong to {activeCapability.name} and inherit the active capability team, artifacts, and learning context.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsCreateModalOpen(false)}
+                    className="rounded-full p-2 text-slate-400 transition-colors hover:bg-surface-container-low hover:text-primary"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <div className="mt-8 grid gap-5 md:grid-cols-2">
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Task title</label>
+                    <input
+                      required
+                      value={draftTask.title}
+                      onChange={event => setDraftTask(prev => ({ ...prev, title: event.target.value }))}
+                      placeholder="e.g. Capability workflow readiness review"
+                      className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Agent owner</label>
+                    <select
+                      value={draftTask.agentId}
+                      onChange={event => setDraftTask(prev => ({ ...prev, agentId: event.target.value }))}
+                      className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    >
+                      {workspace.agents.map(agent => (
+                        <option key={agent.id} value={agent.id}>
+                          {agent.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Priority</label>
+                    <select
+                      value={draftTask.priority}
+                      onChange={event =>
+                        setDraftTask(prev => ({
+                          ...prev,
+                          priority: event.target.value as AgentTask['priority'],
+                        }))
+                      }
+                      className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    >
+                      <option value="High">High</option>
+                      <option value="Med">Med</option>
+                      <option value="Low">Low</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Linked artifact</label>
+                    <select
+                      value={draftTask.artifactId}
+                      onChange={event => setDraftTask(prev => ({ ...prev, artifactId: event.target.value }))}
+                      className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    >
+                      <option value="">No artifact</option>
+                      {workspace.artifacts.map(artifact => (
+                        <option key={artifact.id} value={artifact.id}>
+                          {artifact.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Prompt</label>
+                    <textarea
+                      value={draftTask.prompt}
+                      onChange={event => setDraftTask(prev => ({ ...prev, prompt: event.target.value }))}
+                      placeholder="Describe what the assigned capability agent should do."
+                      className="h-32 w-full resize-none rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-8 flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsCreateModalOpen(false)}
+                    className="flex-1 rounded-2xl border border-outline-variant/20 px-5 py-3 text-sm font-bold text-secondary transition-all hover:bg-surface-container-low"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
+                  >
+                    Create Task
+                  </button>
+                </div>
+              </motion.form>
+            </div>
+          )}
           {selectedTask && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 lg:p-8">
               <motion.div 
@@ -372,9 +646,9 @@ const Tasks = () => {
                           <button className="text-[0.625rem] font-bold text-primary uppercase tracking-widest hover:underline">Download Full Log</button>
                         </div>
                         <div className="bg-slate-950 rounded-2xl p-6 font-mono text-[0.75rem] text-slate-300 space-y-3 shadow-2xl border border-slate-800">
-                          {EXECUTION_LOGS.filter(log => log.taskId === selectedTask.id).map((log) => (
+                          {workspace.executionLogs.filter(log => log.taskId === selectedTask.id).map((log) => (
                             <div key={log.id} className="flex gap-4 group">
-                              <span className="text-slate-600 shrink-0 select-none">[{log.timestamp.split(',')[1].trim()}]</span>
+                              <span className="text-slate-600 shrink-0 select-none">[{formatLogTimestamp(log.timestamp)}]</span>
                               <span className={cn(
                                 "font-bold shrink-0 uppercase w-16",
                                 log.level === 'INFO' ? "text-blue-400" :
@@ -384,7 +658,7 @@ const Tasks = () => {
                               <span className="group-hover:text-white transition-colors">{log.message}</span>
                             </div>
                           ))}
-                          {EXECUTION_LOGS.filter(log => log.taskId === selectedTask.id).length === 0 && (
+                          {workspace.executionLogs.filter(log => log.taskId === selectedTask.id).length === 0 && (
                             <p className="text-slate-500 italic">No execution logs found for this task.</p>
                           )}
                         </div>
@@ -396,7 +670,11 @@ const Tasks = () => {
                           Learning & Skill Updates
                         </label>
                         <div className="grid grid-cols-1 gap-4">
-                          {LEARNING_UPDATES.filter(update => update.capabilityId === activeCapability.id).map((update) => (
+                          {workspace.learningUpdates.map(update => {
+                            const suggestedSkill = buildSkillFromLearningUpdate(update);
+                            const isApplied = capabilitySkillIds.has(suggestedSkill.id);
+
+                            return (
                             <div key={update.id} className="bg-white border border-outline-variant/15 rounded-2xl p-5 shadow-sm hover:border-primary/30 transition-all group">
                               <div className="flex justify-between items-start mb-3">
                                 <div className="flex items-center gap-3">
@@ -416,14 +694,23 @@ const Tasks = () => {
                                   <span className="text-[0.625rem] font-bold text-slate-400 uppercase">Impact:</span>
                                   <span className="text-[0.625rem] font-bold text-tertiary bg-tertiary/5 px-2 py-0.5 rounded uppercase tracking-widest">Skill Enhanced</span>
                                 </div>
-                                <button className="text-[0.625rem] font-bold text-primary flex items-center gap-1 uppercase tracking-widest hover:underline">
-                                  Apply to Skill Library
+                                <button
+                                  onClick={() => {
+                                    if (!isApplied) {
+                                      addCapabilitySkill(activeCapability.id, suggestedSkill);
+                                    }
+                                  }}
+                                  className="text-[0.625rem] font-bold text-primary flex items-center gap-1 uppercase tracking-widest hover:underline disabled:no-underline disabled:text-slate-300"
+                                  disabled={isApplied}
+                                >
+                                  {isApplied ? 'Applied to Skill Library' : 'Apply to Skill Library'}
                                   <ChevronRight size={12} />
                                 </button>
                               </div>
                             </div>
-                          ))}
-                          {LEARNING_UPDATES.filter(update => update.capabilityId === activeCapability.id).length === 0 && (
+                            );
+                          })}
+                          {workspace.learningUpdates.length === 0 && (
                             <div className="p-10 text-center bg-surface-container-low rounded-2xl border border-dashed border-outline-variant/20">
                               <p className="text-xs text-slate-400 italic">No learning updates generated yet.</p>
                             </div>

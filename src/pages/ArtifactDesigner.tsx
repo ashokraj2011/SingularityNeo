@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
+import {
   FileText, 
   Plus, 
   Search, 
@@ -24,27 +24,217 @@ import {
   Lock,
   History
 } from 'lucide-react';
-import { ARTIFACTS } from '../constants';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
 import { Artifact } from '../types';
 
+type ArtifactDraft = {
+  name: string;
+  type: string;
+  version: string;
+  description: string;
+  connectedAgentId: string;
+  template: string;
+  documentationStatus: NonNullable<Artifact['documentationStatus']>;
+  direction: NonNullable<Artifact['direction']>;
+  governanceRules: string;
+  decisions: string;
+  changes: string;
+  learningInsights: string;
+};
+
+const createArtifactId = () => `ART-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+const splitDraftLines = (value: string) =>
+  value
+    .split(/\n|,/)
+    .map(item => item.trim())
+    .filter(Boolean);
+
+const buildArtifactDraft = (artifact?: Artifact, fallbackAgentId = ''): ArtifactDraft => ({
+  name: artifact?.name || '',
+  type: artifact?.type || 'Technical',
+  version: artifact?.version || 'v1.0.0',
+  description: artifact?.description || '',
+  connectedAgentId: artifact?.connectedAgentId || artifact?.agent || fallbackAgentId,
+  template: artifact?.template || '',
+  documentationStatus: artifact?.documentationStatus || 'PENDING',
+  direction: artifact?.direction || 'OUTPUT',
+  governanceRules: (artifact?.governanceRules || []).join('\n'),
+  decisions: (artifact?.decisions || []).join('\n'),
+  changes: (artifact?.changes || []).join('\n'),
+  learningInsights: (artifact?.learningInsights || []).join('\n'),
+});
+
+const getCreatedLabel = () =>
+  new Date().toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+
 const ArtifactDesigner = () => {
-  const { activeCapability } = useCapability();
-  const [selectedArtifactId, setSelectedArtifactId] = useState<string>(ARTIFACTS[0].id);
+  const {
+    activeCapability,
+    getCapabilityWorkspace,
+    setCapabilityWorkspaceContent,
+    updateCapabilityAgent,
+  } = useCapability();
+  const workspace = getCapabilityWorkspace(activeCapability.id);
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'definition' | 'sections' | 'governance'>('definition');
+  const [isCreatingNew, setIsCreatingNew] = useState(false);
+  const [artifactDraft, setArtifactDraft] = useState<ArtifactDraft>(() =>
+    buildArtifactDraft(undefined, workspace.agents[0]?.id || ''),
+  );
 
   const filteredArtifacts = useMemo(() => {
-    return ARTIFACTS.filter(a => 
-      (a.capabilityId === activeCapability.id || a.type === 'Governance') &&
-      a.name.toLowerCase().includes(searchQuery.toLowerCase())
+    return workspace.artifacts.filter(artifact =>
+      artifact.name.toLowerCase().includes(searchQuery.toLowerCase()),
     );
-  }, [activeCapability, searchQuery]);
+  }, [workspace.artifacts, searchQuery]);
 
   const selectedArtifact = useMemo(() => {
-    return ARTIFACTS.find(a => a.id === selectedArtifactId) || ARTIFACTS[0];
-  }, [selectedArtifactId]);
+    return filteredArtifacts.find(a => a.id === selectedArtifactId) || filteredArtifacts[0];
+  }, [filteredArtifacts, selectedArtifactId]);
+
+  useEffect(() => {
+    if (isCreatingNew) {
+      return;
+    }
+
+    if (!selectedArtifact && filteredArtifacts[0]) {
+      setSelectedArtifactId(filteredArtifacts[0].id);
+      return;
+    }
+
+    if (selectedArtifact && filteredArtifacts.some(artifact => artifact.id === selectedArtifact.id)) {
+      return;
+    }
+
+    if (filteredArtifacts[0]) {
+      setSelectedArtifactId(filteredArtifacts[0].id);
+    }
+  }, [filteredArtifacts, isCreatingNew, selectedArtifact]);
+
+  useEffect(() => {
+    if (!selectedArtifact || isCreatingNew) {
+      return;
+    }
+
+    setArtifactDraft(buildArtifactDraft(selectedArtifact, workspace.agents[0]?.id || ''));
+  }, [isCreatingNew, selectedArtifact, workspace.agents]);
+
+  const handleCreateTemplate = () => {
+    setIsCreatingNew(true);
+    setSelectedArtifactId('');
+    setArtifactDraft(buildArtifactDraft(undefined, workspace.agents[0]?.id || ''));
+    setActiveTab('definition');
+  };
+
+  const handleSelectArtifact = (artifactId: string) => {
+    setIsCreatingNew(false);
+    setSelectedArtifactId(artifactId);
+  };
+
+  const handleSaveTemplate = () => {
+    if (!artifactDraft.name.trim()) {
+      return;
+    }
+
+    const producerAgent =
+      workspace.agents.find(agent => agent.id === artifactDraft.connectedAgentId) || workspace.agents[0];
+    const nextArtifact: Artifact = {
+      id: isCreatingNew ? createArtifactId() : selectedArtifact?.id || createArtifactId(),
+      name: artifactDraft.name.trim(),
+      capabilityId: activeCapability.id,
+      type: artifactDraft.type.trim(),
+      version: artifactDraft.version.trim() || 'v1.0.0',
+      agent: producerAgent?.name || artifactDraft.connectedAgentId || 'Capability Agent',
+      created: isCreatingNew ? getCreatedLabel() : selectedArtifact?.created || getCreatedLabel(),
+      template: artifactDraft.template.trim() || undefined,
+      documentationStatus: artifactDraft.documentationStatus,
+      description: artifactDraft.description.trim() || undefined,
+      direction: artifactDraft.direction,
+      connectedAgentId: artifactDraft.connectedAgentId || undefined,
+      sourceWorkflowId: selectedArtifact?.sourceWorkflowId,
+      decisions: splitDraftLines(artifactDraft.decisions),
+      changes: splitDraftLines(artifactDraft.changes),
+      learningInsights: splitDraftLines(artifactDraft.learningInsights),
+      governanceRules: splitDraftLines(artifactDraft.governanceRules),
+      isLearningArtifact: selectedArtifact?.isLearningArtifact,
+      isMasterArtifact: selectedArtifact?.isMasterArtifact,
+    };
+
+    const nextArtifacts = isCreatingNew
+      ? [...workspace.artifacts, nextArtifact]
+      : workspace.artifacts.map(artifact =>
+          artifact.id === selectedArtifact?.id ? nextArtifact : artifact,
+        );
+
+    const previousArtifact = isCreatingNew
+      ? null
+      : workspace.artifacts.find(artifact => artifact.id === selectedArtifact?.id) || null;
+    const previousAgentId = previousArtifact?.connectedAgentId;
+    if (previousAgentId) {
+      const previousAgent = workspace.agents.find(agent => agent.id === previousAgentId);
+      if (previousAgent) {
+        updateCapabilityAgent(activeCapability.id, previousAgentId, {
+          inputArtifacts: previousAgent.inputArtifacts.filter(
+            artifactName => artifactName !== previousArtifact?.name,
+          ),
+          outputArtifacts: previousAgent.outputArtifacts.filter(
+            artifactName => artifactName !== previousArtifact?.name,
+          ),
+        });
+      }
+    }
+
+    if (producerAgent) {
+      const inputArtifacts =
+        artifactDraft.direction === 'INPUT'
+          ? Array.from(new Set([...(producerAgent.inputArtifacts || []), nextArtifact.name]))
+          : producerAgent.inputArtifacts.filter(artifactName => artifactName !== nextArtifact.name);
+      const outputArtifacts =
+        artifactDraft.direction === 'OUTPUT'
+          ? Array.from(new Set([...(producerAgent.outputArtifacts || []), nextArtifact.name]))
+          : producerAgent.outputArtifacts.filter(artifactName => artifactName !== nextArtifact.name);
+
+      updateCapabilityAgent(activeCapability.id, producerAgent.id, {
+        inputArtifacts,
+        outputArtifacts,
+      });
+    }
+
+    setCapabilityWorkspaceContent(activeCapability.id, {
+      artifacts: nextArtifacts,
+    });
+    setIsCreatingNew(false);
+    setSelectedArtifactId(nextArtifact.id);
+  };
+
+  if (!selectedArtifact && !isCreatingNew) {
+    return (
+      <div className="flex min-h-[calc(100vh-160px)] items-center justify-center rounded-[2rem] border border-dashed border-outline-variant/20 bg-white p-10 text-center">
+        <div className="max-w-md space-y-3">
+          <h2 className="text-xl font-extrabold text-primary">No artifacts available yet</h2>
+          <p className="text-sm leading-relaxed text-secondary">
+            Artifacts are governed through capability workflows and agent input/output contracts. Once a capability starts producing or receiving artifacts, they will appear here for review and editing.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const artifactPreview = selectedArtifact || {
+    id: 'DRAFT',
+    name: artifactDraft.name || 'New Artifact',
+    capabilityId: activeCapability.id,
+    type: artifactDraft.type,
+    version: artifactDraft.version,
+    agent: artifactDraft.connectedAgentId || 'Capability Agent',
+    created: getCreatedLabel(),
+  };
 
   return (
     <div className="flex flex-col h-[calc(100vh-160px)] gap-6">
@@ -60,10 +250,6 @@ const ArtifactDesigner = () => {
           <button className="px-4 py-2 bg-white border border-outline-variant/10 rounded-xl text-xs font-bold text-secondary hover:bg-surface-container-low transition-all flex items-center gap-2">
             <History size={14} />
             Version History
-          </button>
-          <button className="px-6 py-2.5 bg-primary text-white text-sm font-bold rounded-xl shadow-lg shadow-primary/20 hover:brightness-110 transition-all flex items-center gap-2">
-            <Plus size={18} />
-            New Template
           </button>
         </div>
       </header>
@@ -88,20 +274,20 @@ const ArtifactDesigner = () => {
               {filteredArtifacts.map((art) => (
                 <button 
                   key={art.id} 
-                  onClick={() => setSelectedArtifactId(art.id)}
+                  onClick={() => handleSelectArtifact(art.id)}
                   className={cn(
                     "w-full text-left p-3 rounded-xl transition-all group flex flex-col gap-1 border",
-                    selectedArtifactId === art.id 
+                    !isCreatingNew && selectedArtifactId === art.id
                       ? "bg-primary/5 border-primary/20 shadow-sm" 
                       : "bg-transparent border-transparent hover:bg-surface-container-low"
                   )}
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <FileText size={14} className={selectedArtifactId === art.id ? "text-primary" : "text-slate-400"} />
+                      <FileText size={14} className={!isCreatingNew && selectedArtifactId === art.id ? "text-primary" : "text-slate-400"} />
                       <span className={cn(
                         "text-xs font-bold transition-colors",
-                        selectedArtifactId === art.id ? "text-primary" : "text-on-surface"
+                        !isCreatingNew && selectedArtifactId === art.id ? "text-primary" : "text-on-surface"
                       )}>
                         {art.name}
                       </span>
@@ -163,7 +349,7 @@ const ArtifactDesigner = () => {
                         <FileText size={32} />
                       </div>
                       <div>
-                        <h2 className="text-xl font-extrabold text-on-surface tracking-tight">{selectedArtifact.name}</h2>
+                        <h2 className="text-xl font-extrabold text-on-surface tracking-tight">{artifactPreview.name}</h2>
                         <p className="text-sm text-secondary font-medium">Core template metadata and agent contracts.</p>
                       </div>
                     </div>
@@ -182,25 +368,33 @@ const ArtifactDesigner = () => {
                       <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Template Name</label>
                       <input 
                         type="text" 
-                        defaultValue={selectedArtifact.name}
+                        value={artifactDraft.name}
+                        onChange={event => setArtifactDraft(prev => ({ ...prev, name: event.target.value }))}
                         className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all"
                       />
                     </div>
                     <div className="space-y-2">
                       <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Category</label>
-                      <select className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all appearance-none">
-                        <option>{selectedArtifact.type}</option>
+                      <select
+                        value={artifactDraft.type}
+                        onChange={event => setArtifactDraft(prev => ({ ...prev, type: event.target.value }))}
+                        className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all appearance-none"
+                      >
                         <option>Technical</option>
                         <option>Business</option>
                         <option>Security</option>
                         <option>Governance</option>
+                        <option>Data</option>
+                        <option>Analysis</option>
+                        <option>Compliance</option>
                       </select>
                     </div>
                     <div className="space-y-2">
                       <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Version</label>
                       <input 
                         type="text" 
-                        defaultValue={selectedArtifact.version}
+                        value={artifactDraft.version}
+                        onChange={event => setArtifactDraft(prev => ({ ...prev, version: event.target.value }))}
                         className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all"
                       />
                     </div>
@@ -209,11 +403,59 @@ const ArtifactDesigner = () => {
                   <div className="space-y-2">
                     <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Description</label>
                     <textarea 
-                      defaultValue={selectedArtifact.isMasterArtifact 
+                      value={artifactDraft.description}
+                      onChange={event => setArtifactDraft(prev => ({ ...prev, description: event.target.value }))}
+                      placeholder={artifactPreview.isMasterArtifact 
                         ? "Consolidated governance record documenting all strategic decisions, system changes, and agent learning insights across the delivery lifecycle."
-                        : `Standardized artifact for ${selectedArtifact.name} generated during the ${selectedArtifact.type} phase.`}
+                        : `Standardized artifact for ${artifactPreview.name} generated during the ${artifactPreview.type} phase.`}
                       className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm text-secondary leading-relaxed h-24 resize-none focus:ring-2 focus:ring-primary/20 outline-none transition-all"
                     />
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Template Key</label>
+                      <input
+                        type="text"
+                        value={artifactDraft.template}
+                        onChange={event => setArtifactDraft(prev => ({ ...prev, template: event.target.value }))}
+                        placeholder="e.g. API_CONTRACT_V1"
+                        className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Direction</label>
+                      <select
+                        value={artifactDraft.direction}
+                        onChange={event =>
+                          setArtifactDraft(prev => ({
+                            ...prev,
+                            direction: event.target.value as NonNullable<Artifact['direction']>,
+                          }))
+                        }
+                        className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all appearance-none"
+                      >
+                        <option value="INPUT">INPUT</option>
+                        <option value="OUTPUT">OUTPUT</option>
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Documentation Status</label>
+                      <select
+                        value={artifactDraft.documentationStatus}
+                        onChange={event =>
+                          setArtifactDraft(prev => ({
+                            ...prev,
+                            documentationStatus: event.target.value as NonNullable<Artifact['documentationStatus']>,
+                          }))
+                        }
+                        className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all appearance-none"
+                      >
+                        <option value="PENDING">PENDING</option>
+                        <option value="SYNCED">SYNCED</option>
+                        <option value="FAILED">FAILED</option>
+                      </select>
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-8">
@@ -226,13 +468,30 @@ const ArtifactDesigner = () => {
                         <div className="flex items-center justify-between p-2 bg-white rounded-lg border border-outline-variant/5">
                           <div className="flex items-center gap-2">
                             <Cpu size={14} className="text-primary" />
-                            <span className="text-xs font-bold">{selectedArtifact.agent}</span>
+                            <span className="text-xs font-bold">
+                              {workspace.agents.find(agent => agent.id === artifactDraft.connectedAgentId)?.name ||
+                                artifactDraft.connectedAgentId ||
+                                artifactPreview.agent}
+                            </span>
                           </div>
                           <span className="text-[0.5rem] font-bold text-success uppercase tracking-widest">Primary</span>
                         </div>
-                        <button className="w-full py-2 border border-dashed border-outline-variant/30 rounded-lg text-[0.625rem] font-bold text-slate-400 hover:text-primary hover:border-primary/30 transition-all">
-                          + Add Producer Agent
-                        </button>
+                        <select
+                          value={artifactDraft.connectedAgentId}
+                          onChange={event =>
+                            setArtifactDraft(prev => ({
+                              ...prev,
+                              connectedAgentId: event.target.value,
+                            }))
+                          }
+                          className="w-full rounded-lg border border-dashed border-outline-variant/30 bg-white px-3 py-2 text-[0.625rem] font-bold text-slate-500 outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                        >
+                          {workspace.agents.map(agent => (
+                            <option key={agent.id} value={agent.id}>
+                              {agent.name}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                     </section>
 
@@ -279,9 +538,9 @@ const ArtifactDesigner = () => {
                     {[
                       { title: 'Title & Status', type: 'Free Text', req: true, icon: FileText },
                       { title: 'Context & Rationale', type: 'Free Text', req: true, icon: Compass },
-                      { title: 'Strategic Decisions', type: 'Decision Box', req: true, icon: ShieldCheck, data: selectedArtifact.decisions },
-                      { title: 'System Changes', type: 'Change Log', req: true, icon: History, data: selectedArtifact.changes },
-                      { title: 'Agent Learning Insights', type: 'Learning Record', req: false, icon: Sparkles, data: selectedArtifact.learningInsights },
+                      { title: 'Strategic Decisions', type: 'Decision Box', req: true, icon: ShieldCheck, data: splitDraftLines(artifactDraft.decisions) },
+                      { title: 'System Changes', type: 'Change Log', req: true, icon: History, data: splitDraftLines(artifactDraft.changes) },
+                      { title: 'Agent Learning Insights', type: 'Learning Record', req: false, icon: Sparkles, data: splitDraftLines(artifactDraft.learningInsights) },
                     ].map((section, i) => (
                       <div key={i} className="flex items-center gap-4 p-4 bg-surface-container-low rounded-2xl border border-outline-variant/5 group hover:border-primary/20 transition-all">
                         <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-outline group-hover:text-primary transition-colors shadow-sm">
@@ -307,6 +566,27 @@ const ArtifactDesigner = () => {
                         </div>
                       </div>
                     ))}
+                  </div>
+
+                  <div className="grid gap-4 pt-4">
+                    <textarea
+                      value={artifactDraft.decisions}
+                      onChange={event => setArtifactDraft(prev => ({ ...prev, decisions: event.target.value }))}
+                      placeholder="Strategic decisions, one per line"
+                      className="h-28 w-full resize-none rounded-2xl border border-outline-variant/20 bg-white px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    />
+                    <textarea
+                      value={artifactDraft.changes}
+                      onChange={event => setArtifactDraft(prev => ({ ...prev, changes: event.target.value }))}
+                      placeholder="System changes, one per line"
+                      className="h-28 w-full resize-none rounded-2xl border border-outline-variant/20 bg-white px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    />
+                    <textarea
+                      value={artifactDraft.learningInsights}
+                      onChange={event => setArtifactDraft(prev => ({ ...prev, learningInsights: event.target.value }))}
+                      placeholder="Learning insights, one per line"
+                      className="h-28 w-full resize-none rounded-2xl border border-outline-variant/20 bg-white px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    />
                   </div>
                 </motion.div>
               )}
@@ -336,7 +616,7 @@ const ArtifactDesigner = () => {
                         Validation Rules
                       </h3>
                       <div className="space-y-3">
-                        {selectedArtifact.governanceRules?.map((rule, i) => (
+                        {splitDraftLines(artifactDraft.governanceRules).map((rule, i) => (
                           <div key={i} className="p-4 bg-surface-container-low rounded-xl border border-outline-variant/10 flex gap-3">
                             <CheckCircle2 size={16} className="text-success shrink-0 mt-0.5" />
                             <p className="text-xs text-secondary font-medium leading-relaxed">{rule}</p>
@@ -349,6 +629,12 @@ const ArtifactDesigner = () => {
                         <button className="w-full py-3 border-2 border-dashed border-outline-variant/30 rounded-xl text-[0.625rem] font-bold text-slate-400 hover:text-primary hover:border-primary/30 transition-all">
                           + Define New Validation Rule
                         </button>
+                        <textarea
+                          value={artifactDraft.governanceRules}
+                          onChange={event => setArtifactDraft(prev => ({ ...prev, governanceRules: event.target.value }))}
+                          placeholder="Governance and validation rules, one per line"
+                          className="h-32 w-full resize-none rounded-2xl border border-outline-variant/20 bg-white px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                        />
                       </div>
                     </section>
 
@@ -412,7 +698,10 @@ const ArtifactDesigner = () => {
               <button className="px-6 py-2 text-sm font-bold text-secondary hover:bg-surface-container-low rounded-xl transition-all">
                 Discard Changes
               </button>
-              <button className="px-8 py-2 bg-primary text-white text-sm font-bold rounded-xl shadow-lg shadow-primary/20 hover:brightness-110 transition-all">
+              <button
+                onClick={handleSaveTemplate}
+                className="px-8 py-2 bg-primary text-white text-sm font-bold rounded-xl shadow-lg shadow-primary/20 hover:brightness-110 transition-all"
+              >
                 Save Template
               </button>
             </div>

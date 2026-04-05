@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
+import {
   LayoutGrid, 
   Trello, 
   Activity, 
@@ -24,11 +24,22 @@ import {
   Lightbulb
 } from 'lucide-react';
 import { useCapability } from '../context/CapabilityContext';
-import { WORK_ITEMS, EXECUTION_LOGS, WORKFLOWS } from '../constants';
 import { cn } from '../lib/utils';
 import { WorkItem, WorkItemPhase } from '../types';
 
 const PHASES: WorkItemPhase[] = ['BACKLOG', 'ANALYSIS', 'EXECUTION', 'REVIEW', 'DONE'];
+const createWorkItemId = () => `WI-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+
+const formatLogTimestamp = (timestamp: string) => {
+  const parsedDate = new Date(timestamp);
+  if (!Number.isNaN(parsedDate.getTime())) {
+    return parsedDate.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+  return timestamp.includes(',') ? timestamp.split(',')[1].trim() : timestamp;
+};
 
 const getStatusColor = (status: string) => {
   switch (status) {
@@ -81,17 +92,80 @@ const WorkItemCard = ({ item, onClick }: { item: WorkItem; onClick: (id: string)
 );
 
 const Orchestrator = () => {
-  const { activeCapability } = useCapability();
+  const { activeCapability, getCapabilityWorkspace, setCapabilityWorkspaceContent } = useCapability();
+  const workspace = getCapabilityWorkspace(activeCapability.id);
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(null);
   const [view, setView] = useState<'board' | 'list'>('board');
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [draftPhase, setDraftPhase] = useState<WorkItemPhase>('BACKLOG');
+  const [draftWorkItem, setDraftWorkItem] = useState({
+    title: '',
+    description: '',
+    workflowId: workspace.workflows[0]?.id || '',
+    assignedAgentId: workspace.agents[0]?.id || '',
+    priority: 'Med' as WorkItem['priority'],
+    tags: '',
+  });
 
   const filteredWorkItems = useMemo(() => {
-    return WORK_ITEMS.filter(wi => wi.capabilityId === activeCapability.id);
-  }, [activeCapability]);
+    return workspace.workItems;
+  }, [workspace.workItems]);
 
   const selectedWorkItem = useMemo(() => {
     return filteredWorkItems.find(wi => wi.id === selectedWorkItemId) || null;
   }, [selectedWorkItemId, filteredWorkItems]);
+
+  const selectedWorkflow = selectedWorkItem
+    ? workspace.workflows.find(workflow => workflow.id === selectedWorkItem.workflowId)
+    : null;
+  const selectedExecutionLogs = selectedWorkItem
+    ? workspace.executionLogs.filter(log =>
+        selectedWorkItem.assignedAgentId ? log.agentId === selectedWorkItem.assignedAgentId : true,
+      )
+    : [];
+
+  const openCreateModal = (phase: WorkItemPhase) => {
+    setDraftPhase(phase);
+    setDraftWorkItem({
+      title: '',
+      description: '',
+      workflowId: workspace.workflows[0]?.id || '',
+      assignedAgentId: workspace.agents[0]?.id || '',
+      priority: 'Med',
+      tags: '',
+    });
+    setIsCreateModalOpen(true);
+  };
+
+  const handleCreateWorkItem = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!draftWorkItem.title.trim() || !draftWorkItem.workflowId) {
+      return;
+    }
+
+    const newWorkItem: WorkItem = {
+      id: createWorkItemId(),
+      title: draftWorkItem.title.trim(),
+      description: draftWorkItem.description.trim() || `Work item for ${activeCapability.name}.`,
+      phase: draftPhase,
+      capabilityId: activeCapability.id,
+      workflowId: draftWorkItem.workflowId,
+      currentStepId: workspace.workflows.find(workflow => workflow.id === draftWorkItem.workflowId)?.steps[0]?.id,
+      assignedAgentId: draftWorkItem.assignedAgentId || undefined,
+      status: draftPhase === 'DONE' ? 'COMPLETED' : 'ACTIVE',
+      priority: draftWorkItem.priority,
+      tags: draftWorkItem.tags
+        .split(',')
+        .map(tag => tag.trim())
+        .filter(Boolean),
+    };
+
+    setCapabilityWorkspaceContent(activeCapability.id, {
+      workItems: [...workspace.workItems, newWorkItem],
+    });
+    setSelectedWorkItemId(newWorkItem.id);
+    setIsCreateModalOpen(false);
+  };
 
   return (
     <div className="flex flex-col h-[calc(100vh-160px)] gap-6">
@@ -124,7 +198,10 @@ const Orchestrator = () => {
               <LayoutGrid size={18} />
             </button>
           </div>
-          <button className="bg-primary text-white px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 shadow-sm hover:brightness-110 transition-all">
+          <button
+            onClick={() => openCreateModal('BACKLOG')}
+            className="bg-primary text-white px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 shadow-sm hover:brightness-110 transition-all"
+          >
             <Plus size={18} />
             New Story
           </button>
@@ -150,7 +227,10 @@ const Orchestrator = () => {
                 {filteredWorkItems.filter(wi => wi.phase === phase).map(item => (
                   <WorkItemCard key={item.id} item={item} onClick={setSelectedWorkItemId} />
                 ))}
-                <button className="w-full py-3 border-2 border-dashed border-outline-variant/20 rounded-2xl text-slate-300 hover:text-primary hover:border-primary/30 transition-all flex items-center justify-center gap-2 group">
+                <button
+                  onClick={() => openCreateModal(phase)}
+                  className="w-full py-3 border-2 border-dashed border-outline-variant/20 rounded-2xl text-slate-300 hover:text-primary hover:border-primary/30 transition-all flex items-center justify-center gap-2 group"
+                >
                   <Plus size={16} className="group-hover:scale-110 transition-transform" />
                   <span className="text-[0.625rem] font-bold uppercase tracking-widest">Add Item</span>
                 </button>
@@ -162,6 +242,154 @@ const Orchestrator = () => {
 
       {/* Work Item Detail Overlay */}
       <AnimatePresence>
+        {isCreateModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsCreateModalOpen(false)}
+              className="absolute inset-0 bg-black/40 backdrop-blur-md"
+            />
+            <motion.form
+              initial={{ opacity: 0, y: 20, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 20, scale: 0.98 }}
+              onSubmit={handleCreateWorkItem}
+              className="relative w-full max-w-2xl rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.2em] text-primary">New work item</p>
+                  <h3 className="mt-2 text-2xl font-extrabold text-primary">Add a capability story</h3>
+                  <p className="mt-2 text-sm text-secondary">
+                    This story will be tracked under {activeCapability.name} and follow the selected workflow from the active capability workspace.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsCreateModalOpen(false)}
+                  className="rounded-full p-2 text-slate-400 transition-colors hover:bg-surface-container-low hover:text-primary"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="mt-8 grid gap-5 md:grid-cols-2">
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Title</label>
+                  <input
+                    required
+                    value={draftWorkItem.title}
+                    onChange={event => setDraftWorkItem(prev => ({ ...prev, title: event.target.value }))}
+                    placeholder="e.g. SDLC readiness for onboarding flow"
+                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                  />
+                </div>
+
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Description</label>
+                  <textarea
+                    value={draftWorkItem.description}
+                    onChange={event => setDraftWorkItem(prev => ({ ...prev, description: event.target.value }))}
+                    placeholder="Summarize the outcome this work item should produce."
+                    className="h-28 w-full resize-none rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Phase</label>
+                  <select
+                    value={draftPhase}
+                    onChange={event => setDraftPhase(event.target.value as WorkItemPhase)}
+                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                  >
+                    {PHASES.map(phase => (
+                      <option key={phase} value={phase}>
+                        {phase}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Priority</label>
+                  <select
+                    value={draftWorkItem.priority}
+                    onChange={event =>
+                      setDraftWorkItem(prev => ({
+                        ...prev,
+                        priority: event.target.value as WorkItem['priority'],
+                      }))
+                    }
+                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                  >
+                    <option value="High">High</option>
+                    <option value="Med">Med</option>
+                    <option value="Low">Low</option>
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Workflow</label>
+                  <select
+                    value={draftWorkItem.workflowId}
+                    onChange={event => setDraftWorkItem(prev => ({ ...prev, workflowId: event.target.value }))}
+                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                  >
+                    {workspace.workflows.map(workflow => (
+                      <option key={workflow.id} value={workflow.id}>
+                        {workflow.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Assigned agent</label>
+                  <select
+                    value={draftWorkItem.assignedAgentId}
+                    onChange={event => setDraftWorkItem(prev => ({ ...prev, assignedAgentId: event.target.value }))}
+                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                  >
+                    <option value="">Unassigned</option>
+                    {workspace.agents.map(agent => (
+                      <option key={agent.id} value={agent.id}>
+                        {agent.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Tags</label>
+                  <input
+                    value={draftWorkItem.tags}
+                    onChange={event => setDraftWorkItem(prev => ({ ...prev, tags: event.target.value }))}
+                    placeholder="comma, separated, tags"
+                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-8 flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsCreateModalOpen(false)}
+                  className="flex-1 rounded-2xl border border-outline-variant/20 px-5 py-3 text-sm font-bold text-secondary transition-all hover:bg-surface-container-low"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
+                >
+                  Create Story
+                </button>
+              </div>
+            </motion.form>
+          </div>
+        )}
         {selectedWorkItem && (
           <div className="fixed inset-0 z-50 flex items-center justify-end p-4">
             <motion.div 
@@ -206,26 +434,30 @@ const Orchestrator = () => {
                       Execution Workflow
                     </h3>
                     <span className="text-[0.625rem] font-bold text-primary bg-primary/5 px-2 py-1 rounded uppercase tracking-widest">
-                      {WORKFLOWS.find(w => w.id === selectedWorkItem.workflowId)?.name}
+                      {selectedWorkflow?.name || 'Unlinked workflow'}
                     </span>
                   </div>
                   <div className="relative flex justify-between items-center px-4">
                     <div className="absolute top-1/2 left-0 w-full h-0.5 bg-surface-container-high -translate-y-1/2" />
-                    {[1, 2, 3, 4].map((step, i) => (
-                      <div key={step} className="relative z-10 flex flex-col items-center gap-2">
+                    {(selectedWorkflow?.steps || []).map((step, i) => (
+                      <div key={step.id} className="relative z-10 flex flex-col items-center gap-2">
                         <div className={cn(
                           "w-8 h-8 rounded-full flex items-center justify-center border-2 transition-all",
-                          i < 2 ? "bg-primary border-primary text-white" : 
-                          i === 2 ? "bg-white border-primary text-primary animate-pulse" :
+                          selectedWorkItem.currentStepId === step.id ? "bg-white border-primary text-primary animate-pulse" :
+                          i < (selectedWorkflow?.steps.findIndex(workflowStep => workflowStep.id === selectedWorkItem.currentStepId) || 0)
+                            ? "bg-primary border-primary text-white"
+                            :
                           "bg-white border-surface-container-high text-slate-300"
                         )}>
-                          {i < 2 ? <CheckCircle2 size={16} /> : <span className="text-xs font-bold">{step}</span>}
+                          {i < (selectedWorkflow?.steps.findIndex(workflowStep => workflowStep.id === selectedWorkItem.currentStepId) || 0)
+                            ? <CheckCircle2 size={16} />
+                            : <span className="text-xs font-bold">{i + 1}</span>}
                         </div>
                         <span className={cn(
                           "text-[0.5rem] font-bold uppercase tracking-widest",
-                          i === 2 ? "text-primary" : "text-slate-400"
+                          selectedWorkItem.currentStepId === step.id ? "text-primary" : "text-slate-400"
                         )}>
-                          {i === 0 ? 'Analysis' : i === 1 ? 'Drafting' : i === 2 ? 'Execution' : 'Review'}
+                          {step.action}
                         </span>
                       </div>
                     ))}
@@ -281,9 +513,9 @@ const Orchestrator = () => {
                     </button>
                   </div>
                   <div className="bg-slate-950 rounded-2xl p-6 font-mono text-[0.75rem] text-slate-300 space-y-4 shadow-2xl border border-slate-800 max-h-64 overflow-y-auto custom-scrollbar">
-                    {EXECUTION_LOGS.slice(0, 5).map((log, i) => (
+                    {selectedExecutionLogs.slice(0, 5).map((log, i) => (
                       <div key={i} className="flex gap-4 group">
-                        <span className="text-slate-600 shrink-0 select-none">[{log.timestamp.split(',')[1].trim()}]</span>
+                        <span className="text-slate-600 shrink-0 select-none">[{formatLogTimestamp(log.timestamp)}]</span>
                         <div className="flex flex-col gap-1">
                           <div className="flex items-center gap-2">
                             <span className={cn(
@@ -296,6 +528,9 @@ const Orchestrator = () => {
                         </div>
                       </div>
                     ))}
+                    {selectedExecutionLogs.length === 0 && (
+                      <p className="text-slate-500 italic">No execution trace has been recorded for this work item yet.</p>
+                    )}
                   </div>
                 </section>
 

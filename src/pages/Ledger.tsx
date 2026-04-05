@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { motion } from 'motion/react';
-import { 
+import {
   Download, 
   Verified, 
   FolderEdit, 
@@ -20,16 +20,16 @@ import {
   GitBranch,
   Activity
 } from 'lucide-react';
-import { ARTIFACTS } from '../constants';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
 
 const Ledger = () => {
-  const { activeCapability } = useCapability();
+  const { activeCapability, getCapabilityWorkspace } = useCapability();
+  const workspace = getCapabilityWorkspace(activeCapability.id);
 
   const filteredArtifacts = useMemo(() => {
-    return ARTIFACTS.filter(art => art.capabilityId === activeCapability.id);
-  }, [activeCapability]);
+    return workspace.artifacts;
+  }, [workspace.artifacts]);
 
   const stats = useMemo(() => {
     return {

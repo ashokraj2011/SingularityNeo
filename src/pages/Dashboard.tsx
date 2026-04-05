@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Bolt, 
@@ -12,20 +12,16 @@ import {
   Zap,
   Cpu,
   Plus,
-  X,
-  CheckCircle2,
   Clock,
-  PlayCircle,
   Globe,
   Database,
   Activity,
-  PlusCircle,
-  ChevronRight
 } from 'lucide-react';
-import { BLUEPRINTS, WORK_PACKAGES, AGENT_TASKS } from '../constants';
+import { BLUEPRINTS, WORK_PACKAGES } from '../constants';
 import { cn } from '../lib/utils';
 import { Status } from '../types';
 import { useCapability } from '../context/CapabilityContext';
+import { useNavigate } from 'react-router-dom';
 
 const StatusBadge = ({ status }: { status: Status }) => {
   const styles: Record<string, string> = {
@@ -49,12 +45,10 @@ const StatusBadge = ({ status }: { status: Status }) => {
 };
 
 const Dashboard = () => {
-  const { activeCapability } = useCapability();
+  const navigate = useNavigate();
+  const { activeCapability, getCapabilityWorkspace } = useCapability();
   const [taskFilter, setTaskFilter] = useState<'ALL' | 'QUEUED' | 'PROCESSING' | 'COMPLETED'>('ALL');
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [newAgent, setNewAgent] = useState({ name: '', role: 'ANALYST', priority: 'MEDIUM' });
-
-  const [isSuccess, setIsSuccess] = useState(false);
+  const workspace = getCapabilityWorkspace(activeCapability.id);
 
   const filteredBlueprints = useMemo(() => {
     return BLUEPRINTS.filter(bp => bp.capabilityId === activeCapability.id);
@@ -65,21 +59,10 @@ const Dashboard = () => {
   }, [activeCapability]);
 
   const filteredTasks = useMemo(() => {
-    const capabilityTasks = AGENT_TASKS.filter(task => task.capabilityId === activeCapability.id);
+    const capabilityTasks = workspace.tasks;
     if (taskFilter === 'ALL') return capabilityTasks;
     return capabilityTasks.filter(task => task.status === taskFilter);
-  }, [taskFilter, activeCapability]);
-
-  const handleCreateAgent = (e: React.FormEvent) => {
-    e.preventDefault();
-    // Simulate API call
-    setIsSuccess(true);
-    setTimeout(() => {
-      setIsSuccess(false);
-      setIsCreateModalOpen(false);
-      setNewAgent({ name: '', role: 'ANALYST', priority: 'MEDIUM' });
-    }, 2000);
-  };
+  }, [taskFilter, workspace.tasks]);
 
   return (
     <div className="space-y-8">
@@ -95,7 +78,7 @@ const Dashboard = () => {
         </div>
         <div className="flex gap-3">
           <button 
-            onClick={() => setIsCreateModalOpen(true)}
+            onClick={() => navigate('/team')}
             className="px-6 py-3 bg-secondary text-white rounded-xl font-bold flex items-center gap-2 shadow-lg shadow-secondary/10 hover:translate-y-[-2px] transition-transform"
           >
             <Plus size={18} />
@@ -369,138 +352,6 @@ const Dashboard = () => {
           </div>
         </div>
       </div>
-
-      {/* Create Agent Modal */}
-      <AnimatePresence>
-        {isCreateModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsCreateModalOpen(false)}
-              className="absolute inset-0 bg-on-surface/40 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden"
-            >
-              <div className="p-6 border-b border-outline-variant/10 flex justify-between items-center bg-surface-container-low">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-secondary flex items-center justify-center text-white">
-                    <Cpu size={20} />
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-primary">Provision New Agent</h3>
-                    <p className="text-[0.625rem] font-bold text-secondary uppercase tracking-widest">Context: {activeCapability.name}</p>
-                  </div>
-                </div>
-                <button 
-                  onClick={() => setIsCreateModalOpen(false)}
-                  className="p-2 hover:bg-surface-container-high rounded-full transition-colors"
-                >
-                  <X size={20} className="text-outline" />
-                </button>
-              </div>
-
-              <form onSubmit={handleCreateAgent} className="p-6 space-y-6">
-                <AnimatePresence mode="wait">
-                  {isSuccess ? (
-                    <motion.div 
-                      key="success"
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.9 }}
-                      className="py-8 flex flex-col items-center justify-center text-center space-y-4"
-                    >
-                      <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center text-primary">
-                        <CheckCircle2 size={40} />
-                      </div>
-                      <div>
-                        <h4 className="text-lg font-bold text-primary">Agent Provisioned</h4>
-                        <p className="text-sm text-secondary">The agent has been successfully deployed to the grid.</p>
-                      </div>
-                    </motion.div>
-                  ) : (
-                    <motion.div 
-                      key="form"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      className="space-y-6"
-                    >
-                      <div className="space-y-2">
-                        <label className="text-[0.6875rem] font-bold text-slate-500 uppercase tracking-wider">Agent Designation</label>
-                        <input 
-                          required
-                          type="text" 
-                          placeholder="e.g. RiskAnalyzer_V5"
-                          className="w-full bg-surface-container-low border-none rounded-xl py-3 px-4 text-sm focus:ring-2 focus:ring-primary transition-all"
-                          value={newAgent.name}
-                          onChange={e => setNewAgent({...newAgent, name: e.target.value})}
-                        />
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <label className="text-[0.6875rem] font-bold text-slate-500 uppercase tracking-wider">Primary Role</label>
-                          <select 
-                            className="w-full bg-surface-container-low border-none rounded-xl py-3 px-4 text-sm focus:ring-2 focus:ring-primary appearance-none"
-                            value={newAgent.role}
-                            onChange={e => setNewAgent({...newAgent, role: e.target.value})}
-                          >
-                            <option value="ANALYST">Analyst</option>
-                            <option value="ARCHITECT">Architect</option>
-                            <option value="GOVERNOR">Governor</option>
-                            <option value="EXECUTOR">Executor</option>
-                          </select>
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-[0.6875rem] font-bold text-slate-500 uppercase tracking-wider">Priority Level</label>
-                          <select 
-                            className="w-full bg-surface-container-low border-none rounded-xl py-3 px-4 text-sm focus:ring-2 focus:ring-primary appearance-none"
-                            value={newAgent.priority}
-                            onChange={e => setNewAgent({...newAgent, priority: e.target.value})}
-                          >
-                            <option value="LOW">Low</option>
-                            <option value="MEDIUM">Medium</option>
-                            <option value="HIGH">High</option>
-                            <option value="URGENT">Urgent</option>
-                          </select>
-                        </div>
-                      </div>
-
-                      <div className="p-4 bg-primary-fixed/30 rounded-xl border border-primary/10">
-                        <p className="text-[0.6875rem] text-primary font-medium leading-relaxed">
-                          Provisioning this agent will allocate compute resources from the {activeCapability.name} Enterprise Grid. Ensure the agent's scope is within governed boundaries.
-                        </p>
-                      </div>
-
-                      <div className="flex gap-3 pt-2">
-                        <button 
-                          type="button"
-                          onClick={() => setIsCreateModalOpen(false)}
-                          className="flex-1 py-3 bg-surface-container-high text-primary font-bold text-sm rounded-xl hover:bg-surface-container-highest transition-all"
-                        >
-                          Cancel
-                        </button>
-                        <button 
-                          type="submit"
-                          className="flex-1 py-3 bg-primary text-white font-bold text-sm rounded-xl hover:opacity-90 shadow-lg shadow-primary/20 transition-all"
-                        >
-                          Deploy Agent
-                        </button>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
     </div>
   );
 };
