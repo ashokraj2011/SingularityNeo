@@ -132,6 +132,10 @@ const Tasks = () => {
     () => new Set(activeCapability.skillLibrary.map(skill => skill.id)),
     [activeCapability.skillLibrary],
   );
+  const agentNamesById = useMemo(
+    () => new Map(workspace.agents.map(agent => [agent.id, agent.name])),
+    [workspace.agents],
+  );
 
   const handleCreateTask = (event: React.FormEvent) => {
     event.preventDefault();
@@ -274,6 +278,16 @@ const Tasks = () => {
                       task.status === 'COMPLETED' ? "bg-tertiary-fixed-dim/20 text-tertiary" :
                       "bg-surface-container-high text-secondary"
                     )}>{task.status}</span>
+                    {task.managedByWorkflow && (
+                      <span className="text-[0.625rem] w-fit px-2 py-0.5 rounded-full font-bold uppercase bg-primary/10 text-primary">
+                        Workflow Managed
+                      </span>
+                    )}
+                    {task.taskType === 'TEST' && (
+                      <span className="text-[0.625rem] w-fit px-2 py-0.5 rounded-full font-bold uppercase bg-emerald-100 text-emerald-700">
+                        Test Coverage
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center gap-1 text-[0.625rem] font-bold text-slate-400">
                     <Clock size={12} />
@@ -290,7 +304,7 @@ const Tasks = () => {
                     </div>
                     <div className="flex flex-col">
                       <span className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Agent</span>
-                      <span className="text-xs font-bold text-on-surface">{task.agent}</span>
+                      <span className="text-xs font-bold text-on-surface">{agentNamesById.get(task.agent) || task.agent}</span>
                     </div>
                   </div>
                   <button 
@@ -512,6 +526,16 @@ const Tasks = () => {
                               "text-[0.625rem] px-2.5 py-1 rounded-full font-bold uppercase tracking-wider",
                               selectedTask.priority === 'High' ? "bg-error/10 text-error" : "bg-slate-100 text-slate-500"
                             )}>{selectedTask.priority} Priority</span>
+                            {selectedTask.managedByWorkflow && (
+                              <span className="text-[0.625rem] px-2.5 py-1 rounded-full font-bold uppercase tracking-wider bg-primary/10 text-primary">
+                                Workflow Managed
+                              </span>
+                            )}
+                            {selectedTask.taskType === 'TEST' && (
+                              <span className="text-[0.625rem] px-2.5 py-1 rounded-full font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700">
+                                Testing
+                              </span>
+                            )}
                           </div>
                           <h2 className="text-2xl font-extrabold text-on-surface leading-tight tracking-tight">{selectedTask.title}</h2>
                           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-secondary font-medium">
@@ -520,7 +544,7 @@ const Tasks = () => {
                                 <Cpu size={14} className="text-primary" />
                               </div>
                               <span className="text-slate-400 uppercase text-[0.625rem] font-bold">Agent:</span>
-                              <span className="text-on-surface">{selectedTask.agent}</span>
+                              <span className="text-on-surface">{agentNamesById.get(selectedTask.agent) || selectedTask.agent}</span>
                             </div>
                             <div className="flex items-center gap-2">
                               <div className="w-6 h-6 rounded bg-primary/5 flex items-center justify-center">
@@ -529,6 +553,18 @@ const Tasks = () => {
                               <span className="text-slate-400 uppercase text-[0.625rem] font-bold">Initiated:</span>
                               <span className="text-on-surface">{selectedTask.timestamp}</span>
                             </div>
+                            {selectedTask.workItemId && (
+                              <div className="flex items-center gap-2">
+                                <div className="w-6 h-6 rounded bg-primary/5 flex items-center justify-center">
+                                  <History size={14} className="text-primary" />
+                                </div>
+                                <span className="text-slate-400 uppercase text-[0.625rem] font-bold">Story:</span>
+                                <span className="text-on-surface">
+                                  {selectedTask.workItemId}
+                                  {selectedTask.phase ? ` • ${selectedTask.phase}` : ''}
+                                </span>
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="flex flex-col items-start md:items-end gap-1">

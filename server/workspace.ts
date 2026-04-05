@@ -1,6 +1,7 @@
 import {
   AGENT_TASKS,
   ARTIFACTS,
+  BUILT_IN_AGENT_TEMPLATES,
   COPILOT_MODEL_OPTIONS,
   EXECUTION_LOGS,
   LEARNING_UPDATES,
@@ -44,6 +45,12 @@ const toAgentLabel = (value: string) =>
 
 const getDefaultSkillIds = (capability: Capability) =>
   capability.skillLibrary.map(skill => skill.id);
+
+const createBuiltInAgentId = (capabilityId: string, key: string) =>
+  `AGENT-${slugify(capabilityId)}-${key}`;
+
+const resolveCapabilityText = (value: string, capability: Capability) =>
+  value.replace(/\{capabilityName\}/g, capability.name);
 
 const getMetadataNumber = (value: unknown) =>
   typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -201,6 +208,81 @@ export const buildOwnerAgent = (capability: Capability): CapabilityAgent => {
   };
 };
 
+export const buildBuiltInAgents = (capability: Capability): CapabilityAgent[] =>
+  BUILT_IN_AGENT_TEMPLATES.map(template => {
+    const agentId = createBuiltInAgentId(capability.id, template.key);
+
+    return {
+      id: agentId,
+      capabilityId: capability.id,
+      name: template.name,
+      role: template.role,
+      objective: resolveCapabilityText(template.objective, capability),
+      systemPrompt: resolveCapabilityText(template.systemPrompt, capability),
+      initializationStatus: 'READY',
+      documentationSources: getCapabilityDocumentationSources(capability),
+      inputArtifacts: [...template.inputArtifacts],
+      outputArtifacts: [...template.outputArtifacts],
+      isBuiltIn: true,
+      learningNotes: [
+        `${template.name} is a built-in agent for ${capability.name}.`,
+        `Keep all outputs aligned to ${capability.domain || capability.name} capability context.`,
+      ],
+      skillIds: getDefaultSkillIds(capability),
+      provider: DEFAULT_AGENT_PROVIDER,
+      model: DEFAULT_AGENT_MODEL,
+      tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
+      usage: buildAgentUsage(capability.id, agentId, [], []),
+      previousOutputs: [],
+    };
+  });
+
+export const buildBaseAgents = (
+  capability: Capability,
+  ownerAgent: CapabilityAgent,
+): CapabilityAgent[] => [ownerAgent, ...buildBuiltInAgents(capability)];
+
+const mergeWorkspaceAgents = (
+  capability: Capability,
+  ownerAgent: CapabilityAgent,
+  agents: CapabilityAgent[],
+  tasks: AgentTask[],
+  logs: ExecutionLog[],
+) => {
+  const builtInAgents = buildBuiltInAgents(capability);
+  const builtInIds = new Set(builtInAgents.map(agent => agent.id));
+  const nextOwnerAgent: CapabilityAgent = {
+    ...buildOwnerAgent(capability),
+    ...ownerAgent,
+    capabilityId: capability.id,
+    isOwner: true,
+  };
+
+  return applyWorkspaceRuntime(
+    capability,
+    [
+      nextOwnerAgent,
+      ...builtInAgents.map(agent => {
+        const existingAgent = agents.find(
+          current => !current.isOwner && current.id === agent.id,
+        );
+
+        return existingAgent
+          ? {
+              ...agent,
+              ...existingAgent,
+              capabilityId: capability.id,
+              isBuiltIn: true,
+            }
+          : agent;
+      }),
+      ...agents.filter(agent => !agent.isOwner && !builtInIds.has(agent.id)),
+    ],
+    tasks,
+    logs,
+  );
+};
+
 export const buildWelcomeMessage = (
   capability: Capability,
   ownerAgent: CapabilityAgent,
@@ -218,7 +300,9 @@ export const buildSeededAgents = (
   capability: Capability,
   ownerAgent: CapabilityAgent,
 ): CapabilityAgent[] => {
-  const nextAgents = new Map<string, CapabilityAgent>();
+  const nextAgents = new Map<string, CapabilityAgent>(
+    buildBuiltInAgents(capability).map(agent => [agent.id, agent]),
+  );
   const learningByAgent = LEARNING_UPDATES.filter(
     update => update.capabilityId === capability.id,
   ).reduce<Record<string, string[]>>((acc, update) => {
@@ -293,10 +377,12 @@ export const materializeWorkspace = (
     createdAt: string;
   },
 ): CapabilityWorkspace => {
-  const ownerAgent = workspace.agents.find(agent => agent.isOwner) || buildOwnerAgent(capability);
-  const agents = applyWorkspaceRuntime(
+  const ownerAgent =
+    workspace.agents.find(agent => agent.isOwner) || buildOwnerAgent(capability);
+  const agents = mergeWorkspaceAgents(
     capability,
-    [ownerAgent, ...workspace.agents.filter(agent => !agent.isOwner && agent.id !== ownerAgent.id)],
+    ownerAgent,
+    workspace.agents,
     workspace.tasks,
     workspace.executionLogs,
   );

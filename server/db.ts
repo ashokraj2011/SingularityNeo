@@ -79,6 +79,7 @@ const schemaStatements = [
       input_artifacts TEXT[] NOT NULL DEFAULT '{}',
       output_artifacts TEXT[] NOT NULL DEFAULT '{}',
       is_owner BOOLEAN NOT NULL DEFAULT FALSE,
+      is_built_in BOOLEAN NOT NULL DEFAULT FALSE,
       learning_notes TEXT[] NOT NULL DEFAULT '{}',
       skill_ids TEXT[] NOT NULL DEFAULT '{}',
       provider TEXT NOT NULL,
@@ -150,6 +151,12 @@ const schemaStatements = [
       id TEXT NOT NULL,
       title TEXT NOT NULL,
       agent TEXT NOT NULL,
+      work_item_id TEXT,
+      workflow_id TEXT,
+      workflow_step_id TEXT,
+      managed_by_workflow BOOLEAN NOT NULL DEFAULT FALSE,
+      task_type TEXT,
+      phase TEXT,
       priority TEXT NOT NULL,
       status TEXT NOT NULL,
       timestamp TEXT NOT NULL,
@@ -203,6 +210,8 @@ const schemaStatements = [
       priority TEXT NOT NULL,
       tags TEXT[] NOT NULL DEFAULT '{}',
       pending_request JSONB,
+      blocker JSONB,
+      history JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
@@ -230,6 +239,42 @@ const migrationStatements = [
   `
     ALTER TABLE capabilities
     ADD COLUMN IF NOT EXISTS additional_metadata JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE capability_agents
+    ADD COLUMN IF NOT EXISTS is_built_in BOOLEAN NOT NULL DEFAULT FALSE
+  `,
+  `
+    ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS work_item_id TEXT
+  `,
+  `
+    ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS workflow_id TEXT
+  `,
+  `
+    ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS workflow_step_id TEXT
+  `,
+  `
+    ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS managed_by_workflow BOOLEAN NOT NULL DEFAULT FALSE
+  `,
+  `
+    ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS task_type TEXT
+  `,
+  `
+    ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS phase TEXT
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS blocker JSONB
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS history JSONB NOT NULL DEFAULT '[]'::jsonb
   `,
   `
     ALTER TABLE capability_workflows

@@ -25,11 +25,13 @@ import {
 import { query, transaction } from './db';
 import {
   applyWorkspaceRuntime,
+  buildBaseAgents,
   buildOwnerAgent,
   buildSeededAgents,
   buildWelcomeMessage,
   materializeWorkspace,
 } from './workspace';
+import { getDefaultCapabilityWorkflows } from '../src/lib/standardWorkflow';
 
 type CapabilityBundle = {
   capability: Capability;
@@ -42,6 +44,7 @@ type AppState = {
 };
 
 const withUpdatedTimestamp = 'NOW()';
+const LEGACY_DEMO_CAPABILITY_IDS = ['CAP-001', 'CAP-002', 'CAP-003'];
 
 const asStringArray = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter(item => typeof item === 'string') : [];
@@ -92,6 +95,7 @@ const agentFromRow = (row: Record<string, any>): CapabilityAgent => ({
   inputArtifacts: asStringArray(row.input_artifacts),
   outputArtifacts: asStringArray(row.output_artifacts),
   isOwner: Boolean(row.is_owner),
+  isBuiltIn: Boolean(row.is_built_in),
   learningNotes: asStringArray(row.learning_notes),
   skillIds: asStringArray(row.skill_ids),
   provider: row.provider,
@@ -156,6 +160,12 @@ const taskFromRow = (row: Record<string, any>): AgentTask => ({
   title: row.title,
   agent: row.agent,
   capabilityId: row.capability_id,
+  workItemId: row.work_item_id || undefined,
+  workflowId: row.workflow_id || undefined,
+  workflowStepId: row.workflow_step_id || undefined,
+  managedByWorkflow: row.managed_by_workflow ?? undefined,
+  taskType: row.task_type || undefined,
+  phase: row.phase || undefined,
   priority: row.priority,
   status: row.status,
   timestamp: row.timestamp,
@@ -199,6 +209,8 @@ const workItemFromRow = (row: Record<string, any>): WorkItem => ({
   priority: row.priority,
   tags: asStringArray(row.tags),
   pendingRequest: row.pending_request || undefined,
+  blocker: row.blocker || undefined,
+  history: asJsonArray<WorkItem['history'][number]>(row.history),
 });
 
 const workspaceCreatedAt = (row: Record<string, any> | undefined) =>
@@ -358,6 +370,7 @@ const upsertAgentTx = async (
         input_artifacts,
         output_artifacts,
         is_owner,
+        is_built_in,
         learning_notes,
         skill_ids,
         provider,
@@ -366,7 +379,7 @@ const upsertAgentTx = async (
         updated_at
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,${withUpdatedTimestamp}
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,${withUpdatedTimestamp}
       )
       ON CONFLICT (capability_id, id) DO UPDATE SET
         name = EXCLUDED.name,
@@ -378,6 +391,7 @@ const upsertAgentTx = async (
         input_artifacts = EXCLUDED.input_artifacts,
         output_artifacts = EXCLUDED.output_artifacts,
         is_owner = EXCLUDED.is_owner,
+        is_built_in = EXCLUDED.is_built_in,
         learning_notes = EXCLUDED.learning_notes,
         skill_ids = EXCLUDED.skill_ids,
         provider = EXCLUDED.provider,
@@ -397,6 +411,7 @@ const upsertAgentTx = async (
       agent.inputArtifacts,
       agent.outputArtifacts,
       Boolean(agent.isOwner),
+      Boolean(agent.isBuiltIn),
       agent.learningNotes || [],
       agent.skillIds,
       agent.provider,
@@ -411,6 +426,26 @@ const replaceAgentsTx = async (client: PoolClient, capabilityId: string, agents:
 
   for (const agent of agents) {
     await upsertAgentTx(client, capabilityId, agent);
+  }
+};
+
+const ensureBaseAgentsTx = async (client: PoolClient, capability: Capability) => {
+  const existingAgents = await client.query<{ id: string }>(
+    `
+      SELECT id
+      FROM capability_agents
+      WHERE capability_id = $1
+    `,
+    [capability.id],
+  );
+  const existingAgentIds = new Set(existingAgents.rows.map(row => row.id));
+
+  for (const agent of buildBaseAgents(capability, buildOwnerAgent(capability))) {
+    if (existingAgentIds.has(agent.id)) {
+      continue;
+    }
+
+    await upsertAgentTx(client, capability.id, agent);
   }
 };
 
@@ -598,6 +633,12 @@ const replaceTasksTx = async (
           id,
           title,
           agent,
+          work_item_id,
+          workflow_id,
+          workflow_step_id,
+          managed_by_workflow,
+          task_type,
+          phase,
           priority,
           status,
           timestamp,
@@ -607,13 +648,19 @@ const replaceTasksTx = async (
           produced_outputs,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,${withUpdatedTimestamp})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,${withUpdatedTimestamp})
       `,
       [
         capabilityId,
         task.id,
         task.title,
         task.agent,
+        task.workItemId || null,
+        task.workflowId || null,
+        task.workflowStepId || null,
+        task.managedByWorkflow ?? false,
+        task.taskType || null,
+        task.phase || null,
         task.priority,
         task.status,
         task.timestamp,
@@ -723,9 +770,11 @@ const replaceWorkItemsTx = async (
           priority,
           tags,
           pending_request,
+          blocker,
+          history,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,${withUpdatedTimestamp})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,${withUpdatedTimestamp})
       `,
       [
         capabilityId,
@@ -740,9 +789,59 @@ const replaceWorkItemsTx = async (
         item.priority,
         item.tags,
         item.pendingRequest || null,
+        item.blocker || null,
+        JSON.stringify(item.history || []),
       ],
     );
   }
+};
+
+const hasModernWorkflowShape = (steps: unknown) =>
+  Array.isArray(steps) &&
+  steps.every(
+    step =>
+      step &&
+      typeof step === 'object' &&
+      typeof (step as { name?: unknown }).name === 'string' &&
+      typeof (step as { phase?: unknown }).phase === 'string' &&
+      typeof (step as { stepType?: unknown }).stepType === 'string',
+  );
+
+const seedCapabilityTx = async (client: PoolClient, capability: Capability) => {
+  const ownerAgent = buildOwnerAgent(capability);
+  const defaultWorkflows = getDefaultCapabilityWorkflows(capability);
+
+  await upsertCapabilityTx(client, capability);
+  await upsertWorkspaceMetaTx(client, capability.id, ownerAgent.id);
+  await replaceSkillsTx(client, capability.id, capability.skillLibrary);
+  await replaceAgentsTx(client, capability.id, buildSeededAgents(capability, ownerAgent));
+  await replaceMessagesTx(client, capability.id, [buildWelcomeMessage(capability, ownerAgent)]);
+  await replaceWorkflowsTx(client, capability.id, defaultWorkflows);
+  await replaceArtifactsTx(
+    client,
+    capability.id,
+    ARTIFACTS.filter(artifact => artifact.capabilityId === capability.id),
+  );
+  await replaceTasksTx(
+    client,
+    capability.id,
+    AGENT_TASKS.filter(task => task.capabilityId === capability.id),
+  );
+  await replaceExecutionLogsTx(
+    client,
+    capability.id,
+    EXECUTION_LOGS.filter(log => log.capabilityId === capability.id),
+  );
+  await replaceLearningUpdatesTx(
+    client,
+    capability.id,
+    LEARNING_UPDATES.filter(update => update.capabilityId === capability.id),
+  );
+  await replaceWorkItemsTx(
+    client,
+    capability.id,
+    WORK_ITEMS.filter(item => item.capabilityId === capability.id),
+  );
 };
 
 const getCapabilityByIdTx = async (
@@ -884,55 +983,33 @@ const getCapabilityBundleTx = async (
 };
 
 export const initializeSeedData = async () => {
-  const existing = await query<{ count: string }>('SELECT COUNT(*)::text AS count FROM capabilities');
-  const hasCapabilities = Number(existing.rows[0]?.count || '0') > 0;
-
   await transaction(async client => {
+    const currentSeedIds = new Set(CAPABILITIES.map(capability => capability.id));
+    const demoCapabilityIdsToRemove = LEGACY_DEMO_CAPABILITY_IDS.filter(
+      capabilityId => !currentSeedIds.has(capabilityId),
+    );
+
+    if (demoCapabilityIdsToRemove.length > 0) {
+      await client.query('DELETE FROM capabilities WHERE id = ANY($1::text[])', [
+        demoCapabilityIdsToRemove,
+      ]);
+    }
+
+    const existing = await client.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM capabilities',
+    );
+    const hasCapabilities = Number(existing.rows[0]?.count || '0') > 0;
+
     if (!hasCapabilities) {
       for (const capability of CAPABILITIES) {
-        const ownerAgent = buildOwnerAgent(capability);
-        await upsertCapabilityTx(client, capability);
-        await upsertWorkspaceMetaTx(client, capability.id, ownerAgent.id);
-        await replaceSkillsTx(client, capability.id, capability.skillLibrary);
-        await replaceAgentsTx(client, capability.id, buildSeededAgents(capability, ownerAgent));
-        await replaceMessagesTx(client, capability.id, [buildWelcomeMessage(capability, ownerAgent)]);
-        await replaceWorkflowsTx(
-          client,
-          capability.id,
-          WORKFLOWS.filter(workflow => workflow.capabilityId === capability.id),
-        );
-        await replaceArtifactsTx(
-          client,
-          capability.id,
-          ARTIFACTS.filter(artifact => artifact.capabilityId === capability.id),
-        );
-        await replaceTasksTx(
-          client,
-          capability.id,
-          AGENT_TASKS.filter(task => task.capabilityId === capability.id),
-        );
-        await replaceExecutionLogsTx(
-          client,
-          capability.id,
-          EXECUTION_LOGS.filter(log => log.capabilityId === capability.id),
-        );
-        await replaceLearningUpdatesTx(
-          client,
-          capability.id,
-          LEARNING_UPDATES.filter(update => update.capabilityId === capability.id),
-        );
-        await replaceWorkItemsTx(
-          client,
-          capability.id,
-          WORK_ITEMS.filter(item => item.capabilityId === capability.id),
-        );
+        await seedCapabilityTx(client, capability);
       }
-      return;
     }
 
     for (const seededCapability of CAPABILITIES) {
       const currentCapability = await getCapabilityByIdTx(client, seededCapability.id);
       if (!currentCapability) {
+        await seedCapabilityTx(client, seededCapability);
         continue;
       }
 
@@ -961,6 +1038,57 @@ export const initializeSeedData = async () => {
       };
 
       await upsertCapabilityTx(client, backfilledCapability);
+
+      const workflowCountResult = await client.query<{ count: string }>(
+        `
+          SELECT COUNT(*)::text AS count
+          FROM capability_workflows
+          WHERE capability_id = $1
+        `,
+        [seededCapability.id],
+      );
+
+      const workflowRowsResult = await client.query<{ steps: unknown }>(
+        `
+          SELECT steps
+          FROM capability_workflows
+          WHERE capability_id = $1
+        `,
+        [seededCapability.id],
+      );
+
+      const hasModernWorkflows = workflowRowsResult.rows.some(row =>
+        hasModernWorkflowShape(row.steps),
+      );
+
+      if (
+        Number(workflowCountResult.rows[0]?.count || '0') === 0 ||
+        !hasModernWorkflows
+      ) {
+        await replaceWorkflowsTx(
+          client,
+          seededCapability.id,
+          getDefaultCapabilityWorkflows(backfilledCapability),
+        );
+        await replaceWorkItemsTx(client, seededCapability.id, []);
+      }
+    }
+
+    const capabilityResult = await client.query<{ id: string }>(
+      `
+        SELECT id
+        FROM capabilities
+        ORDER BY created_at ASC, id ASC
+      `,
+    );
+
+    for (const row of capabilityResult.rows) {
+      const capability = await getCapabilityByIdTx(client, row.id);
+      if (!capability) {
+        continue;
+      }
+
+      await ensureBaseAgentsTx(client, capability);
     }
   });
 };
@@ -991,9 +1119,13 @@ export const createCapabilityRecord = async (
 
     const ownerAgent = buildOwnerAgent(capability);
     await upsertWorkspaceMetaTx(client, capability.id, ownerAgent.id);
-    await replaceAgentsTx(client, capability.id, [ownerAgent]);
+    await replaceAgentsTx(client, capability.id, buildBaseAgents(capability, ownerAgent));
     await replaceMessagesTx(client, capability.id, [buildWelcomeMessage(capability, ownerAgent)]);
-    await replaceWorkflowsTx(client, capability.id, []);
+    await replaceWorkflowsTx(
+      client,
+      capability.id,
+      getDefaultCapabilityWorkflows(capability),
+    );
     await replaceArtifactsTx(client, capability.id, []);
     await replaceTasksTx(client, capability.id, []);
     await replaceExecutionLogsTx(client, capability.id, []);

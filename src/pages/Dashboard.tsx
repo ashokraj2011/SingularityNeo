@@ -17,13 +17,13 @@ import {
   Database,
   Activity,
 } from 'lucide-react';
-import { BLUEPRINTS, WORK_PACKAGES } from '../constants';
+import { BLUEPRINTS } from '../constants';
 import { cn } from '../lib/utils';
-import { Status } from '../types';
+import { Status, WorkItem } from '../types';
 import { useCapability } from '../context/CapabilityContext';
 import { useNavigate } from 'react-router-dom';
 
-const StatusBadge = ({ status }: { status: Status }) => {
+const StatusBadge = ({ status }: { status: Status | WorkItem['status'] }) => {
   const styles: Record<string, string> = {
     STABLE: "bg-primary-fixed text-primary border border-primary/20",
     ALERT: "bg-error-container text-on-error-container border border-error/20",
@@ -35,6 +35,9 @@ const StatusBadge = ({ status }: { status: Status }) => {
     PROCESSING: "bg-amber-100 text-amber-800 border border-amber-200",
     QUEUED: "bg-slate-100 text-slate-600 border border-slate-200",
     COMPLETED: "bg-primary/10 text-primary border border-primary/20",
+    ACTIVE: "bg-primary/10 text-primary border border-primary/20",
+    BLOCKED: "bg-error/10 text-error border border-error/20",
+    PENDING_APPROVAL: "bg-amber-100 text-amber-800 border border-amber-200",
   };
 
   return (
@@ -49,14 +52,107 @@ const Dashboard = () => {
   const { activeCapability, getCapabilityWorkspace } = useCapability();
   const [taskFilter, setTaskFilter] = useState<'ALL' | 'QUEUED' | 'PROCESSING' | 'COMPLETED'>('ALL');
   const workspace = getCapabilityWorkspace(activeCapability.id);
+  const agentsById = useMemo(
+    () => new Map(workspace.agents.map(agent => [agent.id, agent.name])),
+    [workspace.agents],
+  );
+  const workflowsById = useMemo(
+    () => new Map(workspace.workflows.map(workflow => [workflow.id, workflow])),
+    [workspace.workflows],
+  );
 
   const filteredBlueprints = useMemo(() => {
     return BLUEPRINTS.filter(bp => bp.capabilityId === activeCapability.id);
   }, [activeCapability]);
 
-  const filteredWorkPackages = useMemo(() => {
-    return WORK_PACKAGES.filter(wp => wp.capabilityId === activeCapability.id);
-  }, [activeCapability]);
+  const liveWorkPackages = useMemo(
+    () =>
+      workspace.workItems
+        .slice()
+        .sort((left, right) => {
+          const leftTimestamp = left.history[left.history.length - 1]?.timestamp || '';
+          const rightTimestamp = right.history[right.history.length - 1]?.timestamp || '';
+          return rightTimestamp.localeCompare(leftTimestamp);
+        })
+        .slice(0, 8),
+    [workspace.workItems],
+  );
+
+  const recommendedSteps = useMemo(() => {
+    const recommendations: Array<{
+      key: string;
+      title: string;
+      desc: string;
+      icon: typeof ShieldCheck;
+      onClick: () => void;
+    }> = [];
+
+    const blockedItem = workspace.workItems.find(item => item.status === 'BLOCKED');
+    if (blockedItem) {
+      recommendations.push({
+        key: `blocked-${blockedItem.id}`,
+        title: `Unblock ${blockedItem.title}`,
+        desc:
+          blockedItem.blocker?.message ||
+          `Resolve the blocker in ${blockedItem.phase.toLowerCase()} and restart the workflow.`,
+        icon: RefreshCw,
+        onClick: () => navigate(`/orchestrator?selected=${encodeURIComponent(blockedItem.id)}`),
+      });
+    }
+
+    const pendingApprovalItem = workspace.workItems.find(
+      item => item.status === 'PENDING_APPROVAL',
+    );
+    if (pendingApprovalItem) {
+      recommendations.push({
+        key: `approval-${pendingApprovalItem.id}`,
+        title: `Approve ${pendingApprovalItem.title}`,
+        desc:
+          pendingApprovalItem.pendingRequest?.message ||
+          `Review the approval gate for ${pendingApprovalItem.title}.`,
+        icon: ShieldCheck,
+        onClick: () =>
+          navigate(`/orchestrator?selected=${encodeURIComponent(pendingApprovalItem.id)}`),
+      });
+    }
+
+    const activeItem = workspace.workItems.find(item => item.status === 'ACTIVE');
+    if (activeItem) {
+      const workflow = workflowsById.get(activeItem.workflowId);
+      const currentStep = workflow?.steps.find(step => step.id === activeItem.currentStepId);
+      recommendations.push({
+        key: `continue-${activeItem.id}`,
+        title: `Continue ${activeItem.title}`,
+        desc:
+          currentStep?.description ||
+          `Move the story forward from ${activeItem.phase.toLowerCase()} when the step is ready.`,
+        icon: ArrowRight,
+        onClick: () => navigate(`/orchestrator?selected=${encodeURIComponent(activeItem.id)}`),
+      });
+    }
+
+    if (recommendations.length === 0 && workspace.workflows.length > 0) {
+      recommendations.push({
+        key: 'create-work-package',
+        title: 'Create Work Package',
+        desc: 'Launch a new story into the active SDLC flow for this capability.',
+        icon: Bolt,
+        onClick: () => navigate('/orchestrator?new=1'),
+      });
+    }
+
+    if (recommendations.length === 0) {
+      recommendations.push({
+        key: 'design-workflow',
+        title: 'Define Workflow',
+        desc: 'Create or refine the capability workflow before starting delivery execution.',
+        icon: Activity,
+        onClick: () => navigate('/designer'),
+      });
+    }
+
+    return recommendations.slice(0, 3);
+  }, [navigate, workspace.workItems, workspace.workflows, workflowsById]);
 
   const filteredTasks = useMemo(() => {
     const capabilityTasks = workspace.tasks;
@@ -84,7 +180,10 @@ const Dashboard = () => {
             <Plus size={18} />
             <span>Create Agent</span>
           </button>
-          <button className="px-6 py-3 bg-primary text-white rounded-xl font-bold flex items-center gap-2 shadow-lg shadow-primary/10 hover:translate-y-[-2px] transition-transform">
+          <button
+            onClick={() => navigate('/orchestrator?new=1')}
+            className="px-6 py-3 bg-primary text-white rounded-xl font-bold flex items-center gap-2 shadow-lg shadow-primary/10 hover:translate-y-[-2px] transition-transform"
+          >
             <Bolt size={18} />
             <span>New Work Package</span>
           </button>
@@ -180,11 +279,12 @@ const Dashboard = () => {
           <div>
             <h4 className="text-lg font-bold mb-4">Recommended Next Steps</h4>
             <div className="space-y-4">
-              {[
-                { title: 'Approve Governance Gate', desc: 'Security scan 100% complete', icon: ShieldCheck },
-                { title: 'Resync Artifacts', desc: '3 stale nodes detected', icon: RefreshCw },
-              ].map((step, i) => (
-                <div key={i} className="flex gap-4 p-3 bg-white/10 rounded-xl hover:bg-white/15 transition-colors cursor-pointer group">
+              {recommendedSteps.map(step => (
+                <button
+                  key={step.key}
+                  onClick={step.onClick}
+                  className="flex w-full gap-4 rounded-xl bg-white/10 p-3 text-left transition-colors hover:bg-white/15 group"
+                >
                   <div className="w-10 h-10 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
                     <step.icon size={18} />
                   </div>
@@ -192,11 +292,14 @@ const Dashboard = () => {
                     <p className="text-sm font-bold">{step.title}</p>
                     <p className="text-[0.6875rem] text-primary-fixed-dim">{step.desc}</p>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           </div>
-          <button className="w-full mt-6 py-3 bg-white text-primary rounded-xl font-bold text-sm hover:bg-surface-container-low transition-colors">
+          <button
+            onClick={() => navigate('/orchestrator')}
+            className="w-full mt-6 py-3 bg-white text-primary rounded-xl font-bold text-sm hover:bg-surface-container-low transition-colors"
+          >
             View Full Analysis
           </button>
         </motion.div>
@@ -257,24 +360,34 @@ const Dashboard = () => {
               <thead className="bg-surface-container-low">
                 <tr>
                   <th className="px-6 py-4 text-[0.6875rem] font-bold uppercase text-slate-500">Work ID</th>
-                  <th className="px-6 py-4 text-[0.6875rem] font-bold uppercase text-slate-500">Blueprint</th>
+                  <th className="px-6 py-4 text-[0.6875rem] font-bold uppercase text-slate-500">Workflow</th>
                   <th className="px-6 py-4 text-[0.6875rem] font-bold uppercase text-slate-500">Status</th>
                   <th className="px-6 py-4 text-[0.6875rem] font-bold uppercase text-slate-500">Owner</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-outline-variant/10">
-                {filteredWorkPackages.map((wp) => (
-                  <tr key={wp.id} className="hover:bg-surface-container-low transition-colors">
-                    <td className="px-6 py-4 font-bold text-primary text-sm">{wp.id}</td>
-                    <td className="px-6 py-4 text-sm text-secondary">{wp.blueprint}</td>
-                    <td className="px-6 py-4"><StatusBadge status={wp.status} /></td>
+                {liveWorkPackages.map((workItem) => (
+                  <tr
+                    key={workItem.id}
+                    onClick={() =>
+                      navigate(`/orchestrator?selected=${encodeURIComponent(workItem.id)}`)
+                    }
+                    className="cursor-pointer transition-colors hover:bg-surface-container-low"
+                  >
+                    <td className="px-6 py-4 font-bold text-primary text-sm">{workItem.id}</td>
+                    <td className="px-6 py-4 text-sm text-secondary">
+                      {workflowsById.get(workItem.workflowId)?.name || 'Workflow not found'}
+                    </td>
+                    <td className="px-6 py-4"><StatusBadge status={workItem.status} /></td>
                     <td className="px-6 py-4 flex items-center gap-2">
                       <div className="w-6 h-6 rounded-full bg-surface-container-highest" />
-                      <span className="text-xs font-medium text-slate-600">{wp.owner.name}</span>
+                      <span className="text-xs font-medium text-slate-600">
+                        {agentsById.get(workItem.assignedAgentId || '') || 'Unassigned'}
+                      </span>
                     </td>
                   </tr>
                 ))}
-                {filteredWorkPackages.length === 0 && (
+                {liveWorkPackages.length === 0 && (
                   <tr>
                     <td colSpan={4} className="px-6 py-12 text-center text-sm text-slate-400 italic">
                       No active work packages in this context.

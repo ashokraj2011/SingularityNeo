@@ -75,6 +75,7 @@ export interface CapabilityAgent {
   inputArtifacts: string[];
   outputArtifacts: string[];
   isOwner?: boolean;
+  isBuiltIn?: boolean;
   learningNotes?: string[];
   skillIds: string[];
   provider: 'GitHub Copilot API';
@@ -110,6 +111,12 @@ export interface AgentTask {
   title: string;
   agent: string;
   capabilityId: string;
+  workItemId?: string;
+  workflowId?: string;
+  workflowStepId?: string;
+  managedByWorkflow?: boolean;
+  taskType?: 'DELIVERY' | 'TEST' | 'APPROVAL' | 'GOVERNANCE';
+  phase?: WorkItemPhase;
   priority: 'High' | 'Med' | 'Low';
   status: Status;
   timestamp: string;
@@ -153,12 +160,48 @@ export interface Artifact {
   sourceWorkflowId?: string;
 }
 
+export type WorkItemPhase =
+  | 'BACKLOG'
+  | 'ANALYSIS'
+  | 'DESIGN'
+  | 'DEVELOPMENT'
+  | 'QA'
+  | 'GOVERNANCE'
+  | 'RELEASE'
+  | 'DONE';
+
+export type WorkflowStepType = 'DELIVERY' | 'GOVERNANCE_GATE' | 'HUMAN_APPROVAL';
+
+export interface WorkflowHandoffProtocol {
+  id: string;
+  name: string;
+  sourceStepId: string;
+  targetAgentId?: string;
+  targetPhase?: WorkItemPhase;
+  description?: string;
+  rules: string[];
+  validationRequired: boolean;
+  autoDocumentation: boolean;
+}
+
 export interface WorkflowStep {
   id: string;
+  name: string;
+  phase: WorkItemPhase;
+  stepType: WorkflowStepType;
   agentId: string;
   action: string;
+  description?: string;
   inputArtifactId?: string;
   outputArtifactId?: string;
+  handoffToAgentId?: string;
+  handoffToPhase?: WorkItemPhase;
+  handoffLabel?: string;
+  handoffProtocolId?: string;
+  governanceGate?: string;
+  approverRoles?: string[];
+  exitCriteria?: string[];
+  templatePath?: string;
 }
 
 export interface Workflow {
@@ -166,6 +209,7 @@ export interface Workflow {
   name: string;
   capabilityId: string;
   steps: WorkflowStep[];
+  handoffProtocols?: WorkflowHandoffProtocol[];
   status: Status;
   workflowType?: 'SDLC' | 'Operational' | 'Governance' | 'Custom';
   scope?: 'CAPABILITY' | 'GLOBAL';
@@ -193,7 +237,33 @@ export interface LearningUpdate {
   timestamp: string;
 }
 
-export type WorkItemPhase = 'BACKLOG' | 'ANALYSIS' | 'EXECUTION' | 'REVIEW' | 'DONE';
+export type WorkItemStatus = 'ACTIVE' | 'BLOCKED' | 'PENDING_APPROVAL' | 'COMPLETED';
+
+export interface WorkItemPendingRequest {
+  type: 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION';
+  message: string;
+  requestedBy: string;
+  timestamp: string;
+}
+
+export interface WorkItemBlocker {
+  type: 'CONFLICT_RESOLUTION' | 'HUMAN_INPUT' | 'APPROVAL';
+  message: string;
+  requestedBy: string;
+  timestamp: string;
+  status: 'OPEN' | 'RESOLVED';
+  resolution?: string;
+}
+
+export interface WorkItemHistoryEntry {
+  id: string;
+  timestamp: string;
+  actor: string;
+  action: string;
+  detail: string;
+  phase?: WorkItemPhase;
+  status?: WorkItemStatus;
+}
 
 export interface WorkItem {
   id: string;
@@ -204,15 +274,12 @@ export interface WorkItem {
   workflowId: string;
   currentStepId?: string;
   assignedAgentId?: string;
-  status: 'ACTIVE' | 'BLOCKED' | 'PENDING_APPROVAL' | 'COMPLETED';
+  status: WorkItemStatus;
   priority: 'High' | 'Med' | 'Low';
   tags: string[];
-  pendingRequest?: {
-    type: 'APPROVAL' | 'INPUT';
-    message: string;
-    requestedBy: string;
-    timestamp: string;
-  };
+  pendingRequest?: WorkItemPendingRequest;
+  blocker?: WorkItemBlocker;
+  history: WorkItemHistoryEntry[];
 }
 
 export interface CapabilityWorkspace {

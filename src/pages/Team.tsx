@@ -121,6 +121,10 @@ export default function Team() {
       ),
     [workspace.agents],
   );
+  const builtInCount = useMemo(
+    () => workspace.agents.filter(agent => agent.isBuiltIn).length,
+    [workspace.agents],
+  );
 
   const configureAgent = (agent: CapabilityAgent) => {
     setMode('edit');
@@ -218,8 +222,8 @@ export default function Team() {
         <div className="grid grid-cols-3 gap-3 rounded-3xl border border-outline-variant/15 bg-white p-4 shadow-sm">
           {[
             { label: 'Agents', value: workspace.agents.length },
+            { label: 'Built-in Agents', value: builtInCount },
             { label: 'Learning Notes', value: learningCount },
-            { label: 'Active Chat Agent', value: activeChatAgent ? 1 : 0 },
           ].map(item => (
             <div key={item.label} className="rounded-2xl bg-surface-container-low px-4 py-3 text-center">
               <p className="text-2xl font-extrabold text-primary">{item.value}</p>
@@ -320,6 +324,11 @@ export default function Team() {
                           <span className="rounded-full bg-primary/5 px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">
                             {activeCapability.id}
                           </span>
+                          {agent.isBuiltIn && (
+                            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-emerald-700">
+                              Built-in
+                            </span>
+                          )}
                           <span className="rounded-full bg-surface-container-low px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-secondary">
                             {agent.model}
                           </span>
@@ -432,7 +441,15 @@ export default function Team() {
               {[
                 { label: 'Capability Tag', value: activeCapability.id, icon: CheckCircle2 },
                 { label: 'Provider', value: 'GitHub Copilot API', icon: Cpu },
-                { label: 'Outputs', value: selectedAgent?.previousOutputs.length || 0, icon: FileText },
+                {
+                  label: 'Agent Type',
+                  value: selectedAgent?.isOwner
+                    ? 'Owner'
+                    : selectedAgent?.isBuiltIn
+                    ? 'Built-in'
+                    : 'Custom',
+                  icon: Bot,
+                },
               ].map(item => (
                 <div key={item.label} className="rounded-2xl bg-surface-container-low p-4">
                   <div className="flex items-center gap-2">
@@ -442,6 +459,15 @@ export default function Team() {
                   <p className="mt-3 text-lg font-extrabold text-primary">{item.value}</p>
                 </div>
               ))}
+            </div>
+
+            <div className="mt-6 rounded-3xl border border-emerald-100 bg-emerald-50/70 p-5">
+              <p className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-emerald-700">
+                Standard Team
+              </p>
+              <p className="mt-2 text-sm leading-relaxed text-emerald-900">
+                Every capability starts with a built-in delivery team: Architect, Business Analyst, Software Developer, QA, DevOps, and Validation Agent. You can edit them, but they stay tagged to this capability.
+              </p>
             </div>
 
             <div className="mt-6 grid gap-4 md:grid-cols-2">

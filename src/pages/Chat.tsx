@@ -210,7 +210,7 @@ const Chat = () => {
     : '0.0000';
 
   return (
-    <div className="flex h-[calc(100vh-160px)] flex-col gap-6">
+    <div className="flex min-h-0 flex-1 flex-col gap-6">
       <header className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
         <div>
           <div className="mb-1 flex items-center gap-2">
@@ -256,8 +256,8 @@ const Chat = () => {
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 gap-8">
-        <div className="flex flex-1 flex-col overflow-hidden rounded-3xl border border-outline-variant/15 bg-white shadow-sm">
+      <div className="flex min-h-0 flex-1 flex-col gap-6 xl:flex-row xl:gap-8">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-outline-variant/15 bg-white shadow-sm">
           <div className="border-b border-outline-variant/10 bg-surface-container-lowest/30 px-6 py-4">
             <div className="relative">
               <Search
@@ -379,7 +379,7 @@ const Chat = () => {
           </div>
         </div>
 
-        <div className="flex w-80 flex-col gap-6">
+        <div className="flex min-h-0 w-full flex-col gap-6 xl:w-80 xl:min-w-80">
           <section className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
             <h3 className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-widest text-primary">
               <Zap size={16} />
@@ -471,7 +471,7 @@ const Chat = () => {
             </div>
           </section>
 
-          <section className="flex flex-1 flex-col overflow-hidden rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
+          <section className="flex min-h-[260px] flex-1 flex-col overflow-hidden rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
             <h3 className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-widest text-primary">
               <Brain size={16} />
               Team Learning

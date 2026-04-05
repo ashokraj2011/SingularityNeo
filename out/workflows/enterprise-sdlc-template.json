@@ -1,0 +1,65 @@
+{
+  "name": "Enterprise SDLC Flow",
+  "summary": "Standard SDLC workflow with agent hand-offs, governance validation, and human approval before release.",
+  "phases": [
+    "BACKLOG",
+    "ANALYSIS",
+    "DESIGN",
+    "DEVELOPMENT",
+    "QA",
+    "GOVERNANCE",
+    "RELEASE",
+    "DONE"
+  ],
+  "steps": [
+    {
+      "name": "Business Analysis",
+      "type": "DELIVERY",
+      "phase": "ANALYSIS",
+      "agent": "Business Analyst",
+      "handoffTo": "Architect"
+    },
+    {
+      "name": "Solution Design",
+      "type": "DELIVERY",
+      "phase": "DESIGN",
+      "agent": "Architect",
+      "handoffTo": "Software Developer"
+    },
+    {
+      "name": "Implementation",
+      "type": "DELIVERY",
+      "phase": "DEVELOPMENT",
+      "agent": "Software Developer",
+      "handoffTo": "QA"
+    },
+    {
+      "name": "Quality Assurance",
+      "type": "DELIVERY",
+      "phase": "QA",
+      "agent": "QA",
+      "handoffTo": "Validation Agent"
+    },
+    {
+      "name": "Governance Gate",
+      "type": "GOVERNANCE_GATE",
+      "phase": "GOVERNANCE",
+      "agent": "Validation Agent",
+      "approvalRoles": ["Development Manager", "Team Lead"]
+    },
+    {
+      "name": "Human Approval",
+      "type": "HUMAN_APPROVAL",
+      "phase": "RELEASE",
+      "agent": "Capability Owning Agent",
+      "approvalRoles": ["Development Manager", "Squad Leader", "Team Lead"]
+    },
+    {
+      "name": "Release Execution",
+      "type": "DELIVERY",
+      "phase": "RELEASE",
+      "agent": "DevOps",
+      "handoffTo": "Capability Owning Agent"
+    }
+  ]
+}
