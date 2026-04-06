@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useCapability } from '../context/CapabilityContext';
+import { useToast } from '../context/ToastContext';
 import { cn } from '../lib/utils';
 import {
   CapabilityDeploymentTarget,
@@ -122,6 +123,7 @@ export default function CapabilityMetadata() {
     getCapabilityWorkspace,
     updateCapabilityMetadata,
   } = useCapability();
+  const { success } = useToast();
   const [isSaving, startTransition] = useTransition();
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const ownerAgent = workspace.agents.find(agent => agent.isOwner) || workspace.agents[0];
@@ -341,6 +343,10 @@ export default function CapabilityMetadata() {
         stakeholders: filteredStakeholders,
         additionalMetadata: filteredMetadataEntries,
       });
+      success(
+        'Capability metadata saved',
+        `${form.name.trim()} now has the latest business, execution, and stakeholder details.`,
+      );
     });
   };
 
@@ -359,6 +365,12 @@ export default function CapabilityMetadata() {
     updateCapabilityMetadata(activeCapability.id, {
       status: nextStatus,
     });
+    success(
+      nextStatus === 'ARCHIVED'
+        ? 'Capability made inactive'
+        : 'Capability reactivated',
+      `${activeCapability.name} lifecycle state was updated.`,
+    );
   };
 
   return (

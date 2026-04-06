@@ -31,7 +31,9 @@ import {
 } from './repository';
 import {
   getWorkflowRunDetail,
+  listRecentWorkflowRunEvents,
   listWorkflowRunEvents,
+  listWorkflowRunsByCapability,
   listWorkflowRunsForWorkItem,
 } from './execution/repository';
 import {
@@ -53,14 +55,30 @@ import {
   listLedgerArtifacts,
 } from './ledger';
 import {
+  buildCapabilitySystemPrompt,
   defaultModel,
   getConfiguredToken,
   githubModelsApiUrl,
   invokeCapabilityChat,
   normalizeModel,
+  requestGitHubModelStream,
   staticModels,
   type ChatHistoryMessage,
 } from './githubModels';
+import { buildMemoryContext, listMemoryDocuments, refreshCapabilityMemory, searchCapabilityMemory } from './memory';
+import { evaluateBranchPolicy, listPolicyDecisions } from './policy';
+import { subscribeToRunEvents } from './eventBus';
+import { getEvalRunDetail, listEvalRuns, listEvalSuites, runEvalSuite } from './evals';
+import {
+  buildRunConsoleSnapshot,
+  createTraceId,
+  finishTelemetrySpan,
+  listTelemetryMetrics,
+  listTelemetrySpans,
+  recordUsageMetrics,
+  startTelemetrySpan,
+} from './telemetry';
+import { getPlatformFeatureState } from './db';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -199,6 +217,15 @@ const parseActor = (value: unknown, fallback: string) => {
   return actor || fallback;
 };
 
+const writeSseEvent = (
+  response: express.Response,
+  event: string,
+  payload: unknown,
+) => {
+  response.write(`event: ${event}\n`);
+  response.write(`data: ${JSON.stringify(payload)}\n\n`);
+};
+
 app.use((request, response, next) => {
   response.setHeader('Access-Control-Allow-Origin', '*');
   response.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
@@ -228,6 +255,126 @@ app.get('/api/state', async (_request, response) => {
 app.get('/api/capabilities/:capabilityId', async (request, response) => {
   try {
     response.json(await getCapabilityBundle(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/run-console', async (request, response) => {
+  try {
+    const capabilityId = request.params.capabilityId;
+    const [recentRuns, recentEvents, recentPolicyDecisions] = await Promise.all([
+      listWorkflowRunsByCapability(capabilityId),
+      listRecentWorkflowRunEvents(capabilityId),
+      listPolicyDecisions(capabilityId),
+    ]);
+
+    response.json(
+      await buildRunConsoleSnapshot(
+        capabilityId,
+        recentRuns,
+        recentEvents,
+        recentPolicyDecisions,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/telemetry/spans', async (request, response) => {
+  try {
+    response.json(
+      await listTelemetrySpans(
+        request.params.capabilityId,
+        Number(request.query.limit || 80),
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/telemetry/metrics', async (request, response) => {
+  try {
+    response.json(
+      await listTelemetryMetrics(
+        request.params.capabilityId,
+        Number(request.query.limit || 120),
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/memory/documents', async (request, response) => {
+  try {
+    response.json(await listMemoryDocuments(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/memory/search', async (request, response) => {
+  try {
+    response.json(
+      await searchCapabilityMemory({
+        capabilityId: request.params.capabilityId,
+        queryText: String(request.query.q || ''),
+        limit: Number(request.query.limit || 8),
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/memory/refresh', async (request, response) => {
+  try {
+    response.json(await refreshCapabilityMemory(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/evals/suites', async (request, response) => {
+  try {
+    response.json(await listEvalSuites(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/evals/runs', async (request, response) => {
+  try {
+    response.json(await listEvalRuns(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/evals/runs/:runId', async (request, response) => {
+  try {
+    response.json(
+      await getEvalRunDetail(
+        request.params.capabilityId,
+        request.params.runId,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/evals/suites/:suiteId/run', async (request, response) => {
+  try {
+    response.status(201).json(
+      await runEvalSuite(
+        request.params.capabilityId,
+        request.params.suiteId,
+      ),
+    );
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -566,6 +713,51 @@ app.get('/api/capabilities/:capabilityId/runs/:runId/events', async (request, re
   }
 });
 
+app.get('/api/capabilities/:capabilityId/runs/:runId/stream', async (request, response) => {
+  response.setHeader('Content-Type', 'text/event-stream');
+  response.setHeader('Cache-Control', 'no-cache, no-transform');
+  response.setHeader('Connection', 'keep-alive');
+  response.flushHeaders?.();
+
+  const { capabilityId, runId } = request.params;
+
+  try {
+    const [detail, events] = await Promise.all([
+      getWorkflowRunDetail(capabilityId, runId),
+      listWorkflowRunEvents(capabilityId, runId),
+    ]);
+    writeSseEvent(response, 'snapshot', { detail, events });
+  } catch (error) {
+    writeSseEvent(response, 'error', {
+      error: error instanceof Error ? error.message : 'Unable to load run stream snapshot.',
+    });
+    response.end();
+    return;
+  }
+
+  const unsubscribe = subscribeToRunEvents(runId, event => {
+    writeSseEvent(response, 'event', event);
+  });
+
+  const interval = setInterval(() => {
+    void getWorkflowRunDetail(capabilityId, runId)
+      .then(detail => {
+        writeSseEvent(response, 'heartbeat', { detail });
+      })
+      .catch(error => {
+        writeSseEvent(response, 'error', {
+          error: error instanceof Error ? error.message : 'Run stream refresh failed.',
+        });
+      });
+  }, 3000);
+
+  request.on('close', () => {
+    clearInterval(interval);
+    unsubscribe();
+    response.end();
+  });
+});
+
 app.post('/api/capabilities/:capabilityId/runs/:runId/approve', async (request, response) => {
   try {
     const detail = await approveWorkflowRun({
@@ -711,6 +903,7 @@ app.post('/api/capabilities/:capabilityId/code-workspaces/branch', async (reques
 
 app.get('/api/runtime/status', (_request, response) => {
   const token = getConfiguredToken();
+  const platformFeatures = getPlatformFeatureState();
 
   response.json({
     configured: Boolean(token),
@@ -726,6 +919,8 @@ app.get('/api/runtime/status', (_request, response) => {
       ...model,
       apiModelId: normalizeModel(model.id),
     })),
+    streaming: true,
+    platformFeatures,
   });
 });
 
@@ -749,16 +944,210 @@ app.post('/api/runtime/chat', async (request, response) => {
   }
 
   try {
-    response.json(
-      await invokeCapabilityChat({
-        capability: body.capability,
-        agent: body.agent,
-        history: body.history || [],
-        message,
-      }),
-    );
+    const traceId = createTraceId();
+    const span = await startTelemetrySpan({
+      capabilityId: body.capability.id,
+      traceId,
+      entityType: 'CHAT',
+      entityId: body.agent.id,
+      name: `Capability chat: ${body.agent.name}`,
+      status: 'RUNNING',
+      model: body.agent.model,
+      attributes: {
+        capabilityId: body.capability.id,
+        agentId: body.agent.id,
+      },
+    });
+    const memoryContext = await buildMemoryContext({
+      capabilityId: body.capability.id,
+      queryText: message,
+    });
+    const chatResponse = await invokeCapabilityChat({
+      capability: body.capability,
+      agent: body.agent,
+      history: body.history || [],
+      message,
+      memoryPrompt: memoryContext.prompt
+        ? `Retrieved memory context:\n${memoryContext.prompt}`
+        : undefined,
+    });
+    await finishTelemetrySpan({
+      capabilityId: body.capability.id,
+      spanId: span.id,
+      status: 'OK',
+      costUsd: chatResponse.usage.estimatedCostUsd,
+      tokenUsage: chatResponse.usage,
+      attributes: {
+        memoryHits: memoryContext.results.length,
+      },
+    });
+    await recordUsageMetrics({
+      capabilityId: body.capability.id,
+      traceId,
+      scopeType: 'CHAT',
+      scopeId: body.agent.id,
+      totalTokens: chatResponse.usage.totalTokens,
+      costUsd: chatResponse.usage.estimatedCostUsd,
+      tags: {
+        model: chatResponse.model,
+      },
+    });
+
+    response.json({
+      ...chatResponse,
+      traceId,
+      memoryReferences: memoryContext.results.map(result => result.reference),
+    });
   } catch (error) {
     sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/runtime/chat/stream', async (request, response) => {
+  const token = getConfiguredToken();
+  if (!token) {
+    response.status(503).json({
+      error:
+        'GitHub Models is not configured. Add GITHUB_MODELS_TOKEN to .env.local and restart the server.',
+    });
+    return;
+  }
+
+  const body = request.body as ChatRequestBody;
+  const message = body.message?.trim();
+  if (!message || !body.capability || !body.agent) {
+    response.status(400).json({
+      error: 'Capability, agent, and message are required.',
+    });
+    return;
+  }
+
+  response.setHeader('Content-Type', 'text/event-stream');
+  response.setHeader('Cache-Control', 'no-cache, no-transform');
+  response.setHeader('Connection', 'keep-alive');
+  response.flushHeaders?.();
+
+  const traceId = createTraceId();
+  const memoryContext = await buildMemoryContext({
+    capabilityId: body.capability.id,
+    queryText: message,
+  });
+
+  writeSseEvent(response, 'start', {
+    type: 'start',
+    traceId,
+    createdAt: new Date().toISOString(),
+  });
+  writeSseEvent(response, 'memory', {
+    type: 'memory',
+    traceId,
+    memoryReferences: memoryContext.results.map(result => result.reference),
+  });
+
+  try {
+    const span = await startTelemetrySpan({
+      capabilityId: body.capability.id,
+      traceId,
+      entityType: 'CHAT',
+      entityId: body.agent.id,
+      name: `Capability chat stream: ${body.agent.name}`,
+      status: 'RUNNING',
+      model: body.agent.model,
+      attributes: {
+        capabilityId: body.capability.id,
+        agentId: body.agent.id,
+        streamed: true,
+      },
+    });
+    const normalizedHistory = (body.history || [])
+      .filter(item => item?.content?.trim())
+      .slice(-10)
+      .map(item => ({
+        role: item.role === 'agent' ? 'assistant' : 'user',
+        content: item.content!.trim(),
+      })) as Array<{ role: 'assistant' | 'user'; content: string }>;
+
+    const streamed = await requestGitHubModelStream({
+      model: body.agent.model,
+      maxTokens: Number(body.agent.tokenLimit || 1200),
+      temperature: 0.2,
+      messages: [
+        {
+          role: 'developer',
+          content:
+            'You are operating inside an enterprise capability workspace. Stay scoped to the provided capability and agent context, and be explicit when context is missing.',
+        },
+        {
+          role: 'system',
+          content: [
+            buildCapabilitySystemPrompt({
+              capability: body.capability,
+              agent: body.agent,
+            }),
+            memoryContext.prompt ? `Retrieved memory context:\n${memoryContext.prompt}` : null,
+          ]
+            .filter(Boolean)
+            .join('\n\n'),
+        },
+        ...normalizedHistory,
+        {
+          role: 'user',
+          content: message,
+        },
+      ],
+      onDelta: delta => {
+        writeSseEvent(response, 'delta', {
+          type: 'delta',
+          traceId,
+          content: delta,
+        });
+      },
+    });
+
+    await finishTelemetrySpan({
+      capabilityId: body.capability.id,
+      spanId: span.id,
+      status: 'OK',
+      costUsd: streamed.usage.estimatedCostUsd,
+      tokenUsage: streamed.usage,
+      attributes: {
+        memoryHits: memoryContext.results.length,
+        streamed: true,
+      },
+    });
+    await recordUsageMetrics({
+      capabilityId: body.capability.id,
+      traceId,
+      scopeType: 'CHAT',
+      scopeId: body.agent.id,
+      totalTokens: streamed.usage.totalTokens,
+      costUsd: streamed.usage.estimatedCostUsd,
+      tags: {
+        model: streamed.model,
+        streamed: 'true',
+      },
+    });
+
+    writeSseEvent(response, 'complete', {
+      type: 'complete',
+      traceId,
+      content: streamed.content,
+      createdAt: streamed.createdAt,
+      model: streamed.model,
+      usage: streamed.usage,
+      memoryReferences: memoryContext.results.map(result => result.reference),
+    });
+    response.end();
+  } catch (error) {
+    writeSseEvent(response, 'error', {
+      type: 'error',
+      traceId,
+      error:
+        error instanceof Error
+          ? error.message
+          : 'The backend runtime could not complete this streaming request.',
+    });
+    response.end();
   }
 });
 
@@ -773,6 +1162,17 @@ if (fs.existsSync(distDir)) {
 const startServer = async () => {
   await initializeDatabase();
   await initializeSeedData();
+  const state = await fetchAppState();
+  await Promise.all(
+    state.capabilities.map(capability =>
+      refreshCapabilityMemory(capability.id).catch(() => undefined),
+    ),
+  );
+  await Promise.all(
+    state.capabilities.map(capability =>
+      listEvalSuites(capability.id).catch(() => undefined),
+    ),
+  );
   startExecutionWorker();
 
   app.listen(port, () => {

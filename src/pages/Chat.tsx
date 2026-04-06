@@ -16,7 +16,7 @@ import {
 import {
   fetchRuntimeStatus,
   type RuntimeStatus,
-  sendCapabilityChat,
+  streamCapabilityChat,
 } from '../lib/api';
 import { useCapability } from '../context/CapabilityContext';
 import { cn } from '../lib/utils';
@@ -45,6 +45,8 @@ const Chat = () => {
   const [error, setError] = useState('');
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [configError, setConfigError] = useState('');
+  const [streamedDraft, setStreamedDraft] = useState('');
+  const [lastMemoryHits, setLastMemoryHits] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const activeAgent =
@@ -103,7 +105,7 @@ const Chat = () => {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [filteredMessages.length, isSending, workspace.capabilityId]);
+  }, [filteredMessages.length, isSending, workspace.capabilityId, streamedDraft]);
 
   const handleSend = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -129,23 +131,68 @@ const Chat = () => {
     setInput('');
     setError('');
     setIsSending(true);
+    setStreamedDraft('');
+    setLastMemoryHits(0);
 
     try {
-      const result = await sendCapabilityChat({
+      let completionPayload:
+        | {
+            content: string;
+            createdAt?: string;
+            model?: string;
+            usage?: {
+              promptTokens: number;
+              completionTokens: number;
+              totalTokens: number;
+              estimatedCostUsd: number;
+            };
+            traceId?: string;
+          }
+        | null = null;
+
+      await streamCapabilityChat({
         capability: activeCapability,
         agent: activeAgent,
         history: workspace.messages.slice(-10),
         message: userContent,
+      }, {
+        onEvent: event => {
+          if (event.type === 'memory') {
+            setLastMemoryHits(event.memoryReferences?.length || 0);
+            return;
+          }
+
+          if (event.type === 'delta' && event.content) {
+            setStreamedDraft(current => current + event.content);
+            return;
+          }
+
+          if (event.type === 'complete') {
+            completionPayload = {
+              content: event.content || '',
+              createdAt: event.createdAt,
+              model: event.model,
+              usage: event.usage,
+              traceId: event.traceId,
+            };
+          }
+        },
       });
+
+      const result = completionPayload;
+      if (!result) {
+        throw new Error('The backend stream completed without a final response payload.');
+      }
 
       appendCapabilityMessage(activeCapability.id, {
         id: `${Date.now()}-agent`,
         role: 'agent',
         content: result.content,
-        timestamp: formatTimestamp(new Date(result.createdAt)),
+        timestamp: formatTimestamp(new Date(result.createdAt || Date.now())),
         agentId: activeAgent.id,
         agentName: activeAgent.name,
       });
+      setStreamedDraft('');
 
       setCapabilityWorkspaceContent(activeCapability.id, {
         executionLogs: [
@@ -155,16 +202,18 @@ const Chat = () => {
             taskId: `CHAT-${userMessageId}`,
             capabilityId: activeCapability.id,
             agentId: activeAgent.id,
-            timestamp: new Date(result.createdAt).toISOString(),
+            timestamp: new Date(result.createdAt || Date.now()).toISOString(),
             level: 'INFO',
-            message: `Completed capability chat response with ${result.model}.`,
+            message: `Completed streamed capability chat response with ${result.model}.`,
+            traceId: result.traceId,
             metadata: {
               requestType: 'CHAT',
               model: result.model,
-              promptTokens: result.usage.promptTokens,
-              completionTokens: result.usage.completionTokens,
-              totalTokens: result.usage.totalTokens,
-              estimatedCostUsd: result.usage.estimatedCostUsd,
+              promptTokens: result.usage?.promptTokens || 0,
+              completionTokens: result.usage?.completionTokens || 0,
+              totalTokens: result.usage?.totalTokens || 0,
+              estimatedCostUsd: result.usage?.estimatedCostUsd || 0,
+              memoryHits: lastMemoryHits,
               outputTitle: `${activeAgent.name} chat response`,
               outputSummary: summarizeOutput(result.content),
               outputStatus: 'completed',
@@ -173,6 +222,7 @@ const Chat = () => {
         ],
       });
     } catch (nextError) {
+      setStreamedDraft('');
       setError(
         nextError instanceof Error
           ? nextError.message
@@ -325,15 +375,20 @@ const Chat = () => {
                   <LoaderCircle size={20} className="animate-spin" />
                 </div>
                 <div className="space-y-1">
-                  <div className="mb-1 flex items-center gap-2">
+                <div className="mb-1 flex items-center gap-2">
                     <span className="text-[0.625rem] font-bold uppercase tracking-widest text-slate-400">
                       {activeAgent.name}
                     </span>
                     <span className="text-[0.625rem] text-slate-300">Working...</span>
+                    {lastMemoryHits > 0 ? (
+                      <span className="text-[0.625rem] font-bold uppercase tracking-widest text-primary">
+                        {lastMemoryHits} memory hits
+                      </span>
+                    ) : null}
                   </div>
                   <div className="rounded-2xl rounded-tl-none border border-outline-variant/5 bg-surface-container-low p-4 text-sm leading-relaxed text-on-surface">
-                    Grounding the response in {activeCapability.name}, {activeAgent.role},
-                    documentation context, and the selected {activeAgent.model} runtime.
+                    {streamedDraft ||
+                      `Grounding the response in ${activeCapability.name}, ${activeAgent.role}, documentation context, and the selected ${activeAgent.model} runtime.`}
                   </div>
                 </div>
               </div>

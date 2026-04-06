@@ -8,6 +8,7 @@ import {
   CapabilityExecutionCommandTemplate,
   ToolAdapterId,
 } from '../../src/types';
+import { runSandboxedCommand, type SandboxProfile, summarizeSandboxFailure } from '../sandbox';
 
 const execFileAsync = promisify(execFile);
 
@@ -18,6 +19,7 @@ export type ToolExecutionResult = {
   exitCode?: number;
   stdoutPreview?: string;
   stderrPreview?: string;
+  sandboxProfile?: string;
 };
 
 type ToolExecutionContext = {
@@ -143,17 +145,22 @@ const executeCommandTemplate = async (
   capability: Capability,
   template: CapabilityExecutionCommandTemplate,
   workspacePath?: string,
+  sandboxProfile: SandboxProfile = 'workspace',
 ) => {
   const workingDirectory = template.workingDirectory
     ? resolveWorkspacePath(capability, template.workingDirectory)
     : resolveWorkspacePath(capability, workspacePath);
-  const [file, ...args] = template.command;
-  const result = await runProcess(file, args, workingDirectory);
+  const result = await runSandboxedCommand({
+    command: template.command,
+    cwd: workingDirectory,
+    workspacePath: workingDirectory,
+    profile: sandboxProfile,
+  });
 
   if (result.exitCode !== 0) {
     throw new Error(
       `${template.label} failed in ${workingDirectory}: ${
-        previewText(result.stderr || result.stdout || 'Unknown error')
+        summarizeSandboxFailure(result.stderr, result.stdout)
       }`,
     );
   }
@@ -164,9 +171,11 @@ const executeCommandTemplate = async (
     exitCode: result.exitCode,
     stdoutPreview: previewText(result.stdout),
     stderrPreview: previewText(result.stderr),
+    sandboxProfile: result.sandboxProfile,
     details: {
       command: template.command,
       templateId: template.id,
+      executionMode: result.executionMode,
     },
   } satisfies ToolExecutionResult;
 };
@@ -304,6 +313,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         capability,
         resolveCommandTemplate(capability, String(args.templateId || 'build')),
         args.workspacePath,
+        'build',
       ),
   },
   run_test: {
@@ -315,6 +325,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         capability,
         resolveCommandTemplate(capability, String(args.templateId || 'test')),
         args.workspacePath,
+        'test',
       ),
   },
   run_docs: {
@@ -326,6 +337,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         capability,
         resolveCommandTemplate(capability, String(args.templateId || 'docs')),
         args.workspacePath,
+        'docs',
       ),
   },
   run_deploy: {
@@ -365,6 +377,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         capability,
         template,
         target.workspacePath || args.workspacePath,
+        'deploy',
       );
     },
   },

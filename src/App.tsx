@@ -2,6 +2,7 @@ import { Suspense, lazy } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { CapabilityProvider } from './context/CapabilityContext';
+import { ToastProvider } from './context/ToastContext';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Designer = lazy(() => import('./pages/Designer'));
@@ -15,6 +16,9 @@ const Orchestrator = lazy(() => import('./pages/Orchestrator'));
 const ArtifactDesigner = lazy(() => import('./pages/ArtifactDesigner'));
 const CapabilitySetup = lazy(() => import('./pages/CapabilitySetup'));
 const CapabilityMetadata = lazy(() => import('./pages/CapabilityMetadata'));
+const RunConsole = lazy(() => import('./pages/RunConsole'));
+const MemoryExplorer = lazy(() => import('./pages/MemoryExplorer'));
+const EvalCenter = lazy(() => import('./pages/EvalCenter'));
 
 const RouteLoader = () => (
   <div className="section-card ambient-shadow min-h-[calc(100vh-12rem)] p-8">
@@ -39,28 +43,33 @@ const RouteLoader = () => (
 
 export default function App() {
   return (
-    <CapabilityProvider>
-      <Router>
-        <Layout>
-          <Suspense fallback={<RouteLoader />}>
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/designer" element={<Designer />} />
-              <Route path="/tasks" element={<Tasks />} />
-              <Route path="/ledger" element={<Ledger />} />
-              <Route path="/team" element={<Team />} />
-              <Route path="/skills" element={<SkillLibrary />} />
-              <Route path="/studio" element={<Studio />} />
-              <Route path="/chat" element={<Chat />} />
-              <Route path="/orchestrator" element={<Orchestrator />} />
-              <Route path="/artifact-designer" element={<ArtifactDesigner />} />
-              <Route path="/capabilities/new" element={<CapabilitySetup />} />
-              <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
-              <Route path="*" element={<Dashboard />} />
-            </Routes>
-          </Suspense>
-        </Layout>
-      </Router>
-    </CapabilityProvider>
+    <ToastProvider>
+      <CapabilityProvider>
+        <Router>
+          <Layout>
+            <Suspense fallback={<RouteLoader />}>
+              <Routes>
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/designer" element={<Designer />} />
+                <Route path="/tasks" element={<Tasks />} />
+                <Route path="/ledger" element={<Ledger />} />
+                <Route path="/team" element={<Team />} />
+                <Route path="/skills" element={<SkillLibrary />} />
+                <Route path="/studio" element={<Studio />} />
+                <Route path="/chat" element={<Chat />} />
+                <Route path="/orchestrator" element={<Orchestrator />} />
+                <Route path="/artifact-designer" element={<ArtifactDesigner />} />
+                <Route path="/capabilities/new" element={<CapabilitySetup />} />
+                <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
+                <Route path="/run-console" element={<RunConsole />} />
+                <Route path="/memory" element={<MemoryExplorer />} />
+                <Route path="/evals" element={<EvalCenter />} />
+                <Route path="*" element={<Dashboard />} />
+              </Routes>
+            </Suspense>
+          </Layout>
+        </Router>
+      </CapabilityProvider>
+    </ToastProvider>
   );
 }

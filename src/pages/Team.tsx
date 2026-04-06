@@ -18,6 +18,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { COPILOT_MODEL_OPTIONS, SKILL_LIBRARY } from '../constants';
 import { useCapability } from '../context/CapabilityContext';
+import { useToast } from '../context/ToastContext';
 import { CapabilityAgent, Skill } from '../types';
 import {
   EmptyState,
@@ -86,6 +87,7 @@ export default function Team() {
     updateCapabilityAgent,
     setActiveChatAgent,
   } = useCapability();
+  const { success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const availableSkills = useMemo(
     () => getAvailableSkills(activeCapability.skillLibrary),
@@ -187,6 +189,7 @@ export default function Team() {
     };
 
     if (mode === 'create') {
+      const agentName = form.name.trim();
       addCapabilityAgent(activeCapability.id, {
         id: createAgentId(activeCapability.id, form.name),
         ...sharedFields,
@@ -201,6 +204,7 @@ export default function Team() {
         },
         previousOutputs: [],
       });
+      success('Agent created', `${agentName} is now part of ${activeCapability.name}.`);
       setMode('create');
       setForm(createAgentForm(availableSkills));
       return;
@@ -208,6 +212,7 @@ export default function Team() {
 
     if (selectedAgent) {
       updateCapabilityAgent(activeCapability.id, selectedAgent.id, sharedFields);
+      success('Agent updated', `${sharedFields.name} settings were saved.`);
     }
   };
 

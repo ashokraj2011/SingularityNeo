@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useCapability } from '../context/CapabilityContext';
+import { useToast } from '../context/ToastContext';
 import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
 import {
   approveCapabilityWorkflowRun,
@@ -221,6 +222,7 @@ const Orchestrator = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const { activeCapability, getCapabilityWorkspace, refreshCapabilityBundle } =
     useCapability();
+  const { success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
 
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(null);
@@ -523,11 +525,18 @@ const Orchestrator = () => {
     Boolean(selectedOpenWait) &&
     (!resolutionIsRequired || Boolean(resolutionNote.trim()));
 
-  const withAction = async (label: string, action: () => Promise<void>) => {
+  const withAction = async (
+    label: string,
+    action: () => Promise<void>,
+    successMessage?: { title: string; description?: string },
+  ) => {
     setBusyAction(label);
     setActionError('');
     try {
       await action();
+      if (successMessage) {
+        success(successMessage.title, successMessage.description);
+      }
     } catch (error) {
       setActionError(
         error instanceof Error ? error.message : 'The orchestration action failed.',
@@ -565,6 +574,9 @@ const Orchestrator = () => {
         priority: 'Med',
         tags: '',
       });
+    }, {
+      title: 'Work item created',
+      description: `${draftWorkItem.title.trim()} is now queued in ${activeCapability.name}.`,
     });
   };
 
@@ -576,6 +588,9 @@ const Orchestrator = () => {
     await withAction('start', async () => {
       await startCapabilityWorkflowRun(activeCapability.id, selectedWorkItem.id);
       await refreshSelection(selectedWorkItem.id);
+    }, {
+      title: 'Execution started',
+      description: `${selectedWorkItem.title} is now running through the workflow.`,
     });
   };
 
@@ -589,6 +604,9 @@ const Orchestrator = () => {
         restartFromPhase: selectedWorkItem.phase,
       });
       await refreshSelection(selectedWorkItem.id);
+    }, {
+      title: 'Execution restarted',
+      description: `${selectedWorkItem.title} restarted from ${PHASE_META[selectedWorkItem.phase].label}.`,
     });
   };
 
@@ -619,6 +637,14 @@ const Orchestrator = () => {
 
       setResolutionNote('');
       await refreshSelection(selectedWorkItem.id);
+    }, {
+      title:
+        selectedOpenWait.type === 'APPROVAL'
+          ? 'Approval submitted'
+          : selectedOpenWait.type === 'INPUT'
+          ? 'Input submitted'
+          : 'Conflict resolved',
+      description: `${selectedWorkItem.title} was updated and can continue through the workflow.`,
     });
   };
 
@@ -633,6 +659,9 @@ const Orchestrator = () => {
       });
       setResolutionNote('');
       await refreshSelection(selectedWorkItem.id);
+    }, {
+      title: 'Execution cancelled',
+      description: `${selectedWorkItem.title} was stopped from the control plane.`,
     });
   };
 
@@ -648,6 +677,9 @@ const Orchestrator = () => {
         note: `Story moved to ${PHASE_META[targetPhase].label} from the orchestration board.`,
       });
       await refreshSelection(selectedWorkItemId === workItemId ? workItemId : undefined);
+    }, {
+      title: 'Work item moved',
+      description: `${item.title} moved to ${PHASE_META[targetPhase].label}.`,
     });
   };
 

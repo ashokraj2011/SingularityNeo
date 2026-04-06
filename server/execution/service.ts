@@ -4,6 +4,7 @@ import {
   Capability,
   CapabilityAgent,
   ExecutionLog,
+  MemoryReference,
   RunWait,
   RunWaitType,
   ToolAdapterId,
@@ -24,6 +25,8 @@ import {
   buildCapabilitySystemPrompt,
   requestGitHubModel,
 } from '../githubModels';
+import { buildMemoryContext, refreshCapabilityMemory } from '../memory';
+import { evaluateToolPolicy } from '../policy';
 import {
   createRunEvent,
   createRunWait,
@@ -47,6 +50,12 @@ import {
   getCapabilityBundle,
   replaceCapabilityWorkspaceContentRecord,
 } from '../repository';
+import {
+  createTraceId,
+  finishTelemetrySpan,
+  recordUsageMetrics,
+  startTelemetrySpan,
+} from '../telemetry';
 
 const MAX_AGENT_TOOL_LOOPS = 8;
 
@@ -83,6 +92,19 @@ type ExecutionDecision =
       reasoning: string;
       summary: string;
     };
+
+type DecisionEnvelope = {
+  decision: ExecutionDecision;
+  model: string;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    estimatedCostUsd: number;
+  };
+  latencyMs: number;
+  retrievalReferences: MemoryReference[];
+};
 
 type ProjectionContext = {
   capability: Capability;
@@ -131,6 +153,9 @@ const createExecutionLog = ({
   runId,
   runStepId,
   toolInvocationId,
+  traceId,
+  latencyMs,
+  costUsd,
 }: {
   capabilityId: string;
   taskId: string;
@@ -141,6 +166,9 @@ const createExecutionLog = ({
   runId?: string;
   runStepId?: string;
   toolInvocationId?: string;
+  traceId?: string;
+  latencyMs?: number;
+  costUsd?: number;
 }): ExecutionLog => ({
   id: createLogId(),
   capabilityId,
@@ -152,6 +180,9 @@ const createExecutionLog = ({
   runId,
   runStepId,
   toolInvocationId,
+  traceId,
+  latencyMs,
+  costUsd,
   metadata,
 });
 
@@ -384,11 +415,18 @@ const requestStepDecision = async ({
   toolHistory: Array<{ role: 'assistant' | 'user'; content: string }>;
   handoffContext?: string;
   resolvedWaitContext?: string;
-}): Promise<ExecutionDecision> => {
+}): Promise<DecisionEnvelope> => {
   const allowedToolIds = step.allowedToolIds || [];
   const toolDescriptions = allowedToolIds.length
     ? listToolDescriptions(allowedToolIds).join('\n')
     : 'No tools are allowed for this step.';
+  const startedAt = Date.now();
+  const memoryContext = await buildMemoryContext({
+    capabilityId: capability.id || workItem.capabilityId,
+    queryText: [workItem.title, workItem.description, step.action, step.name]
+      .filter(Boolean)
+      .join('\n'),
+  });
 
   const response = await requestGitHubModel({
     model: agent.model,
@@ -405,7 +443,7 @@ const requestStepDecision = async ({
         content: `${buildCapabilitySystemPrompt({
           capability,
           agent,
-        })}\n\nCurrent workflow: ${workflow.name}\nCurrent step: ${step.name}\nCurrent phase: ${workItem.phase}\nCurrent step attempt: ${runStep.attemptCount}\nStep objective: ${step.action}\nStep guidance: ${step.description || 'None'}\nExecution notes: ${step.executionNotes || 'None'}\nWorkflow hand-off context from prior completed steps:\n${handoffContext || 'None'}\nResolved human input/conflict context for this step:\n${resolvedWaitContext || 'None'}\nAllowed tools:\n${toolDescriptions}\n\nUse prior-step hand-offs and resolved human inputs as authoritative downstream context. Do not ask for information that is already present in those sections. If you truly need more input, explain exactly what new gap remains and why the existing hand-off context is insufficient.\n\nReturn JSON with one of these shapes:\n1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"src/index.ts"}}}\n2. {"action":"complete","reasoning":"...","summary":"..."}\n3. {"action":"pause_for_input","reasoning":"...","wait":{"type":"INPUT","message":"..."}}\n4. {"action":"pause_for_approval","reasoning":"...","wait":{"type":"APPROVAL","message":"..."}}\n5. {"action":"fail","reasoning":"...","summary":"..."}\nOnly choose tool ids from the allowed list. If no tools are allowed, either complete, pause, or fail.`,
+        })}\n\nCurrent workflow: ${workflow.name}\nCurrent step: ${step.name}\nCurrent phase: ${workItem.phase}\nCurrent step attempt: ${runStep.attemptCount}\nStep objective: ${step.action}\nStep guidance: ${step.description || 'None'}\nExecution notes: ${step.executionNotes || 'None'}\nWorkflow hand-off context from prior completed steps:\n${handoffContext || 'None'}\nResolved human input/conflict context for this step:\n${resolvedWaitContext || 'None'}\nRetrieved memory context:\n${memoryContext.prompt || 'None'}\nAllowed tools:\n${toolDescriptions}\n\nUse prior-step hand-offs, retrieved memory, and resolved human inputs as authoritative downstream context. Do not ask for information that is already present in those sections. If you truly need more input, explain exactly what new gap remains and why the existing context is insufficient.\n\nReturn JSON with one of these shapes:\n1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"src/index.ts"}}}\n2. {"action":"complete","reasoning":"...","summary":"..."}\n3. {"action":"pause_for_input","reasoning":"...","wait":{"type":"INPUT","message":"..."}}\n4. {"action":"pause_for_approval","reasoning":"...","wait":{"type":"APPROVAL","message":"..."}}\n5. {"action":"fail","reasoning":"...","summary":"..."}\nOnly choose tool ids from the allowed list. If no tools are allowed, either complete, pause, or fail.`,
       },
       ...toolHistory,
       {
@@ -415,7 +453,13 @@ const requestStepDecision = async ({
     ],
   });
 
-  return extractJsonObject(response.content) as ExecutionDecision;
+  return {
+    decision: extractJsonObject(response.content) as ExecutionDecision,
+    model: response.model,
+    usage: response.usage,
+    latencyMs: Date.now() - startedAt,
+    retrievalReferences: memoryContext.results.map(result => result.reference),
+  } as DecisionEnvelope;
 };
 
 const getCurrentRunStep = (detail: WorkflowRunDetail) => {
@@ -588,6 +632,7 @@ const syncRunningProjection = async ({
         message: historyMessage,
         runId: detail.run.id,
         runStepId: getCurrentRunStep(detail).id,
+        traceId: detail.run.traceId,
       }),
     ],
   });
@@ -647,6 +692,7 @@ const syncWaitingProjection = async ({
         message: waitMessage,
         runId: detail.run.id,
         runStepId: getCurrentRunStep(detail).id,
+        traceId: detail.run.traceId,
       }),
     ],
   });
@@ -754,6 +800,7 @@ const syncCompletedProjection = async ({
         runId: detail.run.id,
         runStepId: completedRunStep.id,
         toolInvocationId,
+        traceId: detail.run.traceId,
         metadata: {
           outputSummary: summary,
           outputTitle: primaryArtifact?.name || `${completedStep.name} Output`,
@@ -826,6 +873,7 @@ const syncFailedProjection = async ({
         level: 'ERROR',
         runId: detail.run.id,
         runStepId: runStep.id,
+        traceId: detail.run.traceId,
       }),
     ],
   });
@@ -836,11 +884,17 @@ const buildArtifactFromStepCompletion = ({
   step,
   summary,
   toolInvocationId,
+  retrievalReferences,
+  costUsd,
+  latencyMs,
 }: {
   detail: WorkflowRunDetail;
   step: WorkflowStep;
   summary: string;
   toolInvocationId?: string;
+  retrievalReferences?: MemoryReference[];
+  costUsd?: number;
+  latencyMs?: number;
 }): Artifact => ({
   id: createArtifactId(),
   name: `${step.name} Output`,
@@ -876,6 +930,10 @@ const buildArtifactFromStepCompletion = ({
     ['Summary', summary],
   ])}`,
   downloadable: true,
+  traceId: detail.run.traceId,
+  latencyMs,
+  costUsd,
+  retrievalReferences,
 });
 
 const buildHandoffArtifact = ({
@@ -923,6 +981,7 @@ const buildHandoffArtifact = ({
     ['Carry Forward Summary', summary],
   ])}`,
   downloadable: true,
+  traceId: detail.run.traceId,
 });
 
 const buildHumanInteractionArtifact = ({
@@ -986,6 +1045,7 @@ const buildHumanInteractionArtifact = ({
       ['Resolution', resolution],
     ])}`,
     downloadable: true,
+    traceId: detail.run.traceId,
   };
 };
 
@@ -1055,9 +1115,11 @@ export const createWorkItemRecord = async ({
         taskId: nextWorkItem.id,
         agentId: firstStep.agentId,
         message: `${nextWorkItem.title} entered ${firstStep.name} in ${workflow.name}.`,
+        traceId: undefined,
       }),
     ],
   });
+  await refreshCapabilityMemory(capabilityId).catch(() => undefined);
 
   return nextWorkItem;
 };
@@ -1133,6 +1195,7 @@ export const moveWorkItemToPhaseControl = async ({
       }),
     ],
   });
+  await refreshCapabilityMemory(capabilityId).catch(() => undefined);
 
   return nextWorkItem;
 };
@@ -1257,6 +1320,8 @@ const resolveRunWaitAndQueue = async ({
       runId,
       workItemId: detail.run.workItemId,
       runStepId: nextRunStep.id,
+      traceId: detail.run.traceId,
+      spanId: currentRunStep.spanId,
       type: 'RUN_RESUMED',
       level: 'INFO',
       message: resolution,
@@ -1341,6 +1406,7 @@ const resolveRunWaitAndQueue = async ({
         message: resolution,
         runId: detail.run.id,
         runStepId: currentRunStep.id,
+        traceId: detail.run.traceId,
         metadata: {
           waitId: openWait.id,
           waitType: expectedType,
@@ -1350,6 +1416,7 @@ const resolveRunWaitAndQueue = async ({
       }),
     ],
   });
+  await refreshCapabilityMemory(capabilityId).catch(() => undefined);
 
   return nextDetail;
 };
@@ -1456,6 +1523,7 @@ export const cancelWorkflowRun = async ({
         message: note || 'Run cancelled by user.',
         level: 'WARN',
         runId,
+        traceId: detail.run.traceId,
       }),
     ],
   });
@@ -1495,6 +1563,8 @@ const completeRunWithWait = async ({
     capabilityId: detail.run.capabilityId,
     runId: detail.run.id,
     runStepId: currentRunStep.id,
+    traceId: detail.run.traceId,
+    spanId: currentRunStep.spanId,
     type: waitType,
     status: 'OPEN',
     message: waitMessage,
@@ -1529,6 +1599,7 @@ const completeRunWithWait = async ({
     waitType,
     waitMessage,
   });
+  await refreshCapabilityMemory(detail.run.capabilityId).catch(() => undefined);
   await releaseRunLease({
     capabilityId: detail.run.capabilityId,
     runId: detail.run.id,
@@ -1567,6 +1638,7 @@ const failRun = async ({
     detail: nextDetail,
     message,
   });
+  await refreshCapabilityMemory(detail.run.capabilityId).catch(() => undefined);
   await releaseRunLease({
     capabilityId: detail.run.capabilityId,
     runId: detail.run.id,
@@ -1587,12 +1659,14 @@ const executeAutomatedStep = async (
   const agent =
     projection.workspace.agents.find(item => item.id === step.agentId) ||
     projection.workspace.agents[0];
+  const traceId = detail.run.traceId || createTraceId();
 
-  const updatedRunStep = await updateWorkflowRunStep({
+  let currentRunStep = await updateWorkflowRunStep({
     ...runStep,
     status: 'RUNNING',
     attemptCount: runStep.attemptCount + 1,
     startedAt: runStep.startedAt || new Date().toISOString(),
+    spanId: runStep.spanId || createTraceId().slice(0, 16),
   });
   const updatedRun = (
     await updateWorkflowRun({
@@ -1602,9 +1676,30 @@ const executeAutomatedStep = async (
       currentStepId: step.id,
       currentPhase: step.phase,
       assignedAgentId: step.agentId,
+      traceId,
     })
   ).run;
   const runningDetail = await getWorkflowRunDetail(detail.run.capabilityId, updatedRun.id);
+  const stepSpan = await startTelemetrySpan({
+    capabilityId: detail.run.capabilityId,
+    traceId,
+    parentSpanId: undefined,
+    entityType: 'STEP',
+    entityId: currentRunStep.id,
+    name: `${step.name} execution`,
+    status: 'RUNNING',
+    model: agent.model,
+    attributes: {
+      workItemId: detail.run.workItemId,
+      workflowId: detail.run.workflowId,
+      phase: step.phase,
+      stepType: step.stepType,
+    },
+  });
+  currentRunStep = await updateWorkflowRunStep({
+    ...currentRunStep,
+    spanId: stepSpan.id,
+  });
   await syncRunningProjection({
     detail: runningDetail,
     capability: projection.capability,
@@ -1613,8 +1708,10 @@ const executeAutomatedStep = async (
   });
 
   const toolHistory: Array<{ role: 'assistant' | 'user'; content: string }> = [];
-  const hasApprovedDeployment = runningDetail.steps.some(
+  let hasApprovedDeployment = runningDetail.steps.some(
     item => item.stepType === 'HUMAN_APPROVAL' && item.status === 'COMPLETED',
+  ) || runningDetail.waits.some(
+    wait => wait.type === 'APPROVAL' && wait.status === 'RESOLVED',
   );
   const handoffContext = buildWorkflowHandoffContext({
     detail: runningDetail,
@@ -1623,42 +1720,147 @@ const executeAutomatedStep = async (
   });
   const resolvedWaitContext = buildResolvedWaitContext({
     detail: runningDetail,
-    runStep: updatedRunStep,
+    runStep: currentRunStep,
   });
 
   for (let iteration = 0; iteration < MAX_AGENT_TOOL_LOOPS; iteration += 1) {
-    const decision = await requestStepDecision({
+    const decisionEnvelope = await requestStepDecision({
       capability: projection.capability,
       workItem: projection.workItem,
       workflow: detail.run.workflowSnapshot,
       step,
-      runStep: updatedRunStep,
+      runStep: currentRunStep,
       agent,
       toolHistory,
       handoffContext,
       resolvedWaitContext,
     });
+    const decision = decisionEnvelope.decision;
+    currentRunStep = await updateWorkflowRunStep({
+      ...currentRunStep,
+      retrievalReferences: decisionEnvelope.retrievalReferences,
+      metadata: {
+        ...(currentRunStep.metadata || {}),
+        lastDecisionModel: decisionEnvelope.model,
+        lastDecisionTokens: decisionEnvelope.usage.totalTokens,
+      },
+    });
+    await recordUsageMetrics({
+      capabilityId: detail.run.capabilityId,
+      traceId,
+      scopeType: 'STEP',
+      scopeId: currentRunStep.id,
+      latencyMs: decisionEnvelope.latencyMs,
+      totalTokens: decisionEnvelope.usage.totalTokens,
+      costUsd: decisionEnvelope.usage.estimatedCostUsd,
+      tags: {
+        phase: step.phase,
+        model: decisionEnvelope.model,
+      },
+    });
 
     if (decision.action === 'invoke_tool') {
       const allowedToolIds = step.allowedToolIds || [];
       if (!allowedToolIds.includes(decision.toolCall.toolId)) {
+        await finishTelemetrySpan({
+          capabilityId: detail.run.capabilityId,
+          spanId: stepSpan.id,
+          status: 'ERROR',
+          costUsd: decisionEnvelope.usage.estimatedCostUsd,
+          tokenUsage: decisionEnvelope.usage,
+          attributes: {
+            reason: `Tool ${decision.toolCall.toolId} is not allowed for ${step.name}.`,
+          },
+        });
         return failRun({
           detail: runningDetail,
           message: `Tool ${decision.toolCall.toolId} is not allowed for ${step.name}.`,
         });
       }
 
+      const policyDecision = await evaluateToolPolicy({
+        capability: projection.capability,
+        traceId,
+        toolId: decision.toolCall.toolId,
+        requestedByAgentId: agent.id,
+        runId: detail.run.id,
+        runStepId: currentRunStep.id,
+        targetId:
+          typeof decision.toolCall.args?.path === 'string'
+            ? decision.toolCall.args.path
+            : typeof decision.toolCall.args?.templateId === 'string'
+            ? decision.toolCall.args.templateId
+            : undefined,
+        hasApprovalBypass: hasApprovedDeployment,
+      });
+
+      if (policyDecision.decision === 'DENY') {
+        await finishTelemetrySpan({
+          capabilityId: detail.run.capabilityId,
+          spanId: stepSpan.id,
+          status: 'ERROR',
+          costUsd: decisionEnvelope.usage.estimatedCostUsd,
+          tokenUsage: decisionEnvelope.usage,
+          attributes: {
+            policyDecisionId: policyDecision.id,
+            policyResult: policyDecision.decision,
+          },
+        });
+        return failRun({
+          detail: runningDetail,
+          message: policyDecision.reason,
+        });
+      }
+
+      if (policyDecision.decision === 'REQUIRE_APPROVAL') {
+        await finishTelemetrySpan({
+          capabilityId: detail.run.capabilityId,
+          spanId: stepSpan.id,
+          status: 'WAITING',
+          costUsd: decisionEnvelope.usage.estimatedCostUsd,
+          tokenUsage: decisionEnvelope.usage,
+          attributes: {
+            policyDecisionId: policyDecision.id,
+            policyResult: policyDecision.decision,
+          },
+        });
+        return completeRunWithWait({
+          detail: runningDetail,
+          waitType: 'APPROVAL',
+          waitMessage: policyDecision.reason,
+        });
+      }
+
+      const toolInvocationId = `TOOL-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+      const toolSpan = await startTelemetrySpan({
+        capabilityId: detail.run.capabilityId,
+        traceId,
+        parentSpanId: stepSpan.id,
+        entityType: 'TOOL',
+        entityId: toolInvocationId,
+        name: `${decision.toolCall.toolId} tool`,
+        status: 'RUNNING',
+        attributes: {
+          stepName: step.name,
+          toolId: decision.toolCall.toolId,
+          policyDecisionId: policyDecision.id,
+        },
+      });
       const toolInvocation = await createToolInvocation({
-        id: `TOOL-${Math.random().toString(36).slice(2, 10).toUpperCase()}`,
+        id: toolInvocationId,
         capabilityId: detail.run.capabilityId,
         runId: detail.run.id,
-        runStepId: updatedRunStep.id,
+        runStepId: currentRunStep.id,
+        traceId,
+        spanId: toolSpan.id,
         toolId: decision.toolCall.toolId,
         status: 'RUNNING',
         request: decision.toolCall.args || {},
         retryable: false,
+        policyDecisionId: policyDecision.id,
         startedAt: new Date().toISOString(),
       });
+      const toolStartedAt = Date.now();
 
       try {
         const result = await executeTool({
@@ -1668,6 +1870,7 @@ const executeAutomatedStep = async (
           args: decision.toolCall.args || {},
           requireApprovedDeployment: hasApprovedDeployment,
         });
+        const toolLatency = Date.now() - toolStartedAt;
         const completedTool = await updateToolInvocation({
           ...toolInvocation,
           status: 'COMPLETED',
@@ -1677,15 +1880,39 @@ const executeAutomatedStep = async (
           stdoutPreview: result.stdoutPreview,
           stderrPreview: result.stderrPreview,
           retryable: result.retryable,
+          sandboxProfile: result.sandboxProfile,
+          latencyMs: toolLatency,
           completedAt: new Date().toISOString(),
+        });
+        await finishTelemetrySpan({
+          capabilityId: detail.run.capabilityId,
+          spanId: toolSpan.id,
+          status: 'OK',
+          attributes: {
+            sandboxProfile: result.sandboxProfile,
+            policyDecisionId: policyDecision.id,
+          },
+        });
+        await recordUsageMetrics({
+          capabilityId: detail.run.capabilityId,
+          traceId,
+          scopeType: 'TOOL',
+          scopeId: completedTool.id,
+          latencyMs: toolLatency,
+          tags: {
+            toolId: completedTool.toolId,
+            sandbox: result.sandboxProfile || 'unknown',
+          },
         });
         await insertRunEvent(
           createRunEvent({
             capabilityId: detail.run.capabilityId,
             runId: detail.run.id,
             workItemId: detail.run.workItemId,
-            runStepId: updatedRunStep.id,
+            runStepId: currentRunStep.id,
             toolInvocationId: completedTool.id,
+            traceId,
+            spanId: toolSpan.id,
             type: 'TOOL_COMPLETED',
             level: 'INFO',
             message: result.summary,
@@ -1709,11 +1936,11 @@ const executeAutomatedStep = async (
             2,
           )}`,
         });
-        await updateWorkflowRunStep({
-          ...updatedRunStep,
+        currentRunStep = await updateWorkflowRunStep({
+          ...currentRunStep,
           lastToolInvocationId: completedTool.id,
           metadata: {
-            ...(updatedRunStep.metadata || {}),
+            ...(currentRunStep.metadata || {}),
             lastToolSummary: result.summary,
           },
         });
@@ -1725,7 +1952,27 @@ const executeAutomatedStep = async (
           ...toolInvocation,
           status: 'FAILED',
           resultSummary: message,
+          sandboxProfile: toolInvocation.sandboxProfile,
           completedAt: new Date().toISOString(),
+        });
+        await finishTelemetrySpan({
+          capabilityId: detail.run.capabilityId,
+          spanId: toolSpan.id,
+          status: 'ERROR',
+          attributes: {
+            error: message,
+            policyDecisionId: policyDecision.id,
+          },
+        });
+        await finishTelemetrySpan({
+          capabilityId: detail.run.capabilityId,
+          spanId: stepSpan.id,
+          status: 'ERROR',
+          costUsd: decisionEnvelope.usage.estimatedCostUsd,
+          tokenUsage: decisionEnvelope.usage,
+          attributes: {
+            error: message,
+          },
         });
         return failRun({
           detail: runningDetail,
@@ -1739,13 +1986,17 @@ const executeAutomatedStep = async (
         detail: runningDetail,
         step,
         summary: decision.summary,
+        retrievalReferences: decisionEnvelope.retrievalReferences,
+        costUsd: decisionEnvelope.usage.estimatedCostUsd,
+        latencyMs: decisionEnvelope.latencyMs,
       });
-      await updateWorkflowRunStep({
-        ...updatedRunStep,
+      currentRunStep = await updateWorkflowRunStep({
+        ...currentRunStep,
         status: 'COMPLETED',
         completedAt: new Date().toISOString(),
         evidenceSummary: decision.reasoning,
         outputSummary: decision.summary,
+        retrievalReferences: decisionEnvelope.retrievalReferences,
       });
       const nextStep = getNextWorkflowStep(detail.run.workflowSnapshot, step.id);
       const nextRun = (
@@ -1765,18 +2016,29 @@ const executeAutomatedStep = async (
             detail: runningDetail,
             step,
             nextStep,
-            runStep: updatedRunStep,
+            runStep: currentRunStep,
             summary: decision.summary,
           })
         : null;
       await syncCompletedProjection({
         detail: nextDetail,
         completedStep: step,
-        completedRunStep: updatedRunStep,
+        completedRunStep: currentRunStep,
         nextStep,
         summary: decision.summary,
         artifacts: handoffArtifact ? [artifact, handoffArtifact] : [artifact],
       });
+      await finishTelemetrySpan({
+        capabilityId: detail.run.capabilityId,
+        spanId: stepSpan.id,
+        status: 'OK',
+        costUsd: decisionEnvelope.usage.estimatedCostUsd,
+        tokenUsage: decisionEnvelope.usage,
+        attributes: {
+          outputSummary: decision.summary,
+        },
+      });
+      await refreshCapabilityMemory(detail.run.capabilityId).catch(() => undefined);
 
       if (!nextStep) {
         await releaseRunLease({
@@ -1789,6 +2051,17 @@ const executeAutomatedStep = async (
     }
 
     if (decision.action === 'pause_for_input' || decision.action === 'pause_for_approval') {
+      await finishTelemetrySpan({
+        capabilityId: detail.run.capabilityId,
+        spanId: stepSpan.id,
+        status: 'WAITING',
+        costUsd: decisionEnvelope.usage.estimatedCostUsd,
+        tokenUsage: decisionEnvelope.usage,
+        attributes: {
+          waitType: decision.wait.type,
+          waitMessage: decision.wait.message,
+        },
+      });
       return completeRunWithWait({
         detail: runningDetail,
         waitType: decision.wait.type,
@@ -1797,6 +2070,16 @@ const executeAutomatedStep = async (
     }
 
     if (decision.action === 'fail') {
+      await finishTelemetrySpan({
+        capabilityId: detail.run.capabilityId,
+        spanId: stepSpan.id,
+        status: 'ERROR',
+        costUsd: decisionEnvelope.usage.estimatedCostUsd,
+        tokenUsage: decisionEnvelope.usage,
+        attributes: {
+          error: decision.summary,
+        },
+      });
       return failRun({
         detail: runningDetail,
         message: decision.summary,
@@ -1804,6 +2087,14 @@ const executeAutomatedStep = async (
     }
   }
 
+  await finishTelemetrySpan({
+    capabilityId: detail.run.capabilityId,
+    spanId: stepSpan.id,
+    status: 'ERROR',
+    attributes: {
+      error: `${step.name} exceeded the maximum tool loop iterations.`,
+    },
+  });
   return failRun({
     detail: runningDetail,
     message: `${step.name} exceeded the maximum tool loop iterations.`,

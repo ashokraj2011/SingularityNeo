@@ -6,9 +6,18 @@ import {
   CapabilityWorkspace,
   CompletedWorkOrderDetail,
   CompletedWorkOrderSummary,
+  ChatStreamEvent,
+  EvalRun,
+  EvalRunDetail,
+  EvalSuite,
   LedgerArtifactRecord,
+  MemoryDocument,
+  MemorySearchResult,
   RunEvent,
+  RunConsoleSnapshot,
   Skill,
+  TelemetryMetricSample,
+  TelemetrySpan,
   WorkItem,
   WorkItemPhase,
   WorkflowRun,
@@ -21,6 +30,11 @@ export interface RuntimeStatus {
   endpoint: string;
   tokenSource: string | null;
   defaultModel: string;
+  streaming?: boolean;
+  platformFeatures?: {
+    pgvectorAvailable: boolean;
+    memoryEmbeddingDimensions: number;
+  };
   availableModels: Array<{
     id: string;
     label: string;
@@ -42,6 +56,7 @@ export interface CapabilityChatResponse {
   usage: RuntimeUsage;
   responseId: string | null;
   createdAt: string;
+  traceId?: string;
 }
 
 export interface AppState {
@@ -439,3 +454,150 @@ export const restartCapabilityWorkflowRun = async (
       body: JSON.stringify(payload || {}),
     },
   );
+
+export const fetchRunConsoleSnapshot = async (
+  capabilityId: string,
+): Promise<RunConsoleSnapshot> =>
+  requestJson<RunConsoleSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/run-console`,
+  );
+
+export const fetchTelemetrySpans = async (
+  capabilityId: string,
+  limit = 80,
+): Promise<TelemetrySpan[]> =>
+  requestJson<TelemetrySpan[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/telemetry/spans?limit=${limit}`,
+  );
+
+export const fetchTelemetryMetrics = async (
+  capabilityId: string,
+  limit = 120,
+): Promise<TelemetryMetricSample[]> =>
+  requestJson<TelemetryMetricSample[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/telemetry/metrics?limit=${limit}`,
+  );
+
+export const fetchMemoryDocuments = async (
+  capabilityId: string,
+): Promise<MemoryDocument[]> =>
+  requestJson<MemoryDocument[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/documents`,
+  );
+
+export const searchCapabilityMemory = async (
+  capabilityId: string,
+  queryText: string,
+  limit = 8,
+): Promise<MemorySearchResult[]> =>
+  requestJson<MemorySearchResult[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/search?q=${encodeURIComponent(queryText)}&limit=${limit}`,
+  );
+
+export const refreshCapabilityMemoryIndex = async (
+  capabilityId: string,
+): Promise<MemoryDocument[]> =>
+  requestJson<MemoryDocument[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/refresh`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const listCapabilityEvalSuites = async (
+  capabilityId: string,
+): Promise<EvalSuite[]> =>
+  requestJson<EvalSuite[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/evals/suites`,
+  );
+
+export const listCapabilityEvalRuns = async (
+  capabilityId: string,
+): Promise<EvalRun[]> =>
+  requestJson<EvalRun[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/evals/runs`,
+  );
+
+export const fetchCapabilityEvalRun = async (
+  capabilityId: string,
+  runId: string,
+): Promise<EvalRunDetail> =>
+  requestJson<EvalRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/evals/runs/${encodeURIComponent(runId)}`,
+  );
+
+export const runCapabilityEvalSuite = async (
+  capabilityId: string,
+  suiteId: string,
+): Promise<EvalRunDetail> =>
+  requestJson<EvalRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/evals/suites/${encodeURIComponent(suiteId)}/run`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const streamCapabilityChat = async (
+  payload: CapabilityChatRequest,
+  handlers: {
+    onEvent: (event: ChatStreamEvent) => void;
+  },
+) => {
+  const response = await fetch('/api/runtime/chat/stream', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(await getError(response));
+  }
+
+  if (!response.body) {
+    throw new Error('Streaming response body was not available.');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffered += decoder.decode(value, { stream: true });
+    const frames = buffered.split('\n\n');
+    buffered = frames.pop() || '';
+
+    for (const frame of frames) {
+      const eventType =
+        frame
+          .split('\n')
+          .find(line => line.startsWith('event:'))
+          ?.replace(/^event:\s*/, '')
+          .trim() || 'message';
+      const data = frame
+        .split('\n')
+        .filter(line => line.startsWith('data:'))
+        .map(line => line.replace(/^data:\s*/, ''))
+        .join('\n');
+
+      if (!data) {
+        continue;
+      }
+
+      const payload = JSON.parse(data) as ChatStreamEvent;
+
+      handlers.onEvent({
+        ...payload,
+        type: payload.type || (eventType as ChatStreamEvent['type']),
+      });
+    }
+  }
+};

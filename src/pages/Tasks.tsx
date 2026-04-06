@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
+import { useToast } from '../context/ToastContext';
 import { AgentTask, LearningUpdate, Skill } from '../types';
 
 const createTaskId = () => `TASK-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
@@ -102,6 +103,7 @@ const Tasks = () => {
     setCapabilityWorkspaceContent,
     addCapabilitySkill,
   } = useCapability();
+  const { success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'details' | 'logs'>('details');
@@ -196,6 +198,7 @@ const Tasks = () => {
       artifactId: workspace.artifacts[0]?.id || '',
     });
     setIsCreateModalOpen(false);
+    success('Task created', `${newTask.title} was queued for ${selectedAgent.name}.`);
   };
 
   const getIconForType = (type: string) => {
@@ -734,6 +737,10 @@ const Tasks = () => {
                                   onClick={() => {
                                     if (!isApplied) {
                                       addCapabilitySkill(activeCapability.id, suggestedSkill);
+                                      success(
+                                        'Skill applied',
+                                        `${suggestedSkill.name} was added from learning updates.`,
+                                      );
                                     }
                                   }}
                                   className="text-[0.625rem] font-bold text-primary flex items-center gap-1 uppercase tracking-widest hover:underline disabled:no-underline disabled:text-slate-300"

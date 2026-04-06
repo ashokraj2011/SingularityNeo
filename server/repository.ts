@@ -178,6 +178,13 @@ const artifactFromRow = (row: Record<string, any>) => ({
   contentText: row.content_text || undefined,
   contentJson: row.content_json || undefined,
   downloadable: row.downloadable ?? undefined,
+  traceId: row.trace_id || undefined,
+  latencyMs: row.latency_ms ?? undefined,
+  costUsd: row.cost_usd ? Number(row.cost_usd) : undefined,
+  policyDecisionId: row.policy_decision_id || undefined,
+  retrievalReferences: Array.isArray(row.retrieval_references)
+    ? row.retrieval_references
+    : undefined,
 });
 
 const taskFromRow = (row: Record<string, any>): AgentTask => ({
@@ -214,6 +221,9 @@ const executionLogFromRow = (row: Record<string, any>): ExecutionLog => ({
   runId: row.run_id || undefined,
   runStepId: row.run_step_id || undefined,
   toolInvocationId: row.tool_invocation_id || undefined,
+  traceId: row.trace_id || undefined,
+  latencyMs: row.latency_ms ?? undefined,
+  costUsd: row.cost_usd ? Number(row.cost_usd) : undefined,
   metadata: row.metadata || undefined,
 });
 
@@ -643,10 +653,15 @@ const replaceArtifactsTx = async (
           content_text,
           content_json,
           downloadable,
+          trace_id,
+          latency_ms,
+          cost_usd,
+          policy_decision_id,
+          retrieval_references,
           updated_at
         )
         VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,${withUpdatedTimestamp}
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,${withUpdatedTimestamp}
         )
       `,
       [
@@ -688,6 +703,11 @@ const replaceArtifactsTx = async (
         artifact.contentText || null,
         artifact.contentJson || null,
         artifact.downloadable ?? false,
+        artifact.traceId || null,
+        artifact.latencyMs ?? null,
+        artifact.costUsd ?? null,
+        artifact.policyDecisionId || null,
+        JSON.stringify(artifact.retrievalReferences || []),
       ],
     );
   }
@@ -777,9 +797,12 @@ const replaceExecutionLogsTx = async (
           run_id,
           run_step_id,
           tool_invocation_id,
+          trace_id,
+          latency_ms,
+          cost_usd,
           metadata
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       `,
       [
         capabilityId,
@@ -792,6 +815,9 @@ const replaceExecutionLogsTx = async (
         log.runId || null,
         log.runStepId || null,
         log.toolInvocationId || null,
+        log.traceId || null,
+        log.latencyMs ?? null,
+        log.costUsd ?? null,
         log.metadata || null,
       ],
     );

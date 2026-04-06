@@ -13,6 +13,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { SKILL_LIBRARY } from '../constants';
 import { useCapability } from '../context/CapabilityContext';
+import { useToast } from '../context/ToastContext';
 import { LearningUpdate, Skill } from '../types';
 
 const createSkillId = (name: string) =>
@@ -67,6 +68,7 @@ export default function SkillLibrary() {
     addCapabilitySkill,
     removeCapabilitySkill,
   } = useCapability();
+  const { success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const [draft, setDraft] = useState({
     name: '',
@@ -122,13 +124,15 @@ export default function SkillLibrary() {
       return;
     }
 
+    const skillName = draft.name.trim();
     addCapabilitySkill(activeCapability.id, {
       id: createSkillId(draft.name),
-      name: draft.name.trim(),
+      name: skillName,
       description: draft.description.trim(),
       category: draft.category,
       version: draft.version.trim() || '1.0.0',
     });
+    success('Skill added', `${skillName} is now available in this capability.`);
 
     setDraft({
       name: '',
@@ -136,6 +140,16 @@ export default function SkillLibrary() {
       category: 'Analysis',
       version: '1.0.0',
     });
+  };
+
+  const handleRemoveSkill = (skill: Skill) => {
+    removeCapabilitySkill(activeCapability.id, skill.id);
+    success('Skill removed', `${skill.name} was removed from this capability.`);
+  };
+
+  const handleAddCatalogSkill = (skill: Skill) => {
+    addCapabilitySkill(activeCapability.id, skill);
+    success('Skill added', `${skill.name} was added to ${activeCapability.name}.`);
   };
 
   return (
@@ -231,7 +245,7 @@ export default function SkillLibrary() {
                       </p>
                     </div>
                     <button
-                      onClick={() => removeCapabilitySkill(activeCapability.id, skill.id)}
+                      onClick={() => handleRemoveSkill(skill)}
                       className="rounded-full p-2 text-slate-400 transition-colors hover:bg-white hover:text-error"
                       aria-label={`Remove ${skill.name}`}
                     >
@@ -306,7 +320,7 @@ export default function SkillLibrary() {
                       </p>
                     </div>
                     <button
-                      onClick={() => addCapabilitySkill(activeCapability.id, skill)}
+                      onClick={() => handleAddCatalogSkill(skill)}
                       className="inline-flex items-center gap-2 rounded-full bg-primary px-3 py-1.5 text-[0.6875rem] font-bold text-white transition-all hover:brightness-110"
                     >
                       <Wand2 size={14} />
@@ -437,7 +451,7 @@ export default function SkillLibrary() {
                       </p>
                     </div>
                     <button
-                      onClick={() => addCapabilitySkill(activeCapability.id, skill)}
+                      onClick={() => handleAddCatalogSkill(skill)}
                       className="inline-flex items-center gap-2 rounded-full border border-primary/15 bg-white px-3 py-1.5 text-[0.6875rem] font-bold text-primary transition-all hover:bg-primary/5"
                     >
                       <CheckCircle2 size={14} />

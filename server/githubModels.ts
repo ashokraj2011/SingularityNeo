@@ -202,11 +202,13 @@ export const requestGitHubModel = async ({
   messages,
   maxTokens = 1200,
   temperature = 0.2,
+  timeoutMs = 45000,
 }: {
   model?: string;
   messages: GitHubModelsMessage[];
   maxTokens?: number;
   temperature?: number;
+  timeoutMs?: number;
 }) => {
   const token = getConfiguredToken();
   if (!token) {
@@ -216,6 +218,8 @@ export const requestGitHubModel = async ({
   }
 
   const resolvedModel = normalizeModel(model);
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
   const response = await fetch(`${githubModelsApiUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -224,6 +228,7 @@ export const requestGitHubModel = async ({
       'Content-Type': 'application/json',
       'X-GitHub-Api-Version': '2022-11-28',
     },
+    signal: controller.signal,
     body: JSON.stringify({
       model: resolvedModel,
       messages,
@@ -232,6 +237,7 @@ export const requestGitHubModel = async ({
       stream: false,
     }),
   });
+  clearTimeout(timeoutHandle);
 
   if (!response.ok) {
     throw new Error(await getErrorMessage(response));
@@ -253,12 +259,128 @@ export const requestGitHubModel = async ({
   };
 };
 
+const getDeltaContent = (payload: any) => {
+  const delta = payload?.choices?.[0]?.delta;
+  if (typeof delta?.content === 'string') {
+    return delta.content;
+  }
+  if (Array.isArray(delta?.content)) {
+    return delta.content
+      .map((item: any) => (typeof item?.text === 'string' ? item.text : ''))
+      .join('');
+  }
+  return '';
+};
+
+export const requestGitHubModelStream = async ({
+  model,
+  messages,
+  maxTokens = 1200,
+  temperature = 0.2,
+  timeoutMs = 45000,
+  onDelta,
+}: {
+  model?: string;
+  messages: GitHubModelsMessage[];
+  maxTokens?: number;
+  temperature?: number;
+  timeoutMs?: number;
+  onDelta: (delta: string) => void;
+}) => {
+  const token = getConfiguredToken();
+  if (!token) {
+    throw new Error(
+      'GitHub Models is not configured. Add GITHUB_MODELS_TOKEN to .env.local and restart the server.',
+    );
+  }
+
+  const resolvedModel = normalizeModel(model);
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  const response = await fetch(`${githubModelsApiUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Accept: 'text/event-stream',
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    signal: controller.signal,
+    body: JSON.stringify({
+      model: resolvedModel,
+      messages,
+      max_tokens: Math.max(256, Math.min(Number(maxTokens || 1200), 8000)),
+      temperature,
+      stream: true,
+    }),
+  });
+
+  if (!response.ok) {
+    clearTimeout(timeoutHandle);
+    throw new Error(await getErrorMessage(response));
+  }
+
+  if (!response.body) {
+    clearTimeout(timeoutHandle);
+    throw new Error('Streaming response body was not available.');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  let fullContent = '';
+  let usage: ReturnType<typeof toUsage> | undefined;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffered += decoder.decode(value, { stream: true });
+    const frames = buffered.split('\n\n');
+    buffered = frames.pop() || '';
+
+    for (const frame of frames) {
+      const dataLines = frame
+        .split('\n')
+        .filter(line => line.startsWith('data:'))
+        .map(line => line.replace(/^data:\s*/, '').trim())
+        .filter(Boolean);
+
+      for (const line of dataLines) {
+        if (line === '[DONE]') {
+          continue;
+        }
+        const payload = JSON.parse(line);
+        if (payload?.usage) {
+          usage = toUsage(payload.usage);
+        }
+        const delta = getDeltaContent(payload);
+        if (delta) {
+          fullContent += delta;
+          onDelta(delta);
+        }
+      }
+    }
+  }
+  clearTimeout(timeoutHandle);
+
+  return {
+    content: fullContent,
+    model: resolvedModel,
+    createdAt: new Date().toISOString(),
+    usage: usage || toUsage(undefined),
+  };
+};
+
 export const invokeCapabilityChat = async ({
   capability,
   agent,
   history = [],
   message,
   developerPrompt,
+  memoryPrompt,
   temperature = 0.2,
 }: {
   capability: Partial<Capability>;
@@ -266,6 +388,7 @@ export const invokeCapabilityChat = async ({
   history?: ChatHistoryMessage[] | CapabilityChatMessage[];
   message: string;
   developerPrompt?: string;
+  memoryPrompt?: string;
   temperature?: number;
 }) => {
   const normalizedHistory = (history || [])
@@ -289,7 +412,9 @@ export const invokeCapabilityChat = async ({
       },
       {
         role: 'system',
-        content: buildCapabilitySystemPrompt({ capability, agent }),
+        content: [buildCapabilitySystemPrompt({ capability, agent }), memoryPrompt]
+          .filter(Boolean)
+          .join('\n\n'),
       },
       ...normalizedHistory,
       {

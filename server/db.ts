@@ -8,6 +8,11 @@ const connectionConfig = {
   password: process.env.PGPASSWORD || undefined,
 };
 
+const MEMORY_EMBEDDING_DIMENSIONS = 64;
+const platformFeatureState = {
+  pgvectorAvailable: false,
+};
+
 let poolPromise: Promise<Pool> | null = null;
 
 const getSafeDatabaseName = () => {
@@ -155,6 +160,11 @@ const schemaStatements = [
       content_text TEXT,
       content_json JSONB,
       downloadable BOOLEAN NOT NULL DEFAULT FALSE,
+      trace_id TEXT,
+      latency_ms INTEGER,
+      cost_usd NUMERIC(12,6),
+      policy_decision_id TEXT,
+      retrieval_references JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
@@ -199,6 +209,9 @@ const schemaStatements = [
       run_id TEXT,
       run_step_id TEXT,
       tool_invocation_id TEXT,
+      trace_id TEXT,
+      latency_ms INTEGER,
+      cost_usd NUMERIC(12,6),
       metadata JSONB,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
@@ -256,6 +269,7 @@ const schemaStatements = [
       current_wait_id TEXT,
       terminal_outcome TEXT,
       restart_from_phase TEXT,
+      trace_id TEXT,
       lease_owner TEXT,
       lease_expires_at TIMESTAMPTZ,
       started_at TIMESTAMPTZ,
@@ -278,10 +292,12 @@ const schemaStatements = [
       agent_id TEXT NOT NULL,
       status TEXT NOT NULL,
       attempt_count INTEGER NOT NULL DEFAULT 0,
+      span_id TEXT,
       evidence_summary TEXT,
       output_summary TEXT,
       wait_id TEXT,
       last_tool_invocation_id TEXT,
+      retrieval_references JSONB NOT NULL DEFAULT '[]'::jsonb,
       started_at TIMESTAMPTZ,
       completed_at TIMESTAMPTZ,
       metadata JSONB,
@@ -299,6 +315,8 @@ const schemaStatements = [
       id TEXT NOT NULL,
       run_id TEXT NOT NULL,
       run_step_id TEXT NOT NULL,
+      trace_id TEXT,
+      span_id TEXT,
       tool_id TEXT NOT NULL,
       status TEXT NOT NULL,
       request JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -308,6 +326,10 @@ const schemaStatements = [
       stdout_preview TEXT,
       stderr_preview TEXT,
       retryable BOOLEAN NOT NULL DEFAULT FALSE,
+      sandbox_profile TEXT,
+      policy_decision_id TEXT,
+      latency_ms INTEGER,
+      cost_usd NUMERIC(12,6),
       started_at TIMESTAMPTZ,
       completed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -327,6 +349,8 @@ const schemaStatements = [
       id TEXT NOT NULL,
       run_id TEXT NOT NULL,
       work_item_id TEXT NOT NULL,
+      trace_id TEXT,
+      span_id TEXT,
       timestamp TEXT NOT NULL,
       level TEXT NOT NULL,
       type TEXT NOT NULL,
@@ -347,6 +371,8 @@ const schemaStatements = [
       id TEXT NOT NULL,
       run_id TEXT NOT NULL,
       run_step_id TEXT NOT NULL,
+      trace_id TEXT,
+      span_id TEXT,
       type TEXT NOT NULL,
       status TEXT NOT NULL,
       message TEXT NOT NULL,
@@ -363,6 +389,180 @@ const schemaStatements = [
         ON DELETE CASCADE,
       FOREIGN KEY (capability_id, run_step_id)
         REFERENCES capability_workflow_run_steps(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_trace_spans (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      trace_id TEXT NOT NULL,
+      parent_span_id TEXT,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL,
+      model TEXT,
+      cost_usd NUMERIC(12,6),
+      token_usage JSONB,
+      attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
+      started_at TIMESTAMPTZ NOT NULL,
+      ended_at TIMESTAMPTZ,
+      duration_ms INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_metric_samples (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      trace_id TEXT,
+      scope_type TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      metric_name TEXT NOT NULL,
+      metric_value DOUBLE PRECISION NOT NULL,
+      unit TEXT NOT NULL,
+      tags JSONB NOT NULL DEFAULT '{}'::jsonb,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_policy_decisions (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      trace_id TEXT,
+      run_id TEXT,
+      run_step_id TEXT,
+      tool_invocation_id TEXT,
+      action_type TEXT NOT NULL,
+      target_id TEXT,
+      decision TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      requested_by_agent_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_memory_documents (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      source_type TEXT NOT NULL,
+      tier TEXT NOT NULL,
+      source_id TEXT,
+      source_uri TEXT,
+      freshness TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      content_preview TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_memory_chunks (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      token_estimate INTEGER NOT NULL DEFAULT 0,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, document_id)
+        REFERENCES capability_memory_documents(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_memory_embeddings (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      chunk_id TEXT NOT NULL,
+      vector_model TEXT NOT NULL,
+      embedding_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, document_id)
+        REFERENCES capability_memory_documents(capability_id, id)
+        ON DELETE CASCADE,
+      FOREIGN KEY (capability_id, chunk_id)
+        REFERENCES capability_memory_chunks(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_eval_suites (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      agent_role TEXT NOT NULL,
+      eval_type TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_eval_cases (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      suite_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      input JSONB NOT NULL DEFAULT '{}'::jsonb,
+      expected JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, suite_id)
+        REFERENCES capability_eval_suites(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_eval_runs (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      suite_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      trace_id TEXT,
+      judge_model TEXT,
+      score DOUBLE PRECISION,
+      summary TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ,
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, suite_id)
+        REFERENCES capability_eval_suites(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_eval_run_results (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      eval_run_id TEXT NOT NULL,
+      eval_case_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      score DOUBLE PRECISION NOT NULL,
+      summary TEXT NOT NULL,
+      details JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, eval_run_id)
+        REFERENCES capability_eval_runs(capability_id, id)
+        ON DELETE CASCADE,
+      FOREIGN KEY (capability_id, eval_case_id)
+        REFERENCES capability_eval_cases(capability_id, id)
         ON DELETE CASCADE
     )
   `,
@@ -526,6 +726,26 @@ const migrationStatements = [
     ADD COLUMN IF NOT EXISTS downloadable BOOLEAN NOT NULL DEFAULT FALSE
   `,
   `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS trace_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS latency_ms INTEGER
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(12,6)
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS policy_decision_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS retrieval_references JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
     ALTER TABLE capability_execution_logs
     ADD COLUMN IF NOT EXISTS run_id TEXT
   `,
@@ -536,6 +756,70 @@ const migrationStatements = [
   `
     ALTER TABLE capability_execution_logs
     ADD COLUMN IF NOT EXISTS tool_invocation_id TEXT
+  `,
+  `
+    ALTER TABLE capability_execution_logs
+    ADD COLUMN IF NOT EXISTS trace_id TEXT
+  `,
+  `
+    ALTER TABLE capability_execution_logs
+    ADD COLUMN IF NOT EXISTS latency_ms INTEGER
+  `,
+  `
+    ALTER TABLE capability_execution_logs
+    ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(12,6)
+  `,
+  `
+    ALTER TABLE capability_workflow_runs
+    ADD COLUMN IF NOT EXISTS trace_id TEXT
+  `,
+  `
+    ALTER TABLE capability_workflow_run_steps
+    ADD COLUMN IF NOT EXISTS span_id TEXT
+  `,
+  `
+    ALTER TABLE capability_workflow_run_steps
+    ADD COLUMN IF NOT EXISTS retrieval_references JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE capability_tool_invocations
+    ADD COLUMN IF NOT EXISTS trace_id TEXT
+  `,
+  `
+    ALTER TABLE capability_tool_invocations
+    ADD COLUMN IF NOT EXISTS span_id TEXT
+  `,
+  `
+    ALTER TABLE capability_tool_invocations
+    ADD COLUMN IF NOT EXISTS sandbox_profile TEXT
+  `,
+  `
+    ALTER TABLE capability_tool_invocations
+    ADD COLUMN IF NOT EXISTS policy_decision_id TEXT
+  `,
+  `
+    ALTER TABLE capability_tool_invocations
+    ADD COLUMN IF NOT EXISTS latency_ms INTEGER
+  `,
+  `
+    ALTER TABLE capability_tool_invocations
+    ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(12,6)
+  `,
+  `
+    ALTER TABLE capability_run_events
+    ADD COLUMN IF NOT EXISTS trace_id TEXT
+  `,
+  `
+    ALTER TABLE capability_run_events
+    ADD COLUMN IF NOT EXISTS span_id TEXT
+  `,
+  `
+    ALTER TABLE capability_run_waits
+    ADD COLUMN IF NOT EXISTS trace_id TEXT
+  `,
+  `
+    ALTER TABLE capability_run_waits
+    ADD COLUMN IF NOT EXISTS span_id TEXT
   `,
   `
     CREATE INDEX IF NOT EXISTS capability_workflow_runs_status_idx
@@ -561,7 +845,72 @@ const migrationStatements = [
     CREATE INDEX IF NOT EXISTS capability_artifacts_run_idx
     ON capability_artifacts (capability_id, source_run_id, created_at DESC)
   `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_trace_spans_trace_idx
+    ON capability_trace_spans (capability_id, trace_id, started_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_metric_samples_scope_idx
+    ON capability_metric_samples (capability_id, scope_type, scope_id, recorded_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_policy_decisions_run_idx
+    ON capability_policy_decisions (capability_id, run_id, created_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_memory_documents_source_idx
+    ON capability_memory_documents (capability_id, source_type, updated_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_memory_chunks_document_idx
+    ON capability_memory_chunks (capability_id, document_id, chunk_index ASC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_memory_embeddings_chunk_idx
+    ON capability_memory_embeddings (capability_id, chunk_id)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_eval_runs_suite_idx
+    ON capability_eval_runs (capability_id, suite_id, created_at DESC)
+  `,
 ];
+
+const detectOptionalPlatformExtensions = async (client: PoolClient) => {
+  try {
+    await client.query('CREATE EXTENSION IF NOT EXISTS vector');
+  } catch (error) {
+    console.warn('pgvector is not available in this Postgres instance; using JSON embeddings fallback.');
+  }
+
+  const extensionResult = await client.query<{ exists: boolean }>(
+    `
+      SELECT EXISTS(
+        SELECT 1
+        FROM pg_extension
+        WHERE extname = 'vector'
+      ) AS exists
+    `,
+  );
+  platformFeatureState.pgvectorAvailable = Boolean(extensionResult.rows[0]?.exists);
+};
+
+const ensureOptionalVectorSchema = async (client: PoolClient) => {
+  if (platformFeatureState.pgvectorAvailable) {
+    await client.query(
+      `
+        ALTER TABLE capability_memory_embeddings
+        ADD COLUMN IF NOT EXISTS embedding_vector vector(${MEMORY_EMBEDDING_DIMENSIONS})
+      `,
+    );
+    await client.query(
+      `
+        CREATE INDEX IF NOT EXISTS capability_memory_embeddings_vector_idx
+        ON capability_memory_embeddings
+        USING hnsw (embedding_vector vector_cosine_ops)
+      `,
+    );
+  }
+};
 
 const ensureDatabaseExists = async () => {
   const safeDatabaseName = getSafeDatabaseName();
@@ -651,11 +1000,18 @@ export const transaction = async <T>(fn: (client: PoolClient) => Promise<T>) =>
 
 export const initializeDatabase = async () => {
   await withClient(async client => {
+    await detectOptionalPlatformExtensions(client);
     for (const statement of schemaStatements) {
       await client.query(statement);
     }
     for (const statement of migrationStatements) {
       await client.query(statement);
     }
+    await ensureOptionalVectorSchema(client);
   });
 };
+
+export const getPlatformFeatureState = () => ({
+  pgvectorAvailable: platformFeatureState.pgvectorAvailable,
+  memoryEmbeddingDimensions: MEMORY_EMBEDDING_DIMENSIONS,
+});

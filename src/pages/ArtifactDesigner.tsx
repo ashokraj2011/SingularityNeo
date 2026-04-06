@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
+import { useToast } from '../context/ToastContext';
 import { Artifact, CapabilityWorkspace } from '../types';
 
 type ArtifactDraft = {
@@ -157,6 +158,7 @@ const ArtifactDesigner = () => {
     setCapabilityWorkspaceContent,
     updateCapabilityAgent,
   } = useCapability();
+  const { success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -299,6 +301,10 @@ const ArtifactDesigner = () => {
     });
     setIsCreatingNew(false);
     setSelectedArtifactId(nextArtifact.id);
+    success(
+      isCreatingNew ? 'Artifact created' : 'Artifact updated',
+      `${nextArtifact.name} is now saved in the capability ledger.`,
+    );
   };
 
   if (!selectedArtifact && !isCreatingNew) {

@@ -34,6 +34,7 @@ import {
   type AppState,
 } from '../lib/api';
 import { getDefaultCapabilityWorkflows } from '../lib/standardWorkflow';
+import { useToast } from './ToastContext';
 
 interface CapabilityContextType {
   activeCapability: Capability;
@@ -591,6 +592,7 @@ const normalizeAppState = (
 };
 
 export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
+  const { error: showErrorToast } = useToast();
   const initialState = useRef(readInitialState()).current;
   const [capabilities, setCapabilities] = useState<Capability[]>(initialState.capabilities);
   const [activeCapability, setActiveCapability] = useState<Capability>(initialState.activeCapability);
@@ -676,6 +678,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
       `Failed to sync ${scope} with the capability persistence API.`,
       error,
     );
+    showErrorToast('Unable to save changes', `The latest ${scope} update could not be synced to the API.`);
   };
 
   const addCapability = (newCapability: Capability) => {

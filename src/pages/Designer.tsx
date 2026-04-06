@@ -33,6 +33,7 @@ import {
 import { BLUEPRINTS } from '../constants';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
+import { useToast } from '../context/ToastContext';
 import { WorkItemPhase, Workflow, WorkflowHandoffProtocol, WorkflowStep } from '../types';
 import {
   createStandardCapabilityWorkflow,
@@ -81,6 +82,7 @@ const getWorkflowProtocols = (workflow: Workflow): WorkflowHandoffProtocol[] => 
 
 const Designer = () => {
   const { activeCapability, getCapabilityWorkspace, setCapabilityWorkspaceContent } = useCapability();
+  const { success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const [view, setView] = useState<'blueprints' | 'workflows'>('workflows');
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null);
@@ -240,6 +242,7 @@ const Designer = () => {
     });
     setIsWorkflowModalOpen(false);
     setView('workflows');
+    success('Workflow created', `${newWorkflow.name} was added to ${activeCapability.name}.`);
   };
 
   const handleCreateStandardWorkflow = () => {
@@ -250,6 +253,7 @@ const Designer = () => {
       );
       setIsWorkflowModalOpen(false);
       setView('workflows');
+      success('Workflow ready', `${standardWorkflow.name} is already available in this capability.`);
       return;
     }
 
@@ -259,6 +263,7 @@ const Designer = () => {
     setSelectedWorkflow(standardWorkflow);
     setIsWorkflowModalOpen(false);
     setView('workflows');
+    success('Standard workflow added', `${standardWorkflow.name} was added to the capability.`);
   };
 
   const handleAddStep = (event: React.FormEvent) => {
@@ -322,6 +327,7 @@ const Designer = () => {
       templatePath: '/out/steps/custom-step-template.md',
     });
     setIsStepModalOpen(false);
+    success('Workflow step saved', `${stepDraft.name.trim()} was added to ${selectedWorkflow.name}.`);
   };
 
   const openProtocolModal = (mode: 'create' | 'edit') => {
@@ -409,6 +415,10 @@ const Designer = () => {
 
     setSelectedStepId(protocolDraft.sourceStepId);
     setIsProtocolModalOpen(false);
+    success(
+      'Hand-off protocol saved',
+      `${nextProtocol.name} is now attached to the workflow.`,
+    );
   };
 
   return (

@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useCapability } from '../context/CapabilityContext';
+import { useToast } from '../context/ToastContext';
 import { getDefaultExecutionConfig } from '../lib/executionConfig';
 import { Capability } from '../types';
 
@@ -25,6 +26,7 @@ const slugify = (value: string) =>
 export default function CapabilitySetup() {
   const navigate = useNavigate();
   const { capabilities, createCapability } = useCapability();
+  const { success } = useToast();
   const [isSaving, startTransition] = useTransition();
   const [form, setForm] = useState({
     name: '',
@@ -85,6 +87,10 @@ export default function CapabilitySetup() {
 
     startTransition(() => {
       createCapability(capability);
+      success(
+        'Capability created',
+        `${capability.name} is ready for metadata and team setup.`,
+      );
       navigate('/capabilities/metadata');
     });
   };

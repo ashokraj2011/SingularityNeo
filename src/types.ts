@@ -221,6 +221,11 @@ export interface Artifact {
   contentText?: string;
   contentJson?: Record<string, any> | any[];
   downloadable?: boolean;
+  traceId?: string;
+  latencyMs?: number;
+  costUsd?: number;
+  policyDecisionId?: string;
+  retrievalReferences?: MemoryReference[];
 }
 
 export type WorkItemPhase =
@@ -304,6 +309,9 @@ export interface ExecutionLog {
   runId?: string;
   runStepId?: string;
   toolInvocationId?: string;
+  traceId?: string;
+  latencyMs?: number;
+  costUsd?: number;
   metadata?: Record<string, any>;
 }
 
@@ -408,6 +416,7 @@ export interface WorkflowRun {
   currentWaitId?: string;
   terminalOutcome?: string;
   restartFromPhase?: WorkItemPhase;
+  traceId?: string;
   leaseOwner?: string;
   leaseExpiresAt?: string;
   startedAt?: string;
@@ -428,10 +437,12 @@ export interface WorkflowRunStep {
   agentId: string;
   status: WorkflowRunStepStatus;
   attemptCount: number;
+  spanId?: string;
   evidenceSummary?: string;
   outputSummary?: string;
   waitId?: string;
   lastToolInvocationId?: string;
+  retrievalReferences?: MemoryReference[];
   startedAt?: string;
   completedAt?: string;
   metadata?: Record<string, any>;
@@ -442,6 +453,8 @@ export interface ToolInvocation {
   capabilityId: string;
   runId: string;
   runStepId: string;
+  traceId?: string;
+  spanId?: string;
   toolId: ToolAdapterId;
   status: ToolInvocationStatus;
   request: Record<string, any>;
@@ -451,6 +464,10 @@ export interface ToolInvocation {
   stdoutPreview?: string;
   stderrPreview?: string;
   retryable: boolean;
+  sandboxProfile?: string;
+  policyDecisionId?: string;
+  latencyMs?: number;
+  costUsd?: number;
   startedAt?: string;
   completedAt?: string;
   createdAt: string;
@@ -461,6 +478,8 @@ export interface RunEvent {
   capabilityId: string;
   runId: string;
   workItemId: string;
+  traceId?: string;
+  spanId?: string;
   timestamp: string;
   level: 'INFO' | 'WARN' | 'ERROR';
   type: string;
@@ -475,6 +494,8 @@ export interface RunWait {
   capabilityId: string;
   runId: string;
   runStepId: string;
+  traceId?: string;
+  spanId?: string;
   type: RunWaitType;
   status: RunWaitStatus;
   message: string;
@@ -572,6 +593,233 @@ export interface ArtifactContentResponse {
   fileName: string;
   contentText?: string;
   contentJson?: Record<string, any> | any[];
+}
+
+export type TelemetrySpanKind =
+  | 'HTTP'
+  | 'CHAT'
+  | 'RUN'
+  | 'STEP'
+  | 'TOOL'
+  | 'MEMORY'
+  | 'POLICY'
+  | 'EVAL';
+
+export type TelemetrySpanStatus = 'OK' | 'ERROR' | 'WAITING' | 'RUNNING';
+
+export interface TelemetrySpan {
+  id: string;
+  capabilityId: string;
+  traceId: string;
+  parentSpanId?: string;
+  entityType: TelemetrySpanKind;
+  entityId?: string;
+  name: string;
+  status: TelemetrySpanStatus;
+  startedAt: string;
+  endedAt?: string;
+  durationMs?: number;
+  model?: string;
+  costUsd?: number;
+  tokenUsage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+  attributes?: Record<string, any>;
+}
+
+export interface TelemetryMetricSample {
+  id: string;
+  capabilityId: string;
+  traceId?: string;
+  scopeType: 'CAPABILITY' | 'AGENT' | 'RUN' | 'STEP' | 'TOOL' | 'CHAT' | 'EVAL';
+  scopeId: string;
+  metricName: string;
+  metricValue: number;
+  unit: 'ms' | 'usd' | 'tokens' | 'count' | 'ratio';
+  tags?: Record<string, string>;
+  recordedAt: string;
+}
+
+export interface TelemetrySummary {
+  capabilityId: string;
+  totalRuns: number;
+  activeRuns: number;
+  waitingRuns: number;
+  failedRuns: number;
+  totalCostUsd: number;
+  totalTokens: number;
+  averageLatencyMs: number;
+  policyDecisionCount: number;
+  memoryDocumentCount: number;
+  recentSpans: TelemetrySpan[];
+  recentMetrics: TelemetryMetricSample[];
+}
+
+export type PolicyActionType =
+  | 'workspace_write'
+  | 'git_branch'
+  | 'run_build'
+  | 'run_test'
+  | 'run_docs'
+  | 'run_deploy'
+  | 'destructive_git'
+  | 'custom';
+
+export type PolicyDecisionResult = 'ALLOW' | 'REQUIRE_APPROVAL' | 'DENY';
+
+export interface PolicyDecision {
+  id: string;
+  capabilityId: string;
+  traceId?: string;
+  runId?: string;
+  runStepId?: string;
+  toolInvocationId?: string;
+  actionType: PolicyActionType;
+  targetId?: string;
+  decision: PolicyDecisionResult;
+  reason: string;
+  requestedByAgentId?: string;
+  createdAt: string;
+}
+
+export type MemorySourceType =
+  | 'CAPABILITY_METADATA'
+  | 'CHAT_SESSION'
+  | 'WORK_ITEM'
+  | 'ARTIFACT'
+  | 'HANDOFF'
+  | 'HUMAN_INTERACTION'
+  | 'REPOSITORY_FILE';
+
+export type MemoryStoreTier = 'WORKING' | 'SESSION' | 'LONG_TERM';
+
+export interface MemoryReference {
+  documentId: string;
+  chunkId: string;
+  title: string;
+  sourceType: MemorySourceType;
+  tier: MemoryStoreTier;
+  score?: number;
+}
+
+export interface MemoryDocument {
+  id: string;
+  capabilityId: string;
+  title: string;
+  sourceType: MemorySourceType;
+  tier: MemoryStoreTier;
+  sourceId?: string;
+  sourceUri?: string;
+  freshness?: 'HOT' | 'WARM' | 'COLD';
+  metadata?: Record<string, any>;
+  contentPreview: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MemoryChunk {
+  id: string;
+  capabilityId: string;
+  documentId: string;
+  chunkIndex: number;
+  content: string;
+  tokenEstimate: number;
+  metadata?: Record<string, any>;
+  createdAt: string;
+}
+
+export interface MemorySearchResult {
+  reference: MemoryReference;
+  document: MemoryDocument;
+  chunk: MemoryChunk;
+}
+
+export interface EvalSuite {
+  id: string;
+  capabilityId: string;
+  name: string;
+  description: string;
+  agentRole: string;
+  evalType: 'STRUCTURED_OUTPUT' | 'RETRIEVAL' | 'WORKFLOW';
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvalCase {
+  id: string;
+  capabilityId: string;
+  suiteId: string;
+  name: string;
+  description: string;
+  input: Record<string, any>;
+  expected: Record<string, any>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvalRunCaseResult {
+  id: string;
+  capabilityId: string;
+  evalRunId: string;
+  evalCaseId: string;
+  status: 'PASSED' | 'FAILED' | 'WARN';
+  score: number;
+  summary: string;
+  details?: Record<string, any>;
+  createdAt: string;
+}
+
+export interface EvalRun {
+  id: string;
+  capabilityId: string;
+  suiteId: string;
+  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+  traceId?: string;
+  judgeModel?: string;
+  score?: number;
+  summary?: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
+export interface EvalRunDetail {
+  run: EvalRun;
+  suite: EvalSuite;
+  cases: EvalCase[];
+  results: EvalRunCaseResult[];
+}
+
+export interface RunConsoleSnapshot {
+  capabilityId: string;
+  telemetry: TelemetrySummary;
+  activeRuns: WorkflowRun[];
+  recentRuns: WorkflowRun[];
+  recentEvents: RunEvent[];
+  recentPolicyDecisions: PolicyDecision[];
+}
+
+export interface ChatStreamEvent {
+  type:
+    | 'start'
+    | 'memory'
+    | 'delta'
+    | 'complete'
+    | 'error';
+  content?: string;
+  createdAt?: string;
+  model?: string;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    estimatedCostUsd: number;
+  };
+  traceId?: string;
+  memoryReferences?: MemoryReference[];
+  error?: string;
 }
 
 export interface CapabilityWorkspace {

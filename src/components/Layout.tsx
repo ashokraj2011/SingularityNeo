@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
+  Activity,
   BarChart3,
   Bell,
+  BrainCircuit,
   BookOpen,
   Box,
   ChevronDown,
@@ -22,6 +24,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
+import { useToast } from '../context/ToastContext';
 import { StatusBadge } from './EnterpriseUI';
 
 const workspaceNavItems = [
@@ -33,6 +36,9 @@ const workspaceNavItems = [
   { name: 'Studio', shortName: 'Studio', icon: Sparkles, path: '/studio' },
   { name: 'Execution & Controls', shortName: 'Execution', icon: Terminal, path: '/tasks' },
   { name: 'Work Orchestrator', shortName: 'Orchestrator', icon: Trello, path: '/orchestrator' },
+  { name: 'Run Console', shortName: 'Run Console', icon: Activity, path: '/run-console' },
+  { name: 'Memory Explorer', shortName: 'Memory', icon: BrainCircuit, path: '/memory' },
+  { name: 'Eval Center', shortName: 'Evals', icon: BarChart3, path: '/evals' },
   { name: 'Artifact Ledger', shortName: 'Ledger', icon: Wallet, path: '/ledger' },
   { name: 'Agent Chat', shortName: 'Chat', icon: MessageSquare, path: '/chat' },
 ] as const;
@@ -50,6 +56,7 @@ const Sidebar = () => {
     capabilities,
     updateCapabilityMetadata,
   } = useCapability();
+  const { success } = useToast();
   const [isCapabilityMenuOpen, setIsCapabilityMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const activeCapabilities = useMemo(
@@ -86,6 +93,10 @@ const Sidebar = () => {
     updateCapabilityMetadata(activeCapability.id, {
       status: nextArchivedState ? 'ARCHIVED' : 'STABLE',
     });
+    success(
+      nextArchivedState ? 'Capability made inactive' : 'Capability reactivated',
+      `${activeCapability.name} is now ${nextArchivedState ? 'inactive' : 'active'} in the workspace.`,
+    );
     setIsCapabilityMenuOpen(false);
   };
 

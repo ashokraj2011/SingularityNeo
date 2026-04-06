@@ -12,6 +12,8 @@ import {
   WorkItemPhase,
 } from '../../src/types';
 import { query, transaction } from '../db';
+import { publishRunEvent } from '../eventBus';
+import { createSpanId, createTraceId } from '../telemetry';
 
 const asIso = (value: unknown) =>
   value instanceof Date ? value.toISOString() : String(value || '');
@@ -51,6 +53,7 @@ const runFromRow = (row: Record<string, any>): WorkflowRun => ({
   currentWaitId: row.current_wait_id || undefined,
   terminalOutcome: row.terminal_outcome || undefined,
   restartFromPhase: row.restart_from_phase || undefined,
+  traceId: row.trace_id || undefined,
   leaseOwner: row.lease_owner || undefined,
   leaseExpiresAt: row.lease_expires_at ? asIso(row.lease_expires_at) : undefined,
   startedAt: row.started_at ? asIso(row.started_at) : undefined,
@@ -71,10 +74,14 @@ const stepFromRow = (row: Record<string, any>): WorkflowRunStep => ({
   agentId: row.agent_id,
   status: row.status,
   attemptCount: Number(row.attempt_count || 0),
+  spanId: row.span_id || undefined,
   evidenceSummary: row.evidence_summary || undefined,
   outputSummary: row.output_summary || undefined,
   waitId: row.wait_id || undefined,
   lastToolInvocationId: row.last_tool_invocation_id || undefined,
+  retrievalReferences: Array.isArray(row.retrieval_references)
+    ? row.retrieval_references
+    : undefined,
   startedAt: row.started_at ? asIso(row.started_at) : undefined,
   completedAt: row.completed_at ? asIso(row.completed_at) : undefined,
   metadata: row.metadata || undefined,
@@ -85,6 +92,8 @@ const toolFromRow = (row: Record<string, any>): ToolInvocation => ({
   capabilityId: row.capability_id,
   runId: row.run_id,
   runStepId: row.run_step_id,
+  traceId: row.trace_id || undefined,
+  spanId: row.span_id || undefined,
   toolId: row.tool_id,
   status: row.status,
   request: asJson<Record<string, any>>(row.request, {}),
@@ -94,6 +103,10 @@ const toolFromRow = (row: Record<string, any>): ToolInvocation => ({
   stdoutPreview: row.stdout_preview || undefined,
   stderrPreview: row.stderr_preview || undefined,
   retryable: Boolean(row.retryable),
+  sandboxProfile: row.sandbox_profile || undefined,
+  policyDecisionId: row.policy_decision_id || undefined,
+  latencyMs: row.latency_ms ?? undefined,
+  costUsd: row.cost_usd ? Number(row.cost_usd) : undefined,
   startedAt: row.started_at ? asIso(row.started_at) : undefined,
   completedAt: row.completed_at ? asIso(row.completed_at) : undefined,
   createdAt: asIso(row.created_at),
@@ -104,6 +117,8 @@ const eventFromRow = (row: Record<string, any>): RunEvent => ({
   capabilityId: row.capability_id,
   runId: row.run_id,
   workItemId: row.work_item_id,
+  traceId: row.trace_id || undefined,
+  spanId: row.span_id || undefined,
   timestamp: row.timestamp,
   level: row.level,
   type: row.type,
@@ -118,6 +133,8 @@ const waitFromRow = (row: Record<string, any>): RunWait => ({
   capabilityId: row.capability_id,
   runId: row.run_id,
   runStepId: row.run_step_id,
+  traceId: row.trace_id || undefined,
+  spanId: row.span_id || undefined,
   type: row.type,
   status: row.status,
   message: row.message,
@@ -196,6 +213,24 @@ export const listWorkflowRunEvents = async (
       ORDER BY created_at ASC, id ASC
     `,
     [capabilityId, runId],
+  );
+
+  return result.rows.map(eventFromRow);
+};
+
+export const listRecentWorkflowRunEvents = async (
+  capabilityId: string,
+  limit = 40,
+): Promise<RunEvent[]> => {
+  const result = await query(
+    `
+      SELECT *
+      FROM capability_run_events
+      WHERE capability_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2
+    `,
+    [capabilityId, limit],
   );
 
   return result.rows.map(eventFromRow);
@@ -327,6 +362,7 @@ export const createWorkflowRun = async ({
 
     const attemptNumber = Number(attemptResult.rows[0]?.attempt_number || 0) + 1;
     const runId = createId('RUN');
+    const traceId = createTraceId();
     const startingStep =
       (restartFromPhase
         ? workflow.steps.find(step => step.phase === restartFromPhase)
@@ -351,6 +387,7 @@ export const createWorkflowRun = async ({
       currentPhase: startingStep.phase,
       assignedAgentId: startingStep.agentId,
       restartFromPhase,
+      traceId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -368,9 +405,10 @@ export const createWorkflowRun = async ({
           current_step_id,
           current_phase,
           assigned_agent_id,
-          restart_from_phase
+          restart_from_phase,
+          trace_id
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
       `,
       [
         capabilityId,
@@ -384,6 +422,7 @@ export const createWorkflowRun = async ({
         run.currentPhase || null,
         run.assignedAgentId || null,
         run.restartFromPhase || null,
+        run.traceId,
       ],
     );
 
@@ -402,9 +441,11 @@ export const createWorkflowRun = async ({
             agent_id,
             status,
             attempt_count,
+            span_id,
+            retrieval_references,
             metadata
           )
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         `,
         [
           capabilityId,
@@ -418,6 +459,8 @@ export const createWorkflowRun = async ({
           step.agentId,
           index < startingIndex ? 'COMPLETED' : 'PENDING',
           0,
+          createSpanId(),
+          JSON.stringify([]),
           JSON.stringify({
             allowedToolIds: step.allowedToolIds || [],
             preferredWorkspacePath: step.preferredWorkspacePath || null,
@@ -434,12 +477,13 @@ export const createWorkflowRun = async ({
           run_id,
           work_item_id,
           timestamp,
+          trace_id,
           level,
           type,
           message,
           details
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       `,
       [
         capabilityId,
@@ -447,6 +491,7 @@ export const createWorkflowRun = async ({
         run.id,
         workItem.id,
         new Date().toISOString(),
+        traceId,
         'INFO',
         'RUN_CREATED',
         `Workflow run ${run.id} was created for ${workItem.title}.`,
@@ -476,10 +521,11 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
           current_wait_id = $9,
           terminal_outcome = $10,
           restart_from_phase = $11,
-          lease_owner = $12,
-          lease_expires_at = $13,
-          started_at = $14,
-          completed_at = $15,
+          trace_id = $12,
+          lease_owner = $13,
+          lease_expires_at = $14,
+          started_at = $15,
+          completed_at = $16,
           updated_at = NOW()
         WHERE capability_id = $1 AND id = $2
       `,
@@ -495,6 +541,7 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
         run.currentWaitId || null,
         run.terminalOutcome || null,
         run.restartFromPhase || null,
+        run.traceId || null,
         run.leaseOwner || null,
         run.leaseExpiresAt || null,
         run.startedAt || null,
@@ -515,13 +562,15 @@ export const updateWorkflowRunStep = async (
         SET
           status = $3,
           attempt_count = $4,
-          evidence_summary = $5,
-          output_summary = $6,
-          wait_id = $7,
-          last_tool_invocation_id = $8,
-          started_at = $9,
-          completed_at = $10,
-          metadata = $11,
+          span_id = $5,
+          evidence_summary = $6,
+          output_summary = $7,
+          wait_id = $8,
+          last_tool_invocation_id = $9,
+          retrieval_references = $10,
+          started_at = $11,
+          completed_at = $12,
+          metadata = $13,
           updated_at = NOW()
         WHERE capability_id = $1 AND id = $2
         RETURNING *
@@ -531,10 +580,12 @@ export const updateWorkflowRunStep = async (
         step.id,
         step.status,
         step.attemptCount,
+        step.spanId || null,
         step.evidenceSummary || null,
         step.outputSummary || null,
         step.waitId || null,
         step.lastToolInvocationId || null,
+        step.retrievalReferences || [],
         step.startedAt || null,
         step.completedAt || null,
         step.metadata || null,
@@ -553,14 +604,16 @@ export const insertRunEvent = async (event: RunEvent): Promise<RunEvent> => {
         run_id,
         work_item_id,
         timestamp,
+        trace_id,
         level,
         type,
         message,
         run_step_id,
         tool_invocation_id,
+        span_id,
         details
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       RETURNING *
     `,
     [
@@ -569,16 +622,20 @@ export const insertRunEvent = async (event: RunEvent): Promise<RunEvent> => {
       event.runId,
       event.workItemId,
       event.timestamp,
+      event.traceId || null,
       event.level,
       event.type,
       event.message,
       event.runStepId || null,
       event.toolInvocationId || null,
+      event.spanId || null,
       event.details || null,
     ],
   );
 
-  return eventFromRow(result.rows[0]);
+  const nextEvent = eventFromRow(result.rows[0]);
+  publishRunEvent(nextEvent);
+  return nextEvent;
 };
 
 export const createRunEvent = (
@@ -603,6 +660,8 @@ export const createRunWait = async (
         status,
         message,
         requested_by,
+        trace_id,
+        span_id,
         resolution,
         resolved_by,
         payload,
@@ -610,7 +669,7 @@ export const createRunWait = async (
         resolved_at,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
       RETURNING *
     `,
     [
@@ -622,6 +681,8 @@ export const createRunWait = async (
       wait.status,
       wait.message,
       wait.requestedBy,
+      wait.traceId || null,
+      wait.spanId || null,
       wait.resolution || null,
       wait.resolvedBy || null,
       wait.payload || null,
@@ -676,6 +737,8 @@ export const createToolInvocation = async (
         id,
         run_id,
         run_step_id,
+        trace_id,
+        span_id,
         tool_id,
         status,
         request,
@@ -685,12 +748,16 @@ export const createToolInvocation = async (
         stdout_preview,
         stderr_preview,
         retryable,
+        sandbox_profile,
+        policy_decision_id,
+        latency_ms,
+        cost_usd,
         started_at,
         completed_at,
         created_at,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
       RETURNING *
     `,
     [
@@ -698,6 +765,8 @@ export const createToolInvocation = async (
       invocation.id,
       invocation.runId,
       invocation.runStepId,
+      invocation.traceId || null,
+      invocation.spanId || null,
       invocation.toolId,
       invocation.status,
       invocation.request,
@@ -707,6 +776,10 @@ export const createToolInvocation = async (
       invocation.stdoutPreview || null,
       invocation.stderrPreview || null,
       invocation.retryable,
+      invocation.sandboxProfile || null,
+      invocation.policyDecisionId || null,
+      invocation.latencyMs ?? null,
+      invocation.costUsd ?? null,
       invocation.startedAt || null,
       invocation.completedAt || null,
       invocation.createdAt || new Date().toISOString(),
@@ -731,8 +804,12 @@ export const updateToolInvocation = async (
         stdout_preview = $8,
         stderr_preview = $9,
         retryable = $10,
-        started_at = $11,
-        completed_at = $12,
+        sandbox_profile = $11,
+        policy_decision_id = $12,
+        latency_ms = $13,
+        cost_usd = $14,
+        started_at = $15,
+        completed_at = $16,
         updated_at = NOW()
       WHERE capability_id = $1 AND id = $2
       RETURNING *
@@ -748,6 +825,10 @@ export const updateToolInvocation = async (
       invocation.stdoutPreview || null,
       invocation.stderrPreview || null,
       invocation.retryable,
+      invocation.sandboxProfile || null,
+      invocation.policyDecisionId || null,
+      invocation.latencyMs ?? null,
+      invocation.costUsd ?? null,
       invocation.startedAt || null,
       invocation.completedAt || null,
     ],
