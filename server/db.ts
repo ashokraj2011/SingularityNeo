@@ -118,7 +118,12 @@ const schemaStatements = [
       workflow_type TEXT,
       scope TEXT NOT NULL DEFAULT 'CAPABILITY',
       summary TEXT,
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      entry_node_id TEXT,
+      nodes JSONB NOT NULL DEFAULT '[]'::jsonb,
+      edges JSONB NOT NULL DEFAULT '[]'::jsonb,
       steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+      publish_state TEXT NOT NULL DEFAULT 'DRAFT',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
@@ -262,9 +267,11 @@ const schemaStatements = [
       status TEXT NOT NULL,
       attempt_number INTEGER NOT NULL,
       workflow_snapshot JSONB NOT NULL,
+      current_node_id TEXT,
       current_step_id TEXT,
       current_phase TEXT,
       assigned_agent_id TEXT,
+      branch_state JSONB NOT NULL DEFAULT '{}'::jsonb,
       pause_reason TEXT,
       current_wait_id TEXT,
       terminal_outcome TEXT,
@@ -284,6 +291,7 @@ const schemaStatements = [
       capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
       id TEXT NOT NULL,
       run_id TEXT NOT NULL,
+      workflow_node_id TEXT NOT NULL,
       workflow_step_id TEXT NOT NULL,
       step_index INTEGER NOT NULL,
       phase TEXT NOT NULL,
@@ -654,6 +662,26 @@ const migrationStatements = [
     ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'CAPABILITY'
   `,
   `
+    ALTER TABLE capability_workflows
+    ADD COLUMN IF NOT EXISTS schema_version INTEGER NOT NULL DEFAULT 1
+  `,
+  `
+    ALTER TABLE capability_workflows
+    ADD COLUMN IF NOT EXISTS entry_node_id TEXT
+  `,
+  `
+    ALTER TABLE capability_workflows
+    ADD COLUMN IF NOT EXISTS nodes JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE capability_workflows
+    ADD COLUMN IF NOT EXISTS edges JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE capability_workflows
+    ADD COLUMN IF NOT EXISTS publish_state TEXT NOT NULL DEFAULT 'DRAFT'
+  `,
+  `
     ALTER TABLE capability_artifacts
     ADD COLUMN IF NOT EXISTS run_id TEXT
   `,
@@ -774,8 +802,25 @@ const migrationStatements = [
     ADD COLUMN IF NOT EXISTS trace_id TEXT
   `,
   `
+    ALTER TABLE capability_workflow_runs
+    ADD COLUMN IF NOT EXISTS current_node_id TEXT
+  `,
+  `
+    ALTER TABLE capability_workflow_runs
+    ADD COLUMN IF NOT EXISTS branch_state JSONB NOT NULL DEFAULT '{}'::jsonb
+  `,
+  `
     ALTER TABLE capability_workflow_run_steps
     ADD COLUMN IF NOT EXISTS span_id TEXT
+  `,
+  `
+    ALTER TABLE capability_workflow_run_steps
+    ADD COLUMN IF NOT EXISTS workflow_node_id TEXT
+  `,
+  `
+    UPDATE capability_workflow_run_steps
+    SET workflow_node_id = workflow_step_id
+    WHERE workflow_node_id IS NULL
   `,
   `
     ALTER TABLE capability_workflow_run_steps

@@ -34,6 +34,7 @@ import {
   type AppState,
 } from '../lib/api';
 import { getDefaultCapabilityWorkflows } from '../lib/standardWorkflow';
+import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowGraph';
 import { useToast } from './ToastContext';
 
 interface CapabilityContextType {
@@ -451,7 +452,9 @@ const buildCapabilityWorkspace = (
   includeSeedData = false,
 ): CapabilityWorkspace => {
   const ownerAgent = buildOwnerAgent(capability);
-  const defaultWorkflows = getDefaultCapabilityWorkflows(capability);
+  const defaultWorkflows = getDefaultCapabilityWorkflows(capability).map(workflow =>
+    buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)),
+  );
   return {
     capabilityId: capability.id,
     agents: includeSeedData
@@ -532,7 +535,9 @@ const normalizeWorkspace = (
       nextTasks,
       nextExecutionLogs,
     ),
-    workflows: workspace?.workflows || seededWorkspace.workflows,
+    workflows: (workspace?.workflows || seededWorkspace.workflows).map(workflow =>
+      buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)),
+    ),
     artifacts: workspace?.artifacts || seededWorkspace.artifacts,
     tasks: nextTasks,
     executionLogs: nextExecutionLogs,

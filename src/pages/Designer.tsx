@@ -1,216 +1,504 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Search, 
-  History, 
-  GitBranch, 
-  MoreVertical, 
-  Compass, 
-  PenTool, 
-  Code,
-  Settings2,
-  ChevronDown,
-  Plus,
-  Table,
-  Filter,
-  ArrowRight, 
-  Cpu, 
-  Terminal, 
-  ShieldCheck,
-  ArrowUpRight,
-  Workflow as WorkflowIcon,
-  Layers,
-  FileText,
-  Share2,
-  Database,
+  AlertTriangle,
+  ArrowRight,
+  ArrowUpDown,
+  BarChart3,
   CheckCircle2,
-  AlertCircle,
-  BookOpen,
+  CircleDot,
+  Code2,
+  Copy,
+  Database,
+  Download,
+  FileText,
+  Filter,
+  GitBranch,
+  GitMerge,
+  Globe,
+  LayoutTemplate,
+  PanelLeft,
+  Play,
+  Plus,
+  Radio,
+  Route,
+  ScanLine,
+  Server,
+  ShieldCheck,
+  Shuffle,
   Sparkles,
-  User,
-  X
+  Split,
+  UnfoldVertical,
+  Workflow as WorkflowIcon,
+  Wrench,
+  X,
 } from 'lucide-react';
-import { BLUEPRINTS } from '../constants';
-import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
-import { WorkItemPhase, Workflow, WorkflowHandoffProtocol, WorkflowStep } from '../types';
+import {
+  EmptyState,
+  FormSection,
+  ModalShell,
+  SectionCard,
+  StatusBadge,
+  Toolbar,
+} from '../components/EnterpriseUI';
 import {
   createStandardCapabilityWorkflow,
-  SDLC_BOARD_PHASES,
 } from '../lib/standardWorkflow';
+import {
+  autoLayoutWorkflowGraph,
+  buildWorkflowFromGraph,
+  createWorkflowEdge,
+  createWorkflowNode,
+  getOutgoingWorkflowEdges,
+  getWorkflowEdges,
+  getWorkflowNode,
+  getWorkflowNodeDimensions,
+  getWorkflowNodeOrder,
+  getWorkflowNodes,
+  getWorkflowPublishState,
+  isVisibleWorkflowNode,
+  normalizeWorkflowGraph,
+  validateWorkflowGraph,
+  WORKFLOW_GRAPH_PHASES,
+} from '../lib/workflowGraph';
+import { cn } from '../lib/utils';
+import type {
+  ToolAdapterId,
+  WorkItemPhase,
+  Workflow,
+  WorkflowEdge,
+  WorkflowNode,
+  WorkflowNodeType,
+  WorkflowPublishState,
+} from '../types';
 
-const createWorkflowId = () => `WF-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-const createWorkflowStepId = () => `STEP-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-const createHandoffProtocolId = () =>
-  `HANDOFF-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+const NODE_TYPE_OPTIONS: Array<{
+  type: WorkflowNodeType;
+  label: string;
+  description: string;
+}> = [
+  { type: 'DELIVERY', label: 'Delivery Step', description: 'Agent-owned delivery work inside an SDLC phase.' },
+  { type: 'DECISION', label: 'Decision', description: 'Route work based on outcome, guardrail, or validation result.' },
+  { type: 'PARALLEL_SPLIT', label: 'Parallel Split', description: 'Fan work out across multiple agent tracks.' },
+  { type: 'PARALLEL_JOIN', label: 'Parallel Join', description: 'Wait for multiple agent tracks, then continue.' },
+  { type: 'GOVERNANCE_GATE', label: 'Governance Gate', description: 'Hold for governance, audit, or risk checks.' },
+  { type: 'HUMAN_APPROVAL', label: 'Human Approval', description: 'Pause for human review, approval, or clarification.' },
+  { type: 'RELEASE', label: 'Release Step', description: 'Release or deploy after upstream work is complete.' },
+  { type: 'END', label: 'End', description: 'Terminal node that closes the workflow path.' },
+  { type: 'EXTRACT', label: 'Legacy Source Step', description: 'Legacy ETL node imported from an older workflow.' },
+  { type: 'TRANSFORM', label: 'Legacy Transform Step', description: 'Legacy ETL node imported from an older workflow.' },
+  { type: 'LOAD', label: 'Legacy Target Step', description: 'Legacy ETL node imported from an older workflow.' },
+  { type: 'FILTER', label: 'Legacy Validation Step', description: 'Legacy ETL node imported from an older workflow.' },
+];
 
-const parseLines = (value: string) =>
+const EDGE_CONDITION_OPTIONS: WorkflowEdge['conditionType'][] = [
+  'DEFAULT',
+  'SUCCESS',
+  'FAILURE',
+  'APPROVED',
+  'REJECTED',
+  'PARALLEL',
+  'CUSTOM',
+];
+
+const TOOL_OPTIONS: ToolAdapterId[] = [
+  'workspace_list',
+  'workspace_read',
+  'workspace_search',
+  'git_status',
+  'workspace_write',
+  'run_build',
+  'run_test',
+  'run_docs',
+  'run_deploy',
+];
+
+const NODE_TYPE_TONE: Record<WorkflowNodeType, string> = {
+  START: 'bg-slate-100 text-slate-700 border-slate-200',
+  EXTRACT: 'bg-slate-100 text-slate-600 border-slate-200',
+  TRANSFORM: 'bg-slate-100 text-slate-600 border-slate-200',
+  LOAD: 'bg-slate-100 text-slate-600 border-slate-200',
+  FILTER: 'bg-slate-100 text-slate-600 border-slate-200',
+  DELIVERY: 'bg-primary/10 text-primary border-primary/20',
+  GOVERNANCE_GATE: 'bg-orange-100 text-orange-800 border-orange-200',
+  HUMAN_APPROVAL: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200',
+  DECISION: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+  PARALLEL_SPLIT: 'bg-rose-100 text-rose-700 border-rose-200',
+  PARALLEL_JOIN: 'bg-pink-100 text-pink-700 border-pink-200',
+  RELEASE: 'bg-teal-100 text-teal-700 border-teal-200',
+  END: 'bg-slate-900 text-white border-slate-900',
+};
+
+const PUBLISH_STATE_TONE: Record<WorkflowPublishState, 'neutral' | 'info' | 'success'> = {
+  DRAFT: 'neutral',
+  VALIDATED: 'info',
+  PUBLISHED: 'success',
+};
+
+const AGENT_NODE_GROUPS: Array<{
+  title: string;
+  description: string;
+  phase: Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'>;
+  items: Array<{ type: WorkflowNodeType; label: string; defaultPhase: Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'> }>;
+}> = [
+  {
+    title: 'Delivery Agents',
+    description: 'Core agent steps that perform analysis, design, build, QA, and release work.',
+    phase: 'DEVELOPMENT',
+    items: [
+      { type: 'DELIVERY', label: 'Analysis Task', defaultPhase: 'ANALYSIS' },
+      { type: 'DELIVERY', label: 'Design Task', defaultPhase: 'DESIGN' },
+      { type: 'DELIVERY', label: 'Build Task', defaultPhase: 'DEVELOPMENT' },
+      { type: 'DELIVERY', label: 'QA Task', defaultPhase: 'QA' },
+      { type: 'RELEASE', label: 'Release Task', defaultPhase: 'RELEASE' },
+    ],
+  },
+  {
+    title: 'Handoffs & Branching',
+    description: 'Move work between agents and branch on review or execution outcomes.',
+    phase: 'DESIGN',
+    items: [
+      { type: 'DECISION', label: 'Decision', defaultPhase: 'DESIGN' },
+      { type: 'PARALLEL_SPLIT', label: 'Parallel Split', defaultPhase: 'DESIGN' },
+      { type: 'PARALLEL_JOIN', label: 'Parallel Join', defaultPhase: 'QA' },
+    ],
+  },
+  {
+    title: 'Governance & Human Review',
+    description: 'Pause for approval, human input, and governance sign-offs.',
+    phase: 'GOVERNANCE',
+    items: [
+      { type: 'GOVERNANCE_GATE', label: 'Governance Gate', defaultPhase: 'GOVERNANCE' },
+      { type: 'HUMAN_APPROVAL', label: 'Human Approval', defaultPhase: 'GOVERNANCE' },
+      { type: 'END', label: 'End', defaultPhase: 'RELEASE' },
+    ],
+  },
+];
+
+const slugify = (value: string) =>
   value
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean);
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24);
 
-const getWorkflowProtocols = (workflow: Workflow): WorkflowHandoffProtocol[] => {
-  if (workflow.handoffProtocols?.length) {
-    return workflow.handoffProtocols;
+const createWorkflowId = (capabilityId: string, name: string) =>
+  `WF-${slugify(capabilityId)}-${slugify(name || 'WORKFLOW')}`;
+
+const createDesignerCopyId = (prefix: 'WF' | 'NODE' | 'EDGE', label: string) =>
+  `${prefix}-${slugify(label || prefix)}-${Date.now().toString(36).toUpperCase()}-${Math.random()
+    .toString(36)
+    .slice(2, 6)
+    .toUpperCase()}`;
+
+const createCopyName = (sourceName: string, existingNames: string[]) => {
+  const normalizedExistingNames = new Set(existingNames.map(name => name.trim().toLowerCase()));
+  const baseName = sourceName.replace(/\s+copy(?:\s+\d+)?$/i, '').trim() || sourceName.trim();
+  let index = 1;
+  let candidate = `${baseName} Copy`;
+
+  while (normalizedExistingNames.has(candidate.toLowerCase())) {
+    index += 1;
+    candidate = `${baseName} Copy ${index}`;
   }
 
-  return workflow.steps
-    .filter(step => step.handoffToAgentId || step.handoffToPhase)
-    .map(step => ({
-      id: step.handoffProtocolId || `HANDOFF-${workflow.id}-${step.id}`,
-      name: step.handoffLabel || `${step.name} Hand-off`,
-      sourceStepId: step.id,
-      targetAgentId: step.handoffToAgentId,
-      targetPhase: step.handoffToPhase,
-      description:
-        step.description ||
-        `Protocol for moving delivery context forward from ${step.name}.`,
-      rules:
-        step.exitCriteria?.length
-          ? step.exitCriteria
-          : [
-              'Validate the step output before handing work forward.',
-              'Capture assumptions and unresolved risks in the hand-off notes.',
-              'Publish the hand-off summary to the capability documentation trail.',
-            ],
-      validationRequired: true,
-      autoDocumentation: true,
-    }));
+  return candidate;
+};
+
+const phaseLabel = (phase: WorkItemPhase) =>
+  phase
+    .toLowerCase()
+    .split('_')
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+
+const isLegacyEtlNodeType = (type: WorkflowNodeType) =>
+  type === 'EXTRACT' || type === 'TRANSFORM' || type === 'LOAD' || type === 'FILTER';
+
+const getNodeTypeLabel = (type: WorkflowNodeType) =>
+  NODE_TYPE_OPTIONS.find(option => option.type === type)?.label || type;
+
+const getEtlSubTypeIcon = (subType?: string) => {
+  switch (subType) {
+    case 'database_source': case 'database_target': return Database;
+    case 'file_source': case 'file_target': return FileText;
+    case 'api_source': case 'api_target': return Globe;
+    case 'stream_source': return Radio;
+    case 'filter': return Filter;
+    case 'map': return Shuffle;
+    case 'join': return GitMerge;
+    case 'aggregate': return BarChart3;
+    case 'sort': return ArrowUpDown;
+    case 'deduplicate': return Copy;
+    case 'validate': return ShieldCheck;
+    case 'script': return Code2;
+    case 'warehouse_target': return Server;
+    case 'error_handler': return AlertTriangle;
+    default: return null;
+  }
+};
+
+const getNodeIcon = (type: WorkflowNodeType, etlSubType?: string) => {
+  const subIcon = etlSubType ? getEtlSubTypeIcon(etlSubType) : null;
+  if (subIcon) return subIcon;
+  switch (type) {
+    case 'EXTRACT': return Database;
+    case 'TRANSFORM': return Shuffle;
+    case 'LOAD': return Server;
+    case 'FILTER': return Filter;
+    case 'DELIVERY': return WorkflowIcon;
+    case 'DECISION': return GitBranch;
+    case 'PARALLEL_SPLIT': return Split;
+    case 'PARALLEL_JOIN': return UnfoldVertical;
+    case 'GOVERNANCE_GATE': return ShieldCheck;
+    case 'HUMAN_APPROVAL': return CheckCircle2;
+    case 'RELEASE': return Sparkles;
+    case 'END': return CircleDot;
+    default: return WorkflowIcon;
+  }
+};
+
+const getSamplePath = (workflow: Workflow) => {
+  const normalized = buildWorkflowFromGraph(normalizeWorkflowGraph(workflow));
+  const path: Array<{ label: string; note?: string }> = [];
+  const visited = new Set<string>();
+  let currentNode = getWorkflowNode(normalized, normalized.entryNodeId);
+  let safetyCounter = 0;
+
+  while (currentNode && !visited.has(currentNode.id) && safetyCounter < 40) {
+    safetyCounter += 1;
+    visited.add(currentNode.id);
+    if (currentNode.type !== 'START') {
+      path.push({
+        label: currentNode.name,
+        note:
+          currentNode.type === 'HUMAN_APPROVAL'
+            ? 'Pauses for approval'
+            : currentNode.type === 'PARALLEL_SPLIT'
+            ? 'Creates parallel branches'
+            : currentNode.type === 'PARALLEL_JOIN'
+            ? 'Waits for branches to join'
+            : undefined,
+      });
+    }
+    if (currentNode.type === 'END') {
+      break;
+    }
+    const nextEdge = getOutgoingWorkflowEdges(normalized, currentNode.id)[0];
+    if (!nextEdge) {
+      break;
+    }
+    currentNode = getWorkflowNode(normalized, nextEdge.toNodeId);
+  }
+
+  return path;
+};
+
+const getNodeValidationMessages = (
+  workflow: Workflow,
+  selectedNodeId?: string,
+  selectedEdgeId?: string,
+) => {
+  const validation = validateWorkflowGraph(workflow);
+  return {
+    all: validation.errors,
+    selected:
+      validation.errors.filter(
+        error => error.nodeId === selectedNodeId || error.edgeId === selectedEdgeId,
+      ) || [],
+    nodeIdsWithErrors: new Set(validation.errors.map(error => error.nodeId).filter(Boolean)),
+  };
+};
+
+const getEdgePath = (fromNode: WorkflowNode, toNode: WorkflowNode) => {
+  const { width, height } = getWorkflowNodeDimensions();
+  const startX = fromNode.layout.x + width;
+  const startY = fromNode.layout.y + height / 2;
+  const endX = toNode.layout.x;
+  const endY = toNode.layout.y + height / 2;
+  const controlX = Math.max((startX + endX) / 2, startX + 40);
+  return `M ${startX} ${startY} C ${controlX} ${startY}, ${controlX} ${endY}, ${endX} ${endY}`;
+};
+
+const getDropCoordinates = (
+  event: React.DragEvent<HTMLDivElement>,
+  element: HTMLDivElement,
+  scale: number,
+) => {
+  const bounds = element.getBoundingClientRect();
+  return {
+    x: (event.clientX - bounds.left + element.scrollLeft) / scale - 110,
+    y: (event.clientY - bounds.top + element.scrollTop) / scale - 54,
+  };
+};
+
+const getCanvasPointFromMouse = (
+  clientX: number,
+  clientY: number,
+  element: HTMLDivElement,
+  scale: number,
+) => {
+  const bounds = element.getBoundingClientRect();
+  return {
+    x: (clientX - bounds.left + element.scrollLeft) / scale,
+    y: (clientY - bounds.top + element.scrollTop) / scale,
+  };
 };
 
 const Designer = () => {
-  const { activeCapability, getCapabilityWorkspace, setCapabilityWorkspaceContent } = useCapability();
-  const { success } = useToast();
+  const { activeCapability, getCapabilityWorkspace, setCapabilityWorkspaceContent } =
+    useCapability();
+  const { success, info, warning } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
-  const [view, setView] = useState<'blueprints' | 'workflows'>('workflows');
-  const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null);
-  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
-  const [isWorkflowModalOpen, setIsWorkflowModalOpen] = useState(false);
-  const [isStepModalOpen, setIsStepModalOpen] = useState(false);
-  const [isProtocolModalOpen, setIsProtocolModalOpen] = useState(false);
+  const workflows = useMemo(
+    () =>
+      workspace.workflows.map(workflow =>
+        buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)),
+      ),
+    [workspace.workflows],
+  );
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>(
+    workflows[0]?.id || '',
+  );
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [connectFromNodeId, setConnectFromNodeId] = useState<string | null>(null);
+  const [dragLinkFromNodeId, setDragLinkFromNodeId] = useState<string | null>(null);
+  const [dragLinkPosition, setDragLinkPosition] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  const [canvasScale, setCanvasScale] = useState(1);
+  const [isWorkflowLibraryOpen, setIsWorkflowLibraryOpen] = useState(true);
+  const [isCreateWorkflowOpen, setIsCreateWorkflowOpen] = useState(false);
   const [workflowDraft, setWorkflowDraft] = useState({
     name: '',
+    summary: '',
     workflowType: 'SDLC' as NonNullable<Workflow['workflowType']>,
     scope: 'CAPABILITY' as NonNullable<Workflow['scope']>,
-    summary: '',
   });
-  const [stepDraft, setStepDraft] = useState({
-    name: '',
-    phase: 'ANALYSIS' as WorkItemPhase,
-    stepType: 'DELIVERY' as WorkflowStep['stepType'],
-    agentId: workspace.agents[0]?.id || '',
-    action: '',
-    description: '',
-    inputArtifactId: workspace.artifacts[0]?.id || '',
-    outputArtifactId: workspace.artifacts[0]?.id || '',
-    handoffToAgentId: '',
-    handoffToPhase: 'DESIGN' as WorkItemPhase,
-    governanceGate: '',
-    approverRoles: '',
-    exitCriteria: '',
-    templatePath: '/out/steps/custom-step-template.md',
-  });
-  const [protocolDraft, setProtocolDraft] = useState({
-    id: '',
-    sourceStepId: '',
-    name: '',
-    description: '',
-    targetAgentId: '',
-    targetPhase: 'DESIGN' as WorkItemPhase,
-    rules: '',
-    validationRequired: true,
-    autoDocumentation: true,
-  });
+  const [nodeDraft, setNodeDraft] = useState<WorkflowNode | null>(null);
+  const [edgeDraft, setEdgeDraft] = useState<WorkflowEdge | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
 
-  const filteredBlueprints = useMemo(() => {
-    return BLUEPRINTS.filter(bp => bp.capabilityId === activeCapability.id);
-  }, [activeCapability]);
-
-  const filteredWorkflows = useMemo(() => {
-    return workspace.workflows;
-  }, [workspace.workflows]);
-
-  const visibleArtifacts = useMemo(() => {
-    return workspace.artifacts;
-  }, [workspace.artifacts]);
-
-  const selectedWorkflowProtocols = useMemo(
-    () => (selectedWorkflow ? getWorkflowProtocols(selectedWorkflow) : []),
-    [selectedWorkflow],
-  );
-
-  const selectedStep = useMemo(
+  const selectedWorkflow = useMemo(
     () =>
-      selectedWorkflow?.steps.find(step => step.id === selectedStepId) ||
-      selectedWorkflow?.steps[0] ||
+      workflows.find(workflow => workflow.id === selectedWorkflowId) ||
+      workflows[0] ||
       null,
-    [selectedStepId, selectedWorkflow],
+    [selectedWorkflowId, workflows],
   );
 
-  const selectedProtocol = useMemo(() => {
-    if (!selectedWorkflow || !selectedStep) {
-      return null;
-    }
-
-    return (
-      selectedWorkflowProtocols.find(
-        protocol =>
-          protocol.id === selectedStep.handoffProtocolId ||
-          protocol.sourceStepId === selectedStep.id,
-      ) || null
-    );
-  }, [selectedStep, selectedWorkflow, selectedWorkflowProtocols]);
-
   useEffect(() => {
-    if (filteredWorkflows.length === 0) {
-      setSelectedWorkflow(null);
+    if (!selectedWorkflow && workflows[0]) {
+      setSelectedWorkflowId(workflows[0].id);
       return;
     }
 
-    setSelectedWorkflow(current =>
-      current && filteredWorkflows.some(workflow => workflow.id === current.id) ? current : filteredWorkflows[0],
-    );
-  }, [filteredWorkflows]);
+    if (!selectedWorkflowId && workflows[0]) {
+      setSelectedWorkflowId(workflows[0].id);
+    }
+  }, [selectedWorkflow, selectedWorkflowId, workflows]);
+
+  const nodes = selectedWorkflow ? getWorkflowNodes(selectedWorkflow) : [];
+  const edges = selectedWorkflow ? getWorkflowEdges(selectedWorkflow) : [];
+  const orderedNodeIds = selectedWorkflow ? getWorkflowNodeOrder(selectedWorkflow) : [];
+  const orderedNodes = orderedNodeIds
+    .map(nodeId => nodes.find(node => node.id === nodeId))
+    .filter((node): node is WorkflowNode => Boolean(node));
+  const selectedNode =
+    selectedWorkflow && selectedNodeId
+      ? getWorkflowNode(selectedWorkflow, selectedNodeId) || null
+      : null;
+  const selectedEdge =
+    selectedWorkflow && selectedEdgeId
+      ? edges.find(edge => edge.id === selectedEdgeId) || null
+      : null;
+  const validationState = selectedWorkflow
+    ? getNodeValidationMessages(selectedWorkflow, selectedNodeId || undefined, selectedEdgeId || undefined)
+    : { all: [], selected: [], nodeIdsWithErrors: new Set<string>() };
+  const workflowSamplePath = selectedWorkflow ? getSamplePath(selectedWorkflow) : [];
 
   useEffect(() => {
-    if (!selectedWorkflow?.steps.length) {
-      setSelectedStepId(null);
+    if (!selectedNode) {
+      setNodeDraft(null);
       return;
     }
+    setNodeDraft({ ...selectedNode });
+  }, [selectedNode]);
 
-    setSelectedStepId(current =>
-      current && selectedWorkflow.steps.some(step => step.id === current)
-        ? current
-        : selectedWorkflow.steps[0].id,
-    );
-  }, [selectedWorkflow]);
-
-  const updateSelectedWorkflow = (buildNextWorkflow: (workflow: Workflow) => Workflow) => {
-    if (!selectedWorkflow) {
-      return null;
+  useEffect(() => {
+    if (!selectedEdge) {
+      setEdgeDraft(null);
+      return;
     }
-
-    let nextSelectedWorkflow: Workflow | null = null;
-    const nextWorkflows = workspace.workflows.map(workflow => {
-      if (workflow.id !== selectedWorkflow.id) {
-        return workflow;
-      }
-
-      nextSelectedWorkflow = buildNextWorkflow(workflow);
-      return nextSelectedWorkflow;
+    setEdgeDraft({
+      ...selectedEdge,
+      artifactContract: selectedEdge.artifactContract
+        ? { ...selectedEdge.artifactContract }
+        : undefined,
     });
+  }, [selectedEdge]);
 
-    if (!nextSelectedWorkflow) {
-      return null;
-    }
-
+  const persistWorkflows = (
+    nextWorkflows: Workflow[],
+    toastTitle: string,
+    toastDescription?: string,
+  ) => {
     setCapabilityWorkspaceContent(activeCapability.id, {
-      workflows: nextWorkflows,
+      workflows: nextWorkflows.map(workflow =>
+        buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)),
+      ),
     });
-    setSelectedWorkflow(nextSelectedWorkflow);
-    return nextSelectedWorkflow;
+    success(toastTitle, toastDescription);
+  };
+
+  const focusNodeOnCanvas = (nodeId: string) => {
+    if (!selectedWorkflow || !canvasRef.current) {
+      return;
+    }
+
+    const nextNode = getWorkflowNode(selectedWorkflow, nodeId);
+    if (!nextNode) {
+      return;
+    }
+
+    const nextNodeDimensions = getWorkflowNodeDimensions();
+    canvasRef.current.scrollTo({
+      left: Math.max(
+        nextNode.layout.x * canvasScale -
+          canvasRef.current.clientWidth / 2 +
+          (nextNodeDimensions.width * canvasScale) / 2,
+        0,
+      ),
+      top: Math.max(
+        nextNode.layout.y * canvasScale -
+          canvasRef.current.clientHeight / 2 +
+          (nextNodeDimensions.height * canvasScale) / 2,
+        0,
+      ),
+      behavior: 'smooth',
+    });
+  };
+
+  const replaceSelectedWorkflow = (
+    updater: (workflow: Workflow) => Workflow,
+    toastTitle: string,
+    toastDescription?: string,
+  ) => {
+    if (!selectedWorkflow) {
+      return;
+    }
+
+    const nextWorkflow = buildWorkflowFromGraph(
+      normalizeWorkflowGraph(updater(selectedWorkflow)),
+    );
+
+    const nextWorkflows = workflows.map(workflow =>
+      workflow.id === nextWorkflow.id ? nextWorkflow : workflow,
+    );
+    persistWorkflows(nextWorkflows, toastTitle, toastDescription);
   };
 
   const handleCreateWorkflow = (event: React.FormEvent) => {
@@ -219,1252 +507,2069 @@ const Designer = () => {
       return;
     }
 
-    const newWorkflow: Workflow = {
-      id: createWorkflowId(),
-      name: workflowDraft.name.trim(),
-      capabilityId: activeCapability.id,
-      steps: [],
-      status: 'PENDING',
-      workflowType: workflowDraft.workflowType,
-      scope: workflowDraft.scope,
-      summary: workflowDraft.summary.trim(),
-    };
+    const workflowId = createWorkflowId(activeCapability.id, workflowDraft.name);
+    const startNodeId = `NODE-${slugify(activeCapability.id)}-${slugify(workflowDraft.name)}-START`;
+    const endNodeId = `NODE-${slugify(activeCapability.id)}-${slugify(workflowDraft.name)}-END`;
+    const nextWorkflow = buildWorkflowFromGraph(
+      normalizeWorkflowGraph({
+        id: workflowId,
+        name: workflowDraft.name.trim(),
+        capabilityId: activeCapability.id,
+        status: 'BETA',
+        workflowType: workflowDraft.workflowType,
+        scope: workflowDraft.scope,
+        summary: workflowDraft.summary.trim() || undefined,
+        publishState: 'DRAFT',
+        schemaVersion: 2,
+        entryNodeId: startNodeId,
+        nodes: [
+          createWorkflowNode({
+            id: startNodeId,
+            name: 'Start',
+            type: 'START',
+            phase: 'ANALYSIS',
+            layout: { x: 80, y: 48 },
+          }),
+          createWorkflowNode({
+            id: endNodeId,
+            name: 'End',
+            type: 'END',
+            phase: 'RELEASE',
+            layout: { x: 340, y: 48 + 5 * 176 },
+          }),
+        ],
+        edges: [
+          createWorkflowEdge({
+            fromNodeId: startNodeId,
+            toNodeId: endNodeId,
+            label: 'Complete without delivery',
+          }),
+        ],
+        steps: [],
+      }),
+    );
 
-    setCapabilityWorkspaceContent(activeCapability.id, {
-      workflows: [...workspace.workflows, newWorkflow],
-    });
-    setSelectedWorkflow(newWorkflow);
+    persistWorkflows(
+      [...workflows, nextWorkflow],
+      'Workflow created',
+      `${nextWorkflow.name} is now available in ${activeCapability.name}.`,
+    );
+    setSelectedWorkflowId(nextWorkflow.id);
+    setSelectedNodeId(startNodeId);
+    setSelectedEdgeId(null);
+    setIsCreateWorkflowOpen(false);
     setWorkflowDraft({
       name: '',
+      summary: '',
       workflowType: 'SDLC',
       scope: 'CAPABILITY',
-      summary: '',
     });
-    setIsWorkflowModalOpen(false);
-    setView('workflows');
-    success('Workflow created', `${newWorkflow.name} was added to ${activeCapability.name}.`);
   };
 
-  const handleCreateStandardWorkflow = () => {
+  const handleLoadStandardWorkflow = () => {
     const standardWorkflow = createStandardCapabilityWorkflow(activeCapability);
-    if (workspace.workflows.some(workflow => workflow.id === standardWorkflow.id)) {
-      setSelectedWorkflow(
-        workspace.workflows.find(workflow => workflow.id === standardWorkflow.id) || standardWorkflow,
-      );
-      setIsWorkflowModalOpen(false);
-      setView('workflows');
-      success('Workflow ready', `${standardWorkflow.name} is already available in this capability.`);
-      return;
-    }
+    const existingStandardIndex = workflows.findIndex(
+      workflow => workflow.id === standardWorkflow.id,
+    );
+    const nextWorkflows =
+      existingStandardIndex >= 0
+        ? workflows.map(workflow =>
+            workflow.id === standardWorkflow.id ? standardWorkflow : workflow,
+          )
+        : [...workflows, standardWorkflow];
 
-    setCapabilityWorkspaceContent(activeCapability.id, {
-      workflows: [...workspace.workflows, standardWorkflow],
-    });
-    setSelectedWorkflow(standardWorkflow);
-    setIsWorkflowModalOpen(false);
-    setView('workflows');
-    success('Standard workflow added', `${standardWorkflow.name} was added to the capability.`);
+    persistWorkflows(
+      nextWorkflows,
+      'Standard agent workflow loaded',
+      'The enterprise SDLC graph is now available in the designer.',
+    );
+    setSelectedWorkflowId(standardWorkflow.id);
+    setSelectedNodeId(standardWorkflow.entryNodeId || null);
   };
 
-  const handleAddStep = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!selectedWorkflow || !stepDraft.agentId || !stepDraft.action.trim() || !stepDraft.name.trim()) {
+  const handleDuplicateWorkflow = (workflowToCopy: Workflow | null = selectedWorkflow) => {
+    if (!workflowToCopy) {
       return;
     }
 
-    const nextStepId = createWorkflowStepId();
-    updateSelectedWorkflow(workflow => ({
-      ...workflow,
-      status: workflow.status === 'STABLE' ? workflow.status : 'IN_PROGRESS',
-      steps: [
-        ...workflow.steps,
-        {
-          id: nextStepId,
-          name: stepDraft.name.trim(),
-          phase: stepDraft.phase,
-          stepType: stepDraft.stepType,
-          agentId: stepDraft.agentId,
-          action: stepDraft.action.trim(),
-          description: stepDraft.description.trim() || undefined,
-          inputArtifactId: stepDraft.inputArtifactId || undefined,
-          outputArtifactId: stepDraft.outputArtifactId || undefined,
-          handoffToAgentId: stepDraft.handoffToAgentId || undefined,
-          handoffToPhase: stepDraft.handoffToAgentId ? stepDraft.handoffToPhase : undefined,
-          handoffLabel: stepDraft.handoffToAgentId
-            ? `${stepDraft.name.trim()} hand-off`
+    const copyName = createCopyName(
+      workflowToCopy.name,
+      workflows.map(workflow => workflow.name),
+    );
+    const workflowId = (() => {
+      const baseId = createWorkflowId(activeCapability.id, copyName);
+      if (!workflows.some(workflow => workflow.id === baseId)) {
+        return baseId;
+      }
+
+      let counter = 2;
+      let candidate = `${baseId}-${counter}`;
+      while (workflows.some(workflow => workflow.id === candidate)) {
+        counter += 1;
+        candidate = `${baseId}-${counter}`;
+      }
+      return candidate;
+    })();
+
+    const nodeIdMap = new Map<string, string>();
+    (workflowToCopy.nodes || []).forEach(node => {
+      nodeIdMap.set(node.id, createDesignerCopyId('NODE', `${copyName}-${node.name}`));
+    });
+
+    const copiedWorkflow = buildWorkflowFromGraph(
+      normalizeWorkflowGraph({
+        ...workflowToCopy,
+        id: workflowId,
+        name: copyName,
+        status: 'BETA',
+        publishState: 'DRAFT',
+        summary: workflowToCopy.summary
+          ? `Copy of ${workflowToCopy.summary}`
+          : `Copy of ${workflowToCopy.name}`,
+        entryNodeId: nodeIdMap.get(workflowToCopy.entryNodeId || '') || workflowToCopy.entryNodeId,
+        nodes: (workflowToCopy.nodes || []).map(node => ({
+          ...node,
+          id: nodeIdMap.get(node.id) || node.id,
+          layout: {
+            x: node.layout.x + 48,
+            y: node.layout.y + 32,
+          },
+          approverRoles: node.approverRoles ? [...node.approverRoles] : undefined,
+          exitCriteria: node.exitCriteria ? [...node.exitCriteria] : undefined,
+          allowedToolIds: node.allowedToolIds ? [...node.allowedToolIds] : undefined,
+          etlConfig: node.etlConfig ? { ...node.etlConfig } : undefined,
+        })),
+        edges: (workflowToCopy.edges || []).map(edge => ({
+          ...edge,
+          id: createDesignerCopyId('EDGE', `${copyName}-${edge.label || edge.id}`),
+          fromNodeId: nodeIdMap.get(edge.fromNodeId) || edge.fromNodeId,
+          toNodeId: nodeIdMap.get(edge.toNodeId) || edge.toNodeId,
+          artifactContract: edge.artifactContract
+            ? {
+                ...edge.artifactContract,
+                requiredInputs: edge.artifactContract.requiredInputs
+                  ? [...edge.artifactContract.requiredInputs]
+                  : undefined,
+                expectedOutputs: edge.artifactContract.expectedOutputs
+                  ? [...edge.artifactContract.expectedOutputs]
+                  : undefined,
+              }
             : undefined,
-          governanceGate:
-            stepDraft.stepType === 'GOVERNANCE_GATE'
-              ? stepDraft.governanceGate.trim() || stepDraft.name.trim()
-              : undefined,
-          approverRoles:
-            stepDraft.stepType !== 'DELIVERY'
-              ? stepDraft.approverRoles
-                  .split(',')
-                  .map(role => role.trim())
-                  .filter(Boolean)
-              : undefined,
-          exitCriteria: parseLines(stepDraft.exitCriteria),
-          templatePath: stepDraft.templatePath.trim() || undefined,
-        },
-      ],
-    }));
-    setSelectedStepId(nextStepId);
-    setStepDraft({
-      name: '',
-      phase: 'ANALYSIS',
-      stepType: 'DELIVERY',
-      agentId: workspace.agents[0]?.id || '',
-      action: '',
-      description: '',
-      inputArtifactId: workspace.artifacts[0]?.id || '',
-      outputArtifactId: workspace.artifacts[0]?.id || '',
-      handoffToAgentId: '',
-      handoffToPhase: 'DESIGN',
-      governanceGate: '',
-      approverRoles: '',
-      exitCriteria: '',
-      templatePath: '/out/steps/custom-step-template.md',
-    });
-    setIsStepModalOpen(false);
-    success('Workflow step saved', `${stepDraft.name.trim()} was added to ${selectedWorkflow.name}.`);
-  };
-
-  const openProtocolModal = (mode: 'create' | 'edit') => {
-    const fallbackStep = selectedStep || selectedWorkflow?.steps[0];
-    if (!selectedWorkflow || !fallbackStep) {
-      return;
-    }
-
-    const protocol =
-      mode === 'edit'
-        ? selectedWorkflowProtocols.find(
-            item =>
-              item.id === fallbackStep.handoffProtocolId ||
-              item.sourceStepId === fallbackStep.id,
-          ) || null
-        : null;
-
-    setProtocolDraft({
-      id: protocol?.id || '',
-      sourceStepId: protocol?.sourceStepId || fallbackStep.id,
-      name: protocol?.name || fallbackStep.handoffLabel || `${fallbackStep.name} Hand-off`,
-      description: protocol?.description || fallbackStep.description || '',
-      targetAgentId:
-        protocol?.targetAgentId || fallbackStep.handoffToAgentId || '',
-      targetPhase:
-        protocol?.targetPhase || fallbackStep.handoffToPhase || fallbackStep.phase,
-      rules: (protocol?.rules || fallbackStep.exitCriteria || []).join('\n'),
-      validationRequired: protocol?.validationRequired ?? true,
-      autoDocumentation: protocol?.autoDocumentation ?? true,
-    });
-    setIsProtocolModalOpen(true);
-  };
-
-  const handleSaveProtocol = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!selectedWorkflow || !protocolDraft.sourceStepId || !protocolDraft.name.trim()) {
-      return;
-    }
-
-    const protocolId =
-      protocolDraft.id ||
-      selectedStep?.handoffProtocolId ||
-      createHandoffProtocolId();
-    const nextProtocol: WorkflowHandoffProtocol = {
-      id: protocolId,
-      sourceStepId: protocolDraft.sourceStepId,
-      name: protocolDraft.name.trim(),
-      description: protocolDraft.description.trim() || undefined,
-      targetAgentId: protocolDraft.targetAgentId || undefined,
-      targetPhase: protocolDraft.targetPhase,
-      rules: parseLines(protocolDraft.rules),
-      validationRequired: protocolDraft.validationRequired,
-      autoDocumentation: protocolDraft.autoDocumentation,
-    };
-
-    const currentProtocols = getWorkflowProtocols(selectedWorkflow);
-    const nextProtocols = currentProtocols.some(protocol => protocol.id === protocolId)
-      ? currentProtocols.map(protocol => (protocol.id === protocolId ? nextProtocol : protocol))
-      : [...currentProtocols, nextProtocol];
-
-    updateSelectedWorkflow(workflow => ({
-      ...workflow,
-      handoffProtocols: nextProtocols,
-      steps: workflow.steps.map(step => {
-        if (step.id === protocolDraft.sourceStepId) {
-          return {
-            ...step,
-            handoffProtocolId: protocolId,
-            handoffLabel: nextProtocol.name,
-            handoffToAgentId: nextProtocol.targetAgentId,
-            handoffToPhase: nextProtocol.targetPhase,
-          };
-        }
-
-        if (step.handoffProtocolId === protocolId) {
-          return {
-            ...step,
-            handoffProtocolId: undefined,
-          };
-        }
-
-        return step;
+        })),
+        steps: [],
+        handoffProtocols: [],
       }),
-    }));
+    );
 
-    setSelectedStepId(protocolDraft.sourceStepId);
-    setIsProtocolModalOpen(false);
-    success(
-      'Hand-off protocol saved',
-      `${nextProtocol.name} is now attached to the workflow.`,
+    persistWorkflows(
+      [...workflows, copiedWorkflow],
+      'Workflow duplicated',
+      `${workflowToCopy.name} was copied into ${copiedWorkflow.name}.`,
+    );
+    setSelectedWorkflowId(copiedWorkflow.id);
+    setSelectedNodeId(copiedWorkflow.entryNodeId || copiedWorkflow.nodes?.[0]?.id || null);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+    cancelDragLink();
+  };
+
+  const handleValidateWorkflow = () => {
+    if (!selectedWorkflow) {
+      return;
+    }
+    const validation = validateWorkflowGraph(selectedWorkflow);
+    if (!validation.valid) {
+      warning(
+        'Validation issues found',
+        `${validation.errors.length} graph rules must be resolved before publishing.`,
+      );
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({ ...workflow, publishState: 'VALIDATED' }),
+      'Workflow validated',
+      `${selectedWorkflow.name} passed graph validation and is ready to publish.`,
     );
   };
 
+  const handlePublishWorkflow = () => {
+    if (!selectedWorkflow) {
+      return;
+    }
+    const validation = validateWorkflowGraph(selectedWorkflow);
+    if (!validation.valid) {
+      warning(
+        'Publish blocked',
+        'Resolve workflow validation issues before publishing this flow.',
+      );
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({ ...workflow, publishState: 'PUBLISHED', status: 'STABLE' }),
+      'Workflow published',
+      `${selectedWorkflow.name} is now published for enterprise execution.`,
+    );
+  };
+
+  const handleAutoLayout = () => {
+    if (!selectedWorkflow) {
+      return;
+    }
+    replaceSelectedWorkflow(
+      workflow => autoLayoutWorkflowGraph(workflow),
+      'Graph auto-layout applied',
+      'The workflow lanes and branches were re-aligned for readability.',
+    );
+  };
+
+  const handleExportWorkflow = () => {
+    if (!selectedWorkflow) {
+      return;
+    }
+    const blob = new Blob([JSON.stringify(selectedWorkflow, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${selectedWorkflow.id.toLowerCase()}-graph.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    info('Workflow exported', `${selectedWorkflow.name} JSON was downloaded.`);
+  };
+
+  const handleCanvasDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!selectedWorkflow || !canvasRef.current) {
+      return;
+    }
+
+    event.preventDefault();
+    const moveNodeId = event.dataTransfer.getData('application/singularity-node-move');
+    const nodeTemplate = event.dataTransfer.getData('application/singularity-node-template');
+    const nextCoordinates = getDropCoordinates(event, canvasRef.current, canvasScale);
+
+    if (moveNodeId) {
+      replaceSelectedWorkflow(
+        workflow => ({
+          ...workflow,
+          nodes: (workflow.nodes || []).map(node =>
+            node.id === moveNodeId
+              ? {
+                  ...node,
+                  layout: {
+                    x: Math.max(nextCoordinates.x, 32),
+                    y: Math.max(nextCoordinates.y, 24),
+                  },
+                }
+              : node,
+          ),
+        }),
+        'Node repositioned',
+        'The graph layout was updated.',
+      );
+      return;
+    }
+
+    if (!nodeTemplate) {
+      return;
+    }
+
+    const parsedTemplate = JSON.parse(nodeTemplate) as {
+      type: WorkflowNodeType;
+      phase: Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'>;
+      etlSubType?: string;
+      label?: string;
+    };
+    const nextNode = createWorkflowNode({
+      name:
+        parsedTemplate.label ||
+        NODE_TYPE_OPTIONS.find(option => option.type === parsedTemplate.type)?.label ||
+        'New Node',
+      type: parsedTemplate.type,
+      phase: parsedTemplate.phase,
+      layout: {
+        x: Math.max(nextCoordinates.x, 32),
+        y: Math.max(nextCoordinates.y, 24),
+      },
+      agentId:
+        parsedTemplate.type === 'START' || parsedTemplate.type === 'END'
+          ? undefined
+          : workspace.agents[0]?.id,
+      action:
+        parsedTemplate.type === 'DELIVERY'
+          ? 'Complete the assigned SDLC task and hand off evidence to the next step.'
+          : parsedTemplate.type === 'DECISION'
+          ? 'Evaluate completion criteria and route the work item to the right hand-off path.'
+          : parsedTemplate.type === 'PARALLEL_SPLIT'
+          ? 'Start multiple agent workstreams in parallel.'
+          : parsedTemplate.type === 'PARALLEL_JOIN'
+          ? 'Wait for the parallel workstreams and consolidate their outputs.'
+          : parsedTemplate.type === 'GOVERNANCE_GATE'
+          ? 'Check governance, risk, evidence, and policy requirements before continuing.'
+          : parsedTemplate.type === 'HUMAN_APPROVAL'
+          ? 'Pause for human review, clarification, or approval.'
+          : parsedTemplate.type === 'RELEASE'
+          ? 'Execute release or deployment work and capture completion evidence.'
+          : isLegacyEtlNodeType(parsedTemplate.type)
+          ? 'Legacy ETL step imported from an earlier workflow. Consider converting this to a delivery or governance step.'
+          : 'Describe the work that happens in this node.',
+      etlConfig: parsedTemplate.etlSubType ? { subType: parsedTemplate.etlSubType } : undefined,
+    });
+
+    replaceSelectedWorkflow(
+      workflow => {
+        const nextWorkflow = {
+          ...workflow,
+          nodes: [...(workflow.nodes || []), nextNode],
+        };
+
+        if (!connectFromNodeId) {
+          return nextWorkflow;
+        }
+
+        return {
+          ...nextWorkflow,
+          edges: [
+            ...(nextWorkflow.edges || []),
+            createWorkflowEdge({
+              fromNodeId: connectFromNodeId,
+              toNodeId: nextNode.id,
+              label: 'New branch',
+              conditionType: 'DEFAULT',
+            }),
+          ],
+        };
+      },
+      'Node added',
+      connectFromNodeId
+        ? 'A new node and graph connection were created.'
+        : 'A new graph node was added to the workflow.',
+    );
+    setSelectedNodeId(nextNode.id);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+  };
+
+  const handleConnectNodes = (targetNodeId: string) => {
+    if (!selectedWorkflow || !connectFromNodeId || connectFromNodeId === targetNodeId) {
+      return;
+    }
+
+    const duplicateEdge = edges.some(
+      edge => edge.fromNodeId === connectFromNodeId && edge.toNodeId === targetNodeId,
+    );
+    if (duplicateEdge) {
+      warning('Connection already exists', 'This node path is already defined.');
+      setConnectFromNodeId(null);
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        edges: [
+          ...(workflow.edges || []),
+          createWorkflowEdge({
+            fromNodeId: connectFromNodeId,
+            toNodeId: targetNodeId,
+            label: 'Transition',
+            conditionType: 'DEFAULT',
+          }),
+        ],
+      }),
+      'Nodes connected',
+      'A new workflow transition was created.',
+    );
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+  };
+
+  const cancelDragLink = () => {
+    setDragLinkFromNodeId(null);
+    setDragLinkPosition(null);
+  };
+
+  const handleStartDragLink = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    nodeId: string,
+  ) => {
+    if (!canvasRef.current) {
+      return;
+    }
+
+    event.stopPropagation();
+    const nextPoint = getCanvasPointFromMouse(
+      event.clientX,
+      event.clientY,
+      canvasRef.current,
+      canvasScale,
+    );
+    setDragLinkFromNodeId(nodeId);
+    setDragLinkPosition(nextPoint);
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+  };
+
+  const handleCompleteDragLink = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    targetNodeId: string,
+  ) => {
+    event.stopPropagation();
+    if (!selectedWorkflow || !dragLinkFromNodeId || dragLinkFromNodeId === targetNodeId) {
+      cancelDragLink();
+      return;
+    }
+
+    const duplicateEdge = edges.some(
+      edge => edge.fromNodeId === dragLinkFromNodeId && edge.toNodeId === targetNodeId,
+    );
+    if (duplicateEdge) {
+      warning('Connection already exists', 'This node path is already defined.');
+      cancelDragLink();
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        edges: [
+          ...(workflow.edges || []),
+          createWorkflowEdge({
+            fromNodeId: dragLinkFromNodeId,
+            toNodeId: targetNodeId,
+            label: 'Transition',
+            conditionType: 'DEFAULT',
+          }),
+        ],
+      }),
+      'Nodes connected',
+      'A new workflow transition was created.',
+    );
+    setSelectedEdgeId(null);
+    cancelDragLink();
+  };
+
+  const handleApplyNodeDraft = () => {
+    if (!selectedWorkflow || !selectedNode || !nodeDraft) {
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        nodes: (workflow.nodes || []).map(node =>
+          node.id === selectedNode.id ? nodeDraft : node,
+        ),
+      }),
+      'Node updated',
+      `${nodeDraft.name} was updated in the workflow graph.`,
+    );
+  };
+
+  const handleApplyEdgeDraft = () => {
+    if (!selectedWorkflow || !selectedEdge || !edgeDraft) {
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        edges: (workflow.edges || []).map(edge =>
+          edge.id === selectedEdge.id ? edgeDraft : edge,
+        ),
+      }),
+      'Transition updated',
+      'The hand-off rule and branch metadata were saved.',
+    );
+  };
+
+  const handleDeleteSelectedNode = () => {
+    if (!selectedWorkflow || !selectedNode) {
+      return;
+    }
+    if (selectedNode.type === 'START') {
+      warning('Start node locked', 'The START node cannot be removed from the workflow.');
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        nodes: (workflow.nodes || []).filter(node => node.id !== selectedNode.id),
+        edges: (workflow.edges || []).filter(
+          edge => edge.fromNodeId !== selectedNode.id && edge.toNodeId !== selectedNode.id,
+        ),
+      }),
+      'Node removed',
+      `${selectedNode.name} and its transitions were removed from the graph.`,
+    );
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+  };
+
+  const handleDeleteSelectedEdge = () => {
+    if (!selectedWorkflow || !selectedEdge) {
+      return;
+    }
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        edges: (workflow.edges || []).filter(edge => edge.id !== selectedEdge.id),
+      }),
+      'Transition removed',
+      'The selected graph transition was removed.',
+    );
+    setSelectedEdgeId(null);
+  };
+
+  const handleDuplicateSelectedNode = () => {
+    if (!selectedWorkflow || !selectedNode) {
+      return;
+    }
+
+    if (selectedNode.type === 'START') {
+      warning(
+        'Start node locked',
+        'Duplicate the workflow if you want another template starting point. The START node stays unique inside a graph.',
+      );
+      return;
+    }
+
+    const duplicatedNode = createWorkflowNode({
+      ...selectedNode,
+      id: createDesignerCopyId('NODE', `${selectedNode.name}-copy`),
+      name: createCopyName(
+        selectedNode.name,
+        nodes.filter(node => node.phase === selectedNode.phase).map(node => node.name),
+      ),
+      layout: {
+        x: selectedNode.layout.x + 52,
+        y: selectedNode.layout.y + 28,
+      },
+      approverRoles: selectedNode.approverRoles ? [...selectedNode.approverRoles] : undefined,
+      exitCriteria: selectedNode.exitCriteria ? [...selectedNode.exitCriteria] : undefined,
+      allowedToolIds: selectedNode.allowedToolIds ? [...selectedNode.allowedToolIds] : undefined,
+      etlConfig: selectedNode.etlConfig ? { ...selectedNode.etlConfig } : undefined,
+    });
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        nodes: [...(workflow.nodes || []), duplicatedNode],
+      }),
+      'Node duplicated',
+      `${selectedNode.name} was copied for faster graph editing.`,
+    );
+    setSelectedNodeId(duplicatedNode.id);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+    cancelDragLink();
+    setTimeout(() => focusNodeOnCanvas(duplicatedNode.id), 0);
+  };
+
+  const publishState = selectedWorkflow
+    ? getWorkflowPublishState(selectedWorkflow)
+    : 'DRAFT';
+  const nodeDimensions = getWorkflowNodeDimensions();
+  const visibleNodeCount = orderedNodes.filter(node => isVisibleWorkflowNode(node.type)).length;
+  const controlNodeCount = orderedNodes.length - visibleNodeCount;
+  const laneSummaries = WORKFLOW_GRAPH_PHASES.map(phase => ({
+    phase,
+    count: orderedNodes.filter(node => node.phase === phase).length,
+  }));
+  const nodeCoordinates = orderedNodes.map(node => ({
+    x: node.layout.x,
+    y: node.layout.y,
+  }));
+  const graphWidth = nodeCoordinates.length
+    ? Math.max(...nodeCoordinates.map(point => point.x)) + nodeDimensions.width + 120
+    : 1200;
+  const graphHeight = nodeCoordinates.length
+    ? Math.max(...nodeCoordinates.map(point => point.y)) + nodeDimensions.height + 120
+    : 920;
+  const minimapScale = Math.min(0.14, 180 / Math.max(graphWidth, graphHeight));
+  const dragLinkFromNode =
+    selectedWorkflow && dragLinkFromNodeId
+      ? getWorkflowNode(selectedWorkflow, dragLinkFromNodeId)
+      : null;
+  const dragLinkStart = dragLinkFromNode
+    ? {
+        x: dragLinkFromNode.layout.x + nodeDimensions.width,
+        y: dragLinkFromNode.layout.y + nodeDimensions.height / 2,
+      }
+    : null;
   return (
-    <div className="space-y-8">
-      <div className="flex justify-between items-end mb-6">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[0.625rem] font-bold bg-primary/10 text-primary px-2 py-0.5 rounded uppercase tracking-widest">Capability Context</span>
-            <span className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">{activeCapability.id}</span>
+    <div className="space-y-4">
+      <div className="flex flex-col gap-4 rounded-3xl border border-outline-variant/50 bg-white/70 px-5 py-4 shadow-[0_10px_30px_rgba(12,23,39,0.04)] backdrop-blur xl:flex-row xl:items-start xl:justify-between">
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone="brand">Agent Workflow Studio</StatusBadge>
+            <span className="page-context">{activeCapability.id}</span>
           </div>
-          <h1 className="text-3xl font-extrabold text-primary tracking-tight mb-1">{activeCapability.name} Designer</h1>
-          <p className="text-secondary text-sm font-medium">Design strategic workflows and artifact hand-off protocols for {activeCapability.name}.</p>
+          <div className="space-y-1">
+            <h1 className="text-2xl font-bold tracking-tight text-on-surface">
+              {selectedWorkflow ? selectedWorkflow.name : `${activeCapability.name} Workflow Designer`}
+            </h1>
+            <p className="max-w-4xl text-sm leading-relaxed text-secondary">
+              Design agent-led SDLC workflows with clear ownership, hand-offs, approvals, artifacts, and release stages.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone={PUBLISH_STATE_TONE[publishState]}>{publishState}</StatusBadge>
+            {selectedWorkflow ? (
+              <StatusBadge tone="info">{getWorkflowNodes(selectedWorkflow).length} nodes</StatusBadge>
+            ) : null}
+            {selectedWorkflow ? (
+              <StatusBadge tone="neutral">{getWorkflowEdges(selectedWorkflow).length} transitions</StatusBadge>
+            ) : null}
+            {selectedWorkflow ? (
+              <StatusBadge tone="brand">{visibleNodeCount} runtime nodes</StatusBadge>
+            ) : null}
+            {dragLinkFromNode ? (
+              <StatusBadge tone="warning">Hand-off from {dragLinkFromNode.name}</StatusBadge>
+            ) : null}
+            {connectFromNodeId ? (
+              <StatusBadge tone="warning">
+                Manual hand-off mode from {getWorkflowNode(selectedWorkflow!, connectFromNodeId)?.name}
+              </StatusBadge>
+            ) : null}
+          </div>
         </div>
-        <div className="flex bg-surface-container-low p-1 rounded-xl">
-          <button 
-            onClick={() => setView('blueprints')}
-            className={cn(
-              "px-4 py-2 text-xs font-bold rounded-lg transition-all",
-              view === 'blueprints' ? "bg-white text-primary shadow-sm" : "text-secondary hover:bg-white/50"
-            )}
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handlePublishWorkflow}
+            className="enterprise-button enterprise-button-primary"
           >
-            Blueprint Catalog
+            <Play size={16} />
+            Publish
           </button>
-          <button 
-            onClick={() => setView('workflows')}
-            className={cn(
-              "px-4 py-2 text-xs font-bold rounded-lg transition-all",
-              view === 'workflows' ? "bg-white text-primary shadow-sm" : "text-secondary hover:bg-white/50"
-            )}
+          <button
+            type="button"
+            onClick={() => setIsCreateWorkflowOpen(true)}
+            className="enterprise-button enterprise-button-secondary"
           >
-            Workflow Canvas
+            <Plus size={16} />
+            New Workflow
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-12 gap-8">
-        {/* Left Column: Library List */}
-        <div className="col-span-3 flex flex-col gap-4">
-          <div className="flex items-center justify-between px-2">
-            <span className="text-[0.6875rem] font-bold uppercase text-outline tracking-widest">
-              {view === 'blueprints' ? 'Saved Blueprints' : 'Active Workflows'}
-            </span>
-            <Filter size={18} className="text-outline cursor-pointer" />
-          </div>
-          
-          <div className="space-y-3">
-            {view === 'blueprints' ? (
-              filteredBlueprints.map((bp) => (
-                <div 
-                  key={bp.id} 
-                  className="p-4 rounded-xl bg-white ghost-border ambient-shadow hover:bg-surface-container-low transition-all group cursor-pointer"
-                >
-                  <div className="flex items-start justify-between mb-3">
-                    <span className="px-2 py-1 text-[0.625rem] font-bold rounded-full bg-primary/10 text-primary">{bp.type}</span>
-                    <MoreVertical size={16} className="text-outline group-hover:text-primary" />
-                  </div>
-                  <h3 className="font-bold text-sm text-primary mb-1">{bp.title}</h3>
-                  <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-1">
-                      <GitBranch size={12} className="text-outline" />
-                      <span className="text-[0.6875rem] font-medium text-secondary">{bp.activeIds} Outputs</span>
-                    </div>
-                  </div>
-                </div>
-              ))
-            ) : (
-              filteredWorkflows.map((wf) => (
-                <div 
-                  key={wf.id} 
-                  onClick={() => setSelectedWorkflow(wf)}
-                  className={cn(
-                    "p-4 rounded-xl transition-all group cursor-pointer border",
-                    selectedWorkflow?.id === wf.id 
-                      ? "bg-primary/5 border-primary/20 shadow-sm" 
-                      : "bg-white border-outline-variant/10 hover:bg-surface-container-low"
-                  )}
-                >
-                  <div className="flex items-start justify-between mb-2">
-                    <WorkflowIcon size={18} className={selectedWorkflow?.id === wf.id ? "text-primary" : "text-outline"} />
-                    <div className="flex flex-col items-end gap-1">
-                      <span className={cn(
-                        "px-2 py-0.5 text-[0.625rem] font-bold rounded-full",
-                        wf.status === 'STABLE' ? "bg-success/10 text-success" : "bg-primary/10 text-primary"
-                      )}>
-                        {wf.status}
-                      </span>
-                      <span className={cn(
-                        "px-2 py-0.5 text-[0.625rem] font-bold rounded-full uppercase tracking-widest",
-                        (wf.scope || 'CAPABILITY') === 'GLOBAL'
-                          ? "bg-amber-100 text-amber-700"
-                          : "bg-slate-100 text-slate-600"
-                      )}>
-                        {(wf.scope || 'CAPABILITY') === 'GLOBAL' ? 'Global' : 'Capability'}
-                      </span>
-                    </div>
-                  </div>
-                  <h3 className="font-bold text-sm text-primary mb-1">{wf.name}</h3>
-                  <p className="text-[0.625rem] text-secondary">
-                    {wf.steps.length} SDLC steps
-                  </p>
-                  <p className="mt-2 text-[0.625rem] leading-relaxed text-secondary">
-                    {wf.summary || 'Workflow template ready for story orchestration.'}
-                  </p>
-                </div>
-              ))
-            )}
-            
-            <button
-              onClick={() =>
-                view === 'workflows' ? setIsWorkflowModalOpen(true) : undefined
-              }
-              className="w-full py-3 border-2 border-dashed border-outline-variant text-outline text-xs font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-surface-container-low transition-all"
-            >
-              <Plus size={16} /> New {view === 'blueprints' ? 'Blueprint' : 'Workflow'}
-            </button>
-          </div>
-        </div>
-
-        {/* Right Column: Canvas */}
-        <div className="col-span-9">
-          {view === 'workflows' && selectedWorkflow ? (
-            <div className="space-y-8">
-              <div className="bg-white rounded-3xl border border-outline-variant/15 shadow-sm p-8">
-                <div className="flex justify-between items-center mb-12">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 bg-primary rounded-2xl flex items-center justify-center text-white shadow-lg shadow-primary/20">
-                      <WorkflowIcon size={24} />
-                    </div>
-                    <div>
-                      <h2 className="text-xl font-extrabold text-primary tracking-tight">{selectedWorkflow.name}</h2>
-                      <p className="text-xs text-secondary font-medium">
-                        Visualizing SDLC hand-offs, governance gates, and human approval stages.
-                      </p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <span className="rounded-full bg-primary/10 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">
-                          {selectedWorkflow.workflowType || 'Workflow'}
-                        </span>
-                        <span className={cn(
-                          "rounded-full px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em]",
-                          (selectedWorkflow.scope || 'CAPABILITY') === 'GLOBAL'
-                            ? "bg-amber-100 text-amber-700"
-                            : "bg-slate-100 text-slate-600"
-                        )}>
-                          {(selectedWorkflow.scope || 'CAPABILITY') === 'GLOBAL'
-                            ? 'Global Scope'
-                            : 'Capability Scope'}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex gap-3">
-                    <button className="px-4 py-2 text-xs font-bold text-secondary hover:bg-surface-container-low rounded-xl transition-all">Export JSON</button>
-                    <button
-                      onClick={() => setIsStepModalOpen(true)}
-                      disabled={workspace.agents.length === 0}
-                      className="px-6 py-2.5 bg-primary text-white text-sm font-bold rounded-xl hover:shadow-lg transition-all flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <Plus size={18} /> Add Step
-                    </button>
-                  </div>
-                </div>
-
-                <div className="relative flex items-center justify-between gap-4 overflow-x-auto pb-12 pt-4 px-4 custom-scrollbar">
-                  {selectedWorkflow.steps.map((step, index) => {
-                    const outputArtifact = visibleArtifacts.find(a => a.id === step.outputArtifactId);
-                    return (
-                      <React.Fragment key={step.id}>
-                        <div
-                          className="flex cursor-pointer flex-col items-center gap-6 group"
-                          onClick={() => setSelectedStepId(step.id)}
-                        >
-                          {/* Agent Node */}
-                          <motion.div 
-                            initial={{ opacity: 0, y: 20 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: index * 0.1 }}
-                            className={cn(
-                              "relative w-48 rounded-2xl border bg-surface-container-low p-4 shadow-sm transition-all group-hover:border-primary/40",
-                              selectedStep?.id === step.id
-                                ? "border-primary shadow-lg shadow-primary/10 ring-2 ring-primary/10"
-                                : "border-primary/10"
-                            )}
-                          >
-                            <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-primary text-white text-[0.625rem] font-bold px-2 py-0.5 rounded uppercase tracking-widest shadow-sm">
-                              Agent
-                            </div>
-                            <div className="flex items-center gap-3 mb-3 mt-1">
-                            <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary">
-                              <Cpu size={16} />
-                            </div>
-                              <div className="min-w-0">
-                                <p className="truncate text-xs font-bold text-primary">{step.name}</p>
-                                <p className="truncate text-[0.625rem] font-bold uppercase tracking-[0.16em] text-outline">
-                                  {workspace.agents.find(agent => agent.id === step.agentId)?.name || step.agentId}
-                                </p>
-                              </div>
-                            </div>
-                            <div className="p-2 bg-white rounded-lg border border-outline-variant/10">
-                              <p className="text-[0.6875rem] font-bold text-on-surface mb-1">Action</p>
-                              <p className="text-[0.625rem] text-secondary leading-tight">{step.action}</p>
-                              <div className="mt-2 flex flex-wrap gap-1">
-                                <span className="rounded-full bg-slate-100 px-2 py-1 text-[0.5rem] font-bold uppercase tracking-[0.16em] text-slate-600">
-                                  {step.phase}
-                                </span>
-                                <span className={cn(
-                                  "rounded-full px-2 py-1 text-[0.5rem] font-bold uppercase tracking-[0.16em]",
-                                  step.stepType === 'DELIVERY'
-                                    ? 'bg-primary/10 text-primary'
-                                    : step.stepType === 'GOVERNANCE_GATE'
-                                    ? 'bg-amber-100 text-amber-700'
-                                    : 'bg-fuchsia-100 text-fuchsia-700'
-                                )}>
-                                  {step.stepType.replace('_', ' ')}
-                                </span>
-                              </div>
-                              {step.handoffToAgentId && (
-                                <p className="mt-2 text-[0.5625rem] font-bold uppercase tracking-[0.16em] text-outline">
-                                  {step.handoffLabel || 'Hand-off'} to {workspace.agents.find(agent => agent.id === step.handoffToAgentId)?.name || step.handoffToAgentId}
-                                  {step.handoffToPhase ? ` • ${step.handoffToPhase}` : ''}
-                                </p>
-                              )}
-                            </div>
-                          </motion.div>
-
-                          {/* Artifact Node (Hand-off) */}
-                          {outputArtifact && (
-                            <motion.div 
-                              initial={{ opacity: 0, scale: 0.9 }}
-                              animate={{ opacity: 1, scale: 1 }}
-                              transition={{ delay: index * 0.1 + 0.2 }}
-                              className={cn(
-                                "w-40 p-3 bg-white rounded-xl border shadow-sm relative",
-                                outputArtifact.isMasterArtifact ? "border-primary/40 ring-2 ring-primary/5" : "border-tertiary/20"
-                              )}
-                            >
-                              <div className="absolute -right-2 -top-2">
-                                {outputArtifact.documentationStatus === 'SYNCED' ? (
-                                  <div className="bg-success text-white p-1 rounded-full shadow-sm" title="Synced to Confluence">
-                                    <CheckCircle2 size={12} />
-                                  </div>
-                                ) : (
-                                  <div className="bg-warning text-white p-1 rounded-full shadow-sm" title="Documentation Pending">
-                                    <AlertCircle size={12} />
-                                  </div>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-2 mb-2">
-                                <FileText size={14} className={outputArtifact.isMasterArtifact ? "text-primary" : "text-tertiary"} />
-                                <span className={cn(
-                                  "text-[0.625rem] font-bold uppercase tracking-widest",
-                                  outputArtifact.isMasterArtifact ? "text-primary" : "text-tertiary"
-                                )}>
-                                  {outputArtifact.isMasterArtifact ? 'Master Artifact' : 'Artifact'}
-                                </span>
-                              </div>
-                              <p className="text-[0.6875rem] font-bold text-on-surface truncate mb-1">{outputArtifact.name}</p>
-                              <div className="flex items-center justify-between">
-                                <span className="text-[0.5rem] font-bold text-slate-400 uppercase">{outputArtifact.type}</span>
-                                <Share2 size={12} className="text-slate-400 cursor-pointer hover:text-primary" />
-                              </div>
-                            </motion.div>
-                          )}
-                        </div>
-                        {index < selectedWorkflow.steps.length - 1 && (
-                          <div className="flex-1 min-w-[60px] h-px bg-gradient-to-r from-primary/20 to-tertiary/20 relative">
-                            <ArrowRight size={16} className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-primary/40" />
-                          </div>
-                        )}
-                      </React.Fragment>
-                    );
-                  })}
-                </div>
-
-                <div className="mt-12 p-6 bg-surface-container-low rounded-2xl border border-outline-variant/10 flex items-center justify-between">
-                  <div className="flex items-center gap-6">
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-3 bg-success rounded-full" />
-                      <span className="text-xs font-bold text-secondary uppercase tracking-widest">Documentation Synced</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-3 bg-warning rounded-full" />
-                      <span className="text-xs font-bold text-secondary uppercase tracking-widest">Pending Confluence Update</span>
-                    </div>
-                    {selectedStep && (
-                      <div className="rounded-full bg-white px-3 py-2 text-[0.625rem] font-bold uppercase tracking-[0.16em] text-outline shadow-sm">
-                        Selected Step: {selectedStep.name}
-                      </div>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => openProtocolModal(selectedProtocol ? 'edit' : 'create')}
-                    disabled={!selectedStep}
-                    className="flex items-center gap-2 text-xs font-bold text-primary transition-all hover:underline disabled:cursor-not-allowed disabled:text-outline"
-                  >
-                    <Database size={14} /> Configure Hand-off Rules
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-8">
-                <section className="bg-white rounded-3xl border border-outline-variant/15 shadow-sm p-6">
-                  <h3 className="text-lg font-bold text-primary mb-4 flex items-center gap-2">
-                    <Layers size={20} />
-                    Artifact Hand-off Designer
-                  </h3>
-                  <div className="space-y-4">
-                    <div className="p-4 bg-surface-container-low rounded-xl border border-outline-variant/10">
-                      <p className="text-xs font-bold text-on-surface mb-2">
-                        Protocol:{' '}
-                        {selectedProtocol?.name || selectedStep?.handoffLabel || 'No hand-off protocol defined'}
-                      </p>
-                      <p className="text-[0.6875rem] text-secondary leading-relaxed mb-4">
-                        {selectedProtocol?.description ||
-                          (selectedStep
-                            ? `Define the rules that move output from ${selectedStep.name} into the next SDLC stage.`
-                            : 'Select a step to define how artifacts, approvals, and evidence move forward.')}
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        <span
-                          className={cn(
-                            "px-2 py-1 text-[0.625rem] font-bold rounded",
-                            selectedProtocol?.validationRequired
-                              ? "bg-primary/10 text-primary"
-                              : "bg-slate-100 text-slate-500"
-                          )}
-                        >
-                          {selectedProtocol?.validationRequired
-                            ? 'Validation Required'
-                            : 'Validation Optional'}
-                        </span>
-                        <span
-                          className={cn(
-                            "px-2 py-1 text-[0.625rem] font-bold rounded",
-                            selectedProtocol?.autoDocumentation
-                              ? "bg-tertiary/10 text-tertiary"
-                              : "bg-slate-100 text-slate-500"
-                          )}
-                        >
-                          {selectedProtocol?.autoDocumentation
-                            ? 'Auto-Doc Enabled'
-                            : 'Manual Documentation'}
-                        </span>
-                        {selectedProtocol?.targetPhase && (
-                          <span className="px-2 py-1 rounded bg-slate-100 text-slate-600 text-[0.625rem] font-bold">
-                            Next Phase: {selectedProtocol.targetPhase}
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-4 space-y-2">
-                        {(selectedProtocol?.rules || []).length > 0 ? (
-                          selectedProtocol?.rules.map(rule => (
-                            <div
-                              key={rule}
-                              className="rounded-xl border border-outline-variant/10 bg-white px-3 py-2 text-[0.6875rem] text-secondary"
-                            >
-                              {rule}
-                            </div>
-                          ))
-                        ) : (
-                          <div className="rounded-xl border border-dashed border-outline-variant/20 bg-white px-3 py-4 text-[0.6875rem] text-outline">
-                            No hand-off rules configured for this step yet.
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    {selectedWorkflowProtocols.length > 0 && (
-                      <div className="space-y-2">
-                        {selectedWorkflowProtocols.map(protocol => (
-                          <button
-                            key={protocol.id}
-                            onClick={() => setSelectedStepId(protocol.sourceStepId)}
-                            className={cn(
-                              "flex w-full items-center justify-between rounded-xl border px-3 py-3 text-left transition-all",
-                              selectedProtocol?.id === protocol.id
-                                ? "border-primary/30 bg-primary/5"
-                                : "border-outline-variant/10 bg-white hover:bg-surface-container-low"
-                            )}
-                          >
-                            <div>
-                              <p className="text-xs font-bold text-on-surface">{protocol.name}</p>
-                              <p className="mt-1 text-[0.625rem] font-bold uppercase tracking-[0.16em] text-outline">
-                                {selectedWorkflow.steps.find(step => step.id === protocol.sourceStepId)?.name || 'Step'}
-                              </p>
-                            </div>
-                            <ArrowUpRight size={14} className="text-outline" />
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    <button
-                      onClick={() => openProtocolModal(selectedProtocol ? 'edit' : 'create')}
-                      disabled={!selectedStep}
-                      className="w-full py-3 border-2 border-dashed border-outline-variant text-outline text-xs font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-surface-container-low transition-all disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <Plus size={16} /> {selectedProtocol ? 'Edit Hand-off Protocol' : 'Define New Hand-off Protocol'}
-                    </button>
-                  </div>
-                </section>
-
-                <section className="bg-white rounded-3xl border border-outline-variant/15 shadow-sm p-6">
-                  <h3 className="text-lg font-bold text-primary mb-4 flex items-center gap-2">
-                    <FileText size={20} />
-                    Documentation Automation
-                  </h3>
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between p-4 bg-surface-container-low rounded-xl border border-outline-variant/10">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-indigo-500 rounded-lg flex items-center justify-center text-white">
-                          <BookOpen size={20} />
-                        </div>
-                        <div>
-                          <p className="text-xs font-bold text-on-surface">Confluence Sync</p>
-                          <p className="text-[0.625rem] text-secondary">Last sync: 2h ago</p>
-                        </div>
-                      </div>
-                      <button className="text-[0.625rem] font-bold text-primary uppercase tracking-widest">Settings</button>
-                    </div>
-                    <div className="flex items-center justify-between p-4 bg-surface-container-low rounded-xl border border-outline-variant/10">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center text-white">
-                          <Share2 size={20} />
-                        </div>
-                        <div>
-                          <p className="text-xs font-bold text-on-surface">Jira Integration</p>
-                          <p className="text-[0.625rem] text-secondary">Status: Connected</p>
-                        </div>
-                      </div>
-                      <button className="text-[0.625rem] font-bold text-primary uppercase tracking-widest">Settings</button>
-                    </div>
-                  </div>
-                </section>
-              </div>
-            </div>
-          ) : view === 'workflows' ? (
-            <div className="col-span-2 rounded-[2rem] border border-dashed border-outline-variant/20 bg-white p-16 text-center">
-              <WorkflowIcon size={48} className="mx-auto mb-5 text-outline" />
-              <h3 className="text-2xl font-extrabold text-primary">No workflows yet</h3>
-              <p className="mx-auto mt-3 max-w-xl text-sm leading-relaxed text-secondary">
-                Start by defining an SDLC or operational workflow for {activeCapability.name}. Every step you add here becomes part of the active capability workspace and will be reused by tasks and orchestration.
-              </p>
-              <div className="mt-6 flex items-center justify-center gap-3">
+      {!selectedWorkflow ? (
+        <SectionCard
+          title="No workflow graph yet"
+          description="Start with the standard SDLC template or create a new agent workflow from scratch."
+          icon={WorkflowIcon}
+        >
+          <EmptyState
+            title="Build your first agent workflow"
+            description="Create a graph-based workflow with SDLC lanes, branching decisions, parallel agent tracks, governance pauses, and hand-off contracts."
+            icon={WorkflowIcon}
+            action={
+              <div className="flex flex-wrap items-center justify-center gap-3">
                 <button
-                  onClick={handleCreateStandardWorkflow}
-                  className="inline-flex items-center gap-2 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
+                  type="button"
+                  onClick={handleLoadStandardWorkflow}
+                  className="enterprise-button enterprise-button-primary"
                 >
-                  <Sparkles size={18} />
-                  Load Standard SDLC Flow
+                  <Sparkles size={16} />
+                  Load Standard SDLC
                 </button>
                 <button
-                  onClick={() => setIsWorkflowModalOpen(true)}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-outline-variant/20 bg-white px-5 py-3 text-sm font-bold text-secondary transition-all hover:bg-surface-container-low"
+                  type="button"
+                  onClick={() => setIsCreateWorkflowOpen(true)}
+                  className="enterprise-button enterprise-button-secondary"
                 >
-                  <Plus size={18} />
+                  <Plus size={16} />
                   Create Workflow
                 </button>
               </div>
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-8">
-              {/* Existing Blueprint Canvas logic or placeholder */}
-              <div className="col-span-2 py-24 text-center glass-panel border-dashed">
-                <Compass size={48} className="mx-auto text-outline mb-4 opacity-20" />
-                <h3 className="text-xl font-bold text-primary mb-2">Blueprint Designer</h3>
-                <p className="text-sm text-secondary max-w-md mx-auto">Select a blueprint from the library to begin orchestrating strategic delivery patterns.</p>
+            }
+          />
+        </SectionCard>
+      ) : (
+        <div className="designer-studio-shell">
+          <div className="designer-studio-topbar">
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusBadge tone="brand">{selectedWorkflow.workflowType || 'Custom'}</StatusBadge>
+                <StatusBadge tone="neutral">{selectedWorkflow.scope || 'CAPABILITY'}</StatusBadge>
+                {validationState.all.length > 0 ? (
+                  <StatusBadge tone="warning">
+                    {validationState.all.length} validation issue{validationState.all.length > 1 ? 's' : ''}
+                  </StatusBadge>
+                ) : (
+                  <StatusBadge tone="success">Graph valid</StatusBadge>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-800 bg-slate-900/70 px-2.5 py-1">
+                  <Route size={14} />
+                  {getWorkflowEdges(selectedWorkflow).length} hand-offs
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-800 bg-slate-900/70 px-2.5 py-1">
+                  <WorkflowIcon size={14} />
+                  {WORKFLOW_GRAPH_PHASES.length} SDLC lanes
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-800 bg-slate-900/70 px-2.5 py-1">
+                  <ShieldCheck size={14} />
+                  Agent, hand-off, and approval design
+                </span>
               </div>
             </div>
-          )}
-        </div>
-      </div>
 
-      <AnimatePresence>
-        {isWorkflowModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-24 pb-8 sm:p-6 sm:pt-28 sm:pb-10">
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsWorkflowModalOpen(false)}
-              className="absolute inset-0 bg-black/40 backdrop-blur-md"
-            />
-            <motion.form
-              initial={{ opacity: 0, y: 20, scale: 0.98 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 20, scale: 0.98 }}
-              onSubmit={handleCreateWorkflow}
-              className="relative my-auto w-full max-w-2xl max-h-[calc(100vh-8rem)] overflow-y-auto rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.2em] text-primary">New workflow</p>
-                  <h3 className="mt-2 text-2xl font-extrabold text-primary">Create a capability workflow</h3>
-                  <p className="mt-2 text-sm text-secondary">
-                    This workflow will live under {activeCapability.name} and drive downstream work items and artifact hand-offs.
-                  </p>
-                </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="designer-studio-toolbar">
                 <button
                   type="button"
-                  onClick={() => setIsWorkflowModalOpen(false)}
-                  className="rounded-full p-2 text-slate-400 transition-colors hover:bg-surface-container-low hover:text-primary"
+                  onClick={handleValidateWorkflow}
+                  className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
                 >
-                  <X size={20} />
+                  <ScanLine size={16} />
+                  Validate
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAutoLayout}
+                  className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                >
+                  <LayoutTemplate size={16} />
+                  Auto-layout
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCanvasScale(1)}
+                  className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                >
+                  <Route size={16} />
+                  Fit
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLoadStandardWorkflow}
+                  className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                >
+                  <Sparkles size={16} />
+                  Load Standard SDLC
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportWorkflow}
+                  className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                >
+                  <Download size={16} />
+                  Export
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDuplicateWorkflow()}
+                  className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                >
+                  <Copy size={16} />
+                  Duplicate
                 </button>
               </div>
+            </div>
+          </div>
 
-              <div className="mt-8 grid gap-5 md:grid-cols-2">
-                <div className="rounded-3xl border border-primary/10 bg-primary/5 p-5 md:col-span-2">
-                  <div className="flex items-start justify-between gap-4">
+          <div className="grid gap-0 xl:grid-cols-[19rem,minmax(0,1fr),23rem]">
+            <aside className="border-b border-slate-800/80 bg-slate-950/55 xl:border-b-0 xl:border-r">
+              <div className="designer-widget-stack">
+                <section className="designer-widget">
+                  <div className="designer-widget-header">
                     <div>
-                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">Standard Template</p>
-                      <p className="mt-2 text-sm leading-relaxed text-secondary">
-                        Load the enterprise SDLC template with business analysis, architecture, development, QA, governance gate, human approval, and release hand-offs.
+                      <p className="designer-widget-kicker">Node Widget</p>
+                      <div className="mt-2 flex items-center gap-2">
+                        <WorkflowIcon size={15} className="text-sky-300" />
+                        <p className="text-sm font-semibold text-white">Agent Step Kit</p>
+                      </div>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                        Drag workflow steps into the canvas. Use delivery, decision, approval, governance, and release nodes to design agent execution paths.
                       </p>
                     </div>
+                    <div className="designer-widget-toolbar">
+                      <button
+                        type="button"
+                        onClick={handleDuplicateSelectedNode}
+                        className="designer-widget-action"
+                      >
+                        <Copy size={14} />
+                        Copy node
+                      </button>
+                      <button
+                        type="button"
+                        title={connectFromNodeId ? 'Cancel hand-off mode' : 'Fallback hand-off mode'}
+                        onClick={() => {
+                          if (connectFromNodeId) {
+                            setConnectFromNodeId(null);
+                          } else if (selectedNodeId) {
+                            setConnectFromNodeId(selectedNodeId);
+                          }
+                        }}
+                        className={cn(
+                          'designer-widget-action',
+                          connectFromNodeId && 'border-emerald-400/40 bg-emerald-500/15 text-white',
+                        )}
+                      >
+                        <Route size={14} />
+                        {connectFromNodeId ? 'Cancel hand-off' : 'Hand-off mode'}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="designer-widget-body space-y-4">
+                    {AGENT_NODE_GROUPS.map(group => (
+                      <div
+                        key={group.title}
+                        className="rounded-2xl border border-slate-800 bg-slate-900/60 px-4 py-4"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-500">
+                              {group.title}
+                            </p>
+                            <p className="mt-1 text-[0.6875rem] leading-relaxed text-slate-400">
+                              {group.description}
+                            </p>
+                          </div>
+                          <StatusBadge tone="neutral">{phaseLabel(group.phase)}</StatusBadge>
+                        </div>
+                        <div className="mt-4 grid gap-2">
+                          {group.items.map(item => {
+                            const Icon = getNodeIcon(item.type);
+                            const optionDesc = NODE_TYPE_OPTIONS.find(o => o.type === item.type)?.description || '';
+                            return (
+                              <button
+                                key={`${item.type}-${item.label}`}
+                                type="button"
+                                draggable
+                                title={`Drag ${item.label} to canvas`}
+                                onDragStart={event => {
+                                  event.dataTransfer.setData(
+                                    'application/singularity-node-template',
+                                    JSON.stringify({
+                                      type: item.type,
+                                      phase: item.defaultPhase,
+                                      label: item.label,
+                                    }),
+                                  );
+                                }}
+                                className="group flex items-center gap-3 rounded-2xl border border-slate-800 bg-slate-950/75 px-3 py-3 text-left transition hover:border-sky-500/30 hover:bg-slate-900"
+                              >
+                                <span
+                                  className={cn(
+                                    'flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition',
+                                    NODE_TYPE_TONE[item.type],
+                                  )}
+                                >
+                                  <Icon size={16} />
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                  <span className="block text-sm font-semibold text-white">
+                                    {item.label}
+                                  </span>
+                                  <span className="mt-1 block text-[0.6875rem] leading-relaxed text-slate-400">
+                                    {optionDesc}
+                                  </span>
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="designer-widget">
+                  <div className="designer-widget-header">
+                    <div>
+                      <p className="designer-widget-kicker">Tree Widget</p>
+                      <div className="mt-2 flex items-center gap-2">
+                        <PanelLeft size={15} className="text-sky-300" />
+                        <p className="text-sm font-semibold text-white">Workflow Tree</p>
+                      </div>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                        Browse the workflow by SDLC phase and jump straight to the selected agent step.
+                      </p>
+                    </div>
+                    <div className="designer-widget-toolbar">
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-[0.6875rem] font-semibold text-slate-300">
+                        {orderedNodes.length} nodes
+                      </div>
+                    </div>
+                  </div>
+                  <div className="designer-widget-body">
+                    <div className="space-y-3">
+                      {laneSummaries.map(({ phase, count }) => (
+                        <div key={phase} className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-500">
+                              {phaseLabel(phase)}
+                            </p>
+                            <span className="rounded-full border border-slate-800 bg-slate-950/80 px-2 py-1 text-[0.625rem] font-bold text-slate-400">
+                              {count}
+                            </span>
+                          </div>
+                          {orderedNodes
+                            .filter(node => node.phase === phase)
+                            .map(node => (
+                              <button
+                                key={node.id}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedNodeId(node.id);
+                                  setSelectedEdgeId(null);
+                                  focusNodeOnCanvas(node.id);
+                                }}
+                                className={cn(
+                                  'flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition',
+                                  selectedNodeId === node.id
+                                    ? 'bg-sky-500/15 text-sky-100'
+                                    : 'text-slate-200 hover:bg-slate-950 hover:text-white',
+                                )}
+                              >
+                                <span className="truncate text-sm font-medium">
+                                  {node.name}
+                                </span>
+                                <ArrowRight size={13} className="shrink-0 text-slate-500" />
+                              </button>
+                            ))}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </aside>
+
+            <main className="min-w-0 border-b border-slate-800/80 bg-slate-950/25 xl:border-b-0 xl:border-r">
+              <div className="border-b border-slate-800/80 px-5 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StatusBadge tone="brand">{selectedWorkflow.workflowType || 'Custom'}</StatusBadge>
+                      <StatusBadge tone="neutral">{selectedWorkflow.scope || 'CAPABILITY'}</StatusBadge>
+                      {validationState.all.length > 0 ? (
+                        <StatusBadge tone="warning">
+                          {validationState.all.length} validation issue{validationState.all.length > 1 ? 's' : ''}
+                        </StatusBadge>
+                      ) : (
+                        <StatusBadge tone="success">Graph valid</StatusBadge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+                      <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-800 bg-slate-900/70 px-2.5 py-1">
+                        <Route size={14} />
+                        {getWorkflowEdges(selectedWorkflow).length} hand-offs
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-800 bg-slate-900/70 px-2.5 py-1">
+                        <PanelLeft size={14} />
+                        {WORKFLOW_GRAPH_PHASES.length} SDLC lanes
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-800 bg-slate-900/70 px-2.5 py-1">
+                        <GitBranch size={14} />
+                        Agent steps + hand-offs
+                      </span>
+                    </div>
+                  </div>
+                  <Toolbar className="gap-2 border-slate-800/80 bg-slate-900/70 p-1 shadow-none">
                     <button
                       type="button"
-                      onClick={handleCreateStandardWorkflow}
-                      className="rounded-2xl bg-primary px-4 py-2.5 text-xs font-bold uppercase tracking-[0.18em] text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
+                      onClick={() => setCanvasScale(value => Math.max(0.7, Number((value - 0.1).toFixed(1))))}
+                      className="rounded-xl px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-slate-800"
                     >
-                      Use Standard
+                      -
                     </button>
+                    <span className="min-w-[3rem] text-center text-xs font-semibold text-slate-300">
+                      {Math.round(canvasScale * 100)}%
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setCanvasScale(value => Math.min(1.4, Number((value + 0.1).toFixed(1))))}
+                      className="rounded-xl px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-slate-800"
+                    >
+                      +
+                    </button>
+                  </Toolbar>
+                </div>
+              </div>
+
+              <div className="px-5 py-5">
+                <div
+                  ref={canvasRef}
+                  className="designer-canvas-shell relative h-[calc(100vh-23rem)] min-h-[44rem]"
+                  onDragOver={event => event.preventDefault()}
+                  onDrop={handleCanvasDrop}
+                  onMouseMove={event => {
+                    if (!dragLinkFromNodeId || !canvasRef.current) {
+                      return;
+                    }
+                    setDragLinkPosition(
+                      getCanvasPointFromMouse(
+                        event.clientX,
+                        event.clientY,
+                        canvasRef.current,
+                        canvasScale,
+                      ),
+                    );
+                  }}
+                  onMouseUp={() => {
+                    if (dragLinkFromNodeId) {
+                      cancelDragLink();
+                    }
+                  }}
+                >
+                  <div className="pointer-events-none absolute left-4 top-4 z-10 flex items-center gap-2">
+                    <div className="rounded-full border border-slate-700 bg-slate-950/90 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-300">
+                      Designer
+                    </div>
+                    <div className="rounded-full border border-slate-700 bg-slate-950/90 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-400">
+                      Agent workflow canvas
+                    </div>
+                  </div>
+                  <div className="absolute left-4 top-16 z-20 pointer-events-auto">
+                    <div className="designer-floating-widget">
+                      <div className="designer-floating-widget-header">
+                        <div>
+                          <p className="designer-widget-kicker">Canvas Widget</p>
+                          <div className="mt-2 flex items-center gap-2">
+                            <WorkflowIcon size={15} className="text-sky-300" />
+                            <p className="text-sm font-semibold text-white">Workflow Library</p>
+                          </div>
+                          <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                            Keep workflow copies and variants inside the canvas, like a floating studio library.
+                          </p>
+                        </div>
+                        <div className="designer-widget-toolbar">
+                          <button
+                            type="button"
+                            onClick={() => setIsWorkflowLibraryOpen(current => !current)}
+                            className="designer-widget-action"
+                          >
+                            {isWorkflowLibraryOpen ? 'Collapse' : 'Open'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {isWorkflowLibraryOpen ? (
+                        <div className="designer-floating-widget-body">
+                          <div className="mb-3 grid grid-cols-2 gap-2">
+                            <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
+                              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-500">
+                                Runtime
+                              </p>
+                              <p className="mt-2 text-lg font-bold text-white">{visibleNodeCount}</p>
+                            </div>
+                            <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
+                              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-500">
+                                Control
+                              </p>
+                              <p className="mt-2 text-lg font-bold text-white">{controlNodeCount}</p>
+                            </div>
+                          </div>
+                          <div className="mb-3 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setIsCreateWorkflowOpen(true)}
+                              className="designer-widget-action"
+                            >
+                              <Plus size={14} />
+                              New
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDuplicateWorkflow()}
+                              className="designer-widget-action"
+                            >
+                              <Copy size={14} />
+                              Copy
+                            </button>
+                          </div>
+                          <div className="max-h-[22rem] space-y-2 overflow-y-auto pr-1">
+                            {workflows.map(workflow => (
+                              <div
+                                key={workflow.id}
+                                className={cn(
+                                  'rounded-2xl border px-4 py-3 transition',
+                                  selectedWorkflow.id === workflow.id
+                                    ? 'border-sky-400/40 bg-sky-500/15 text-white shadow-[0_10px_26px_rgba(56,189,248,0.12)]'
+                                    : 'border-slate-800 bg-slate-900/60 text-slate-200 hover:border-slate-600 hover:bg-slate-900',
+                                )}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedWorkflowId(workflow.id);
+                                      setSelectedNodeId(null);
+                                      setSelectedEdgeId(null);
+                                      setConnectFromNodeId(null);
+                                      cancelDragLink();
+                                    }}
+                                    className="min-w-0 flex-1 text-left"
+                                  >
+                                    <p className="truncate text-sm font-semibold">{workflow.name}</p>
+                                    <p className="mt-1 text-[0.6875rem] text-slate-400">
+                                      {workflow.workflowType || 'Custom'} · {workflow.steps.length} projected steps
+                                    </p>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    title={`Duplicate ${workflow.name}`}
+                                    onClick={() => handleDuplicateWorkflow(workflow)}
+                                    className="rounded-xl border border-slate-700 bg-slate-950/80 p-2 text-slate-300 transition hover:border-sky-400/40 hover:text-white"
+                                  >
+                                    <Copy size={14} />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div
+                    className="relative min-h-[72rem] min-w-[96rem] origin-top-left"
+                    style={{ transform: `scale(${canvasScale})`, transformOrigin: 'top left' }}
+                  >
+                    {WORKFLOW_GRAPH_PHASES.map((phase, index) => (
+                      <div
+                        key={phase}
+                        className="pointer-events-none absolute left-0 right-0 border-b border-dashed border-slate-700/70"
+                        style={{
+                          top: 24 + index * 176,
+                          height: 176,
+                        }}
+                      >
+                        <div className="sticky left-0 top-0 inline-flex rounded-r-full border border-slate-700 bg-slate-900/95 px-3 py-1.5 text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-slate-200 shadow-sm">
+                          {phaseLabel(phase)}
+                        </div>
+                      </div>
+                    ))}
+
+                    <svg className="absolute inset-0 h-full w-full overflow-visible">
+                      {edges.map(edge => {
+                        const fromNode = getWorkflowNode(selectedWorkflow, edge.fromNodeId);
+                        const toNode = getWorkflowNode(selectedWorkflow, edge.toNodeId);
+                        if (!fromNode || !toNode) {
+                          return null;
+                        }
+                        const isSelected = selectedEdgeId === edge.id;
+                        const midX = (fromNode.layout.x + toNode.layout.x + nodeDimensions.width) / 2;
+                        const midY = (fromNode.layout.y + toNode.layout.y) / 2 + nodeDimensions.height / 2;
+
+                        return (
+                          <g
+                            key={edge.id}
+                            className="cursor-pointer"
+                            onClick={event => {
+                              event.stopPropagation();
+                              setSelectedEdgeId(edge.id);
+                              setSelectedNodeId(null);
+                              setConnectFromNodeId(null);
+                            }}
+                          >
+                            <path
+                              d={getEdgePath(fromNode, toNode)}
+                              fill="none"
+                              stroke={isSelected ? '#38bdf8' : '#64748b'}
+                              strokeWidth={isSelected ? 3 : 2}
+                              strokeDasharray={edge.conditionType === 'PARALLEL' ? '8 7' : undefined}
+                            />
+                            <circle cx={fromNode.layout.x + nodeDimensions.width} cy={fromNode.layout.y + nodeDimensions.height / 2} r="4" fill={isSelected ? '#38bdf8' : '#64748b'} />
+                            <circle cx={toNode.layout.x} cy={toNode.layout.y + nodeDimensions.height / 2} r="4" fill={isSelected ? '#38bdf8' : '#64748b'} />
+                            <foreignObject x={midX - 96} y={midY - 18} width={192} height={40}>
+                              <div
+                                className={cn(
+                                  'inline-flex w-full items-center justify-center rounded-full border px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] shadow-sm backdrop-blur',
+                                  isSelected
+                                    ? 'border-sky-400/60 bg-sky-500/20 text-sky-100'
+                                    : 'border-slate-600 bg-slate-900/90 text-slate-200',
+                                )}
+                              >
+                                {edge.label || edge.conditionType}
+                              </div>
+                            </foreignObject>
+                          </g>
+                        );
+                      })}
+
+                      {dragLinkStart && dragLinkPosition ? (
+                        <path
+                          d={`M ${dragLinkStart.x} ${dragLinkStart.y} C ${dragLinkStart.x + 70} ${dragLinkStart.y}, ${dragLinkPosition.x - 70} ${dragLinkPosition.y}, ${dragLinkPosition.x} ${dragLinkPosition.y}`}
+                          fill="none"
+                          stroke="#38bdf8"
+                          strokeWidth={3}
+                          strokeDasharray="8 6"
+                        />
+                      ) : null}
+                    </svg>
+
+                    {orderedNodes.map(node => {
+                      const Icon = getNodeIcon(node.type, node.etlConfig?.subType);
+                      const isSelected = selectedNodeId === node.id;
+                      const isConnectTarget =
+                        Boolean(connectFromNodeId) && connectFromNodeId !== node.id;
+                      const isPortTarget =
+                        Boolean(dragLinkFromNodeId) && dragLinkFromNodeId !== node.id;
+
+                      return (
+                        <div
+                          key={node.id}
+                          draggable
+                          onDragStart={event => {
+                            event.dataTransfer.setData(
+                              'application/singularity-node-move',
+                              node.id,
+                            );
+                          }}
+                          onClick={() => {
+                            if (connectFromNodeId && connectFromNodeId !== node.id) {
+                              handleConnectNodes(node.id);
+                              return;
+                            }
+                            setSelectedNodeId(node.id);
+                            setSelectedEdgeId(null);
+                          }}
+                          onKeyDown={event => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              setSelectedNodeId(node.id);
+                              setSelectedEdgeId(null);
+                            }
+                          }}
+                          role="button"
+                          tabIndex={0}
+                          className={cn(
+                            'designer-node-card',
+                            isSelected && 'border-sky-400 ring-2 ring-sky-300/60',
+                            isConnectTarget && 'border-emerald-300 ring-2 ring-emerald-200/80',
+                            validationState.nodeIdsWithErrors.has(node.id) &&
+                              'border-red-300 ring-2 ring-red-200/60',
+                          )}
+                          style={{
+                            left: node.layout.x,
+                            top: node.layout.y,
+                            minHeight: nodeDimensions.height,
+                          }}
+                        >
+                            <button
+                              type="button"
+                              onMouseUp={event => handleCompleteDragLink(event, node.id)}
+                              onClick={event => event.stopPropagation()}
+                            className={cn(
+                              'designer-node-port designer-node-port-input',
+                              isPortTarget && 'designer-node-port-target',
+                            )}
+                            title={`Connect into ${node.name}`}
+                          />
+                          <button
+                            type="button"
+                            onMouseDown={event => handleStartDragLink(event, node.id)}
+                            onClick={event => event.stopPropagation()}
+                            className={cn(
+                              'designer-node-port designer-node-port-output',
+                              dragLinkFromNodeId === node.id && 'designer-node-port-active',
+                            )}
+                            title={`Start link from ${node.name}`}
+                          />
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span className={cn(
+                                'inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border',
+                                NODE_TYPE_TONE[node.type],
+                              )}>
+                                <Icon size={16} />
+                              </span>
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-semibold text-on-surface">
+                                  {node.name}
+                                </p>
+                                <p className="text-[0.6875rem] text-secondary">
+                                  {phaseLabel(node.phase)}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <span className="h-2.5 w-2.5 rounded-full bg-slate-300" />
+                              <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <StatusBadge tone={isVisibleWorkflowNode(node.type) ? 'brand' : 'neutral'}>
+                              {getNodeTypeLabel(node.type)}
+                            </StatusBadge>
+                            {node.agentId ? (
+                              <span className="truncate text-[0.6875rem] font-medium text-outline">
+                                {workspace.agents.find(agent => agent.id === node.agentId)?.name || node.agentId}
+                              </span>
+                            ) : isLegacyEtlNodeType(node.type) ? (
+                              <span className="truncate text-[0.6875rem] font-medium text-outline">
+                                Legacy ETL node
+                              </span>
+                            ) : null}
+                          </div>
+
+                          <p className="line-clamp-2 text-xs leading-relaxed text-secondary">
+                            {node.description || node.action || 'No node guidance yet.'}
+                          </p>
+
+                          <div className="mt-auto flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 text-[0.6875rem] text-outline">
+                              <span className="h-2.5 w-2.5 rounded-full bg-sky-400" />
+                              in
+                              <span className="ml-2 h-2.5 w-2.5 rounded-full bg-primary" />
+                              out
+                            </div>
+                            <button
+                              type="button"
+                              onClick={event => {
+                                event.stopPropagation();
+                                setConnectFromNodeId(node.id);
+                                setSelectedNodeId(node.id);
+                                setSelectedEdgeId(null);
+                              }}
+                              className="rounded-xl border border-outline-variant/30 px-3 py-1.5 text-[0.6875rem] font-semibold text-secondary transition hover:bg-surface-container-low"
+                            >
+                              Hand-off
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="designer-minimap">
+                    <div className="mb-2 flex items-center justify-between gap-4">
+                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-400">
+                        Minimap
+                      </p>
+                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.16em] text-slate-500">
+                        {Math.round(canvasScale * 100)}%
+                      </p>
+                    </div>
+                    <div
+                      className="relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80"
+                      style={{
+                        width: Math.max(graphWidth * minimapScale, 120),
+                        height: Math.max(graphHeight * minimapScale, 88),
+                      }}
+                    >
+                      {orderedNodes.map(node => (
+                        <div
+                          key={`mini-${node.id}`}
+                          className={cn(
+                            'absolute rounded-sm border',
+                            selectedNodeId === node.id
+                              ? 'border-sky-300 bg-sky-400/60'
+                              : 'border-slate-500 bg-slate-300/30',
+                          )}
+                          style={{
+                            left: node.layout.x * minimapScale,
+                            top: node.layout.y * minimapScale,
+                            width: nodeDimensions.width * minimapScale,
+                            height: Math.max(nodeDimensions.height * minimapScale, 6),
+                          }}
+                        />
+                      ))}
+                    </div>
                   </div>
                 </div>
 
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Workflow name</label>
+                <div className="designer-utility-dock">
+                  <div className="designer-panel-card px-4 py-4">
+                    <div className="flex items-center gap-2">
+                      <WorkflowIcon size={16} className="text-sky-300" />
+                      <p className="text-sm font-semibold text-white">Execution Path</p>
+                    </div>
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      {workflowSamplePath.length ? (
+                        workflowSamplePath.map((step, index) => (
+                          <React.Fragment key={`${step.label}-${index}`}>
+                            <div className="rounded-2xl border border-slate-800 bg-slate-950/80 px-3 py-2 shadow-sm">
+                              <p className="text-xs font-semibold text-white">{step.label}</p>
+                              {step.note ? (
+                                <p className="mt-1 text-[0.6875rem] text-slate-400">{step.note}</p>
+                              ) : null}
+                            </div>
+                            {index < workflowSamplePath.length - 1 ? (
+                              <ArrowRight size={14} className="text-slate-500" />
+                            ) : null}
+                          </React.Fragment>
+                        ))
+                      ) : (
+                        <p className="text-sm text-slate-400">
+                          Add nodes and transitions to preview a sample execution path.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="designer-panel-card px-4 py-4">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 size={16} className="text-sky-300" />
+                      <p className="text-sm font-semibold text-white">Validation</p>
+                    </div>
+                    <div className="mt-4 space-y-2">
+                      {validationState.all.length ? (
+                        validationState.all.map(error => (
+                          <div
+                            key={error.id}
+                            className="rounded-2xl border border-red-400/30 bg-red-500/10 px-3 py-3 text-xs leading-relaxed text-red-100"
+                          >
+                            {error.message}
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-sm text-slate-400">
+                          START, END, branching, join, and governance checks are all passing.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </main>
+
+            <aside className="designer-inspector-shell">
+              <div className="sticky top-0 z-10 border-b border-slate-800/80 bg-white/96 px-5 py-4 backdrop-blur">
+                <div className="flex items-center gap-2">
+                  <Wrench size={16} className="text-primary" />
+                  <p className="text-sm font-semibold text-on-surface">Inspector</p>
+                </div>
+                <p className="mt-1 text-xs leading-relaxed text-secondary">
+                  Configure agent ownership, runtime controls, hand-off rules, artifact expectations, and approvals for the selected graph element.
+                </p>
+              </div>
+              <div className="h-[calc(100vh-24rem)] min-h-[46rem] overflow-y-auto p-5">
+            <SectionCard
+            title="Properties"
+            description="Use this dock to configure workflow metadata, execution policy, and hand-off behavior."
+            icon={Wrench}
+            className="border-outline-variant/40 shadow-none"
+          >
+            {selectedNode && nodeDraft ? (
+              <FormSection
+                title="Node Configuration"
+                description="Configure the selected graph node."
+                icon={WorkflowIcon}
+                action={
+                  <button
+                    type="button"
+                    onClick={handleDeleteSelectedNode}
+                    className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 transition hover:bg-red-50"
+                  >
+                    Delete
+                  </button>
+                }
+              >
+                <div className="grid gap-4">
+                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      General
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      Core node identity, type, phase, and assignment.
+                    </p>
+                  </div>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Name</span>
+                    <input
+                      value={nodeDraft.name}
+                      onChange={event =>
+                        setNodeDraft(current => (current ? { ...current, name: event.target.value } : current))
+                      }
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Node Type</span>
+                    <select
+                      value={nodeDraft.type}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                type: event.target.value as WorkflowNodeType,
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    >
+                      {NODE_TYPE_OPTIONS.map(option => (
+                        <option key={option.type} value={option.type}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Phase Lane</span>
+                    <select
+                      value={nodeDraft.phase}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                phase: event.target.value as WorkItemPhase,
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    >
+                      {WORKFLOW_GRAPH_PHASES.map(phase => (
+                        <option key={phase} value={phase}>
+                          {phaseLabel(phase)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Assigned Agent</span>
+                    <select
+                      value={nodeDraft.agentId || ''}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                agentId: event.target.value || undefined,
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    >
+                      <option value="">Control node</option>
+                      {workspace.agents.map(agent => (
+                        <option key={agent.id} value={agent.id}>
+                          {agent.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Action</span>
+                    <input
+                      value={nodeDraft.action || ''}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                action: event.target.value,
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Description</span>
+                    <textarea
+                      rows={4}
+                      value={nodeDraft.description || ''}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                description: event.target.value,
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input min-h-[7rem]"
+                    />
+                  </label>
+
+                  {isLegacyEtlNodeType(nodeDraft.type) ? (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900">
+                      This node came from a legacy ETL-style workflow. It can still be kept for compatibility, but this designer is now optimized for agent workflows. If you want a clean agent model, change the node type to a delivery, decision, governance, approval, or release step.
+                    </div>
+                  ) : null}
+
+                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      Artifacts & Exit
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      Capture the evidence produced by this step and the conditions needed before hand-off.
+                    </p>
+                  </div>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Input Artifact Id</span>
+                    <input
+                      value={nodeDraft.inputArtifactId || ''}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                inputArtifactId: event.target.value || undefined,
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Output Artifact Id</span>
+                    <input
+                      value={nodeDraft.outputArtifactId || ''}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                outputArtifactId: event.target.value || undefined,
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Exit Criteria</span>
+                    <textarea
+                      rows={4}
+                      value={(nodeDraft.exitCriteria || []).join('\n')}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                exitCriteria: event.target.value
+                                  .split('\n')
+                                  .map(value => value.trim())
+                                  .filter(Boolean),
+                              }
+                            : current,
+                        )
+                      }
+                      placeholder="Artifact drafted&#10;Peer review complete&#10;Ready for next hand-off"
+                      className="enterprise-input min-h-[7rem]"
+                    />
+                  </label>
+
+                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      Approvals
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      Roles and governance expectations for this node.
+                    </p>
+                  </div>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Approver Roles</span>
+                    <input
+                      value={(nodeDraft.approverRoles || []).join(', ')}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                approverRoles: event.target.value
+                                  .split(',')
+                                  .map(value => value.trim())
+                                  .filter(Boolean),
+                              }
+                            : current,
+                        )
+                      }
+                      placeholder="Development Manager, Team Lead"
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      Runtime
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      Tooling and execution guidance used during automated runs.
+                    </p>
+                  </div>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Allowed Tools</span>
+                    <select
+                      multiple
+                      value={nodeDraft.allowedToolIds || []}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                allowedToolIds: Array.from(event.target.selectedOptions).map(
+                                  (option: HTMLOptionElement) =>
+                                    option.value as ToolAdapterId,
+                                ),
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input min-h-[9rem]"
+                    >
+                      {TOOL_OPTIONS.map(toolId => (
+                        <option key={toolId} value={toolId}>
+                          {toolId}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Execution Notes</span>
+                    <textarea
+                      rows={4}
+                      value={nodeDraft.executionNotes || ''}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                executionNotes: event.target.value,
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input min-h-[7rem]"
+                    />
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Preferred Workspace Path</span>
+                    <input
+                      value={nodeDraft.preferredWorkspacePath || ''}
+                      onChange={event =>
+                        setNodeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                preferredWorkspacePath: event.target.value || undefined,
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleApplyNodeDraft}
+                    className="enterprise-button enterprise-button-primary"
+                  >
+                    Save node
+                  </button>
+                </div>
+              </FormSection>
+            ) : selectedEdge && edgeDraft ? (
+              <FormSection
+                title="Transition Configuration"
+                description="Define hand-off rules, branch semantics, and artifact contracts."
+                icon={GitBranch}
+                action={
+                  <button
+                    type="button"
+                    onClick={handleDeleteSelectedEdge}
+                    className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 transition hover:bg-red-50"
+                  >
+                    Delete
+                  </button>
+                }
+              >
+                <div className="grid gap-4">
+                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      General
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      Branch identity and condition handling for the selected transition.
+                    </p>
+                  </div>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Label</span>
+                    <input
+                      value={edgeDraft.label || ''}
+                      onChange={event =>
+                        setEdgeDraft(current =>
+                          current ? { ...current, label: event.target.value } : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Condition Type</span>
+                    <select
+                      value={edgeDraft.conditionType}
+                      onChange={event =>
+                        setEdgeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                conditionType: event.target.value as WorkflowEdge['conditionType'],
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    >
+                      {EDGE_CONDITION_OPTIONS.map(option => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Branch Key</span>
+                    <input
+                      value={edgeDraft.branchKey || ''}
+                      onChange={event =>
+                        setEdgeDraft(current =>
+                          current ? { ...current, branchKey: event.target.value } : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      Hand-off
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      Protocol and branch metadata for moving work between nodes.
+                    </p>
+                  </div>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Handoff Protocol Id</span>
+                    <input
+                      value={edgeDraft.handoffProtocolId || ''}
+                      onChange={event =>
+                        setEdgeDraft(current =>
+                          current
+                            ? { ...current, handoffProtocolId: event.target.value || undefined }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      Artifacts
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      Define the input and output expectations carried across this edge.
+                    </p>
+                  </div>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Artifact Inputs</span>
+                    <input
+                      value={(edgeDraft.artifactContract?.requiredInputs || []).join(', ')}
+                      onChange={event =>
+                        setEdgeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                artifactContract: {
+                                  ...(current.artifactContract || {}),
+                                  requiredInputs: event.target.value
+                                    .split(',')
+                                    .map(value => value.trim())
+                                    .filter(Boolean),
+                                },
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Expected Outputs</span>
+                    <input
+                      value={(edgeDraft.artifactContract?.expectedOutputs || []).join(', ')}
+                      onChange={event =>
+                        setEdgeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                artifactContract: {
+                                  ...(current.artifactContract || {}),
+                                  expectedOutputs: event.target.value
+                                    .split(',')
+                                    .map(value => value.trim())
+                                    .filter(Boolean),
+                                },
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input"
+                    />
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Artifact Contract Notes</span>
+                    <textarea
+                      rows={4}
+                      value={edgeDraft.artifactContract?.notes || ''}
+                      onChange={event =>
+                        setEdgeDraft(current =>
+                          current
+                            ? {
+                                ...current,
+                                artifactContract: {
+                                  ...(current.artifactContract || {}),
+                                  notes: event.target.value,
+                                },
+                              }
+                            : current,
+                        )
+                      }
+                      className="enterprise-input min-h-[7rem]"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleApplyEdgeDraft}
+                    className="enterprise-button enterprise-button-primary"
+                  >
+                    Save transition
+                  </button>
+                </div>
+              </FormSection>
+            ) : (
+              <EmptyState
+                title="Select a node or transition"
+                description="Choose a node to edit its SDLC phase, agent, tools, and execution notes. Choose an edge to configure hand-off rules, branch labels, and artifact contracts."
+                icon={Wrench}
+                action={
+                  connectFromNodeId ? (
+                    <button
+                      type="button"
+                      onClick={() => setConnectFromNodeId(null)}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      Cancel hand-off mode
+                    </button>
+                  ) : undefined
+                }
+              />
+              )}
+            </SectionCard>
+              </div>
+            </aside>
+          </div>
+        </div>
+      )}
+
+      {isCreateWorkflowOpen ? (
+        <div className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-20 backdrop-blur-sm">
+          <div className="w-full max-w-3xl">
+            <ModalShell
+              eyebrow="New Workflow Graph"
+              title="Create a graph-first workflow"
+              description="Start from an empty workflow with START and END nodes, then drag agent steps, decisions, approvals, and releases into the canvas."
+              actions={
+                <button
+                  type="button"
+                  onClick={() => setIsCreateWorkflowOpen(false)}
+                  className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface"
+                >
+                  <X size={18} />
+                </button>
+              }
+            >
+              <form className="grid gap-5" onSubmit={handleCreateWorkflow}>
+                <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                  <span>Workflow Name</span>
                   <input
                     required
                     value={workflowDraft.name}
-                    onChange={event => setWorkflowDraft(prev => ({ ...prev, name: event.target.value }))}
-                    placeholder="e.g. SDLC change lifecycle"
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    onChange={event =>
+                      setWorkflowDraft(current => ({ ...current, name: event.target.value }))
+                    }
+                    className="enterprise-input"
                   />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Workflow type</label>
-                  <select
-                    value={workflowDraft.workflowType}
-                    onChange={event =>
-                      setWorkflowDraft(prev => ({
-                        ...prev,
-                        workflowType: event.target.value as NonNullable<Workflow['workflowType']>,
-                      }))
-                    }
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    <option value="SDLC">SDLC</option>
-                    <option value="Operational">Operational</option>
-                    <option value="Governance">Governance</option>
-                    <option value="Custom">Custom</option>
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Workflow scope</label>
-                  <select
-                    value={workflowDraft.scope}
-                    onChange={event =>
-                      setWorkflowDraft(prev => ({
-                        ...prev,
-                        scope: event.target.value as NonNullable<Workflow['scope']>,
-                      }))
-                    }
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    <option value="CAPABILITY">Capability Local</option>
-                    <option value="GLOBAL">Global</option>
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Initial state</label>
-                  <div className="flex h-[50px] items-center rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 text-sm font-bold text-primary">
-                    PENDING
-                  </div>
-                </div>
-
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Summary</label>
+                </label>
+                <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                  <span>Summary</span>
                   <textarea
+                    rows={4}
                     value={workflowDraft.summary}
-                    onChange={event => setWorkflowDraft(prev => ({ ...prev, summary: event.target.value }))}
-                    placeholder="Describe the lifecycle and the outcome this workflow should manage."
-                    className="h-28 w-full resize-none rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    onChange={event =>
+                      setWorkflowDraft(current => ({ ...current, summary: event.target.value }))
+                    }
+                    className="enterprise-input min-h-[7rem]"
                   />
+                </label>
+                <div className="grid gap-5 md:grid-cols-2">
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Workflow Type</span>
+                    <select
+                      value={workflowDraft.workflowType}
+                      onChange={event =>
+                        setWorkflowDraft(current => ({
+                          ...current,
+                          workflowType: event.target.value as NonNullable<Workflow['workflowType']>,
+                        }))
+                      }
+                      className="enterprise-input"
+                    >
+                      <option value="SDLC">SDLC</option>
+                      <option value="Operational">Operational</option>
+                      <option value="Governance">Governance</option>
+                      <option value="Custom">Custom</option>
+                    </select>
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Scope</span>
+                    <select
+                      value={workflowDraft.scope}
+                      onChange={event =>
+                        setWorkflowDraft(current => ({
+                          ...current,
+                          scope: event.target.value as NonNullable<Workflow['scope']>,
+                        }))
+                      }
+                      className="enterprise-input"
+                    >
+                      <option value="CAPABILITY">Capability Local</option>
+                      <option value="GLOBAL">Global</option>
+                    </select>
+                  </label>
                 </div>
-              </div>
-
-              <div className="mt-8 flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => setIsWorkflowModalOpen(false)}
-                  className="flex-1 rounded-2xl border border-outline-variant/20 px-5 py-3 text-sm font-bold text-secondary transition-all hover:bg-surface-container-low"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
-                >
-                  Save Workflow
-                </button>
-              </div>
-            </motion.form>
+                <div className="flex flex-wrap justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsCreateWorkflowOpen(false)}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="enterprise-button enterprise-button-primary">
+                    <Plus size={16} />
+                    Create Graph Workflow
+                  </button>
+                </div>
+              </form>
+            </ModalShell>
           </div>
-        )}
-        {isStepModalOpen && selectedWorkflow && (
-          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-24 pb-8 sm:p-6 sm:pt-28 sm:pb-10">
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsStepModalOpen(false)}
-              className="absolute inset-0 bg-black/40 backdrop-blur-md"
-            />
-            <motion.form
-              initial={{ opacity: 0, y: 20, scale: 0.98 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 20, scale: 0.98 }}
-              onSubmit={handleAddStep}
-              className="relative my-auto w-full max-w-2xl max-h-[calc(100vh-8rem)] overflow-y-auto rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.2em] text-primary">Workflow step</p>
-                  <h3 className="mt-2 text-2xl font-extrabold text-primary">Add a hand-off step</h3>
-                  <p className="mt-2 text-sm text-secondary">
-                    Connect an agent, action, and input/output artifact so this capability workflow can drive execution.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsStepModalOpen(false)}
-                  className="rounded-full p-2 text-slate-400 transition-colors hover:bg-surface-container-low hover:text-primary"
-                >
-                  <X size={20} />
-                </button>
-              </div>
-
-              <div className="mt-8 grid gap-5 md:grid-cols-2">
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Step name</label>
-                  <input
-                    required
-                    value={stepDraft.name}
-                    onChange={event => setStepDraft(prev => ({ ...prev, name: event.target.value }))}
-                    placeholder="e.g. Governance Gate"
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">SDLC phase</label>
-                  <select
-                    value={stepDraft.phase}
-                    onChange={event =>
-                      setStepDraft(prev => ({
-                        ...prev,
-                        phase: event.target.value as WorkItemPhase,
-                      }))
-                    }
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    {SDLC_BOARD_PHASES.filter(phase => phase !== 'BACKLOG' && phase !== 'DONE').map(phase => (
-                      <option key={phase} value={phase}>
-                        {phase}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Step type</label>
-                  <select
-                    value={stepDraft.stepType}
-                    onChange={event =>
-                      setStepDraft(prev => ({
-                        ...prev,
-                        stepType: event.target.value as WorkflowStep['stepType'],
-                      }))
-                    }
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    <option value="DELIVERY">Delivery</option>
-                    <option value="GOVERNANCE_GATE">Governance Gate</option>
-                    <option value="HUMAN_APPROVAL">Human Approval</option>
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Agent</label>
-                  <select
-                    value={stepDraft.agentId}
-                    onChange={event => setStepDraft(prev => ({ ...prev, agentId: event.target.value }))}
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    {workspace.agents.map(agent => (
-                      <option key={agent.id} value={agent.id}>
-                        {agent.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Output artifact</label>
-                  <select
-                    value={stepDraft.outputArtifactId}
-                    onChange={event => setStepDraft(prev => ({ ...prev, outputArtifactId: event.target.value }))}
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    <option value="">No artifact</option>
-                    {visibleArtifacts.map(artifact => (
-                      <option key={artifact.id} value={artifact.id}>
-                        {artifact.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Action</label>
-                  <input
-                    required
-                    value={stepDraft.action}
-                    onChange={event => setStepDraft(prev => ({ ...prev, action: event.target.value }))}
-                    placeholder="e.g. Review documentation and produce test strategy"
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </div>
-
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Description</label>
-                  <textarea
-                    value={stepDraft.description}
-                    onChange={event => setStepDraft(prev => ({ ...prev, description: event.target.value }))}
-                    placeholder="Describe the purpose of this step and what must happen before the story can move forward."
-                    className="h-24 w-full resize-none rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </div>
-
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Input artifact</label>
-                  <select
-                    value={stepDraft.inputArtifactId}
-                    onChange={event => setStepDraft(prev => ({ ...prev, inputArtifactId: event.target.value }))}
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    <option value="">No artifact</option>
-                    {visibleArtifacts.map(artifact => (
-                      <option key={artifact.id} value={artifact.id}>
-                        {artifact.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Hand-off agent</label>
-                  <select
-                    value={stepDraft.handoffToAgentId}
-                    onChange={event => setStepDraft(prev => ({ ...prev, handoffToAgentId: event.target.value }))}
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    <option value="">No hand-off</option>
-                    {workspace.agents.map(agent => (
-                      <option key={agent.id} value={agent.id}>
-                        {agent.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Hand-off phase</label>
-                  <select
-                    value={stepDraft.handoffToPhase}
-                    onChange={event =>
-                      setStepDraft(prev => ({
-                        ...prev,
-                        handoffToPhase: event.target.value as WorkItemPhase,
-                      }))
-                    }
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    {SDLC_BOARD_PHASES.filter(phase => phase !== 'BACKLOG').map(phase => (
-                      <option key={phase} value={phase}>
-                        {phase}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Exit criteria</label>
-                  <textarea
-                    value={stepDraft.exitCriteria}
-                    onChange={event => setStepDraft(prev => ({ ...prev, exitCriteria: event.target.value }))}
-                    placeholder={'Acceptance criteria verified\nEvidence attached\nReady for hand-off'}
-                    className="h-24 w-full resize-none rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </div>
-
-                {stepDraft.stepType !== 'DELIVERY' && (
-                  <>
-                    <div className="space-y-2">
-                      <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Gate name</label>
-                      <input
-                        value={stepDraft.governanceGate}
-                        onChange={event => setStepDraft(prev => ({ ...prev, governanceGate: event.target.value }))}
-                        placeholder="e.g. Release Governance Gate"
-                        className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Approver roles</label>
-                      <input
-                        value={stepDraft.approverRoles}
-                        onChange={event => setStepDraft(prev => ({ ...prev, approverRoles: event.target.value }))}
-                        placeholder="Development Manager, Team Lead"
-                        className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                      />
-                    </div>
-                  </>
-                )}
-
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Template path</label>
-                  <input
-                    value={stepDraft.templatePath}
-                    onChange={event => setStepDraft(prev => ({ ...prev, templatePath: event.target.value }))}
-                    placeholder="/out/steps/custom-step-template.md"
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </div>
-              </div>
-
-              <div className="mt-8 flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => setIsStepModalOpen(false)}
-                  className="flex-1 rounded-2xl border border-outline-variant/20 px-5 py-3 text-sm font-bold text-secondary transition-all hover:bg-surface-container-low"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
-                >
-                  Add Step
-                </button>
-              </div>
-            </motion.form>
-          </div>
-        )}
-        {isProtocolModalOpen && selectedWorkflow && (
-          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-24 pb-8 sm:p-6 sm:pt-28 sm:pb-10">
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsProtocolModalOpen(false)}
-              className="absolute inset-0 bg-black/40 backdrop-blur-md"
-            />
-            <motion.form
-              initial={{ opacity: 0, y: 20, scale: 0.98 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 20, scale: 0.98 }}
-              onSubmit={handleSaveProtocol}
-              className="relative my-auto w-full max-w-3xl max-h-[calc(100vh-8rem)] overflow-y-auto rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.2em] text-primary">
-                    Hand-off protocol
-                  </p>
-                  <h3 className="mt-2 text-2xl font-extrabold text-primary">
-                    Configure workflow transfer rules
-                  </h3>
-                  <p className="mt-2 text-sm text-secondary">
-                    Define how artifacts, approvals, and execution context move between agents and SDLC phases.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsProtocolModalOpen(false)}
-                  className="rounded-full p-2 text-slate-400 transition-colors hover:bg-surface-container-low hover:text-primary"
-                >
-                  <X size={20} />
-                </button>
-              </div>
-
-              <div className="mt-8 grid gap-5 md:grid-cols-2">
-                <label className="space-y-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Source step</span>
-                  <select
-                    value={protocolDraft.sourceStepId}
-                    onChange={event =>
-                      setProtocolDraft(prev => ({ ...prev, sourceStepId: event.target.value }))
-                    }
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    {selectedWorkflow.steps.map(step => (
-                      <option key={step.id} value={step.id}>
-                        {step.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="space-y-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Target phase</span>
-                  <select
-                    value={protocolDraft.targetPhase}
-                    onChange={event =>
-                      setProtocolDraft(prev => ({
-                        ...prev,
-                        targetPhase: event.target.value as WorkItemPhase,
-                      }))
-                    }
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    {SDLC_BOARD_PHASES.filter(phase => phase !== 'BACKLOG').map(phase => (
-                      <option key={phase} value={phase}>
-                        {phase}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="space-y-2 md:col-span-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Protocol name</span>
-                  <input
-                    required
-                    value={protocolDraft.name}
-                    onChange={event =>
-                      setProtocolDraft(prev => ({ ...prev, name: event.target.value }))
-                    }
-                    placeholder="e.g. Secure QA evidence hand-off"
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </label>
-
-                <label className="space-y-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Target agent</span>
-                  <select
-                    value={protocolDraft.targetAgentId}
-                    onChange={event =>
-                      setProtocolDraft(prev => ({ ...prev, targetAgentId: event.target.value }))
-                    }
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  >
-                    <option value="">No target agent</option>
-                    {workspace.agents.map(agent => (
-                      <option key={agent.id} value={agent.id}>
-                        {agent.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="space-y-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Description</span>
-                  <input
-                    value={protocolDraft.description}
-                    onChange={event =>
-                      setProtocolDraft(prev => ({ ...prev, description: event.target.value }))
-                    }
-                    placeholder="What this hand-off validates and why it matters."
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </label>
-
-                <label className="space-y-2 md:col-span-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Rules</span>
-                  <textarea
-                    value={protocolDraft.rules}
-                    onChange={event =>
-                      setProtocolDraft(prev => ({ ...prev, rules: event.target.value }))
-                    }
-                    placeholder={'Validate source artifacts\nAttach evidence and unresolved risks\nPublish hand-off summary'}
-                    className="h-28 w-full resize-none rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </label>
-
-                <label className="flex items-center gap-3 rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3">
-                  <input
-                    type="checkbox"
-                    checked={protocolDraft.validationRequired}
-                    onChange={event =>
-                      setProtocolDraft(prev => ({
-                        ...prev,
-                        validationRequired: event.target.checked,
-                      }))
-                    }
-                    className="h-4 w-4 rounded border-outline-variant"
-                  />
-                  <div>
-                    <p className="text-sm font-bold text-on-surface">Require validation</p>
-                    <p className="text-[0.6875rem] text-secondary">
-                      Keep the hand-off gated until artifacts and criteria are validated.
-                    </p>
-                  </div>
-                </label>
-
-                <label className="flex items-center gap-3 rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3">
-                  <input
-                    type="checkbox"
-                    checked={protocolDraft.autoDocumentation}
-                    onChange={event =>
-                      setProtocolDraft(prev => ({
-                        ...prev,
-                        autoDocumentation: event.target.checked,
-                      }))
-                    }
-                    className="h-4 w-4 rounded border-outline-variant"
-                  />
-                  <div>
-                    <p className="text-sm font-bold text-on-surface">Auto-document hand-off</p>
-                    <p className="text-[0.6875rem] text-secondary">
-                      Publish the protocol summary and evidence trail automatically.
-                    </p>
-                  </div>
-                </label>
-              </div>
-
-              <div className="mt-8 flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => setIsProtocolModalOpen(false)}
-                  className="flex-1 rounded-2xl border border-outline-variant/20 px-5 py-3 text-sm font-bold text-secondary transition-all hover:bg-surface-container-low"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
-                >
-                  Save Protocol
-                </button>
-              </div>
-            </motion.form>
-          </div>
-        )}
-      </AnimatePresence>
+        </div>
+      ) : null}
     </div>
   );
 };

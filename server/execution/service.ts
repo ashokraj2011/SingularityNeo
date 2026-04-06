@@ -9,7 +9,11 @@ import {
   RunWaitType,
   ToolAdapterId,
   Workflow,
+  WorkflowEdge,
+  WorkflowEdgeConditionType,
+  WorkflowNode,
   WorkflowRun,
+  WorkflowRunBranchState,
   WorkflowRunDetail,
   WorkflowRunStep,
   WorkItem,
@@ -21,6 +25,19 @@ import {
   WorkflowStep,
 } from '../../src/types';
 import { syncWorkflowManagedTasksForWorkItem } from '../../src/lib/workflowTaskAutomation';
+import {
+  findFirstExecutableNode,
+  findFirstExecutableNodeForPhase,
+  getDisplayStepIdForNode,
+  getIncomingWorkflowEdges,
+  getOutgoingWorkflowEdges,
+  getWorkflowNode,
+  getWorkflowNodeOrder,
+  getWorkflowNodes,
+  isWorkflowControlNode,
+  isVisibleWorkflowNode,
+  normalizeWorkflowGraph,
+} from '../../src/lib/workflowGraph';
 import {
   buildCapabilitySystemPrompt,
   requestGitHubModel,
@@ -462,9 +479,32 @@ const requestStepDecision = async ({
   } as DecisionEnvelope;
 };
 
+const getNormalizedWorkflowSnapshot = (detail: WorkflowRunDetail) =>
+  normalizeWorkflowGraph(detail.run.workflowSnapshot);
+
+const getRunBranchState = (detail: WorkflowRunDetail): WorkflowRunBranchState => ({
+  pendingNodeIds: detail.run.branchState?.pendingNodeIds || [],
+  completedNodeIds: detail.run.branchState?.completedNodeIds || [],
+  activeNodeIds: detail.run.branchState?.activeNodeIds || [],
+  joinState: detail.run.branchState?.joinState || {},
+  visitCount: detail.run.branchState?.visitCount || 0,
+});
+
+const getCurrentWorkflowNode = (detail: WorkflowRunDetail) => {
+  const node = getWorkflowNode(
+    getNormalizedWorkflowSnapshot(detail),
+    detail.run.currentNodeId || detail.run.currentStepId,
+  );
+  if (!node) {
+    throw new Error(`Run ${detail.run.id} has no current workflow node.`);
+  }
+  return node;
+};
+
 const getCurrentRunStep = (detail: WorkflowRunDetail) => {
+  const currentNode = getCurrentWorkflowNode(detail);
   const runStep = detail.steps.find(
-    item => item.workflowStepId === detail.run.currentStepId,
+    item => item.workflowNodeId === currentNode.id,
   );
   if (!runStep) {
     throw new Error(`Run ${detail.run.id} is missing its current run-step record.`);
@@ -473,8 +513,9 @@ const getCurrentRunStep = (detail: WorkflowRunDetail) => {
 };
 
 const getCurrentWorkflowStep = (detail: WorkflowRunDetail) => {
-  const step = detail.run.workflowSnapshot.steps.find(
-    item => item.id === detail.run.currentStepId,
+  const workflow = getNormalizedWorkflowSnapshot(detail);
+  const step = workflow.steps.find(
+    item => item.id === (detail.run.currentStepId || detail.run.currentNodeId),
   );
   if (!step) {
     throw new Error(`Run ${detail.run.id} has no current workflow step.`);
@@ -482,9 +523,215 @@ const getCurrentWorkflowStep = (detail: WorkflowRunDetail) => {
   return step;
 };
 
-const getNextWorkflowStep = (workflow: Workflow, currentStepId: string | undefined) => {
-  const index = workflow.steps.findIndex(step => step.id === currentStepId);
-  return index >= 0 ? workflow.steps[index + 1] : undefined;
+const getNodeTypeFromRunStep = (runStep: WorkflowRunStep, workflow: Workflow) =>
+  getWorkflowNode(workflow, runStep.workflowNodeId)?.type ||
+  (runStep.metadata?.nodeType as WorkflowNode['type'] | undefined) ||
+  'DELIVERY';
+
+const pickDecisionEdge = ({
+  workflow,
+  node,
+  detail,
+}: {
+  workflow: Workflow;
+  node: WorkflowNode;
+  detail: WorkflowRunDetail;
+}) => {
+  const outgoingEdges = getOutgoingWorkflowEdges(workflow, node.id);
+  if (outgoingEdges.length <= 1) {
+    return outgoingEdges[0];
+  }
+
+  const latestCompletedStep = detail.steps
+    .filter(step => step.status === 'COMPLETED')
+    .slice()
+    .reverse()
+    .find(step => step.workflowNodeId !== node.id);
+  const lastSummary = `${latestCompletedStep?.outputSummary || ''} ${latestCompletedStep?.evidenceSummary || ''}`.toLowerCase();
+  const failureSignals = /(fail|defect|error|rework|retry|blocked|issue)/.test(lastSummary);
+  const successSignals = /(pass|approved|ready|complete|successful|done)/.test(lastSummary);
+
+  const matchingByCondition = (conditionType: WorkflowEdgeConditionType) =>
+    outgoingEdges.find(edge => edge.conditionType === conditionType);
+
+  if (failureSignals) {
+    return matchingByCondition('FAILURE') || matchingByCondition('REJECTED') || outgoingEdges[0];
+  }
+
+  if (successSignals) {
+    return matchingByCondition('SUCCESS') || matchingByCondition('APPROVED') || matchingByCondition('DEFAULT') || outgoingEdges[0];
+  }
+
+  return matchingByCondition('DEFAULT') || outgoingEdges[0];
+};
+
+const resolveGraphTransition = async ({
+  detail,
+  completedNode,
+  completedRunStep,
+  summary,
+}: {
+  detail: WorkflowRunDetail;
+  completedNode: WorkflowNode;
+  completedRunStep: WorkflowRunStep;
+  summary: string;
+}): Promise<{
+  nextRun: WorkflowRun;
+  nextDetail: WorkflowRunDetail;
+  nextStep?: WorkflowStep;
+}> => {
+  const workflow = getNormalizedWorkflowSnapshot(detail);
+  const nodes = getWorkflowNodes(workflow);
+  const branchState = getRunBranchState(detail);
+  const nextBranchState: WorkflowRunBranchState = {
+    pendingNodeIds: branchState.pendingNodeIds.filter(nodeId => nodeId !== completedNode.id),
+    activeNodeIds: branchState.activeNodeIds.filter(nodeId => nodeId !== completedNode.id),
+    completedNodeIds: Array.from(new Set([...branchState.completedNodeIds, completedNode.id])),
+    joinState: { ...(branchState.joinState || {}) },
+    visitCount: (branchState.visitCount || 0) + 1,
+  };
+
+  const enqueueNode = (nodeId: string) => {
+    const node = getWorkflowNode(workflow, nodeId);
+    if (!node || nextBranchState.completedNodeIds.includes(node.id)) {
+      return;
+    }
+
+    if (node.type === 'PARALLEL_JOIN') {
+      const inboundNodeIds = getIncomingWorkflowEdges(workflow, node.id).map(edge => edge.fromNodeId);
+      const completedInboundNodeIds = inboundNodeIds.filter(inboundId =>
+        nextBranchState.completedNodeIds.includes(inboundId),
+      );
+      nextBranchState.joinState = {
+        ...(nextBranchState.joinState || {}),
+        [node.id]: {
+          waitingOnNodeIds: inboundNodeIds.filter(
+            inboundId => !nextBranchState.completedNodeIds.includes(inboundId),
+          ),
+          completedInboundNodeIds,
+        },
+      };
+
+      if (completedInboundNodeIds.length !== inboundNodeIds.length) {
+        return;
+      }
+    }
+
+    if (!nextBranchState.pendingNodeIds.includes(node.id)) {
+      nextBranchState.pendingNodeIds.push(node.id);
+    }
+    if (!nextBranchState.activeNodeIds.includes(node.id)) {
+      nextBranchState.activeNodeIds.push(node.id);
+    }
+  };
+
+  const selectEdgesForNode = (node: WorkflowNode): WorkflowEdge[] => {
+    const outgoingEdges = getOutgoingWorkflowEdges(workflow, node.id);
+    if (node.type === 'DECISION') {
+      const chosenEdge = pickDecisionEdge({ workflow, node, detail });
+      return chosenEdge ? [chosenEdge] : [];
+    }
+    if (node.type === 'PARALLEL_SPLIT') {
+      return outgoingEdges;
+    }
+    return outgoingEdges.length > 0 ? [outgoingEdges[0]] : [];
+  };
+
+  selectEdgesForNode(completedNode).forEach(edge => enqueueNode(edge.toNodeId));
+
+  let nextCurrentNode: WorkflowNode | undefined;
+  let safetyCounter = 0;
+  while (nextBranchState.pendingNodeIds.length > 0 && safetyCounter < Math.max(nodes.length * 3, 12)) {
+    safetyCounter += 1;
+    nextBranchState.pendingNodeIds = nextBranchState.pendingNodeIds
+      .slice()
+      .sort((left, right) => {
+        const leftNode = getWorkflowNode(workflow, left);
+        const rightNode = getWorkflowNode(workflow, right);
+        const orderedIds = getWorkflowNodeOrder(workflow);
+        return orderedIds.indexOf(leftNode?.id || '') - orderedIds.indexOf(rightNode?.id || '');
+      });
+
+    const candidateId = nextBranchState.pendingNodeIds[0];
+    const candidateNode = getWorkflowNode(workflow, candidateId);
+    if (!candidateNode) {
+      nextBranchState.pendingNodeIds.shift();
+      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(nodeId => nodeId !== candidateId);
+      continue;
+    }
+
+    if (candidateNode.type === 'END') {
+      nextBranchState.pendingNodeIds.shift();
+      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(nodeId => nodeId !== candidateId);
+      nextBranchState.completedNodeIds = Array.from(
+        new Set([...nextBranchState.completedNodeIds, candidateNode.id]),
+      );
+      const endRunStep = detail.steps.find(step => step.workflowNodeId === candidateNode.id);
+      if (endRunStep && endRunStep.status !== 'COMPLETED') {
+        await updateWorkflowRunStep({
+          ...endRunStep,
+          status: 'COMPLETED',
+          completedAt: new Date().toISOString(),
+          outputSummary: summary,
+          evidenceSummary: summary,
+        });
+      }
+      break;
+    }
+
+    if (isWorkflowControlNode(candidateNode.type)) {
+      nextBranchState.pendingNodeIds.shift();
+      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(nodeId => nodeId !== candidateNode.id);
+      nextBranchState.completedNodeIds = Array.from(
+        new Set([...nextBranchState.completedNodeIds, candidateNode.id]),
+      );
+      const controlRunStep = detail.steps.find(step => step.workflowNodeId === candidateNode.id);
+      if (controlRunStep && controlRunStep.status !== 'COMPLETED') {
+        await updateWorkflowRunStep({
+          ...controlRunStep,
+          status: 'COMPLETED',
+          completedAt: new Date().toISOString(),
+          outputSummary: `${candidateNode.name} automatically advanced the workflow.`,
+          evidenceSummary: `${candidateNode.type} control node processed.`,
+          metadata: {
+            ...(controlRunStep.metadata || {}),
+            nodeType: candidateNode.type,
+          },
+        });
+      }
+      selectEdgesForNode(candidateNode).forEach(edge => enqueueNode(edge.toNodeId));
+      continue;
+    }
+
+    nextCurrentNode = candidateNode;
+    break;
+  }
+
+  const nextStep = nextCurrentNode
+    ? workflow.steps.find(step => step.id === getDisplayStepIdForNode(workflow, nextCurrentNode?.id))
+    : undefined;
+  const nextRun = (
+    await updateWorkflowRun({
+      ...detail.run,
+      workflowSnapshot: workflow,
+      status: nextCurrentNode ? 'RUNNING' : 'COMPLETED',
+      currentNodeId: nextCurrentNode?.id,
+      currentStepId: nextCurrentNode
+        ? getDisplayStepIdForNode(workflow, nextCurrentNode.id) || nextCurrentNode.id
+        : undefined,
+      currentPhase: nextCurrentNode?.phase || 'DONE',
+      assignedAgentId: nextCurrentNode?.agentId,
+      branchState: nextBranchState,
+      completedAt: nextCurrentNode ? undefined : new Date().toISOString(),
+      terminalOutcome: nextCurrentNode ? undefined : summary,
+    })
+  ).run;
+
+  return {
+    nextRun,
+    nextDetail: await getWorkflowRunDetail(detail.run.capabilityId, nextRun.id),
+    nextStep,
+  };
 };
 
 const buildWorkflowHandoffContext = ({
@@ -496,13 +743,12 @@ const buildWorkflowHandoffContext = ({
   workItem: WorkItem;
   artifacts: Artifact[];
 }) => {
-  const currentStepIndex = detail.run.workflowSnapshot.steps.findIndex(
-    step => step.id === detail.run.currentStepId,
-  );
+  const currentStepIndex = getCurrentRunStep(detail).stepIndex;
   const priorCompletedSteps = detail.steps
     .filter(
       step =>
         step.status === 'COMPLETED' &&
+        !isWorkflowControlNode(getNodeTypeFromRunStep(step, detail.run.workflowSnapshot)) &&
         (currentStepIndex === -1 || step.stepIndex < currentStepIndex),
     )
     .sort((left, right) => left.stepIndex - right.stepIndex);
@@ -1070,9 +1316,12 @@ export const createWorkItemRecord = async ({
     throw new Error(`Workflow ${workflowId} was not found.`);
   }
 
-  const firstStep = workflow.steps[0];
+  const firstNode = findFirstExecutableNode(workflow);
+  const firstStep = firstNode
+    ? workflow.steps.find(step => step.id === firstNode.id)
+    : undefined;
   if (!firstStep) {
-    throw new Error(`Workflow ${workflow.name} does not define any steps.`);
+    throw new Error(`Workflow ${workflow.name} does not define any executable nodes.`);
   }
 
   const nextWorkItem: WorkItem = {
@@ -1142,11 +1391,14 @@ export const moveWorkItemToPhaseControl = async ({
   }
 
   const projection = await resolveProjectionContext(capabilityId, workItemId);
-  const targetStep =
+  const targetNode =
     targetPhase === 'BACKLOG' || targetPhase === 'DONE'
       ? undefined
-      : projection.workflow.steps.find(step => step.phase === targetPhase) ||
-        projection.workflow.steps[0];
+      : findFirstExecutableNodeForPhase(projection.workflow, targetPhase) ||
+        findFirstExecutableNode(projection.workflow);
+  const targetStep = targetNode
+    ? projection.workflow.steps.find(step => step.id === targetNode.id)
+    : undefined;
 
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
@@ -1265,8 +1517,6 @@ const resolveRunWaitAndQueue = async ({
   let nextWorkflowStep: WorkflowStep | undefined;
 
   if (expectedType === 'APPROVAL' && currentStep.stepType === 'HUMAN_APPROVAL') {
-    const nextStep = getNextWorkflowStep(detail.run.workflowSnapshot, currentStep.id);
-    nextWorkflowStep = nextStep;
     nextRunStep = await updateWorkflowRunStep({
       ...currentRunStep,
       status: 'COMPLETED',
@@ -1276,21 +1526,15 @@ const resolveRunWaitAndQueue = async ({
       waitId: openWait.id,
     });
 
-    nextRun = (
-      await updateWorkflowRun({
-        ...detail.run,
-        status: nextStep ? 'QUEUED' : 'COMPLETED',
-        currentStepId: nextStep?.id,
-        currentPhase: nextStep?.phase || 'DONE',
-        assignedAgentId: nextStep?.agentId,
-        pauseReason: undefined,
-        currentWaitId: undefined,
-        completedAt: nextStep ? undefined : new Date().toISOString(),
-        leaseOwner: undefined,
-        leaseExpiresAt: undefined,
-        terminalOutcome: nextStep ? undefined : resolution,
-      })
-    ).run;
+    const currentNode = getCurrentWorkflowNode(detail);
+    const transition = await resolveGraphTransition({
+      detail,
+      completedNode: currentNode,
+      completedRunStep: nextRunStep,
+      summary: resolution,
+    });
+    nextWorkflowStep = transition.nextStep;
+    nextRun = transition.nextRun;
   } else {
     nextRunStep = await updateWorkflowRunStep({
       ...currentRunStep,
@@ -1998,19 +2242,15 @@ const executeAutomatedStep = async (
         outputSummary: decision.summary,
         retrievalReferences: decisionEnvelope.retrievalReferences,
       });
-      const nextStep = getNextWorkflowStep(detail.run.workflowSnapshot, step.id);
-      const nextRun = (
-        await updateWorkflowRun({
-          ...updatedRun,
-          status: nextStep ? 'RUNNING' : 'COMPLETED',
-          currentStepId: nextStep?.id,
-          currentPhase: nextStep?.phase || 'DONE',
-          assignedAgentId: nextStep?.agentId,
-          completedAt: nextStep ? undefined : new Date().toISOString(),
-          terminalOutcome: nextStep ? undefined : decision.summary,
-        })
-      ).run;
-      const nextDetail = await getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
+      const currentNode = getCurrentWorkflowNode(runningDetail);
+      const transition = await resolveGraphTransition({
+        detail: runningDetail,
+        completedNode: currentNode,
+        completedRunStep: currentRunStep,
+        summary: decision.summary,
+      });
+      const nextStep = transition.nextStep;
+      const nextDetail = transition.nextDetail;
       const handoffArtifact = nextStep
         ? buildHandoffArtifact({
             detail: runningDetail,
@@ -2110,7 +2350,10 @@ export const processWorkflowRun = async (
   });
 
   let currentDetail = detail;
-  for (let index = 0; index < currentDetail.run.workflowSnapshot.steps.length + 1; index += 1) {
+  const maxTransitions =
+    Math.max(getWorkflowNodes(currentDetail.run.workflowSnapshot).length, currentDetail.run.workflowSnapshot.steps.length) +
+    2;
+  for (let index = 0; index < maxTransitions; index += 1) {
     const currentStep = getCurrentWorkflowStep(currentDetail);
     if (currentStep.stepType === 'HUMAN_APPROVAL') {
       return completeRunWithWait({

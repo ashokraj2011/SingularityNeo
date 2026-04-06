@@ -35,6 +35,7 @@ import {
 } from './workspace';
 import { getDefaultCapabilityWorkflows } from '../src/lib/standardWorkflow';
 import { normalizeExecutionConfig } from '../src/lib/executionConfig';
+import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../src/lib/workflowGraph';
 
 type CapabilityBundle = {
   capability: Capability;
@@ -128,16 +129,24 @@ const messageFromRow = (row: Record<string, any>): CapabilityChatMessage => ({
   agentName: row.agent_name || undefined,
 });
 
-const workflowFromRow = (row: Record<string, any>): Workflow => ({
-  id: row.id,
-  name: row.name,
-  capabilityId: row.capability_id,
-  steps: asJsonArray<Workflow['steps'][number]>(row.steps),
-  status: row.status,
-  workflowType: row.workflow_type || undefined,
-  scope: row.scope || 'CAPABILITY',
-  summary: row.summary || undefined,
-});
+const workflowFromRow = (row: Record<string, any>): Workflow =>
+  buildWorkflowFromGraph(
+    normalizeWorkflowGraph({
+      id: row.id,
+      name: row.name,
+      capabilityId: row.capability_id,
+      schemaVersion: row.schema_version ? Number(row.schema_version) : undefined,
+      entryNodeId: row.entry_node_id || undefined,
+      nodes: asJsonArray<Workflow['nodes'][number]>(row.nodes),
+      edges: asJsonArray<Workflow['edges'][number]>(row.edges),
+      steps: asJsonArray<Workflow['steps'][number]>(row.steps),
+      status: row.status,
+      workflowType: row.workflow_type || undefined,
+      scope: row.scope || 'CAPABILITY',
+      summary: row.summary || undefined,
+      publishState: row.publish_state || undefined,
+    }),
+  );
 
 const artifactFromRow = (row: Record<string, any>) => ({
   id: row.id,
@@ -575,6 +584,7 @@ const replaceWorkflowsTx = async (
   await client.query('DELETE FROM capability_workflows WHERE capability_id = $1', [capabilityId]);
 
   for (const workflow of workflows) {
+    const normalizedWorkflow = buildWorkflowFromGraph(normalizeWorkflowGraph(workflow));
     await client.query(
       `
         INSERT INTO capability_workflows (
@@ -585,20 +595,30 @@ const replaceWorkflowsTx = async (
           workflow_type,
           scope,
           summary,
+          schema_version,
+          entry_node_id,
+          nodes,
+          edges,
           steps,
+          publish_state,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,${withUpdatedTimestamp})
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,${withUpdatedTimestamp})
       `,
       [
         capabilityId,
-        workflow.id,
-        workflow.name,
-        workflow.status,
-        workflow.workflowType || null,
-        workflow.scope || 'CAPABILITY',
-        workflow.summary || null,
-        JSON.stringify(workflow.steps),
+        normalizedWorkflow.id,
+        normalizedWorkflow.name,
+        normalizedWorkflow.status,
+        normalizedWorkflow.workflowType || null,
+        normalizedWorkflow.scope || 'CAPABILITY',
+        normalizedWorkflow.summary || null,
+        normalizedWorkflow.schemaVersion || null,
+        normalizedWorkflow.entryNodeId || null,
+        JSON.stringify(normalizedWorkflow.nodes || []),
+        JSON.stringify(normalizedWorkflow.edges || []),
+        JSON.stringify(normalizedWorkflow.steps),
+        normalizedWorkflow.publishState || 'DRAFT',
       ],
     );
   }

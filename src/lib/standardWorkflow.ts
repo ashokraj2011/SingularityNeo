@@ -4,10 +4,18 @@ import {
   ToolAdapterId,
   WorkItemPhase,
   Workflow,
+  WorkflowEdge,
   WorkflowHandoffProtocol,
+  WorkflowNode,
   WorkflowStep,
   WorkflowStepType,
 } from '../types';
+import {
+  buildWorkflowFromGraph,
+  createWorkflowEdge,
+  createWorkflowNode,
+  WORKFLOW_GRAPH_PHASES,
+} from './workflowGraph';
 
 type BuiltInAgentKey = (typeof BUILT_IN_AGENT_TEMPLATES)[number]['key'];
 type AgentReference = BuiltInAgentKey | 'OWNER';
@@ -285,32 +293,55 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
 export const createStandardCapabilityWorkflow = (
   capability: Pick<Capability, 'id' | 'name' | 'specialAgentId'>,
 ): Workflow => {
-  const steps = STANDARD_SDLC_STEP_TEMPLATES.map(
-    (template, index): WorkflowStep => ({
-      id: `STEP-${slugify(capability.id)}-${index + 1}`,
-      name: template.name,
-      phase: template.phase,
-      stepType: template.stepType,
-      agentId: resolveAgentReference(capability, template.agentRef),
-      action: template.action,
-      description: template.description,
-      handoffToAgentId: template.handoffToAgentRef
-        ? resolveAgentReference(capability, template.handoffToAgentRef)
-        : undefined,
-      handoffToPhase: template.handoffToPhase,
-      handoffLabel: template.handoffLabel,
-      handoffProtocolId: template.handoffToAgentRef
-        ? getHandoffProtocolId(capability.id, template.key)
-        : undefined,
-      governanceGate: template.governanceGate,
-      approverRoles: template.approverRoles,
-      exitCriteria: template.exitCriteria,
-      templatePath: template.templatePath,
-      allowedToolIds: template.allowedToolIds,
-      preferredWorkspacePath: template.preferredWorkspacePath,
-      executionNotes: template.executionNotes,
+  const startNodeId = `NODE-${slugify(capability.id)}-START`;
+  const endNodeId = `NODE-${slugify(capability.id)}-END`;
+  const nodes: WorkflowNode[] = [
+    createWorkflowNode({
+      id: startNodeId,
+      name: 'Start',
+      type: 'START',
+      phase: 'ANALYSIS',
+      description: 'Entry point for the standard SDLC flow.',
+      layout: { x: 80, y: 48 },
     }),
-  );
+    ...STANDARD_SDLC_STEP_TEMPLATES.map((template, index) =>
+      createWorkflowNode({
+        id: `STEP-${slugify(capability.id)}-${index + 1}`,
+        name: template.name,
+        type:
+          template.stepType === 'GOVERNANCE_GATE'
+            ? 'GOVERNANCE_GATE'
+            : template.stepType === 'HUMAN_APPROVAL'
+            ? 'HUMAN_APPROVAL'
+            : template.phase === 'RELEASE'
+            ? 'RELEASE'
+            : 'DELIVERY',
+        phase: template.phase,
+        agentId: resolveAgentReference(capability, template.agentRef),
+        action: template.action,
+        description: template.description,
+        governanceGate: template.governanceGate,
+        approverRoles: template.approverRoles,
+        exitCriteria: template.exitCriteria,
+        templatePath: template.templatePath,
+        allowedToolIds: template.allowedToolIds,
+        preferredWorkspacePath: template.preferredWorkspacePath,
+        executionNotes: template.executionNotes,
+        layout: {
+          x: 80 + (index + 1) * 260,
+          y: 48 + WORKFLOW_GRAPH_PHASES.indexOf(template.phase as never) * 176,
+        },
+      }),
+    ),
+    createWorkflowNode({
+      id: endNodeId,
+      name: 'End',
+      type: 'END',
+      phase: 'RELEASE',
+      description: 'Terminal completion node for the workflow.',
+      layout: { x: 80 + (STANDARD_SDLC_STEP_TEMPLATES.length + 1) * 260, y: 48 + 5 * 176 },
+    }),
+  ];
 
   const handoffProtocols: WorkflowHandoffProtocol[] = STANDARD_SDLC_STEP_TEMPLATES.flatMap(
     template => {
@@ -318,7 +349,7 @@ export const createStandardCapabilityWorkflow = (
         return [];
       }
 
-      const sourceStep = steps.find(step => step.name === template.name);
+      const sourceStep = nodes.find(step => step.name === template.name);
       if (!sourceStep) {
         return [];
       }
@@ -328,6 +359,7 @@ export const createStandardCapabilityWorkflow = (
           id: getHandoffProtocolId(capability.id, template.key),
           name: template.handoffLabel || `${template.name} Hand-off`,
           sourceStepId: sourceStep.id,
+          sourceNodeId: sourceStep.id,
           targetAgentId: resolveAgentReference(capability, template.handoffToAgentRef),
           targetPhase: template.handoffToPhase,
           description: `Protocol for ${template.name.toLowerCase()} hand-off within ${capability.name}.`,
@@ -340,18 +372,51 @@ export const createStandardCapabilityWorkflow = (
     },
   );
 
-  return {
+  const edges: WorkflowEdge[] = [];
+  const visibleNodes = nodes.filter(node => node.type !== 'START' && node.type !== 'END');
+
+  if (visibleNodes[0]) {
+    edges.push(
+      createWorkflowEdge({
+        fromNodeId: startNodeId,
+        toNodeId: visibleNodes[0].id,
+        label: 'Begin SDLC delivery',
+      }),
+    );
+  }
+
+  visibleNodes.forEach((node, index) => {
+    const template = STANDARD_SDLC_STEP_TEMPLATES[index];
+    const nextNode = visibleNodes[index + 1];
+    edges.push(
+      createWorkflowEdge({
+        fromNodeId: node.id,
+        toNodeId: nextNode?.id || endNodeId,
+        label: template?.handoffLabel || (nextNode ? 'Continue' : 'Complete'),
+        handoffProtocolId: template?.handoffToAgentRef
+          ? getHandoffProtocolId(capability.id, template.key)
+          : undefined,
+      }),
+    );
+  });
+
+  return buildWorkflowFromGraph({
     id: `WF-${slugify(capability.id)}-STANDARD-SDLC`,
     name: 'Enterprise SDLC Flow',
     capabilityId: capability.id,
     status: 'STABLE',
     workflowType: 'SDLC',
     scope: 'CAPABILITY',
+    schemaVersion: 2,
+    entryNodeId: startNodeId,
+    nodes,
+    edges,
     summary:
       'Standard SDLC workflow with explicit agent hand-offs, governance validation, and human approval before release.',
-    steps,
+    steps: [],
     handoffProtocols,
-  };
+    publishState: 'PUBLISHED',
+  });
 };
 
 export const getDefaultCapabilityWorkflows = (

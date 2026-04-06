@@ -14,6 +14,15 @@ import {
 import { query, transaction } from '../db';
 import { publishRunEvent } from '../eventBus';
 import { createSpanId, createTraceId } from '../telemetry';
+import {
+  buildWorkflowFromGraph,
+  findFirstExecutableNode,
+  findFirstExecutableNodeForPhase,
+  getDisplayStepIdForNode,
+  getWorkflowNodeOrder,
+  getWorkflowNodes,
+  normalizeWorkflowGraph,
+} from '../../src/lib/workflowGraph';
 
 const asIso = (value: unknown) =>
   value instanceof Date ? value.toISOString() : String(value || '');
@@ -39,16 +48,22 @@ const runFromRow = (row: Record<string, any>): WorkflowRun => ({
   workflowId: row.workflow_id,
   status: row.status,
   attemptNumber: Number(row.attempt_number || 1),
-  workflowSnapshot: asJson<Workflow>(row.workflow_snapshot, {
-    id: row.workflow_id,
-    capabilityId: row.capability_id,
-    name: 'Workflow',
-    steps: [],
-    status: 'STABLE',
-  }),
+  workflowSnapshot: buildWorkflowFromGraph(
+    normalizeWorkflowGraph(
+      asJson<Workflow>(row.workflow_snapshot, {
+        id: row.workflow_id,
+        capabilityId: row.capability_id,
+        name: 'Workflow',
+        steps: [],
+        status: 'STABLE',
+      }),
+    ),
+  ),
+  currentNodeId: row.current_node_id || undefined,
   currentStepId: row.current_step_id || undefined,
   currentPhase: row.current_phase || undefined,
   assignedAgentId: row.assigned_agent_id || undefined,
+  branchState: asJson(row.branch_state, undefined),
   pauseReason: row.pause_reason || undefined,
   currentWaitId: row.current_wait_id || undefined,
   terminalOutcome: row.terminal_outcome || undefined,
@@ -66,7 +81,8 @@ const stepFromRow = (row: Record<string, any>): WorkflowRunStep => ({
   id: row.id,
   capabilityId: row.capability_id,
   runId: row.run_id,
-  workflowStepId: row.workflow_step_id,
+  workflowNodeId: row.workflow_node_id || row.workflow_step_id,
+  workflowStepId: row.workflow_step_id || undefined,
   stepIndex: Number(row.step_index || 0),
   phase: row.phase,
   name: row.name,
@@ -333,6 +349,7 @@ export const createWorkflowRun = async ({
   restartFromPhase?: WorkItemPhase;
 }): Promise<WorkflowRunDetail> =>
   transaction(async client => {
+    const normalizedWorkflow = buildWorkflowFromGraph(normalizeWorkflowGraph(workflow));
     const activeRunResult = await client.query(
       `
         SELECT id
@@ -363,29 +380,46 @@ export const createWorkflowRun = async ({
     const attemptNumber = Number(attemptResult.rows[0]?.attempt_number || 0) + 1;
     const runId = createId('RUN');
     const traceId = createTraceId();
-    const startingStep =
+    const orderedNodeIds = getWorkflowNodeOrder(normalizedWorkflow);
+    const orderedNodes = orderedNodeIds
+      .map(nodeId => getWorkflowNodes(normalizedWorkflow).find(node => node.id === nodeId))
+      .filter(Boolean);
+    const startingNode =
       (restartFromPhase
-        ? workflow.steps.find(step => step.phase === restartFromPhase)
+        ? findFirstExecutableNodeForPhase(normalizedWorkflow, restartFromPhase)
         : null) ||
-      workflow.steps.find(step => step.id === workItem.currentStepId) ||
-      workflow.steps[0];
+      (workItem.currentStepId
+        ? getWorkflowNodes(normalizedWorkflow).find(node => node.id === workItem.currentStepId)
+        : null) ||
+      findFirstExecutableNode(normalizedWorkflow);
 
-    if (!startingStep) {
-      throw new Error(`Workflow ${workflow.name} does not define any executable steps.`);
+    if (!startingNode) {
+      throw new Error(`Workflow ${normalizedWorkflow.name} does not define any executable nodes.`);
     }
 
-    const startingIndex = workflow.steps.findIndex(step => step.id === startingStep.id);
+    const startingIndex = orderedNodes.findIndex(node => node?.id === startingNode.id);
+    const completedNodeIds = orderedNodes
+      .slice(0, Math.max(startingIndex, 0))
+      .map(node => node!.id);
     const run: WorkflowRun = {
       id: runId,
       capabilityId,
       workItemId: workItem.id,
-      workflowId: workflow.id,
+      workflowId: normalizedWorkflow.id,
       status: 'QUEUED',
       attemptNumber,
-      workflowSnapshot: workflow,
-      currentStepId: startingStep.id,
-      currentPhase: startingStep.phase,
-      assignedAgentId: startingStep.agentId,
+      workflowSnapshot: normalizedWorkflow,
+      currentNodeId: startingNode.id,
+      currentStepId: getDisplayStepIdForNode(normalizedWorkflow, startingNode.id) || startingNode.id,
+      currentPhase: startingNode.phase,
+      assignedAgentId: startingNode.agentId,
+      branchState: {
+        pendingNodeIds: [startingNode.id],
+        activeNodeIds: [startingNode.id],
+        completedNodeIds,
+        joinState: {},
+        visitCount: 0,
+      },
       restartFromPhase,
       traceId,
       createdAt: new Date().toISOString(),
@@ -402,37 +436,42 @@ export const createWorkflowRun = async ({
           status,
           attempt_number,
           workflow_snapshot,
+          current_node_id,
           current_step_id,
           current_phase,
           assigned_agent_id,
+          branch_state,
           restart_from_phase,
           trace_id
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       `,
       [
         capabilityId,
         run.id,
         workItem.id,
-        workflow.id,
+        normalizedWorkflow.id,
         run.status,
         run.attemptNumber,
-        JSON.stringify(workflow),
+        JSON.stringify(normalizedWorkflow),
+        run.currentNodeId || null,
         run.currentStepId || null,
         run.currentPhase || null,
         run.assignedAgentId || null,
+        JSON.stringify(run.branchState || {}),
         run.restartFromPhase || null,
         run.traceId,
       ],
     );
 
-    for (const [index, step] of workflow.steps.entries()) {
+    for (const [index, node] of orderedNodes.entries()) {
       await client.query(
         `
           INSERT INTO capability_workflow_run_steps (
             capability_id,
             id,
             run_id,
+            workflow_node_id,
             workflow_step_id,
             step_index,
             phase,
@@ -445,25 +484,31 @@ export const createWorkflowRun = async ({
             retrieval_references,
             metadata
           )
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
         `,
         [
           capabilityId,
           createId('RUNSTEP'),
           run.id,
-          step.id,
+          node!.id,
+          getDisplayStepIdForNode(normalizedWorkflow, node!.id) || node!.id,
           index,
-          step.phase,
-          step.name,
-          step.stepType,
-          step.agentId,
-          index < startingIndex ? 'COMPLETED' : 'PENDING',
+          node!.phase,
+          node!.name,
+          node!.type === 'GOVERNANCE_GATE'
+            ? 'GOVERNANCE_GATE'
+            : node!.type === 'HUMAN_APPROVAL'
+            ? 'HUMAN_APPROVAL'
+            : 'DELIVERY',
+          node!.agentId || 'SYSTEM',
+          completedNodeIds.includes(node!.id) ? 'COMPLETED' : 'PENDING',
           0,
           createSpanId(),
           JSON.stringify([]),
           JSON.stringify({
-            allowedToolIds: step.allowedToolIds || [],
-            preferredWorkspacePath: step.preferredWorkspacePath || null,
+            nodeType: node!.type,
+            allowedToolIds: node!.allowedToolIds || [],
+            preferredWorkspacePath: node!.preferredWorkspacePath || null,
           }),
         ],
       );
@@ -497,7 +542,7 @@ export const createWorkflowRun = async ({
         `Workflow run ${run.id} was created for ${workItem.title}.`,
         JSON.stringify({
           workflowId: workflow.id,
-          workflowName: workflow.name,
+          workflowName: normalizedWorkflow.name,
           restartFromPhase: restartFromPhase || null,
         }),
       ],
@@ -514,18 +559,20 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
         SET
           status = $3,
           workflow_snapshot = $4,
-          current_step_id = $5,
-          current_phase = $6,
-          assigned_agent_id = $7,
-          pause_reason = $8,
-          current_wait_id = $9,
-          terminal_outcome = $10,
-          restart_from_phase = $11,
-          trace_id = $12,
-          lease_owner = $13,
-          lease_expires_at = $14,
-          started_at = $15,
-          completed_at = $16,
+          current_node_id = $5,
+          current_step_id = $6,
+          current_phase = $7,
+          assigned_agent_id = $8,
+          branch_state = $9,
+          pause_reason = $10,
+          current_wait_id = $11,
+          terminal_outcome = $12,
+          restart_from_phase = $13,
+          trace_id = $14,
+          lease_owner = $15,
+          lease_expires_at = $16,
+          started_at = $17,
+          completed_at = $18,
           updated_at = NOW()
         WHERE capability_id = $1 AND id = $2
       `,
@@ -533,10 +580,12 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
         run.capabilityId,
         run.id,
         run.status,
-        JSON.stringify(run.workflowSnapshot),
+        JSON.stringify(buildWorkflowFromGraph(normalizeWorkflowGraph(run.workflowSnapshot))),
+        run.currentNodeId || null,
         run.currentStepId || null,
         run.currentPhase || null,
         run.assignedAgentId || null,
+        run.branchState || {},
         run.pauseReason || null,
         run.currentWaitId || null,
         run.terminalOutcome || null,

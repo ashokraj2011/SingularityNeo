@@ -251,10 +251,95 @@ export type ToolAdapterId =
   | 'run_docs'
   | 'run_deploy';
 
+export type WorkflowNodeType =
+  | 'START'
+  | 'DELIVERY'
+  | 'GOVERNANCE_GATE'
+  | 'HUMAN_APPROVAL'
+  | 'DECISION'
+  | 'PARALLEL_SPLIT'
+  | 'PARALLEL_JOIN'
+  | 'RELEASE'
+  | 'END'
+  | 'EXTRACT'
+  | 'TRANSFORM'
+  | 'LOAD'
+  | 'FILTER';
+
+export interface WorkflowNodeEtlConfig {
+  subType?: string;
+  connectionId?: string;
+  sourceTable?: string;
+  sourceQuery?: string;
+  targetTable?: string;
+  writeMode?: 'APPEND' | 'OVERWRITE' | 'UPSERT';
+  filterExpression?: string;
+  mappingRules?: string;
+  joinType?: 'INNER' | 'LEFT' | 'RIGHT' | 'FULL';
+  joinKey?: string;
+  aggregateFunction?: string;
+  schemaHint?: string;
+}
+
+export type WorkflowPublishState = 'DRAFT' | 'VALIDATED' | 'PUBLISHED';
+
+export type WorkflowEdgeConditionType =
+  | 'DEFAULT'
+  | 'SUCCESS'
+  | 'FAILURE'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'PARALLEL'
+  | 'CUSTOM';
+
+export interface WorkflowGraphLayout {
+  x: number;
+  y: number;
+}
+
+export interface WorkflowArtifactContract {
+  requiredInputs?: string[];
+  expectedOutputs?: string[];
+  notes?: string;
+}
+
+export interface WorkflowNode {
+  id: string;
+  name: string;
+  type: WorkflowNodeType;
+  phase: WorkItemPhase;
+  layout: WorkflowGraphLayout;
+  agentId?: string;
+  action?: string;
+  description?: string;
+  inputArtifactId?: string;
+  outputArtifactId?: string;
+  governanceGate?: string;
+  approverRoles?: string[];
+  exitCriteria?: string[];
+  templatePath?: string;
+  allowedToolIds?: ToolAdapterId[];
+  preferredWorkspacePath?: string;
+  executionNotes?: string;
+  etlConfig?: WorkflowNodeEtlConfig;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  fromNodeId: string;
+  toNodeId: string;
+  label?: string;
+  conditionType: WorkflowEdgeConditionType;
+  handoffProtocolId?: string;
+  artifactContract?: WorkflowArtifactContract;
+  branchKey?: string;
+}
+
 export interface WorkflowHandoffProtocol {
   id: string;
   name: string;
   sourceStepId: string;
+  sourceNodeId?: string;
   targetAgentId?: string;
   targetPhase?: WorkItemPhase;
   description?: string;
@@ -290,8 +375,13 @@ export interface Workflow {
   id: string;
   name: string;
   capabilityId: string;
+  schemaVersion?: number;
+  entryNodeId?: string;
+  nodes?: WorkflowNode[];
+  edges?: WorkflowEdge[];
   steps: WorkflowStep[];
   handoffProtocols?: WorkflowHandoffProtocol[];
+  publishState?: WorkflowPublishState;
   status: Status;
   workflowType?: 'SDLC' | 'Operational' | 'Governance' | 'Custom';
   scope?: 'CAPABILITY' | 'GLOBAL';
@@ -409,9 +499,11 @@ export interface WorkflowRun {
   status: WorkflowRunStatus;
   attemptNumber: number;
   workflowSnapshot: Workflow;
+  currentNodeId?: string;
   currentStepId?: string;
   currentPhase?: WorkItemPhase;
   assignedAgentId?: string;
+  branchState?: WorkflowRunBranchState;
   pauseReason?: RunWaitType;
   currentWaitId?: string;
   terminalOutcome?: string;
@@ -429,7 +521,8 @@ export interface WorkflowRunStep {
   id: string;
   capabilityId: string;
   runId: string;
-  workflowStepId: string;
+  workflowNodeId: string;
+  workflowStepId?: string;
   stepIndex: number;
   phase: WorkItemPhase;
   name: string;
@@ -446,6 +539,20 @@ export interface WorkflowRunStep {
   startedAt?: string;
   completedAt?: string;
   metadata?: Record<string, any>;
+}
+
+export interface WorkflowRunBranchState {
+  pendingNodeIds: string[];
+  completedNodeIds: string[];
+  activeNodeIds: string[];
+  joinState?: Record<
+    string,
+    {
+      waitingOnNodeIds: string[];
+      completedInboundNodeIds: string[];
+    }
+  >;
+  visitCount?: number;
 }
 
 export interface ToolInvocation {
