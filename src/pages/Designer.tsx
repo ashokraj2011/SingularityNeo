@@ -881,7 +881,7 @@ const Designer = () => {
 
       <AnimatePresence>
         {isWorkflowModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
+          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-24 pb-8 sm:p-6 sm:pt-28 sm:pb-10">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -894,7 +894,7 @@ const Designer = () => {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 20, scale: 0.98 }}
               onSubmit={handleCreateWorkflow}
-              className="relative w-full max-w-2xl rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
+              className="relative my-auto w-full max-w-2xl max-h-[calc(100vh-8rem)] overflow-y-auto rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -1016,7 +1016,7 @@ const Designer = () => {
           </div>
         )}
         {isStepModalOpen && selectedWorkflow && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
+          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-24 pb-8 sm:p-6 sm:pt-28 sm:pb-10">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -1029,7 +1029,7 @@ const Designer = () => {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 20, scale: 0.98 }}
               onSubmit={handleAddStep}
-              className="relative w-full max-w-2xl rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
+              className="relative my-auto w-full max-w-2xl max-h-[calc(100vh-8rem)] overflow-y-auto rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -1266,7 +1266,7 @@ const Designer = () => {
           </div>
         )}
         {isProtocolModalOpen && selectedWorkflow && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
+          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-24 pb-8 sm:p-6 sm:pt-28 sm:pb-10">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -1279,7 +1279,7 @@ const Designer = () => {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 20, scale: 0.98 }}
               onSubmit={handleSaveProtocol}
-              className="relative w-full max-w-3xl rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
+              className="relative my-auto w-full max-w-3xl max-h-[calc(100vh-8rem)] overflow-y-auto rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
             >
               <div className="flex items-start justify-between gap-4">
                 <div>

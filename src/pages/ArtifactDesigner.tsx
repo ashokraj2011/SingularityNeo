@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
-import { Artifact } from '../types';
+import { Artifact, CapabilityWorkspace } from '../types';
 
 type ArtifactDraft = {
   name: string;
@@ -72,6 +72,84 @@ const getCreatedLabel = () =>
     year: 'numeric',
   });
 
+const buildDerivedArtifacts = (workspace: CapabilityWorkspace) => {
+  const artifactsById = new Map(workspace.artifacts.map(artifact => [artifact.id, artifact]));
+  const derived = new Map<string, Artifact>();
+
+  workspace.tasks.forEach(task => {
+    (task.producedOutputs || []).forEach((output, index) => {
+      const artifactId = output.artifactId || `${task.id}-OUTPUT-${index + 1}`;
+      if (artifactsById.has(artifactId) || derived.has(artifactId)) {
+        return;
+      }
+
+      derived.set(artifactId, {
+        id: artifactId,
+        name: output.name,
+        capabilityId: task.capabilityId,
+        type:
+          task.taskType === 'TEST'
+            ? 'Test Evidence'
+            : task.taskType === 'GOVERNANCE'
+            ? 'Governance Evidence'
+            : 'Execution Output',
+        version: task.phase ? `${task.phase.toLowerCase()}-output` : 'workflow-output',
+        agent: task.agent,
+        created: task.timestamp,
+        description: task.executionNotes,
+        direction: 'OUTPUT',
+        connectedAgentId: task.agent,
+        sourceWorkflowId: task.workflowId,
+        runId: task.runId,
+        runStepId: task.runStepId,
+        toolInvocationId: task.toolInvocationId,
+        summary: task.executionNotes,
+      });
+    });
+  });
+
+  workspace.executionLogs.forEach(log => {
+    const outputTitle =
+      typeof log.metadata?.outputTitle === 'string' ? log.metadata.outputTitle : undefined;
+    const outputSummary =
+      typeof log.metadata?.outputSummary === 'string'
+        ? log.metadata.outputSummary
+        : undefined;
+    const artifactId =
+      typeof log.metadata?.artifactId === 'string' ? log.metadata.artifactId : undefined;
+
+    if (!outputTitle && !outputSummary) {
+      return;
+    }
+
+    const derivedId = artifactId || `${log.id}-OUTPUT`;
+    if (artifactsById.has(derivedId) || derived.has(derivedId)) {
+      return;
+    }
+
+    derived.set(derivedId, {
+      id: derivedId,
+      name: outputTitle || 'Workflow Output',
+      capabilityId: log.capabilityId,
+      type: 'Execution Output',
+      version: 'runtime-output',
+      agent: log.agentId,
+      created: log.timestamp,
+      description: outputSummary || log.message,
+      direction: 'OUTPUT',
+      connectedAgentId: log.agentId,
+      runId: log.runId,
+      runStepId: log.runStepId,
+      toolInvocationId: log.toolInvocationId,
+      summary: outputSummary || log.message,
+    });
+  });
+
+  return Array.from(derived.values()).sort((left, right) =>
+    String(right.created).localeCompare(String(left.created)),
+  );
+};
+
 const ArtifactDesigner = () => {
   const {
     activeCapability,
@@ -88,11 +166,16 @@ const ArtifactDesigner = () => {
     buildArtifactDraft(undefined, workspace.agents[0]?.id || ''),
   );
 
+  const allArtifacts = useMemo(
+    () => [...workspace.artifacts, ...buildDerivedArtifacts(workspace)],
+    [workspace],
+  );
+
   const filteredArtifacts = useMemo(() => {
-    return workspace.artifacts.filter(artifact =>
+    return allArtifacts.filter(artifact =>
       artifact.name.toLowerCase().includes(searchQuery.toLowerCase()),
     );
-  }, [workspace.artifacts, searchQuery]);
+  }, [allArtifacts, searchQuery]);
 
   const selectedArtifact = useMemo(() => {
     return filteredArtifacts.find(a => a.id === selectedArtifactId) || filteredArtifacts[0];
@@ -166,11 +249,16 @@ const ArtifactDesigner = () => {
       isMasterArtifact: selectedArtifact?.isMasterArtifact,
     };
 
+    const existingPersistedArtifact = workspace.artifacts.find(
+      artifact => artifact.id === selectedArtifact?.id,
+    );
     const nextArtifacts = isCreatingNew
       ? [...workspace.artifacts, nextArtifact]
-      : workspace.artifacts.map(artifact =>
-          artifact.id === selectedArtifact?.id ? nextArtifact : artifact,
-        );
+      : existingPersistedArtifact
+      ? workspace.artifacts.map(artifact =>
+          artifact.id === existingPersistedArtifact.id ? nextArtifact : artifact,
+        )
+      : [...workspace.artifacts, nextArtifact];
 
     const previousArtifact = isCreatingNew
       ? null
@@ -217,10 +305,25 @@ const ArtifactDesigner = () => {
     return (
       <div className="flex min-h-[calc(100vh-160px)] items-center justify-center rounded-[2rem] border border-dashed border-outline-variant/20 bg-white p-10 text-center">
         <div className="max-w-md space-y-3">
-          <h2 className="text-xl font-extrabold text-primary">No artifacts available yet</h2>
+          <h2 className="text-xl font-extrabold text-primary">
+            {allArtifacts.length === 0
+              ? 'No artifacts available yet'
+              : 'No artifacts match this search'}
+          </h2>
           <p className="text-sm leading-relaxed text-secondary">
-            Artifacts are governed through capability workflows and agent input/output contracts. Once a capability starts producing or receiving artifacts, they will appear here for review and editing.
+            {allArtifacts.length === 0
+              ? 'Artifacts are governed through capability workflows and agent input/output contracts. Workflow-produced outputs will now appear here even before they are formally curated.'
+              : 'Try clearing the search or selecting a different workflow output to continue reviewing the artifact contract.'}
           </p>
+          {allArtifacts.length === 0 && (
+            <button
+              onClick={handleCreateTemplate}
+              className="inline-flex items-center gap-2 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white transition-all hover:brightness-110"
+            >
+              <Plus size={16} />
+              Start artifact draft
+            </button>
+          )}
         </div>
       </div>
     );
@@ -245,8 +348,18 @@ const ArtifactDesigner = () => {
             <span className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">{activeCapability.id}</span>
           </div>
           <h1 className="text-2xl font-extrabold text-on-surface tracking-tight">Artifact Template Designer</h1>
+          <p className="mt-1 text-sm text-secondary">
+            Review governed artifacts and workflow-produced outputs, then curate them into durable capability artifacts.
+          </p>
         </div>
         <div className="flex gap-3">
+          <button
+            onClick={handleCreateTemplate}
+            className="px-4 py-2 bg-primary text-white rounded-xl text-xs font-bold hover:brightness-110 transition-all flex items-center gap-2"
+          >
+            <Plus size={14} />
+            Curate Artifact
+          </button>
           <button className="px-4 py-2 bg-white border border-outline-variant/10 rounded-xl text-xs font-bold text-secondary hover:bg-surface-container-low transition-all flex items-center gap-2">
             <History size={14} />
             Version History
@@ -271,6 +384,20 @@ const ArtifactDesigner = () => {
               </div>
             </div>
             <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+              {isCreatingNew && (
+                <button
+                  onClick={() => setIsCreatingNew(true)}
+                  className="w-full rounded-xl border border-primary/20 bg-primary/5 p-3 text-left transition-all"
+                >
+                  <div className="flex items-center gap-2">
+                    <Plus size={14} className="text-primary" />
+                    <span className="text-xs font-bold text-primary">Artifact Draft</span>
+                  </div>
+                  <p className="mt-1 pl-6 text-[0.625rem] text-secondary">
+                    Curating a durable artifact from workflow or agent output.
+                  </p>
+                </button>
+              )}
               {filteredArtifacts.map((art) => (
                 <button 
                   key={art.id} 
@@ -695,7 +822,21 @@ const ArtifactDesigner = () => {
               </div>
             </div>
             <div className="flex gap-3">
-              <button className="px-6 py-2 text-sm font-bold text-secondary hover:bg-surface-container-low rounded-xl transition-all">
+              <button
+                onClick={() => {
+                  if (selectedArtifact && !isCreatingNew) {
+                    setArtifactDraft(
+                      buildArtifactDraft(selectedArtifact, workspace.agents[0]?.id || ''),
+                    );
+                  } else {
+                    setIsCreatingNew(false);
+                    setArtifactDraft(
+                      buildArtifactDraft(undefined, workspace.agents[0]?.id || ''),
+                    );
+                  }
+                }}
+                className="px-6 py-2 text-sm font-bold text-secondary hover:bg-surface-container-low rounded-xl transition-all"
+              >
                 Discard Changes
               </button>
               <button

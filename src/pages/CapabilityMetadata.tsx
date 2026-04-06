@@ -17,10 +17,19 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useCapability } from '../context/CapabilityContext';
+import { cn } from '../lib/utils';
 import {
+  CapabilityDeploymentTarget,
+  CapabilityExecutionCommandTemplate,
   CapabilityMetadataEntry,
   CapabilityStakeholder,
 } from '../types';
+import {
+  PageHeader,
+  SectionCard,
+  StatTile,
+  StatusBadge,
+} from '../components/EnterpriseUI';
 
 const listToText = (items: string[]) => items.join('\n');
 
@@ -29,6 +38,22 @@ const textToList = (value: string) =>
     .split(/\n|,/)
     .map(item => item.trim())
     .filter(Boolean);
+
+const formatJson = (value: unknown) => JSON.stringify(value, null, 2);
+
+const parseJsonArray = <T,>(value: string, fallback: T[]): T[] => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? (parsed as T[]) : fallback;
+  } catch {
+    return fallback;
+  }
+};
 
 const defaultStakeholderRoles = [
   'Development Manager',
@@ -126,6 +151,13 @@ export default function CapabilityMetadata() {
     databases: listToText(activeCapability.databases),
     gitRepositories: listToText(activeCapability.gitRepositories),
     localDirectories: listToText(activeCapability.localDirectories),
+    defaultWorkspacePath:
+      activeCapability.executionConfig.defaultWorkspacePath || '',
+    allowedWorkspacePaths: listToText(
+      activeCapability.executionConfig.allowedWorkspacePaths,
+    ),
+    commandTemplates: formatJson(activeCapability.executionConfig.commandTemplates),
+    deploymentTargets: formatJson(activeCapability.executionConfig.deploymentTargets),
     teamNames: listToText(activeCapability.teamNames),
     stakeholders: normalizeStakeholders(activeCapability.stakeholders),
     additionalMetadata:
@@ -150,6 +182,17 @@ export default function CapabilityMetadata() {
       databases: listToText(activeCapability.databases),
       gitRepositories: listToText(activeCapability.gitRepositories),
       localDirectories: listToText(activeCapability.localDirectories),
+      defaultWorkspacePath:
+        activeCapability.executionConfig.defaultWorkspacePath || '',
+      allowedWorkspacePaths: listToText(
+        activeCapability.executionConfig.allowedWorkspacePaths,
+      ),
+      commandTemplates: formatJson(
+        activeCapability.executionConfig.commandTemplates,
+      ),
+      deploymentTargets: formatJson(
+        activeCapability.executionConfig.deploymentTargets,
+      ),
       teamNames: listToText(activeCapability.teamNames),
       stakeholders: normalizeStakeholders(activeCapability.stakeholders),
       additionalMetadata:
@@ -174,6 +217,8 @@ export default function CapabilityMetadata() {
     () => form.additionalMetadata.filter(hasMetadataEntryContent),
     [form.additionalMetadata],
   );
+  const capabilityLifecycleLabel =
+    activeCapability.status === 'ARCHIVED' ? 'Inactive' : 'Active';
 
   const metadataSummary = useMemo(
     () => [
@@ -280,6 +325,18 @@ export default function CapabilityMetadata() {
         databases: textToList(form.databases),
         gitRepositories: textToList(form.gitRepositories),
         localDirectories: textToList(form.localDirectories),
+        executionConfig: {
+          defaultWorkspacePath: form.defaultWorkspacePath.trim() || undefined,
+          allowedWorkspacePaths: textToList(form.allowedWorkspacePaths),
+          commandTemplates: parseJsonArray<CapabilityExecutionCommandTemplate>(
+            form.commandTemplates,
+            activeCapability.executionConfig.commandTemplates,
+          ),
+          deploymentTargets: parseJsonArray<CapabilityDeploymentTarget>(
+            form.deploymentTargets,
+            activeCapability.executionConfig.deploymentTargets,
+          ),
+        },
         teamNames: textToList(form.teamNames),
         stakeholders: filteredStakeholders,
         additionalMetadata: filteredMetadataEntries,
@@ -287,49 +344,62 @@ export default function CapabilityMetadata() {
     });
   };
 
+  const handleStatusToggle = () => {
+    const nextStatus = activeCapability.status === 'ARCHIVED' ? 'STABLE' : 'ARCHIVED';
+    const confirmed = window.confirm(
+      `${
+        nextStatus === 'ARCHIVED' ? 'Make inactive' : 'Reactivate'
+      } ${activeCapability.name}?`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    updateCapabilityMetadata(activeCapability.id, {
+      status: nextStatus,
+    });
+  };
+
   return (
-    <div className="space-y-8">
-      <div className="flex items-start justify-between gap-6">
-        <div className="max-w-3xl">
-          <span className="inline-flex rounded-full bg-primary/10 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.25em] text-primary">
-            Capability Metadata
-          </span>
-          <h1 className="mt-4 text-3xl font-extrabold tracking-tight text-primary">
-            {activeCapability.name}
-          </h1>
-          <p className="mt-2 text-sm leading-relaxed text-secondary">
-            Configure the full capability contract: hierarchy, leadership contacts,
-            code repositories, local workspaces, and extra metadata that every
-            downstream team, workflow, and agent should inherit.
-          </p>
-        </div>
-        <div className="rounded-3xl border border-primary/10 bg-primary/5 p-5 shadow-sm">
-          <div className="flex items-start gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-primary shadow-sm">
-              <Bot size={20} />
-            </div>
-            <div>
-              <p className="text-sm font-bold text-on-surface">
-                {ownerAgent?.name || 'Capability Owning Agent'}
-              </p>
-              <p className="mt-1 text-xs leading-relaxed text-secondary">
-                Team owner and default context anchor for this capability
-                workspace.
-              </p>
-              <p className="mt-2 text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-primary">
-                {ownerAgent?.id}
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Capability Metadata"
+        context={activeCapability.id}
+        title={activeCapability.name}
+        description="Configure the capability contract, hierarchy, leadership contacts, code repositories, execution boundaries, and inherited metadata for downstream teams and workflows."
+        actions={
+          <SectionCard
+            title={ownerAgent?.name || 'Capability Owning Agent'}
+            description="Team owner and default context anchor for this capability workspace."
+            icon={Bot}
+            tone="brand"
+            className="min-w-[22rem] p-4"
+            contentClassName="space-y-2"
+          >
+            <StatusBadge tone="brand">{ownerAgent?.id || 'Owner Agent'}</StatusBadge>
+          </SectionCard>
+        }
+      />
+
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+        {metadataSummary.map(item => (
+          <StatTile
+            key={item.label}
+            label={item.label}
+            value={item.value}
+            tone="brand"
+            className="xl:col-span-1"
+          />
+        ))}
+      </section>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <motion.form
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           onSubmit={handleSave}
-          className="rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-sm"
+          className="section-card"
         >
           <div className="grid gap-8">
             <section className="grid gap-5 md:grid-cols-2">
@@ -355,7 +425,7 @@ export default function CapabilityMetadata() {
                 <input
                   value={form.name}
                   onChange={event => setField('name', event.target.value)}
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-input"
                 />
               </label>
 
@@ -366,7 +436,7 @@ export default function CapabilityMetadata() {
                 <input
                   value={form.domain}
                   onChange={event => setField('domain', event.target.value)}
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-input"
                 />
               </label>
 
@@ -377,7 +447,7 @@ export default function CapabilityMetadata() {
                 <input
                   value={form.businessUnit}
                   onChange={event => setField('businessUnit', event.target.value)}
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-input"
                 />
               </label>
 
@@ -390,7 +460,7 @@ export default function CapabilityMetadata() {
                   onChange={event =>
                     setField('parentCapabilityId', event.target.value)
                   }
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-select"
                 >
                   <option value="">Standalone capability</option>
                   {siblingCapabilities.map(capability => (
@@ -409,7 +479,7 @@ export default function CapabilityMetadata() {
                   value={form.ownerTeam}
                   onChange={event => setField('ownerTeam', event.target.value)}
                   placeholder="Capability Strategy Office"
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-input"
                 />
               </label>
 
@@ -420,7 +490,7 @@ export default function CapabilityMetadata() {
                 <textarea
                   value={form.description}
                   onChange={event => setField('description', event.target.value)}
-                  className="h-28 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea h-28"
                 />
               </label>
             </section>
@@ -448,7 +518,7 @@ export default function CapabilityMetadata() {
                   value={form.confluenceLink}
                   onChange={event => setField('confluenceLink', event.target.value)}
                   placeholder="https://confluence.example.com/display/..."
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-input"
                 />
               </label>
 
@@ -460,7 +530,7 @@ export default function CapabilityMetadata() {
                   value={form.jiraBoardLink}
                   onChange={event => setField('jiraBoardLink', event.target.value)}
                   placeholder="https://jira.example.com/boards/..."
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-input"
                 />
               </label>
 
@@ -474,7 +544,7 @@ export default function CapabilityMetadata() {
                     setField('documentationNotes', event.target.value)
                   }
                   placeholder="Runbooks, architecture constraints, terminology, onboarding notes, governance rules."
-                  className="h-28 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea h-28"
                 />
               </label>
             </section>
@@ -503,7 +573,7 @@ export default function CapabilityMetadata() {
                   value={form.applications}
                   onChange={event => setField('applications', event.target.value)}
                   placeholder={'CoreLedger\nCustomerPortal'}
-                  className="h-32 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea h-32"
                 />
               </label>
 
@@ -515,7 +585,7 @@ export default function CapabilityMetadata() {
                   value={form.apis}
                   onChange={event => setField('apis', event.target.value)}
                   placeholder={'AccountAPI\nTransactionService'}
-                  className="h-32 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea h-32"
                 />
               </label>
 
@@ -527,7 +597,7 @@ export default function CapabilityMetadata() {
                   value={form.databases}
                   onChange={event => setField('databases', event.target.value)}
                   placeholder={'Retail_DB_01\nUser_Auth_DB'}
-                  className="h-32 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea h-32"
                 />
               </label>
 
@@ -543,7 +613,7 @@ export default function CapabilityMetadata() {
                   placeholder={
                     'ssh://git.example.com/payments/payments-core.git\nssh://git.example.com/payments/payment-gateway.git'
                   }
-                  className="h-32 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea h-32"
                 />
               </label>
 
@@ -555,7 +625,7 @@ export default function CapabilityMetadata() {
                   value={form.teamNames}
                   onChange={event => setField('teamNames', event.target.value)}
                   placeholder={'Core Banking Architecture\nRetail Platform Delivery'}
-                  className="h-32 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea h-32"
                 />
               </label>
 
@@ -571,7 +641,76 @@ export default function CapabilityMetadata() {
                   placeholder={
                     '/Users/ashokraj/Documents/payments-core\n/Users/ashokraj/Documents/payment-gateway'
                   }
-                  className="h-28 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea h-28"
+                />
+              </label>
+            </section>
+
+            <section className="grid gap-5 md:grid-cols-2">
+              <div className="md:col-span-2 flex items-center gap-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                  <FolderCode size={24} />
+                </div>
+                <div>
+                  <h2 className="text-xl font-extrabold text-primary">
+                    Execution policy
+                  </h2>
+                  <p className="text-sm text-secondary">
+                    Backend execution uses these workspace limits, named command
+                    templates, and deployment targets.
+                  </p>
+                </div>
+              </div>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Default workspace path
+                </span>
+                <input
+                  value={form.defaultWorkspacePath}
+                  onChange={event =>
+                    setField('defaultWorkspacePath', event.target.value)
+                  }
+                  placeholder="/Users/ashokraj/Documents/agentGoogle"
+                  className="field-input"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Allowed workspace paths
+                </span>
+                <textarea
+                  value={form.allowedWorkspacePaths}
+                  onChange={event =>
+                    setField('allowedWorkspacePaths', event.target.value)
+                  }
+                  placeholder={'/Users/ashokraj/Documents/agentGoogle\n/Users/ashokraj/Documents/other-repo'}
+                  className="field-textarea h-28"
+                />
+              </label>
+
+              <label className="space-y-2 md:col-span-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Command templates (JSON array)
+                </span>
+                <textarea
+                  value={form.commandTemplates}
+                  onChange={event => setField('commandTemplates', event.target.value)}
+                  className="field-textarea h-48 font-mono text-xs"
+                />
+              </label>
+
+              <label className="space-y-2 md:col-span-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Deployment targets (JSON array)
+                </span>
+                <textarea
+                  value={form.deploymentTargets}
+                  onChange={event =>
+                    setField('deploymentTargets', event.target.value)
+                  }
+                  className="field-textarea h-40 font-mono text-xs"
                 />
               </label>
             </section>
@@ -617,7 +756,7 @@ export default function CapabilityMetadata() {
                           updateStakeholder(index, 'role', event.target.value)
                         }
                         placeholder="Role"
-                        className="rounded-2xl border border-outline-variant/15 bg-white px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                        className="field-input bg-white"
                       />
                       <input
                         value={stakeholder.name}
@@ -625,7 +764,7 @@ export default function CapabilityMetadata() {
                           updateStakeholder(index, 'name', event.target.value)
                         }
                         placeholder="Name"
-                        className="rounded-2xl border border-outline-variant/15 bg-white px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                        className="field-input bg-white"
                       />
                       <input
                         value={stakeholder.email}
@@ -633,7 +772,7 @@ export default function CapabilityMetadata() {
                           updateStakeholder(index, 'email', event.target.value)
                         }
                         placeholder="email@example.com"
-                        className="rounded-2xl border border-outline-variant/15 bg-white px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                        className="field-input bg-white"
                       />
                       <div className="flex gap-2">
                         <input
@@ -646,7 +785,7 @@ export default function CapabilityMetadata() {
                             )
                           }
                           placeholder="Team name"
-                          className="min-w-0 flex-1 rounded-2xl border border-outline-variant/15 bg-white px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                          className="field-input min-w-0 flex-1 bg-white"
                         />
                         {!isDefaultRole && (
                           <button
@@ -702,7 +841,7 @@ export default function CapabilityMetadata() {
                         updateMetadataEntry(index, 'key', event.target.value)
                       }
                       placeholder="Metadata key"
-                      className="rounded-2xl border border-outline-variant/15 bg-white px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                      className="field-input bg-white"
                     />
                     <input
                       value={entry.value}
@@ -710,7 +849,7 @@ export default function CapabilityMetadata() {
                         updateMetadataEntry(index, 'value', event.target.value)
                       }
                       placeholder="Metadata value"
-                      className="rounded-2xl border border-outline-variant/15 bg-white px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                      className="field-input bg-white"
                     />
                     <button
                       type="button"
@@ -754,7 +893,35 @@ export default function CapabilityMetadata() {
           </div>
         </motion.form>
 
-        <aside className="space-y-4">
+        <aside className="space-y-4 xl:sticky xl:top-28 xl:self-start">
+          <SectionCard
+            title="Capability status"
+            description="Use this to keep a capability active for day-to-day delivery or move it to an inactive state without deleting its history."
+            tone={activeCapability.status === 'ARCHIVED' ? 'muted' : 'brand'}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <StatusBadge
+                tone={activeCapability.status === 'ARCHIVED' ? 'warning' : 'success'}
+              >
+                {capabilityLifecycleLabel}
+              </StatusBadge>
+              <button
+                type="button"
+                onClick={handleStatusToggle}
+                className={cn(
+                  'enterprise-button',
+                  activeCapability.status === 'ARCHIVED'
+                    ? 'enterprise-button-brand-muted'
+                    : 'enterprise-button-secondary',
+                )}
+              >
+                {activeCapability.status === 'ARCHIVED'
+                  ? 'Reactivate capability'
+                  : 'Make inactive'}
+              </button>
+            </div>
+          </SectionCard>
+
           <div className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
             <p className="text-[0.625rem] font-bold uppercase tracking-[0.25em] text-outline">
               Capability summary

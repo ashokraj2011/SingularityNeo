@@ -20,6 +20,30 @@ export interface CapabilityMetadataEntry {
   value: string;
 }
 
+export interface CapabilityExecutionCommandTemplate {
+  id: string;
+  label: string;
+  description?: string;
+  command: string[];
+  workingDirectory?: string;
+  requiresApproval?: boolean;
+}
+
+export interface CapabilityDeploymentTarget {
+  id: string;
+  label: string;
+  description?: string;
+  commandTemplateId: string;
+  workspacePath?: string;
+}
+
+export interface CapabilityExecutionConfig {
+  defaultWorkspacePath?: string;
+  allowedWorkspacePaths: string[];
+  commandTemplates: CapabilityExecutionCommandTemplate[];
+  deploymentTargets: CapabilityDeploymentTarget[];
+}
+
 export interface Capability {
   id: string;
   name: string;
@@ -39,6 +63,7 @@ export interface Capability {
   teamNames: string[];
   stakeholders: CapabilityStakeholder[];
   additionalMetadata: CapabilityMetadataEntry[];
+  executionConfig: CapabilityExecutionConfig;
   status: Status;
   specialAgentId?: string;
   skillLibrary: Skill[];
@@ -122,8 +147,18 @@ export interface AgentTask {
   timestamp: string;
   prompt?: string;
   executionNotes?: string;
+  runId?: string;
+  runStepId?: string;
+  toolInvocationId?: string;
   linkedArtifacts?: { name: string; size: string; type: 'table' | 'scale' | 'file' }[];
-  producedOutputs?: { name: string; status: 'completed' | 'pending'; downloadUrl?: string }[];
+  producedOutputs?: {
+    name: string;
+    status: 'completed' | 'pending';
+    downloadUrl?: string;
+    artifactId?: string;
+    runId?: string;
+    runStepId?: string;
+  }[];
 }
 
 export interface Blueprint {
@@ -136,6 +171,16 @@ export interface Blueprint {
   status: Status;
   type: string;
 }
+
+export type ArtifactKind =
+  | 'PHASE_OUTPUT'
+  | 'HANDOFF_PACKET'
+  | 'APPROVAL_RECORD'
+  | 'INPUT_NOTE'
+  | 'CONFLICT_RESOLUTION'
+  | 'EXECUTION_SUMMARY';
+
+export type ArtifactContentFormat = 'TEXT' | 'MARKDOWN' | 'JSON';
 
 export interface Artifact {
   id: string;
@@ -158,6 +203,24 @@ export interface Artifact {
   direction?: 'INPUT' | 'OUTPUT';
   connectedAgentId?: string;
   sourceWorkflowId?: string;
+  runId?: string;
+  runStepId?: string;
+  toolInvocationId?: string;
+  summary?: string;
+  artifactKind?: ArtifactKind;
+  phase?: WorkItemPhase;
+  workItemId?: string;
+  sourceRunId?: string;
+  sourceRunStepId?: string;
+  sourceWaitId?: string;
+  handoffFromAgentId?: string;
+  handoffToAgentId?: string;
+  contentFormat?: ArtifactContentFormat;
+  mimeType?: string;
+  fileName?: string;
+  contentText?: string;
+  contentJson?: Record<string, any> | any[];
+  downloadable?: boolean;
 }
 
 export type WorkItemPhase =
@@ -171,6 +234,17 @@ export type WorkItemPhase =
   | 'DONE';
 
 export type WorkflowStepType = 'DELIVERY' | 'GOVERNANCE_GATE' | 'HUMAN_APPROVAL';
+
+export type ToolAdapterId =
+  | 'workspace_list'
+  | 'workspace_read'
+  | 'workspace_search'
+  | 'git_status'
+  | 'workspace_write'
+  | 'run_build'
+  | 'run_test'
+  | 'run_docs'
+  | 'run_deploy';
 
 export interface WorkflowHandoffProtocol {
   id: string;
@@ -202,6 +276,9 @@ export interface WorkflowStep {
   approverRoles?: string[];
   exitCriteria?: string[];
   templatePath?: string;
+  allowedToolIds?: ToolAdapterId[];
+  preferredWorkspacePath?: string;
+  executionNotes?: string;
 }
 
 export interface Workflow {
@@ -224,6 +301,9 @@ export interface ExecutionLog {
   timestamp: string;
   level: 'INFO' | 'WARN' | 'ERROR';
   message: string;
+  runId?: string;
+  runStepId?: string;
+  toolInvocationId?: string;
   metadata?: Record<string, any>;
 }
 
@@ -279,7 +359,219 @@ export interface WorkItem {
   tags: string[];
   pendingRequest?: WorkItemPendingRequest;
   blocker?: WorkItemBlocker;
+  activeRunId?: string;
+  lastRunId?: string;
   history: WorkItemHistoryEntry[];
+}
+
+export type WorkflowRunStatus =
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'WAITING_APPROVAL'
+  | 'WAITING_INPUT'
+  | 'WAITING_CONFLICT'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export type WorkflowRunStepStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'WAITING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export type ToolInvocationStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export type RunWaitType = 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION';
+
+export type RunWaitStatus = 'OPEN' | 'RESOLVED' | 'CANCELLED';
+
+export interface WorkflowRun {
+  id: string;
+  capabilityId: string;
+  workItemId: string;
+  workflowId: string;
+  status: WorkflowRunStatus;
+  attemptNumber: number;
+  workflowSnapshot: Workflow;
+  currentStepId?: string;
+  currentPhase?: WorkItemPhase;
+  assignedAgentId?: string;
+  pauseReason?: RunWaitType;
+  currentWaitId?: string;
+  terminalOutcome?: string;
+  restartFromPhase?: WorkItemPhase;
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowRunStep {
+  id: string;
+  capabilityId: string;
+  runId: string;
+  workflowStepId: string;
+  stepIndex: number;
+  phase: WorkItemPhase;
+  name: string;
+  stepType: WorkflowStepType;
+  agentId: string;
+  status: WorkflowRunStepStatus;
+  attemptCount: number;
+  evidenceSummary?: string;
+  outputSummary?: string;
+  waitId?: string;
+  lastToolInvocationId?: string;
+  startedAt?: string;
+  completedAt?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface ToolInvocation {
+  id: string;
+  capabilityId: string;
+  runId: string;
+  runStepId: string;
+  toolId: ToolAdapterId;
+  status: ToolInvocationStatus;
+  request: Record<string, any>;
+  resultSummary?: string;
+  workingDirectory?: string;
+  exitCode?: number;
+  stdoutPreview?: string;
+  stderrPreview?: string;
+  retryable: boolean;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+}
+
+export interface RunEvent {
+  id: string;
+  capabilityId: string;
+  runId: string;
+  workItemId: string;
+  timestamp: string;
+  level: 'INFO' | 'WARN' | 'ERROR';
+  type: string;
+  message: string;
+  runStepId?: string;
+  toolInvocationId?: string;
+  details?: Record<string, any>;
+}
+
+export interface RunWait {
+  id: string;
+  capabilityId: string;
+  runId: string;
+  runStepId: string;
+  type: RunWaitType;
+  status: RunWaitStatus;
+  message: string;
+  requestedBy: string;
+  resolution?: string;
+  resolvedBy?: string;
+  payload?: Record<string, any>;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface WorkflowRunDetail {
+  run: WorkflowRun;
+  steps: WorkflowRunStep[];
+  waits: RunWait[];
+  toolInvocations: ToolInvocation[];
+}
+
+export interface LedgerArtifactRecord {
+  artifact: Artifact;
+  workItemTitle?: string;
+  runStatus?: WorkflowRunStatus;
+  stepName?: string;
+  stepType?: WorkflowStepType;
+  runAttempt?: number;
+  sourceAgentName?: string;
+  targetAgentName?: string;
+}
+
+export interface HumanInteractionRecord {
+  id: string;
+  capabilityId: string;
+  workItemId?: string;
+  workItemTitle?: string;
+  runId: string;
+  runStepId: string;
+  waitId: string;
+  phase?: WorkItemPhase;
+  stepName?: string;
+  interactionType: RunWaitType;
+  status: RunWaitStatus;
+  message: string;
+  requestedBy: string;
+  requestedByName?: string;
+  createdAt: string;
+  resolution?: string;
+  resolvedBy?: string;
+  resolvedByName?: string;
+  resolvedAt?: string;
+  artifactId?: string;
+}
+
+export interface PhaseEvidenceGroup {
+  phase: WorkItemPhase;
+  label: string;
+  stepName?: string;
+  stepType?: WorkflowStepType;
+  artifacts: LedgerArtifactRecord[];
+  handoffArtifacts: LedgerArtifactRecord[];
+  toolInvocations: ToolInvocation[];
+  logs: ExecutionLog[];
+  events: RunEvent[];
+  interactions: HumanInteractionRecord[];
+}
+
+export interface CompletedWorkOrderSummary {
+  workItem: WorkItem;
+  latestCompletedRun?: WorkflowRun;
+  supersededRuns: WorkflowRun[];
+  artifactCount: number;
+  handoffCount: number;
+  interactionCount: number;
+  eventCount: number;
+  logCount: number;
+  completedAt?: string;
+}
+
+export interface CompletedWorkOrderDetail {
+  workItem: WorkItem;
+  workflow?: Workflow;
+  latestCompletedRun?: WorkflowRun;
+  runHistory: WorkflowRun[];
+  latestRunDetail?: WorkflowRunDetail;
+  artifacts: LedgerArtifactRecord[];
+  humanInteractions: HumanInteractionRecord[];
+  phaseGroups: PhaseEvidenceGroup[];
+  events: RunEvent[];
+  logs: ExecutionLog[];
+}
+
+export interface ArtifactContentResponse {
+  artifact: Artifact;
+  contentFormat: ArtifactContentFormat;
+  mimeType: string;
+  fileName: string;
+  contentText?: string;
+  contentJson?: Record<string, any> | any[];
 }
 
 export interface CapabilityWorkspace {

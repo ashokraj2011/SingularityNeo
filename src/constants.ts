@@ -1,4 +1,5 @@
 import { Blueprint, WorkPackage, AgentTask, Artifact, Capability, Skill, Workflow, ExecutionLog, LearningUpdate, WorkItem } from './types';
+import { getDefaultExecutionConfig } from './lib/executionConfig';
 
 export const SKILL_LIBRARY: Skill[] = [
   { id: 'SKL-001', name: 'Log Analysis', description: 'Analyze system logs for patterns and anomalies.', category: 'Analysis', version: '1.2.0' },
@@ -98,6 +99,7 @@ export const CAPABILITIES: Capability[] = [
     teamNames: [],
     stakeholders: [],
     additionalMetadata: [],
+    executionConfig: getDefaultExecutionConfig({ localDirectories: [] }),
     status: 'STABLE',
     specialAgentId: 'AGENT-CALCULATOR-OWNER',
     skillLibrary: [],

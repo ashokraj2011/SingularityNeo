@@ -1,9 +1,18 @@
 import {
+  ArtifactContentResponse,
   Capability,
   CapabilityAgent,
   CapabilityChatMessage,
   CapabilityWorkspace,
+  CompletedWorkOrderDetail,
+  CompletedWorkOrderSummary,
+  LedgerArtifactRecord,
+  RunEvent,
   Skill,
+  WorkItem,
+  WorkItemPhase,
+  WorkflowRun,
+  WorkflowRunDetail,
 } from '../types';
 
 export interface RuntimeStatus {
@@ -118,6 +127,45 @@ export const fetchCapabilityBundle = async (
   requestJson<CapabilityBundle>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}`,
   );
+
+export const fetchLedgerArtifacts = async (
+  capabilityId: string,
+): Promise<LedgerArtifactRecord[]> =>
+  requestJson<LedgerArtifactRecord[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/ledger/artifacts`,
+  );
+
+export const fetchCompletedWorkOrders = async (
+  capabilityId: string,
+): Promise<CompletedWorkOrderSummary[]> =>
+  requestJson<CompletedWorkOrderSummary[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/ledger/completed-work-orders`,
+  );
+
+export const fetchWorkItemEvidence = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<CompletedWorkOrderDetail> =>
+  requestJson<CompletedWorkOrderDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/evidence`,
+  );
+
+export const fetchArtifactContent = async (
+  capabilityId: string,
+  artifactId: string,
+): Promise<ArtifactContentResponse> =>
+  requestJson<ArtifactContentResponse>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/artifacts/${encodeURIComponent(artifactId)}/content`,
+  );
+
+export const getArtifactDownloadUrl = (capabilityId: string, artifactId: string) =>
+  `/api/capabilities/${encodeURIComponent(capabilityId)}/artifacts/${encodeURIComponent(artifactId)}/download`;
+
+export const getWorkItemEvidenceBundleDownloadUrl = (
+  capabilityId: string,
+  workItemId: string,
+) =>
+  `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/evidence-bundle`;
 
 export const createCapabilityRecord = async (
   capability: Capability,
@@ -248,5 +296,146 @@ export const createCapabilityCodeBranch = async (
       method: 'POST',
       headers: jsonHeaders,
       body: JSON.stringify(payload),
+    },
+  );
+
+export const createCapabilityWorkItem = async (
+  capabilityId: string,
+  payload: {
+    title: string;
+    description?: string;
+    workflowId: string;
+    priority: WorkItem['priority'];
+    tags: string[];
+  },
+): Promise<WorkItem> =>
+  requestJson<WorkItem>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const moveCapabilityWorkItem = async (
+  capabilityId: string,
+  workItemId: string,
+  payload: { targetPhase: WorkItemPhase; note?: string },
+): Promise<WorkItem> =>
+  requestJson<WorkItem>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/move`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const startCapabilityWorkflowRun = async (
+  capabilityId: string,
+  workItemId: string,
+  payload?: { restartFromPhase?: WorkItemPhase },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/runs`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
+    },
+  );
+
+export const listCapabilityWorkflowRuns = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<WorkflowRun[]> =>
+  requestJson<WorkflowRun[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/runs`,
+  );
+
+export const fetchCapabilityWorkflowRun = async (
+  capabilityId: string,
+  runId: string,
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}`,
+  );
+
+export const fetchCapabilityWorkflowRunEvents = async (
+  capabilityId: string,
+  runId: string,
+): Promise<RunEvent[]> =>
+  requestJson<RunEvent[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/events`,
+  );
+
+export const approveCapabilityWorkflowRun = async (
+  capabilityId: string,
+  runId: string,
+  payload: { resolution: string; resolvedBy: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/approve`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const provideCapabilityWorkflowRunInput = async (
+  capabilityId: string,
+  runId: string,
+  payload: { resolution: string; resolvedBy: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/provide-input`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const resolveCapabilityWorkflowRunConflict = async (
+  capabilityId: string,
+  runId: string,
+  payload: { resolution: string; resolvedBy: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/resolve-conflict`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const cancelCapabilityWorkflowRun = async (
+  capabilityId: string,
+  runId: string,
+  payload?: { note?: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/cancel`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
+    },
+  );
+
+export const restartCapabilityWorkflowRun = async (
+  capabilityId: string,
+  runId: string,
+  payload?: { restartFromPhase?: WorkItemPhase },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/restart`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
     },
   );

@@ -1,6 +1,7 @@
 import { BUILT_IN_AGENT_TEMPLATES } from '../constants';
 import {
   Capability,
+  ToolAdapterId,
   WorkItemPhase,
   Workflow,
   WorkflowHandoffProtocol,
@@ -27,6 +28,9 @@ type StandardWorkflowStepTemplate = {
   approverRoles?: string[];
   exitCriteria: string[];
   templatePath: string;
+  allowedToolIds: ToolAdapterId[];
+  preferredWorkspacePath?: string;
+  executionNotes?: string;
 };
 
 export const SDLC_BOARD_PHASES: WorkItemPhase[] = [
@@ -92,6 +96,9 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
       'Story ready for solution design',
     ],
     templatePath: '/out/steps/analysis-step-template.md',
+    allowedToolIds: ['workspace_list', 'workspace_read', 'workspace_search'],
+    executionNotes:
+      'Ground the analysis in capability documentation and repository context. Do not modify source code in this step.',
   },
   {
     key: 'DESIGN',
@@ -116,6 +123,9 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
       'Engineering approach approved for build',
     ],
     templatePath: '/out/steps/design-step-template.md',
+    allowedToolIds: ['workspace_list', 'workspace_read', 'workspace_search', 'git_status'],
+    executionNotes:
+      'Use repository inspection tools to understand the existing solution shape and produce design guidance before implementation.',
   },
   {
     key: 'DEVELOPMENT',
@@ -140,6 +150,17 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
       'Build candidate ready for QA',
     ],
     templatePath: '/out/steps/development-step-template.md',
+    allowedToolIds: [
+      'workspace_list',
+      'workspace_read',
+      'workspace_search',
+      'git_status',
+      'workspace_write',
+      'run_build',
+      'run_test',
+    ],
+    executionNotes:
+      'Implementation can modify files inside capability-approved workspaces and should run build/test validation before completing the step.',
   },
   {
     key: 'QA',
@@ -164,6 +185,16 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
       'Release candidate recommended for governance review',
     ],
     templatePath: '/out/steps/qa-step-template.md',
+    allowedToolIds: [
+      'workspace_list',
+      'workspace_read',
+      'workspace_search',
+      'git_status',
+      'run_test',
+      'run_docs',
+    ],
+    executionNotes:
+      'QA should execute configured validation commands, summarize the outcome, and capture evidence for downstream governance.',
   },
   {
     key: 'GOVERNANCE',
@@ -190,6 +221,9 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
       'Governance gate cleared for approval',
     ],
     templatePath: '/out/steps/governance-gate-template.md',
+    allowedToolIds: ['workspace_read', 'workspace_search', 'run_docs'],
+    executionNotes:
+      'Governance validation should review evidence and produce approval-ready documentation, but it should not perform deployments.',
   },
   {
     key: 'APPROVAL',
@@ -215,6 +249,9 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
       'Deployment cleared to proceed',
     ],
     templatePath: '/out/steps/human-approval-template.md',
+    allowedToolIds: [],
+    executionNotes:
+      'This step always pauses for explicit human approval. The backend runner must not auto-complete it.',
   },
   {
     key: 'RELEASE',
@@ -239,6 +276,9 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
       'Release summary published',
     ],
     templatePath: '/out/steps/release-step-template.md',
+    allowedToolIds: ['workspace_read', 'git_status', 'run_deploy', 'run_docs'],
+    executionNotes:
+      'Release execution can only use capability-configured deployment/doc commands and must remain approval-gated before deployment starts.',
   },
 ];
 
@@ -266,6 +306,9 @@ export const createStandardCapabilityWorkflow = (
       approverRoles: template.approverRoles,
       exitCriteria: template.exitCriteria,
       templatePath: template.templatePath,
+      allowedToolIds: template.allowedToolIds,
+      preferredWorkspacePath: template.preferredWorkspacePath,
+      executionNotes: template.executionNotes,
     }),
   );
 

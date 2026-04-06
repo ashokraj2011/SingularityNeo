@@ -20,6 +20,8 @@ import {
   LearningUpdate,
   Skill,
   WorkItem,
+  WorkItemPhase,
+  WorkItemStatus,
   Workflow,
 } from '../src/types';
 import { query, transaction } from './db';
@@ -32,6 +34,7 @@ import {
   materializeWorkspace,
 } from './workspace';
 import { getDefaultCapabilityWorkflows } from '../src/lib/standardWorkflow';
+import { normalizeExecutionConfig } from '../src/lib/executionConfig';
 
 type CapabilityBundle = {
   capability: Capability;
@@ -70,6 +73,10 @@ const capabilityFromRow = (row: Record<string, any>, skills: Skill[]): Capabilit
   teamNames: asStringArray(row.team_names),
   stakeholders: asJsonArray<CapabilityStakeholder>(row.stakeholders),
   additionalMetadata: asJsonArray<CapabilityMetadataEntry>(row.additional_metadata),
+  executionConfig: normalizeExecutionConfig(
+    { localDirectories: asStringArray(row.local_directories) },
+    row.execution_config || undefined,
+  ),
   status: row.status,
   specialAgentId: row.special_agent_id || undefined,
   skillLibrary: skills,
@@ -153,6 +160,24 @@ const artifactFromRow = (row: Record<string, any>) => ({
   direction: row.direction || undefined,
   connectedAgentId: row.connected_agent_id || undefined,
   sourceWorkflowId: row.source_workflow_id || undefined,
+  runId: row.run_id || undefined,
+  runStepId: row.run_step_id || undefined,
+  toolInvocationId: row.tool_invocation_id || undefined,
+  summary: row.summary || undefined,
+  workItemId: row.work_item_id || undefined,
+  artifactKind: row.artifact_kind || undefined,
+  phase: row.phase || undefined,
+  sourceRunId: row.source_run_id || undefined,
+  sourceRunStepId: row.source_run_step_id || undefined,
+  sourceWaitId: row.source_wait_id || undefined,
+  handoffFromAgentId: row.handoff_from_agent_id || undefined,
+  handoffToAgentId: row.handoff_to_agent_id || undefined,
+  contentFormat: row.content_format || undefined,
+  mimeType: row.mime_type || undefined,
+  fileName: row.file_name || undefined,
+  contentText: row.content_text || undefined,
+  contentJson: row.content_json || undefined,
+  downloadable: row.downloadable ?? undefined,
 });
 
 const taskFromRow = (row: Record<string, any>): AgentTask => ({
@@ -171,6 +196,9 @@ const taskFromRow = (row: Record<string, any>): AgentTask => ({
   timestamp: row.timestamp,
   prompt: row.prompt || undefined,
   executionNotes: row.execution_notes || undefined,
+  runId: row.run_id || undefined,
+  runStepId: row.run_step_id || undefined,
+  toolInvocationId: row.tool_invocation_id || undefined,
   linkedArtifacts: asJsonArray<NonNullable<AgentTask['linkedArtifacts']>[number]>(row.linked_artifacts),
   producedOutputs: asJsonArray<NonNullable<AgentTask['producedOutputs']>[number]>(row.produced_outputs),
 });
@@ -183,6 +211,9 @@ const executionLogFromRow = (row: Record<string, any>): ExecutionLog => ({
   timestamp: row.timestamp,
   level: row.level,
   message: row.message,
+  runId: row.run_id || undefined,
+  runStepId: row.run_step_id || undefined,
+  toolInvocationId: row.tool_invocation_id || undefined,
   metadata: row.metadata || undefined,
 });
 
@@ -210,6 +241,8 @@ const workItemFromRow = (row: Record<string, any>): WorkItem => ({
   tags: asStringArray(row.tags),
   pendingRequest: row.pending_request || undefined,
   blocker: row.blocker || undefined,
+  activeRunId: row.active_run_id || undefined,
+  lastRunId: row.last_run_id || undefined,
   history: asJsonArray<WorkItem['history'][number]>(row.history),
 });
 
@@ -227,6 +260,9 @@ const mergeCapability = (current: Capability, updates: Partial<Capability>): Cap
   teamNames: updates.teamNames ?? current.teamNames,
   stakeholders: updates.stakeholders ?? current.stakeholders,
   additionalMetadata: updates.additionalMetadata ?? current.additionalMetadata,
+  executionConfig:
+    updates.executionConfig ??
+    normalizeExecutionConfig(current, current.executionConfig),
   skillLibrary: updates.skillLibrary ?? current.skillLibrary,
 });
 
@@ -252,12 +288,13 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         team_names,
         stakeholders,
         additional_metadata,
+        execution_config,
         status,
         special_agent_id,
         updated_at
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,${withUpdatedTimestamp}
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,${withUpdatedTimestamp}
       )
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
@@ -277,6 +314,7 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         team_names = EXCLUDED.team_names,
         stakeholders = EXCLUDED.stakeholders,
         additional_metadata = EXCLUDED.additional_metadata,
+        execution_config = EXCLUDED.execution_config,
         status = EXCLUDED.status,
         special_agent_id = EXCLUDED.special_agent_id,
         updated_at = ${withUpdatedTimestamp}
@@ -300,6 +338,7 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
       capability.teamNames,
       JSON.stringify(capability.stakeholders),
       JSON.stringify(capability.additionalMetadata),
+      JSON.stringify(normalizeExecutionConfig(capability, capability.executionConfig)),
       capability.status,
       capability.specialAgentId || null,
     ],
@@ -586,10 +625,28 @@ const replaceArtifactsTx = async (
           direction,
           connected_agent_id,
           source_workflow_id,
+          run_id,
+          run_step_id,
+          tool_invocation_id,
+          summary,
+          work_item_id,
+          artifact_kind,
+          phase,
+          source_run_id,
+          source_run_step_id,
+          source_wait_id,
+          handoff_from_agent_id,
+          handoff_to_agent_id,
+          content_format,
+          mime_type,
+          file_name,
+          content_text,
+          content_json,
+          downloadable,
           updated_at
         )
         VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,${withUpdatedTimestamp}
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,${withUpdatedTimestamp}
         )
       `,
       [
@@ -613,6 +670,24 @@ const replaceArtifactsTx = async (
         artifact.direction || null,
         artifact.connectedAgentId || null,
         artifact.sourceWorkflowId || null,
+        artifact.runId || null,
+        artifact.runStepId || null,
+        artifact.toolInvocationId || null,
+        artifact.summary || null,
+        artifact.workItemId || null,
+        artifact.artifactKind || null,
+        artifact.phase || null,
+        artifact.sourceRunId || null,
+        artifact.sourceRunStepId || null,
+        artifact.sourceWaitId || null,
+        artifact.handoffFromAgentId || null,
+        artifact.handoffToAgentId || null,
+        artifact.contentFormat || null,
+        artifact.mimeType || null,
+        artifact.fileName || null,
+        artifact.contentText || null,
+        artifact.contentJson || null,
+        artifact.downloadable ?? false,
       ],
     );
   }
@@ -644,11 +719,14 @@ const replaceTasksTx = async (
           timestamp,
           prompt,
           execution_notes,
+          run_id,
+          run_step_id,
+          tool_invocation_id,
           linked_artifacts,
           produced_outputs,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,${withUpdatedTimestamp})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,${withUpdatedTimestamp})
       `,
       [
         capabilityId,
@@ -666,6 +744,9 @@ const replaceTasksTx = async (
         task.timestamp,
         task.prompt || null,
         task.executionNotes || null,
+        task.runId || null,
+        task.runStepId || null,
+        task.toolInvocationId || null,
         JSON.stringify(task.linkedArtifacts || []),
         JSON.stringify(task.producedOutputs || []),
       ],
@@ -693,9 +774,12 @@ const replaceExecutionLogsTx = async (
           timestamp,
           level,
           message,
+          run_id,
+          run_step_id,
+          tool_invocation_id,
           metadata
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       `,
       [
         capabilityId,
@@ -705,6 +789,9 @@ const replaceExecutionLogsTx = async (
         log.timestamp,
         log.level,
         log.message,
+        log.runId || null,
+        log.runStepId || null,
+        log.toolInvocationId || null,
         log.metadata || null,
       ],
     );
@@ -771,10 +858,12 @@ const replaceWorkItemsTx = async (
           tags,
           pending_request,
           blocker,
+          active_run_id,
+          last_run_id,
           history,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,${withUpdatedTimestamp})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,${withUpdatedTimestamp})
       `,
       [
         capabilityId,
@@ -790,6 +879,8 @@ const replaceWorkItemsTx = async (
         item.tags,
         item.pendingRequest || null,
         item.blocker || null,
+        item.activeRunId || null,
+        item.lastRunId || null,
         JSON.stringify(item.history || []),
       ],
     );
@@ -804,8 +895,252 @@ const hasModernWorkflowShape = (steps: unknown) =>
       typeof step === 'object' &&
       typeof (step as { name?: unknown }).name === 'string' &&
       typeof (step as { phase?: unknown }).phase === 'string' &&
-      typeof (step as { stepType?: unknown }).stepType === 'string',
+      typeof (step as { stepType?: unknown }).stepType === 'string' &&
+      Array.isArray((step as { allowedToolIds?: unknown }).allowedToolIds) &&
+      typeof (step as { executionNotes?: unknown }).executionNotes === 'string',
   );
+
+const createRecoveredHistoryEntry = ({
+  workItemId,
+  phase,
+  status,
+  detail,
+}: {
+  workItemId: string;
+  phase: WorkItemPhase;
+  status: WorkItemStatus;
+  detail: string;
+}) => ({
+  id: `HIST-RECOVERED-${workItemId}`,
+  timestamp: new Date().toISOString(),
+  actor: 'System',
+  action: 'Recovered projection',
+  detail,
+  phase,
+  status,
+});
+
+const stripWorkflowStepSuffix = (value: string) => value.split(' · ')[0].trim();
+
+const extractTitleFromRunEvent = (message: string) => {
+  const match = message.match(/was created for\s+(.+?)\.\s*$/i);
+  return match?.[1]?.trim() || '';
+};
+
+const mapRunStatusToWorkItemStatus = (status: string): WorkItemStatus => {
+  if (status === 'COMPLETED') {
+    return 'COMPLETED';
+  }
+  if (status === 'WAITING_APPROVAL') {
+    return 'PENDING_APPROVAL';
+  }
+  if (status === 'WAITING_INPUT' || status === 'WAITING_CONFLICT' || status === 'FAILED') {
+    return 'BLOCKED';
+  }
+  return 'ACTIVE';
+};
+
+const mapRunStatusToPhase = (status: string, currentPhase?: string | null): WorkItemPhase => {
+  if (status === 'COMPLETED') {
+    return 'DONE';
+  }
+
+  if (currentPhase) {
+    return currentPhase as WorkItemPhase;
+  }
+
+  return 'BACKLOG';
+};
+
+const buildRecoveredPendingRequest = (
+  wait: Record<string, any> | undefined,
+) => {
+  if (!wait || wait.status !== 'OPEN') {
+    return null;
+  }
+
+  return {
+    type: wait.type,
+    message: wait.message,
+    requestedBy: wait.requested_by,
+    timestamp:
+      wait.created_at instanceof Date ? wait.created_at.toISOString() : new Date().toISOString(),
+  };
+};
+
+const buildRecoveredBlocker = (wait: Record<string, any> | undefined) => {
+  if (!wait || wait.status !== 'OPEN' || wait.type === 'APPROVAL') {
+    return null;
+  }
+
+  return {
+    type: wait.type === 'CONFLICT_RESOLUTION' ? 'CONFLICT_RESOLUTION' : 'HUMAN_INPUT',
+    message: wait.message,
+    requestedBy: wait.requested_by,
+    timestamp:
+      wait.created_at instanceof Date ? wait.created_at.toISOString() : new Date().toISOString(),
+    status: 'OPEN' as const,
+  };
+};
+
+const repairWorkItemProjectionsTx = async (client: PoolClient) => {
+  const missingResult = await client.query<{
+    capability_id: string;
+    work_item_id: string;
+  }>(
+    `
+      SELECT DISTINCT source.capability_id, source.work_item_id
+      FROM (
+        SELECT capability_id, work_item_id
+        FROM capability_workflow_runs
+        WHERE work_item_id IS NOT NULL
+        UNION
+        SELECT capability_id, work_item_id
+        FROM capability_tasks
+        WHERE work_item_id IS NOT NULL
+      ) AS source
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM capability_work_items items
+        WHERE items.capability_id = source.capability_id
+          AND items.id = source.work_item_id
+      )
+      ORDER BY source.capability_id ASC, source.work_item_id ASC
+    `,
+  );
+
+  for (const missing of missingResult.rows) {
+    const [runResult, firstTaskResult, runEventResult, waitResult, workflowFallbackResult] =
+      await Promise.all([
+        client.query(
+          `
+            SELECT *
+            FROM capability_workflow_runs
+            WHERE capability_id = $1 AND work_item_id = $2
+            ORDER BY attempt_number DESC, created_at DESC
+            LIMIT 1
+          `,
+          [missing.capability_id, missing.work_item_id],
+        ),
+        client.query(
+          `
+            SELECT *
+            FROM capability_tasks
+            WHERE capability_id = $1 AND work_item_id = $2
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+          `,
+          [missing.capability_id, missing.work_item_id],
+        ),
+        client.query(
+          `
+            SELECT *
+            FROM capability_run_events
+            WHERE capability_id = $1 AND work_item_id = $2 AND type = 'RUN_CREATED'
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+          `,
+          [missing.capability_id, missing.work_item_id],
+        ),
+        client.query(
+          `
+            SELECT waits.*
+            FROM capability_workflow_runs runs
+            JOIN capability_run_waits waits
+              ON waits.capability_id = runs.capability_id
+             AND waits.run_id = runs.id
+            WHERE runs.capability_id = $1
+              AND runs.work_item_id = $2
+              AND waits.status = 'OPEN'
+            ORDER BY waits.created_at DESC, waits.id DESC
+            LIMIT 1
+          `,
+          [missing.capability_id, missing.work_item_id],
+        ),
+        client.query(
+          `
+            SELECT id
+            FROM capability_workflows
+            WHERE capability_id = $1
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+          `,
+          [missing.capability_id],
+        ),
+      ]);
+
+    const latestRun = runResult.rows[0];
+    const firstTask = firstTaskResult.rows[0];
+    const creationEvent = runEventResult.rows[0];
+    const openWait = waitResult.rows[0];
+    const fallbackWorkflowId = workflowFallbackResult.rows[0]?.id || null;
+
+    const title =
+      (firstTask?.title ? stripWorkflowStepSuffix(firstTask.title) : '') ||
+      (creationEvent?.message ? extractTitleFromRunEvent(creationEvent.message) : '') ||
+      `Recovered ${missing.work_item_id}`;
+    const phase = mapRunStatusToPhase(latestRun?.status || '', latestRun?.current_phase || firstTask?.phase);
+    const status = mapRunStatusToWorkItemStatus(latestRun?.status || '');
+    const pendingRequest = buildRecoveredPendingRequest(openWait);
+    const blocker = buildRecoveredBlocker(openWait);
+
+    await client.query(
+      `
+        INSERT INTO capability_work_items (
+          capability_id,
+          id,
+          title,
+          description,
+          phase,
+          workflow_id,
+          current_step_id,
+          assigned_agent_id,
+          status,
+          priority,
+          tags,
+          pending_request,
+          blocker,
+          active_run_id,
+          last_run_id,
+          history,
+          updated_at
+        )
+        VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,${withUpdatedTimestamp}
+        )
+      `,
+      [
+        missing.capability_id,
+        missing.work_item_id,
+        title,
+        `Recovered from workflow execution history for ${title}.`,
+        phase,
+        latestRun?.workflow_id || firstTask?.workflow_id || fallbackWorkflowId || '',
+        phase === 'DONE' ? null : latestRun?.current_step_id || firstTask?.workflow_step_id || null,
+        phase === 'DONE' ? null : latestRun?.assigned_agent_id || null,
+        status,
+        'Med',
+        [],
+        pendingRequest ? JSON.stringify(pendingRequest) : null,
+        blocker ? JSON.stringify(blocker) : null,
+        latestRun && ['QUEUED', 'RUNNING', 'WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT'].includes(latestRun.status)
+          ? latestRun.id
+          : null,
+        latestRun?.id || null,
+        JSON.stringify([
+          createRecoveredHistoryEntry({
+            workItemId: missing.work_item_id,
+            phase,
+            status,
+            detail: latestRun
+              ? `Recovered from workflow run ${latestRun.id}.`
+              : 'Recovered from workflow-managed task history.',
+          }),
+        ]),
+      ],
+    );
+  }
+};
 
 const seedCapabilityTx = async (client: PoolClient, capability: Capability) => {
   const ownerAgent = buildOwnerAgent(capability);
@@ -1070,7 +1405,6 @@ export const initializeSeedData = async () => {
           seededCapability.id,
           getDefaultCapabilityWorkflows(backfilledCapability),
         );
-        await replaceWorkItemsTx(client, seededCapability.id, []);
       }
     }
 
@@ -1090,6 +1424,8 @@ export const initializeSeedData = async () => {
 
       await ensureBaseAgentsTx(client, capability);
     }
+
+    await repairWorkItemProjectionsTx(client);
   });
 };
 

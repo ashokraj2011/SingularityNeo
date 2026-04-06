@@ -25,6 +25,7 @@ import {
   appendCapabilityMessageRecord,
   createCapabilityRecord,
   fetchAppState,
+  fetchCapabilityBundle,
   replaceCapabilityWorkspaceContentRecord,
   removeCapabilitySkillRecord,
   setActiveChatAgentRecord,
@@ -68,6 +69,7 @@ interface CapabilityContextType {
       >
     >,
   ) => void;
+  refreshCapabilityBundle: (capabilityId: string) => Promise<CapabilityWorkspace | null>;
 }
 
 const CapabilityContext = createContext<CapabilityContextType | undefined>(undefined);
@@ -545,12 +547,20 @@ const normalizeWorkspace = (
   };
 };
 
+const getPreferredActiveCapability = (
+  capabilities: Capability[],
+  preferredCapabilityId?: string,
+) =>
+  capabilities.find(capability => capability.id === preferredCapabilityId) ||
+  capabilities.find(capability => capability.status !== 'ARCHIVED') ||
+  capabilities[0];
+
 const readInitialState = () => {
   const capabilities = [...CAPABILITIES];
 
   return {
     capabilities,
-    activeCapability: capabilities[0],
+    activeCapability: getPreferredActiveCapability(capabilities),
     capabilityWorkspaces: capabilities.map(capability =>
       buildCapabilityWorkspace(capability, true),
     ),
@@ -571,9 +581,7 @@ const normalizeAppState = (
     ),
   );
   const nextActiveCapability =
-    nextCapabilities.find(
-      capability => capability.id === preferredActiveCapabilityId,
-    ) || nextCapabilities[0];
+    getPreferredActiveCapability(nextCapabilities, preferredActiveCapabilityId);
 
   return {
     capabilities: nextCapabilities,
@@ -590,6 +598,24 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     initialState.capabilityWorkspaces,
   );
   const mutationQueueRef = useRef<Record<string, Promise<unknown>>>({});
+
+  const syncCapabilityBundleState = (
+    bundle: { capability: Capability; workspace: CapabilityWorkspace },
+    preferredActiveCapabilityId?: string,
+  ) => {
+    setCapabilities(prev => upsertCapability(prev, bundle.capability));
+    setCapabilityWorkspaces(prev =>
+      upsertWorkspace(
+        prev,
+        normalizeWorkspace(bundle.capability, bundle.workspace),
+      ),
+    );
+    setActiveCapability(prev =>
+      prev.id === (preferredActiveCapabilityId || bundle.capability.id)
+        ? bundle.capability
+        : prev,
+    );
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -677,21 +703,41 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     updates: Partial<Capability>,
   ) => {
     let updatedCapability: Capability | null = null;
+    const nextCapabilities = capabilities.map(capability => {
+      if (capability.id !== capabilityId) {
+        return capability;
+      }
 
-    setCapabilities(prev =>
-      prev.map(capability => {
-        if (capability.id !== capabilityId) {
-          return capability;
-        }
+      updatedCapability = { ...capability, ...updates };
+      return updatedCapability;
+    });
 
-        updatedCapability = { ...capability, ...updates };
-        return updatedCapability;
-      }),
-    );
+    setCapabilities(nextCapabilities);
 
-    setActiveCapability(prev =>
-      prev.id === capabilityId ? { ...prev, ...updates } : prev,
-    );
+    setActiveCapability(prev => {
+      if (prev.id !== capabilityId) {
+        return (
+          nextCapabilities.find(capability => capability.id === prev.id) || prev
+        );
+      }
+
+      const nextCapability =
+        updatedCapability ||
+        nextCapabilities.find(capability => capability.id === capabilityId) ||
+        prev;
+
+      if (nextCapability.status === 'ARCHIVED') {
+        return (
+          getPreferredActiveCapability(
+            nextCapabilities.filter(
+              capability => capability.id !== capabilityId,
+            ),
+          ) || nextCapability
+        );
+      }
+
+      return nextCapability;
+    });
 
     setCapabilityWorkspaces(prev => {
       const capability = updatedCapability || getCapabilityById(capabilityId);
@@ -1019,6 +1065,17 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     });
   };
 
+  const refreshCapabilityBundle = async (capabilityId: string) => {
+    try {
+      const bundle = await fetchCapabilityBundle(capabilityId);
+      syncCapabilityBundleState(bundle, capabilityId);
+      return normalizeWorkspace(bundle.capability, bundle.workspace);
+    } catch (error) {
+      logMutationFailure(`workspace refresh for ${capabilityId}`, error);
+      return null;
+    }
+  };
+
   return (
     <CapabilityContext.Provider
       value={{
@@ -1037,6 +1094,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
         appendCapabilityMessage,
         setActiveChatAgent,
         setCapabilityWorkspaceContent,
+        refreshCapabilityBundle,
       }}
     >
       {children}

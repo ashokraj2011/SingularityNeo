@@ -17,21 +17,21 @@ const CapabilitySetup = lazy(() => import('./pages/CapabilitySetup'));
 const CapabilityMetadata = lazy(() => import('./pages/CapabilityMetadata'));
 
 const RouteLoader = () => (
-  <div className="glass-panel ambient-shadow min-h-[calc(100vh-10rem)] rounded-3xl border border-outline-variant/15 p-8">
+  <div className="section-card ambient-shadow min-h-[calc(100vh-12rem)] p-8">
     <div className="animate-pulse space-y-6">
       <div className="h-4 w-28 rounded-full bg-primary/10" />
-      <div className="h-10 w-72 rounded-2xl bg-primary/12" />
+      <div className="h-10 w-72 rounded-xl bg-surface-container-low" />
       <div className="grid gap-4 md:grid-cols-3">
         {Array.from({ length: 3 }, (_, index) => (
           <div
             key={index}
-            className="h-32 rounded-2xl border border-outline-variant/10 bg-surface-container-low"
+            className="h-32 rounded-2xl border border-outline-variant/40 bg-surface-container-low"
           />
         ))}
       </div>
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="h-64 rounded-3xl bg-surface-container-low" />
-        <div className="h-64 rounded-3xl bg-surface-container-low" />
+        <div className="h-64 rounded-2xl bg-surface-container-low" />
+        <div className="h-64 rounded-2xl bg-surface-container-low" />
       </div>
     </div>
   </div>

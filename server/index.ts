@@ -9,10 +9,10 @@ import type {
   Capability,
   CapabilityAgent,
   CapabilityChatMessage,
-  CapabilityMetadataEntry,
-  CapabilityStakeholder,
   CapabilityWorkspace,
   Skill,
+  WorkItem,
+  WorkItemPhase,
 } from '../src/types';
 import { initializeDatabase } from './db';
 import {
@@ -29,72 +29,49 @@ import {
   updateCapabilityAgentRecord,
   updateCapabilityRecord,
 } from './repository';
+import {
+  getWorkflowRunDetail,
+  listWorkflowRunEvents,
+  listWorkflowRunsForWorkItem,
+} from './execution/repository';
+import {
+  approveWorkflowRun,
+  cancelWorkflowRun,
+  createWorkItemRecord,
+  moveWorkItemToPhaseControl,
+  provideWorkflowRunInput,
+  resolveWorkflowRunConflict,
+  restartWorkflowRun,
+  startWorkflowExecution,
+} from './execution/service';
+import { startExecutionWorker, wakeExecutionWorker } from './execution/worker';
+import {
+  buildWorkItemEvidenceBundle,
+  getCompletedWorkOrderEvidence,
+  getLedgerArtifactContent,
+  listCompletedWorkOrders,
+  listLedgerArtifacts,
+} from './ledger';
+import {
+  defaultModel,
+  getConfiguredToken,
+  githubModelsApiUrl,
+  invokeCapabilityChat,
+  normalizeModel,
+  staticModels,
+  type ChatHistoryMessage,
+} from './githubModels';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
 
 const app = express();
 const port = Number(process.env.PORT || '3001');
-const githubModelsApiUrl = (
-  process.env.GITHUB_MODELS_API_URL || 'https://models.github.ai/inference'
-).replace(/\/$/, '');
-const defaultModel = 'openai/gpt-4.1-mini';
 const execFileAsync = promisify(execFile);
-const staticModels = [
-  { id: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', profile: 'Lower cost' },
-  { id: 'gpt-4.1', label: 'GPT-4.1', profile: 'Balanced reasoning' },
-  { id: 'gpt-4o-mini', label: 'GPT-4o Mini', profile: 'Fast multimodal' },
-  { id: 'gpt-4o', label: 'GPT-4o', profile: 'Broader capability' },
-] as const;
-const modelAliases: Record<string, string> = {
-  'gpt-4.1-mini': 'openai/gpt-4.1-mini',
-  'gpt-4.1': 'openai/gpt-4.1',
-  'gpt-4o-mini': 'openai/gpt-4o-mini',
-  'gpt-4o': 'openai/gpt-4o',
-  'o4-mini': 'openai/o4-mini',
-  'o3': 'openai/o3',
-};
-
-type ChatHistoryMessage = {
-  role?: 'user' | 'agent';
-  content?: string;
-};
 
 type ChatRequestBody = {
-  capability?: {
-    id?: string;
-    name?: string;
-    description?: string;
-    domain?: string;
-    parentCapabilityId?: string;
-    businessUnit?: string;
-    ownerTeam?: string;
-    teamNames?: string[];
-    stakeholders?: CapabilityStakeholder[];
-    confluenceLink?: string;
-    jiraBoardLink?: string;
-    documentationNotes?: string;
-    applications?: string[];
-    apis?: string[];
-    databases?: string[];
-    gitRepositories?: string[];
-    localDirectories?: string[];
-    additionalMetadata?: CapabilityMetadataEntry[];
-  };
-  agent?: {
-    id?: string;
-    name?: string;
-    role?: string;
-    objective?: string;
-    systemPrompt?: string;
-    documentationSources?: string[];
-    learningNotes?: string[];
-    inputArtifacts?: string[];
-    outputArtifacts?: string[];
-    skillIds?: string[];
-    model?: string;
-    tokenLimit?: number;
-  };
+  capability?: Capability;
+  agent?: CapabilityAgent;
   history?: ChatHistoryMessage[];
   message?: string;
 };
@@ -112,12 +89,6 @@ type WorkspacePatchBody = Partial<
   >
 >;
 
-type InferenceUsage = {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-};
-
 type CodeWorkspaceStatus = {
   path: string;
   exists: boolean;
@@ -133,53 +104,13 @@ const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 const distDir = path.resolve(projectRoot, 'dist');
 
-const getConfiguredToken = () =>
-  process.env.GITHUB_MODELS_TOKEN || process.env.GITHUB_TOKEN || '';
-
-const normalizeModel = (model?: string) => {
-  const cleaned = model?.trim();
-  if (!cleaned) {
-    return defaultModel;
-  }
-
-  if (cleaned.includes('/')) {
-    return cleaned;
-  }
-
-  return modelAliases[cleaned] || `openai/${cleaned}`;
-};
-
 const normalizeDirectoryPath = (value: string) => path.resolve(value.trim());
-
-const toPromptSection = (label: string, values?: Array<string | undefined>) => {
-  const content = (values || []).filter(Boolean).join(', ');
-  return content ? `${label}: ${content}` : null;
-};
-
-const toStakeholderSection = (stakeholders?: CapabilityStakeholder[]) => {
-  const content = (stakeholders || [])
-    .filter(stakeholder => stakeholder.role || stakeholder.name || stakeholder.email)
-    .map(stakeholder =>
-      [
-        stakeholder.role || 'Stakeholder',
-        stakeholder.name || 'Unknown',
-        stakeholder.teamName ? `team ${stakeholder.teamName}` : null,
-        stakeholder.email ? `email ${stakeholder.email}` : null,
-      ]
-        .filter(Boolean)
-        .join(' | '),
-    );
-
-  return content.length > 0 ? `Stakeholders: ${content.join('; ')}` : null;
-};
-
-const toMetadataEntrySection = (entries?: CapabilityMetadataEntry[]) => {
-  const content = (entries || [])
-    .filter(entry => entry.key || entry.value)
-    .map(entry => `${entry.key || 'Key'}=${entry.value || ''}`);
-
-  return content.length > 0 ? `Additional metadata: ${content.join('; ')}` : null;
-};
+const toSafeDownloadName = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'evidence';
 
 const runGitCommand = async (directoryPath: string, args: string[]) => {
   const result = await execFileAsync('git', ['-C', directoryPath, ...args], {
@@ -244,117 +175,28 @@ const inspectCodeWorkspace = async (directoryPath: string): Promise<CodeWorkspac
   }
 };
 
-const buildSystemPrompt = (body: ChatRequestBody) => {
-  const capability = body.capability || {};
-  const agent = body.agent || {};
-
-  return [
-    `Capability boundary: ${capability.name || capability.id || 'Unknown capability'}`,
-    capability.description ? `Capability description: ${capability.description}` : null,
-    capability.domain ? `Capability domain: ${capability.domain}` : null,
-    capability.parentCapabilityId
-      ? `Parent capability: ${capability.parentCapabilityId}`
-      : null,
-    capability.businessUnit ? `Business unit: ${capability.businessUnit}` : null,
-    capability.ownerTeam ? `Owner team: ${capability.ownerTeam}` : null,
-    toPromptSection('Associated teams', capability.teamNames),
-    toStakeholderSection(capability.stakeholders),
-    agent.name ? `Active agent: ${agent.name}` : null,
-    agent.role ? `Agent role: ${agent.role}` : null,
-    agent.objective ? `Agent objective: ${agent.objective}` : null,
-    agent.systemPrompt ? `Agent instructions: ${agent.systemPrompt}` : null,
-    toPromptSection('Documentation sources', agent.documentationSources),
-    toPromptSection('Learning notes', agent.learningNotes),
-    toPromptSection('Input artifacts', agent.inputArtifacts),
-    toPromptSection('Output artifacts', agent.outputArtifacts),
-    toPromptSection('Skill tags', agent.skillIds),
-    toPromptSection('Applications', capability.applications),
-    toPromptSection('APIs', capability.apis),
-    toPromptSection('Databases', capability.databases),
-    toPromptSection('Git repositories', capability.gitRepositories),
-    toPromptSection('Local directories', capability.localDirectories),
-    toMetadataEntrySection(capability.additionalMetadata),
-    capability.confluenceLink ? `Confluence reference: ${capability.confluenceLink}` : null,
-    capability.jiraBoardLink ? `Jira board reference: ${capability.jiraBoardLink}` : null,
-    capability.documentationNotes
-      ? `Capability documentation notes: ${capability.documentationNotes}`
-      : null,
-    'Keep the response inside this capability context. If capability context is missing for a claim, say so clearly instead of inventing it.',
-    'Prefer practical, execution-ready answers that help the team move work forward.',
-  ]
-    .filter(Boolean)
-    .join('\n');
-};
-
-const getAssistantContent = (payload: any) => {
-  const content = payload?.choices?.[0]?.message?.content;
-  if (typeof content === 'string') {
-    return content;
-  }
-
-  if (Array.isArray(content)) {
-    return content
-      .map(item => {
-        if (typeof item === 'string') {
-          return item;
-        }
-        if (typeof item?.text === 'string') {
-          return item.text;
-        }
-        if (typeof item?.content === 'string') {
-          return item.content;
-        }
-        return '';
-      })
-      .filter(Boolean)
-      .join('\n');
-  }
-
-  return '';
-};
-
-const toUsage = (usage: InferenceUsage | undefined) => {
-  const promptTokens = Number(usage?.prompt_tokens || 0);
-  const completionTokens = Number(usage?.completion_tokens || 0);
-  const totalTokens =
-    Number(usage?.total_tokens || 0) || promptTokens + completionTokens;
-
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens,
-    estimatedCostUsd: Number((totalTokens * 0.000003).toFixed(4)),
-  };
-};
-
-const getErrorMessage = async (response: Response) => {
-  const fallback = `GitHub Models request failed with status ${response.status}.`;
-
-  try {
-    const payload = await response.json();
-    if (typeof payload?.error === 'string') {
-      return payload.error;
-    }
-    if (typeof payload?.message === 'string') {
-      return payload.message;
-    }
-    return fallback;
-  } catch {
-    try {
-      const text = await response.text();
-      return text || fallback;
-    } catch {
-      return fallback;
-    }
-  }
-};
-
 const sendRepositoryError = (response: express.Response, error: unknown) => {
   const message =
     error instanceof Error ? error.message : 'The persistence request failed unexpectedly.';
-  const status = /not found/i.test(message) ? 404 : 500;
+  const status =
+    /not found/i.test(message)
+      ? 404
+      : /already has an active or waiting workflow run|already exists/i.test(message)
+      ? 409
+      : /required|invalid|must/i.test(message)
+      ? 400
+      : /not configured/i.test(message)
+      ? 503
+      : /not registered|forbidden|not allowed/i.test(message)
+      ? 403
+      : 500;
 
   response.status(status).json({ error: message });
+};
+
+const parseActor = (value: unknown, fallback: string) => {
+  const actor = String(value || '').trim();
+  return actor || fallback;
 };
 
 app.use((request, response, next) => {
@@ -391,12 +233,98 @@ app.get('/api/capabilities/:capabilityId', async (request, response) => {
   }
 });
 
+app.get('/api/capabilities/:capabilityId/ledger/artifacts', async (request, response) => {
+  try {
+    response.json(await listLedgerArtifacts(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get(
+  '/api/capabilities/:capabilityId/ledger/completed-work-orders',
+  async (request, response) => {
+    try {
+      response.json(await listCompletedWorkOrders(request.params.capabilityId));
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.get('/api/capabilities/:capabilityId/work-items/:workItemId/evidence', async (request, response) => {
+  try {
+    response.json(
+      await getCompletedWorkOrderEvidence(
+        request.params.capabilityId,
+        request.params.workItemId,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/artifacts/:artifactId/content', async (request, response) => {
+  try {
+    response.json(
+      await getLedgerArtifactContent(
+        request.params.capabilityId,
+        request.params.artifactId,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/artifacts/:artifactId/download', async (request, response) => {
+  try {
+    const content = await getLedgerArtifactContent(
+      request.params.capabilityId,
+      request.params.artifactId,
+    );
+    response.setHeader('Content-Type', content.mimeType);
+    response.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${content.fileName}"`,
+    );
+    response.send(
+      content.contentFormat === 'JSON'
+        ? JSON.stringify(content.contentJson || {}, null, 2)
+        : content.contentText || '',
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/evidence-bundle',
+  async (request, response) => {
+    try {
+      const bundle = await buildWorkItemEvidenceBundle(
+        request.params.capabilityId,
+        request.params.workItemId,
+      );
+      response.setHeader('Content-Type', 'application/json; charset=utf-8');
+      response.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${toSafeDownloadName(bundle.detail.workItem.title)}-evidence-bundle.json"`,
+      );
+      response.send(JSON.stringify(bundle, null, 2));
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
 app.post('/api/capabilities', async (request, response) => {
   const capability = request.body as Capability | undefined;
   if (!capability?.id || !capability?.name || !capability?.description) {
-    response
-      .status(400)
-      .json({ error: 'Capability id, name, and description are required.' });
+    response.status(400).json({
+      error: 'Capability id, name, and description are required.',
+    });
     return;
   }
 
@@ -423,9 +351,9 @@ app.patch('/api/capabilities/:capabilityId', async (request, response) => {
 app.post('/api/capabilities/:capabilityId/skills', async (request, response) => {
   const skill = request.body as Skill | undefined;
   if (!skill?.id || !skill?.name || !skill?.description) {
-    response
-      .status(400)
-      .json({ error: 'Skill id, name, and description are required.' });
+    response.status(400).json({
+      error: 'Skill id, name, and description are required.',
+    });
     return;
   }
 
@@ -438,28 +366,25 @@ app.post('/api/capabilities/:capabilityId/skills', async (request, response) => 
   }
 });
 
-app.delete(
-  '/api/capabilities/:capabilityId/skills/:skillId',
-  async (request, response) => {
-    try {
-      response.json(
-        await removeCapabilitySkillRecord(
-          request.params.capabilityId,
-          request.params.skillId,
-        ),
-      );
-    } catch (error) {
-      sendRepositoryError(response, error);
-    }
-  },
-);
+app.delete('/api/capabilities/:capabilityId/skills/:skillId', async (request, response) => {
+  try {
+    response.json(
+      await removeCapabilitySkillRecord(
+        request.params.capabilityId,
+        request.params.skillId,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
 
 app.post('/api/capabilities/:capabilityId/agents', async (request, response) => {
   const agent = request.body as Omit<CapabilityAgent, 'capabilityId'> | undefined;
   if (!agent?.id || !agent?.name || !agent?.role || !agent?.objective) {
-    response
-      .status(400)
-      .json({ error: 'Agent id, name, role, and objective are required.' });
+    response.status(400).json({
+      error: 'Agent id, name, role, and objective are required.',
+    });
     return;
   }
 
@@ -472,22 +397,19 @@ app.post('/api/capabilities/:capabilityId/agents', async (request, response) => 
   }
 });
 
-app.patch(
-  '/api/capabilities/:capabilityId/agents/:agentId',
-  async (request, response) => {
-    try {
-      response.json(
-        await updateCapabilityAgentRecord(
-          request.params.capabilityId,
-          request.params.agentId,
-          request.body as Partial<CapabilityAgent>,
-        ),
-      );
-    } catch (error) {
-      sendRepositoryError(response, error);
-    }
-  },
-);
+app.patch('/api/capabilities/:capabilityId/agents/:agentId', async (request, response) => {
+  try {
+    response.json(
+      await updateCapabilityAgentRecord(
+        request.params.capabilityId,
+        request.params.agentId,
+        request.body as Partial<CapabilityAgent>,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
 
 app.post('/api/capabilities/:capabilityId/messages', async (request, response) => {
   const message = request.body as Omit<CapabilityChatMessage, 'capabilityId'> | undefined;
@@ -536,6 +458,191 @@ app.patch('/api/capabilities/:capabilityId/workspace', async (request, response)
   }
 });
 
+app.post('/api/capabilities/:capabilityId/work-items', async (request, response) => {
+  const title = String(request.body?.title || '').trim();
+  const workflowId = String(request.body?.workflowId || '').trim();
+  const description = String(request.body?.description || '').trim();
+  const priority = String(request.body?.priority || 'Med') as WorkItem['priority'];
+  const tags = Array.isArray(request.body?.tags)
+    ? request.body.tags.map((tag: unknown) => String(tag).trim()).filter(Boolean)
+    : [];
+
+  if (!title || !workflowId) {
+    response.status(400).json({
+      error: 'Both title and workflowId are required.',
+    });
+    return;
+  }
+
+  try {
+    response.status(201).json(
+      await createWorkItemRecord({
+        capabilityId: request.params.capabilityId,
+        title,
+        description,
+        workflowId,
+        priority,
+        tags,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/work-items/:workItemId/move', async (request, response) => {
+  const targetPhase = String(request.body?.targetPhase || '').trim() as WorkItemPhase;
+  const note = String(request.body?.note || '').trim();
+
+  if (!targetPhase) {
+    response.status(400).json({ error: 'A targetPhase is required.' });
+    return;
+  }
+
+  try {
+    response.json(
+      await moveWorkItemToPhaseControl({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+        targetPhase,
+        note: note || undefined,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/work-items/:workItemId/runs', async (request, response) => {
+  try {
+    const detail = await startWorkflowExecution({
+      capabilityId: request.params.capabilityId,
+      workItemId: request.params.workItemId,
+      restartFromPhase: request.body?.restartFromPhase as WorkItemPhase | undefined,
+    });
+    wakeExecutionWorker();
+    response.status(201).json(detail);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/work-items/:workItemId/runs', async (request, response) => {
+  try {
+    response.json(
+      await listWorkflowRunsForWorkItem(
+        request.params.capabilityId,
+        request.params.workItemId,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/runs/:runId', async (request, response) => {
+  try {
+    response.json(
+      await getWorkflowRunDetail(
+        request.params.capabilityId,
+        request.params.runId,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/runs/:runId/events', async (request, response) => {
+  try {
+    response.json(
+      await listWorkflowRunEvents(
+        request.params.capabilityId,
+        request.params.runId,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/runs/:runId/approve', async (request, response) => {
+  try {
+    const detail = await approveWorkflowRun({
+      capabilityId: request.params.capabilityId,
+      runId: request.params.runId,
+      resolution:
+        String(request.body?.resolution || '').trim() || 'Approved for continuation.',
+      resolvedBy: parseActor(request.body?.resolvedBy, 'Capability Owner'),
+    });
+    wakeExecutionWorker();
+    response.json(detail);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/runs/:runId/provide-input', async (request, response) => {
+  try {
+    const detail = await provideWorkflowRunInput({
+      capabilityId: request.params.capabilityId,
+      runId: request.params.runId,
+      resolution:
+        String(request.body?.resolution || '').trim() || 'Input provided for continuation.',
+      resolvedBy: parseActor(request.body?.resolvedBy, 'Capability Owner'),
+    });
+    wakeExecutionWorker();
+    response.json(detail);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/runs/:runId/resolve-conflict', async (request, response) => {
+  try {
+    const detail = await resolveWorkflowRunConflict({
+      capabilityId: request.params.capabilityId,
+      runId: request.params.runId,
+      resolution:
+        String(request.body?.resolution || '').trim() ||
+        'Conflict resolved for continuation.',
+      resolvedBy: parseActor(request.body?.resolvedBy, 'Capability Owner'),
+    });
+    wakeExecutionWorker();
+    response.json(detail);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/runs/:runId/cancel', async (request, response) => {
+  try {
+    response.json(
+      await cancelWorkflowRun({
+        capabilityId: request.params.capabilityId,
+        runId: request.params.runId,
+        note: String(request.body?.note || '').trim() || undefined,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/runs/:runId/restart', async (request, response) => {
+  try {
+    const detail = await restartWorkflowRun({
+      capabilityId: request.params.capabilityId,
+      runId: request.params.runId,
+      restartFromPhase: request.body?.restartFromPhase as WorkItemPhase | undefined,
+    });
+    wakeExecutionWorker();
+    response.status(201).json(detail);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
 app.get('/api/capabilities/:capabilityId/code-workspaces', async (request, response) => {
   try {
     const bundle = await getCapabilityBundle(request.params.capabilityId);
@@ -551,60 +658,56 @@ app.get('/api/capabilities/:capabilityId/code-workspaces', async (request, respo
   }
 });
 
-app.post(
-  '/api/capabilities/:capabilityId/code-workspaces/branch',
-  async (request, response) => {
-    const requestedPath = String(request.body?.path || '').trim();
-    const branchName = String(request.body?.branchName || '').trim();
+app.post('/api/capabilities/:capabilityId/code-workspaces/branch', async (request, response) => {
+  const requestedPath = String(request.body?.path || '').trim();
+  const branchName = String(request.body?.branchName || '').trim();
 
-    if (!requestedPath || !branchName) {
-      response.status(400).json({
-        error: 'Both path and branchName are required.',
+  if (!requestedPath || !branchName) {
+    response.status(400).json({
+      error: 'Both path and branchName are required.',
+    });
+    return;
+  }
+
+  try {
+    const bundle = await getCapabilityBundle(request.params.capabilityId);
+    const allowedPaths = new Set(
+      bundle.capability.localDirectories.map(normalizeDirectoryPath),
+    );
+    const resolvedPath = normalizeDirectoryPath(requestedPath);
+
+    if (!allowedPaths.has(resolvedPath)) {
+      response.status(403).json({
+        error: 'This directory is not registered under the selected capability.',
       });
       return;
     }
 
-    try {
-      const bundle = await getCapabilityBundle(request.params.capabilityId);
-      const allowedPaths = new Set(
-        bundle.capability.localDirectories.map(normalizeDirectoryPath),
-      );
-      const resolvedPath = normalizeDirectoryPath(requestedPath);
+    const existingBranch = await runGitCommand(resolvedPath, [
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      `refs/heads/${branchName}`,
+    ]).catch(() => '');
 
-      if (!allowedPaths.has(resolvedPath)) {
-        response.status(403).json({
-          error:
-            'This directory is not registered under the selected capability.',
-        });
-        return;
-      }
-
-      const existingBranch = await runGitCommand(resolvedPath, [
-        'rev-parse',
-        '--verify',
-        '--quiet',
-        `refs/heads/${branchName}`,
-      ]).catch(() => '');
-
-      if (existingBranch) {
-        response.status(409).json({
-          error: `Branch ${branchName} already exists in ${resolvedPath}.`,
-        });
-        return;
-      }
-
-      await runGitCommand(resolvedPath, ['switch', '-c', branchName]);
-      response.status(201).json(await inspectCodeWorkspace(resolvedPath));
-    } catch (error) {
-      response.status(500).json({
-        error:
-          error instanceof Error
-            ? error.message
-            : 'Failed to create the Git branch for this directory.',
+    if (existingBranch) {
+      response.status(409).json({
+        error: `Branch ${branchName} already exists in ${resolvedPath}.`,
       });
+      return;
     }
-  },
-);
+
+    await runGitCommand(resolvedPath, ['switch', '-c', branchName]);
+    response.status(201).json(await inspectCodeWorkspace(resolvedPath));
+  } catch (error) {
+    response.status(500).json({
+      error:
+        error instanceof Error
+          ? error.message
+          : 'Failed to create the Git branch for this directory.',
+    });
+  }
+});
 
 app.get('/api/runtime/status', (_request, response) => {
   const token = getConfiguredToken();
@@ -616,8 +719,8 @@ app.get('/api/runtime/status', (_request, response) => {
     tokenSource: process.env.GITHUB_MODELS_TOKEN
       ? 'GITHUB_MODELS_TOKEN'
       : process.env.GITHUB_TOKEN
-        ? 'GITHUB_TOKEN'
-        : null,
+      ? 'GITHUB_TOKEN'
+      : null,
     defaultModel,
     availableModels: staticModels.map(model => ({
       ...model,
@@ -638,87 +741,24 @@ app.post('/api/runtime/chat', async (request, response) => {
 
   const body = request.body as ChatRequestBody;
   const message = body.message?.trim();
-
-  if (!message) {
-    response.status(400).json({ error: 'A chat message is required.' });
+  if (!message || !body.capability || !body.agent) {
+    response.status(400).json({
+      error: 'Capability, agent, and message are required.',
+    });
     return;
   }
 
-  const model = normalizeModel(body.agent?.model);
-  const history = (body.history || [])
-    .filter(item => item?.content?.trim())
-    .slice(-10)
-    .map(item => ({
-      role: item.role === 'agent' ? 'assistant' : 'user',
-      content: item.content!.trim(),
-    }));
-
-  const payload = {
-    model,
-    messages: [
-      {
-        role: 'developer',
-        content:
-          'You are operating inside an enterprise capability workspace. Stay scoped to the provided capability and agent context, and be explicit when context is missing.',
-      },
-      {
-        role: 'system',
-        content: buildSystemPrompt(body),
-      },
-      ...history,
-      {
-        role: 'user',
-        content: message,
-      },
-    ],
-    max_tokens: Math.max(256, Math.min(Number(body.agent?.tokenLimit || 1200), 8000)),
-    temperature: 0.2,
-    stream: false,
-  };
-
   try {
-    const githubResponse = await fetch(`${githubModelsApiUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!githubResponse.ok) {
-      response.status(githubResponse.status).json({
-        error: await getErrorMessage(githubResponse),
-      });
-      return;
-    }
-
-    const result = await githubResponse.json();
-    const content = getAssistantContent(result);
-
-    if (!content) {
-      response.status(502).json({
-        error: 'GitHub Models returned an empty response for this request.',
-      });
-      return;
-    }
-
-    response.json({
-      content,
-      model,
-      usage: toUsage(result?.usage),
-      responseId: result?.id || null,
-      createdAt: new Date().toISOString(),
-    });
+    response.json(
+      await invokeCapabilityChat({
+        capability: body.capability,
+        agent: body.agent,
+        history: body.history || [],
+        message,
+      }),
+    );
   } catch (error) {
-    response.status(500).json({
-      error:
-        error instanceof Error
-          ? error.message
-          : 'The GitHub Models request failed unexpectedly.',
-    });
+    sendRepositoryError(response, error);
   }
 });
 
@@ -733,6 +773,7 @@ if (fs.existsSync(distDir)) {
 const startServer = async () => {
   await initializeDatabase();
   await initializeSeedData();
+  startExecutionWorker();
 
   app.listen(port, () => {
     console.log(`Singularity Neo API listening on http://localhost:${port}`);

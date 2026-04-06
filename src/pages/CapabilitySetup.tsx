@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useCapability } from '../context/CapabilityContext';
+import { getDefaultExecutionConfig } from '../lib/executionConfig';
 import { Capability } from '../types';
 
 const slugify = (value: string) =>
@@ -74,6 +75,9 @@ export default function CapabilitySetup() {
       teamNames: [],
       stakeholders: [],
       additionalMetadata: [],
+      executionConfig: getDefaultExecutionConfig({
+        localDirectories: [],
+      }),
       status: 'PENDING',
       specialAgentId: ownerAgentId,
       skillLibrary: [],

@@ -19,6 +19,12 @@ import { useNavigate } from 'react-router-dom';
 import { COPILOT_MODEL_OPTIONS, SKILL_LIBRARY } from '../constants';
 import { useCapability } from '../context/CapabilityContext';
 import { CapabilityAgent, Skill } from '../types';
+import {
+  EmptyState,
+  PageHeader,
+  StatTile,
+  StatusBadge,
+} from '../components/EnterpriseUI';
 
 const splitLines = (value: string) =>
   value
@@ -206,55 +212,62 @@ export default function Team() {
   };
 
   return (
-    <div className="space-y-8">
-      <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="max-w-3xl">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[0.625rem] font-bold bg-primary/10 text-primary px-2 py-0.5 rounded uppercase tracking-widest">Capability Team</span>
-            <span className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">{activeCapability.id}</span>
-          </div>
-          <h1 className="text-3xl font-extrabold text-primary tracking-tight">{activeCapability.name} Agent Manager</h1>
-          <p className="mt-2 text-sm leading-relaxed text-secondary">
-            Every agent is tagged to this capability, runs through the GitHub Copilot API, and carries its own model, token budget, skill stack, usage profile, and output history.
-          </p>
-        </div>
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Capability Team"
+        context={activeCapability.id}
+        title={`${activeCapability.name} Agent Manager`}
+        description="Manage built-in and custom agents for this capability, including skills, runtime settings, output history, and Copilot usage."
+        actions={
+          <>
+            <button
+              type="button"
+              onClick={() => navigate('/chat')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              <MessageSquare size={16} />
+              Open chat
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/capabilities/metadata')}
+              className="enterprise-button enterprise-button-primary"
+            >
+              <ArrowRight size={16} />
+              Capability metadata
+            </button>
+          </>
+        }
+      />
 
-        <div className="grid grid-cols-3 gap-3 rounded-3xl border border-outline-variant/15 bg-white p-4 shadow-sm">
-          {[
-            { label: 'Agents', value: workspace.agents.length },
-            { label: 'Built-in Agents', value: builtInCount },
-            { label: 'Learning Notes', value: learningCount },
-          ].map(item => (
-            <div key={item.label} className="rounded-2xl bg-surface-container-low px-4 py-3 text-center">
-              <p className="text-2xl font-extrabold text-primary">{item.value}</p>
-              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-secondary">{item.label}</p>
-            </div>
-          ))}
-        </div>
-      </header>
+      <section className="grid gap-4 md:grid-cols-3">
+        <StatTile label="Agents" value={workspace.agents.length} helper="Capability-owned roster" icon={Users} tone="brand" />
+        <StatTile label="Built-in Agents" value={builtInCount} helper="Standard delivery team" icon={Bot} tone="info" />
+        <StatTile label="Learning Notes" value={learningCount} helper={`${workspace.agents.filter(agent => agent.previousOutputs.length > 0).length} agents with outputs`} icon={Brain} tone="success" />
+      </section>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_560px]">
         <section className="space-y-6">
           <motion.div
             initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            className="rounded-[2rem] border border-primary/15 bg-primary/5 p-6 shadow-sm"
+            className="section-card section-card-brand"
           >
-            <div className="flex items-start justify-between gap-4">
+            <div className="section-card-header">
               <div className="flex items-start gap-4">
-                <div className="flex h-14 w-14 items-center justify-center rounded-3xl bg-white text-primary shadow-sm">
+                <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/10 bg-white text-primary shadow-sm">
                   <Crown size={24} />
                 </div>
                 <div>
-                  <p className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-primary">Team owner</p>
-                  <h2 className="mt-1 text-xl font-extrabold text-on-surface">{ownerAgent?.name || 'Capability Owning Agent'}</h2>
+                  <p className="form-kicker text-primary">Team owner</p>
+                  <h2 className="mt-1 text-xl font-bold tracking-tight text-on-surface">{ownerAgent?.name || 'Capability Owning Agent'}</h2>
                   <p className="mt-2 text-sm leading-relaxed text-secondary">
                     {ownerAgent?.objective}
                   </p>
                   <div className="mt-4 flex flex-wrap gap-2">
-                    <span className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-primary">{ownerAgent?.provider}</span>
-                    <span className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-primary">{ownerAgent?.model}</span>
-                    <span className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-primary">{ownerAgent?.tokenLimit.toLocaleString()} tokens</span>
+                    <StatusBadge tone="brand">{ownerAgent?.provider}</StatusBadge>
+                    <StatusBadge tone="brand">{ownerAgent?.model}</StatusBadge>
+                    <StatusBadge tone="brand">{ownerAgent?.tokenLimit.toLocaleString()} tokens</StatusBadge>
                   </div>
                 </div>
               </div>
@@ -290,9 +303,9 @@ export default function Team() {
                   value: formatCurrency(ownerAgent?.usage.estimatedCostUsd || 0),
                 },
               ].map(item => (
-                <div key={item.label} className="rounded-2xl bg-white p-4">
-                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.2em] text-outline">{item.label}</p>
-                  <p className="mt-3 text-xl font-extrabold text-primary">{item.value}</p>
+                <div key={item.label} className="rounded-2xl border border-primary/10 bg-white p-4">
+                  <p className="form-kicker">{item.label}</p>
+                  <p className="mt-3 text-xl font-bold tracking-tight text-on-surface">{item.value}</p>
                 </div>
               ))}
             </div>
@@ -321,17 +334,11 @@ export default function Team() {
                         <h3 className="text-lg font-bold text-on-surface">{agent.name}</h3>
                         <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">{agent.role}</p>
                         <div className="mt-2 flex flex-wrap gap-2">
-                          <span className="rounded-full bg-primary/5 px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">
-                            {activeCapability.id}
-                          </span>
+                          <StatusBadge tone="brand">{activeCapability.id}</StatusBadge>
                           {agent.isBuiltIn && (
-                            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-emerald-700">
-                              Built-in
-                            </span>
+                            <StatusBadge tone="success">Built-in</StatusBadge>
                           )}
-                          <span className="rounded-full bg-surface-container-low px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-secondary">
-                            {agent.model}
-                          </span>
+                          <StatusBadge>{agent.model}</StatusBadge>
                         </div>
                       </div>
                     </div>
@@ -398,13 +405,12 @@ export default function Team() {
             })}
 
             {workspace.agents.length === 0 && (
-              <div className="md:col-span-2 rounded-[2rem] border-2 border-dashed border-outline-variant/20 bg-white p-12 text-center">
-                <Users size={36} className="mx-auto text-outline" />
-                <h3 className="mt-4 text-xl font-bold text-primary">No agents yet</h3>
-                <p className="mt-2 text-sm leading-relaxed text-secondary">
-                  Start with a capability-owned agent configuration on the right to build this team.
-                </p>
-              </div>
+              <EmptyState
+                title="No agents yet"
+                description="Start with a capability-owned agent configuration on the right to build this team."
+                icon={Users}
+                className="md:col-span-2"
+              />
             )}
           </div>
         </section>
@@ -412,7 +418,7 @@ export default function Team() {
         <aside className="space-y-4">
           <form
             onSubmit={handleSubmit}
-            className="rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-sm"
+            className="section-card sticky top-28"
           >
             <div className="flex items-start justify-between gap-4">
               <div className="flex items-center gap-3">
@@ -477,7 +483,7 @@ export default function Team() {
                   value={form.name}
                   onChange={event => setField('name', event.target.value)}
                   placeholder="Compliance Reviewer"
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-input"
                 />
               </label>
 
@@ -487,7 +493,7 @@ export default function Team() {
                   value={form.role}
                   onChange={event => setField('role', event.target.value)}
                   placeholder="Capability Specialist"
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-input"
                 />
               </label>
 
@@ -496,7 +502,7 @@ export default function Team() {
                 <select
                   value={form.model}
                   onChange={event => setField('model', event.target.value)}
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-select"
                 >
                   {COPILOT_MODEL_OPTIONS.map(model => (
                     <option key={model.id} value={model.id}>
@@ -514,7 +520,7 @@ export default function Team() {
                   step={500}
                   value={form.tokenLimit}
                   onChange={event => setField('tokenLimit', event.target.value)}
-                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-input"
                 />
               </label>
 
@@ -524,7 +530,7 @@ export default function Team() {
                   value={form.objective}
                   onChange={event => setField('objective', event.target.value)}
                   placeholder="Describe what this agent owns within the capability."
-                  className="h-24 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea"
                 />
               </label>
 
@@ -534,7 +540,7 @@ export default function Team() {
                   value={form.systemPrompt}
                   onChange={event => setField('systemPrompt', event.target.value)}
                   placeholder="If blank, the capability-aware default prompt will be used."
-                  className="h-24 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea"
                 />
               </label>
 
@@ -544,7 +550,7 @@ export default function Team() {
                   value={form.documentationSources}
                   onChange={event => setField('documentationSources', event.target.value)}
                   placeholder={'Confluence capability page\nJira board\nArchitecture runbook'}
-                  className="h-24 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea"
                 />
               </label>
 
@@ -554,7 +560,7 @@ export default function Team() {
                   value={form.learningNotes}
                   onChange={event => setField('learningNotes', event.target.value)}
                   placeholder={'Pricing policy changes\nAPI governance updates'}
-                  className="h-24 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm leading-relaxed outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                  className="field-textarea"
                 />
               </label>
             </div>

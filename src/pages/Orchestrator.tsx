@@ -1,58 +1,63 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { AnimatePresence, motion } from 'motion/react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { motion } from 'motion/react';
 import {
   AlertCircle,
   ArrowRight,
   CheckCircle2,
-  ChevronRight,
-  Clock,
+  Clock3,
   LayoutGrid,
+  List,
   LoaderCircle,
-  MessageSquare,
+  Play,
   Plus,
-  Send,
+  RefreshCw,
   ShieldCheck,
-  Sparkles,
-  Trello,
-  User,
+  Square,
   Workflow as WorkflowIcon,
   Wrench,
-  X,
 } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useCapability } from '../context/CapabilityContext';
-import { cn } from '../lib/utils';
-import { SDLC_BOARD_PHASES } from '../lib/standardWorkflow';
-import { syncWorkflowManagedTasksForWorkItem } from '../lib/workflowTaskAutomation';
+import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
 import {
+  approveCapabilityWorkflowRun,
+  cancelCapabilityWorkflowRun,
+  createCapabilityWorkItem,
+  fetchCapabilityWorkflowRun,
+  fetchCapabilityWorkflowRunEvents,
   fetchRuntimeStatus,
-  sendCapabilityChat,
+  listCapabilityWorkflowRuns,
+  moveCapabilityWorkItem,
+  provideCapabilityWorkflowRunInput,
+  resolveCapabilityWorkflowRunConflict,
+  restartCapabilityWorkflowRun,
+  startCapabilityWorkflowRun,
   type RuntimeStatus,
 } from '../lib/api';
-import { WorkItem, WorkItemPhase, WorkflowStep } from '../types';
-
-const createWorkItemId = () => `WI-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-const createHistoryId = () => `HIST-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-const createLogId = () => `LOG-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-
-const formatTaskTimestamp = () =>
-  new Date().toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-
-const summarizeOutput = (value: string) =>
-  value.replace(/\s+/g, ' ').trim().slice(0, 240);
-
-const PHASE_META: Record<
+import { SDLC_BOARD_PHASES } from '../lib/standardWorkflow';
+import { cn } from '../lib/utils';
+import type {
+  RunEvent,
+  RunWait,
+  WorkItem,
   WorkItemPhase,
-  {
-    label: string;
-    accent: string;
-  }
-> = {
+  Workflow,
+  WorkflowRun,
+  WorkflowRunDetail,
+  WorkflowRunStep,
+} from '../types';
+import {
+  BoardColumn,
+  DrawerShell,
+  EmptyState,
+  ModalShell,
+  PageHeader,
+  StatTile,
+  StatusBadge,
+  Toolbar,
+} from '../components/EnterpriseUI';
+
+const PHASE_META: Record<WorkItemPhase, { label: string; accent: string }> = {
   BACKLOG: { label: 'Backlog', accent: 'bg-slate-100 text-slate-700' },
   ANALYSIS: { label: 'Analysis', accent: 'bg-sky-100 text-sky-700' },
   DESIGN: { label: 'Design', accent: 'bg-indigo-100 text-indigo-700' },
@@ -63,31 +68,49 @@ const PHASE_META: Record<
   DONE: { label: 'Done', accent: 'bg-surface-container-high text-secondary' },
 };
 
-const STATUS_META: Record<
+const RUN_STATUS_META: Record<
+  WorkflowRun['status'],
+  { label: string; accent: string }
+> = {
+  QUEUED: { label: 'Queued', accent: 'bg-slate-100 text-slate-700' },
+  RUNNING: { label: 'Running', accent: 'bg-primary/10 text-primary' },
+  WAITING_APPROVAL: { label: 'Waiting Approval', accent: 'bg-amber-100 text-amber-700' },
+  WAITING_INPUT: { label: 'Waiting Input', accent: 'bg-orange-100 text-orange-700' },
+  WAITING_CONFLICT: { label: 'Waiting Conflict', accent: 'bg-red-100 text-red-700' },
+  COMPLETED: { label: 'Completed', accent: 'bg-emerald-100 text-emerald-700' },
+  FAILED: { label: 'Failed', accent: 'bg-red-100 text-red-700' },
+  CANCELLED: { label: 'Cancelled', accent: 'bg-slate-200 text-slate-700' },
+};
+
+const WORK_ITEM_STATUS_META: Record<
   WorkItem['status'],
-  {
-    label: string;
-    accent: string;
-  }
+  { label: string; accent: string }
 > = {
   ACTIVE: { label: 'Active', accent: 'bg-primary/10 text-primary' },
-  BLOCKED: { label: 'Blocked', accent: 'bg-error/10 text-error' },
-  PENDING_APPROVAL: {
-    label: 'Pending Approval',
-    accent: 'bg-amber-100 text-amber-700',
-  },
+  BLOCKED: { label: 'Blocked', accent: 'bg-red-100 text-red-700' },
+  PENDING_APPROVAL: { label: 'Pending Approval', accent: 'bg-amber-100 text-amber-700' },
   COMPLETED: { label: 'Completed', accent: 'bg-emerald-100 text-emerald-700' },
 };
 
-const getPhaseOrder = (phase: WorkItemPhase) => SDLC_BOARD_PHASES.indexOf(phase);
+const ACTIVE_RUN_STATUSES: WorkflowRun['status'][] = [
+  'QUEUED',
+  'RUNNING',
+  'WAITING_APPROVAL',
+  'WAITING_INPUT',
+  'WAITING_CONFLICT',
+];
 
-const formatTimestamp = (value: string) => {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+const formatTimestamp = (value?: string) => {
+  if (!value) {
+    return 'Not yet';
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
     return value;
   }
 
-  return date.toLocaleString([], {
+  return parsed.toLocaleString([], {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
@@ -95,181 +118,124 @@ const formatTimestamp = (value: string) => {
   });
 };
 
-const createHistoryEntry = (
-  actor: string,
-  action: string,
-  detail: string,
-  phase?: WorkItemPhase,
-  status?: WorkItem['status'],
-) => ({
-  id: createHistoryId(),
-  timestamp: new Date().toISOString(),
-  actor,
-  action,
-  detail,
-  phase,
-  status,
-});
+const summarizeJson = (value: unknown) =>
+  typeof value === 'string' ? value : JSON.stringify(value || {}, null, 2);
 
-const getStepStatus = (step?: WorkflowStep): WorkItem['status'] =>
-  step?.stepType === 'HUMAN_APPROVAL' ? 'PENDING_APPROVAL' : 'ACTIVE';
-
-const buildPendingRequest = (step?: WorkflowStep): WorkItem['pendingRequest'] => {
-  if (!step || step.stepType !== 'HUMAN_APPROVAL') {
-    return undefined;
-  }
-
-  return {
-    type: 'APPROVAL',
-    message:
-      `${step.name} is waiting for human approval before release execution can continue.`,
-    requestedBy: step.agentId,
-    timestamp: new Date().toISOString(),
-  };
-};
-
-const resolveStepForPhase = (
-  workflow: { steps: WorkflowStep[] },
-  phase: WorkItemPhase,
-  currentStepId?: string,
+const getCurrentWorkflowStep = (
+  workflow: Workflow | null,
+  runDetail: WorkflowRunDetail | null,
+  workItem: WorkItem | null,
 ) => {
-  if (phase === 'BACKLOG' || phase === 'DONE') {
-    return undefined;
+  if (!workflow) {
+    return null;
   }
 
-  const phaseSteps = workflow.steps.filter(step => step.phase === phase);
-  if (phaseSteps.length === 0) {
-    return undefined;
+  if (runDetail?.run.currentStepId) {
+    return (
+      workflow.steps.find(step => step.id === runDetail.run.currentStepId) || null
+    );
   }
 
-  return phaseSteps.find(step => step.id === currentStepId) || phaseSteps[0];
+  if (workItem?.currentStepId) {
+    return workflow.steps.find(step => step.id === workItem.currentStepId) || null;
+  }
+
+  const lastCompletedRunStep = runDetail?.steps
+    .filter(step => step.status === 'COMPLETED')
+    .slice(-1)[0];
+
+  if (lastCompletedRunStep) {
+    return (
+      workflow.steps.find(step => step.id === lastCompletedRunStep.workflowStepId) ||
+      null
+    );
+  }
+
+  return workItem?.phase === 'DONE' ? workflow.steps[workflow.steps.length - 1] || null : null;
 };
 
-const buildExecutionPrompt = ({
-  item,
-  workflowName,
-  step,
-  agentName,
-  taskPrompt,
-  protocolName,
-  protocolRules,
-  inputArtifactLabel,
-  outputArtifactLabel,
-}: {
-  item: WorkItem;
-  workflowName: string;
-  step: WorkflowStep;
-  agentName: string;
-  taskPrompt?: string;
-  protocolName?: string;
-  protocolRules?: string[];
-  inputArtifactLabel?: string;
-  outputArtifactLabel?: string;
-}) =>
-  [
-    `Execute the current SDLC step for work item "${item.title}".`,
-    `Workflow: ${workflowName}.`,
-    `Assigned agent: ${agentName}.`,
-    `Current phase: ${item.phase}.`,
-    `Current step: ${step.name}.`,
-    `Step objective: ${step.action}.`,
-    step.description ? `Step guidance: ${step.description}` : null,
-    `Story request: ${item.description}`,
-    taskPrompt ? `Workflow-managed task prompt: ${taskPrompt}` : null,
-    protocolName ? `Hand-off protocol: ${protocolName}.` : null,
-    protocolRules?.length
-      ? `Hand-off rules: ${protocolRules.join('; ')}`
-      : null,
-    inputArtifactLabel ? `Input artifact: ${inputArtifactLabel}` : null,
-    outputArtifactLabel ? `Expected output artifact: ${outputArtifactLabel}` : null,
-    step.exitCriteria?.length
-      ? `Exit criteria: ${step.exitCriteria.join('; ')}`
-      : null,
-    step.stepType === 'DELIVERY'
-      ? 'Execute this delivery step and provide a concise completion summary, the concrete output produced, and any residual risks.'
-      : 'Prepare the validation or approval-ready evidence for this step, then summarize what is ready and what still needs human action.',
-    'Answer in a practical execution style with sections for Summary, Output, and Follow-up.',
-  ]
-    .filter(Boolean)
-    .join('\n');
+const getSelectedRunWait = (runDetail: WorkflowRunDetail | null) =>
+  runDetail?.waits.slice().reverse().find(wait => wait.status === 'OPEN') || null;
 
-const WorkItemCard = ({
-  item,
-  stepName,
-  agentName,
-  onClick,
-  onDragStart,
-  onDragEnd,
-  isDragging,
+const getAttentionReason = ({
+  blocker,
+  pendingRequest,
+  wait,
 }: {
-  key?: React.Key;
-  item: WorkItem;
-  stepName: string;
-  agentName: string;
-  onClick: (id: string) => void;
-  onDragStart: (event: React.DragEvent<HTMLButtonElement>, id: string) => void;
-  onDragEnd: () => void;
-  isDragging: boolean;
+  blocker?: WorkItem['blocker'];
+  pendingRequest?: WorkItem['pendingRequest'];
+  wait?: RunWait | null;
+}) => blocker?.message || wait?.message || pendingRequest?.message || '';
+
+const getAttentionLabel = ({
+  blocker,
+  pendingRequest,
+  wait,
+}: {
+  blocker?: WorkItem['blocker'];
+  pendingRequest?: WorkItem['pendingRequest'];
+  wait?: RunWait | null;
+}) => {
+  if (blocker?.status === 'OPEN') {
+    return blocker.type === 'HUMAN_INPUT'
+      ? 'Waiting for human input'
+      : 'Waiting for conflict resolution';
+  }
+
+  if (wait?.type === 'APPROVAL' || pendingRequest?.type === 'APPROVAL') {
+    return 'Waiting for approval';
+  }
+
+  if (wait?.type === 'INPUT' || pendingRequest?.type === 'INPUT') {
+    return 'Waiting for input';
+  }
+
+  if (
+    wait?.type === 'CONFLICT_RESOLUTION' ||
+    pendingRequest?.type === 'CONFLICT_RESOLUTION'
+  ) {
+    return 'Waiting for conflict resolution';
+  }
+
+  return 'Action required';
+};
+
+const DetailPill = ({
+  accent,
+  children,
+}: {
+  accent: string;
+  children: React.ReactNode;
 }) => (
-  <motion.button
-    layout
-    draggable
-    onClick={() => onClick(item.id)}
-    onDragStart={event => onDragStart(event, item.id)}
-    onDragEnd={onDragEnd}
+  <span
     className={cn(
-      'w-full rounded-3xl border border-outline-variant/15 bg-white p-4 text-left shadow-sm transition-all hover:border-primary/30 hover:shadow-md',
-      isDragging && 'scale-[0.98] opacity-50',
+      'inline-flex rounded-full px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em]',
+      accent,
     )}
   >
-    <div className="flex items-start justify-between gap-3">
-      <div>
-        <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">{item.id}</p>
-        <h3 className="mt-2 text-sm font-bold text-on-surface">{item.title}</h3>
-      </div>
-      <span
-        className={cn(
-          'rounded-full px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em]',
-          STATUS_META[item.status].accent,
-        )}
-      >
-        {STATUS_META[item.status].label}
-      </span>
-    </div>
-
-    <div className="mt-4 space-y-2">
-      <div className="rounded-2xl bg-surface-container-low px-3 py-2">
-        <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Current Step</p>
-        <p className="mt-1 text-xs font-semibold text-on-surface">{stepName}</p>
-      </div>
-      <div className="flex items-center justify-between text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-secondary">
-        <span>{agentName}</span>
-        <span>{PHASE_META[item.phase].label}</span>
-      </div>
-      {(item.blocker?.status === 'OPEN' || item.pendingRequest) && (
-        <div className="flex items-center gap-2 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-amber-700">
-          <AlertCircle size={14} />
-          <span>{item.blocker?.status === 'OPEN' ? 'Blocked' : 'Action Required'}</span>
-        </div>
-      )}
-    </div>
-  </motion.button>
+    {children}
+  </span>
 );
 
 const Orchestrator = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { activeCapability, getCapabilityWorkspace, setCapabilityWorkspaceContent } =
+  const { activeCapability, getCapabilityWorkspace, refreshCapabilityBundle } =
     useCapability();
   const workspace = getCapabilityWorkspace(activeCapability.id);
+
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [view, setView] = useState<'board' | 'list'>('board');
-  const [actionNote, setActionNote] = useState('');
   const [draggedWorkItemId, setDraggedWorkItemId] = useState<string | null>(null);
   const [dragOverPhase, setDragOverPhase] = useState<WorkItemPhase | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeError, setRuntimeError] = useState('');
-  const [isExecutingWorkItemId, setIsExecutingWorkItemId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState('');
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [selectedRunDetail, setSelectedRunDetail] = useState<WorkflowRunDetail | null>(null);
+  const [selectedRunEvents, setSelectedRunEvents] = useState<RunEvent[]>([]);
+  const [selectedRunHistory, setSelectedRunHistory] = useState<WorkflowRun[]>([]);
+  const [resolutionNote, setResolutionNote] = useState('');
   const [draftWorkItem, setDraftWorkItem] = useState({
     title: '',
     description: '',
@@ -278,7 +244,6 @@ const Orchestrator = () => {
     tags: '',
   });
 
-  const workItems = useMemo(() => workspace.workItems, [workspace.workItems]);
   const workflowsById = useMemo(
     () => new Map(workspace.workflows.map(workflow => [workflow.id, workflow])),
     [workspace.workflows],
@@ -287,6 +252,68 @@ const Orchestrator = () => {
     () => new Map(workspace.agents.map(agent => [agent.id, agent])),
     [workspace.agents],
   );
+  const workItems = workspace.workItems;
+
+  const loadSelectedRunData = useCallback(
+    async (workItemId: string) => {
+      const runs = await listCapabilityWorkflowRuns(activeCapability.id, workItemId);
+      setSelectedRunHistory(runs);
+
+      const latestRun = runs[0];
+      if (!latestRun) {
+        setSelectedRunDetail(null);
+        setSelectedRunEvents([]);
+        return;
+      }
+
+      const [detail, events] = await Promise.all([
+        fetchCapabilityWorkflowRun(activeCapability.id, latestRun.id),
+        fetchCapabilityWorkflowRunEvents(activeCapability.id, latestRun.id),
+      ]);
+      setSelectedRunDetail(detail);
+      setSelectedRunEvents(events);
+    },
+    [activeCapability.id],
+  );
+
+  const refreshSelection = useCallback(
+    async (workItemId?: string | null) => {
+      await refreshCapabilityBundle(activeCapability.id);
+      if (workItemId) {
+        await loadSelectedRunData(workItemId);
+      }
+    },
+    [activeCapability.id, loadSelectedRunData, refreshCapabilityBundle],
+  );
+
+  useEffect(() => {
+    void refreshCapabilityBundle(activeCapability.id);
+  }, [activeCapability.id, refreshCapabilityBundle]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    fetchRuntimeStatus()
+      .then(status => {
+        if (!isMounted) {
+          return;
+        }
+        setRuntimeStatus(status);
+        setRuntimeError('');
+      })
+      .catch(error => {
+        if (!isMounted) {
+          return;
+        }
+        setRuntimeError(
+          error instanceof Error ? error.message : 'Unable to load runtime configuration.',
+        );
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!selectedWorkItemId || workItems.some(item => item.id === selectedWorkItemId)) {
@@ -296,37 +323,20 @@ const Orchestrator = () => {
   }, [selectedWorkItemId, workItems]);
 
   useEffect(() => {
-    setRuntimeError('');
-  }, [selectedWorkItemId]);
+    if (!selectedWorkItemId) {
+      setSelectedRunDetail(null);
+      setSelectedRunEvents([]);
+      setSelectedRunHistory([]);
+      setResolutionNote('');
+      return;
+    }
 
-  useEffect(() => {
-    let isMounted = true;
-
-    fetchRuntimeStatus()
-      .then(nextStatus => {
-        if (!isMounted) {
-          return;
-        }
-
-        setRuntimeStatus(nextStatus);
-        setRuntimeError('');
-      })
-      .catch(error => {
-        if (!isMounted) {
-          return;
-        }
-
-        setRuntimeError(
-          error instanceof Error
-            ? error.message
-            : 'Unable to load runtime configuration.',
-        );
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+    void loadSelectedRunData(selectedWorkItemId).catch(error => {
+      setActionError(
+        error instanceof Error ? error.message : 'Failed to load workflow run details.',
+      );
+    });
+  }, [loadSelectedRunData, selectedWorkItemId]);
 
   useEffect(() => {
     const nextSearchParams = new URLSearchParams(searchParams);
@@ -341,7 +351,6 @@ const Orchestrator = () => {
     const selectedId = searchParams.get('selected');
     if (selectedId && workItems.some(item => item.id === selectedId)) {
       setSelectedWorkItemId(selectedId);
-      setActionNote('');
       nextSearchParams.delete('selected');
       shouldReplace = true;
     }
@@ -351,44 +360,71 @@ const Orchestrator = () => {
     }
   }, [searchParams, setSearchParams, workItems]);
 
+  useEffect(() => {
+    const hasActiveRuns = workItems.some(item => Boolean(item.activeRunId));
+    if (!hasActiveRuns && !selectedWorkItemId) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void refreshSelection(selectedWorkItemId);
+    }, 3000);
+
+    return () => window.clearInterval(timer);
+  }, [refreshSelection, selectedWorkItemId, workItems]);
+
   const selectedWorkItem =
     workItems.find(item => item.id === selectedWorkItemId) || null;
   const selectedWorkflow = selectedWorkItem
     ? workflowsById.get(selectedWorkItem.workflowId) || null
     : null;
-  const currentStep = selectedWorkflow?.steps.find(
-    step => step.id === selectedWorkItem?.currentStepId,
+  const selectedCurrentStep = getCurrentWorkflowStep(
+    selectedWorkflow,
+    selectedRunDetail,
+    selectedWorkItem,
   );
-  const currentStepIndex = selectedWorkflow
-    ? selectedWorkflow.steps.findIndex(step => step.id === selectedWorkItem?.currentStepId)
-    : -1;
-  const displayStep =
-    currentStep ||
-    (selectedWorkItem?.status === 'COMPLETED'
-      ? selectedWorkflow?.steps[selectedWorkflow.steps.length - 1]
-      : null) ||
-    null;
-  const displayStepIndex =
-    displayStep && selectedWorkflow
-      ? selectedWorkflow.steps.findIndex(step => step.id === displayStep.id)
-      : -1;
-  const nextStep =
-    selectedWorkflow && currentStepIndex >= 0
-      ? selectedWorkflow.steps[currentStepIndex + 1]
-      : undefined;
-  const displayAgent = displayStep
-    ? agentsById.get(selectedWorkItem?.assignedAgentId || displayStep.agentId || '') || null
+  const selectedOpenWait = getSelectedRunWait(selectedRunDetail);
+  const selectedAgent = selectedCurrentStep?.agentId
+    ? agentsById.get(selectedCurrentStep.agentId) || null
     : selectedWorkItem?.assignedAgentId
     ? agentsById.get(selectedWorkItem.assignedAgentId) || null
     : null;
-  const workItemManagedTasks = useMemo(() => {
+  const selectedAttentionReason = selectedWorkItem
+    ? getAttentionReason({
+        blocker: selectedWorkItem.blocker,
+        pendingRequest: selectedWorkItem.pendingRequest,
+        wait: selectedOpenWait,
+      })
+    : '';
+  const selectedAttentionLabel = selectedWorkItem
+    ? getAttentionLabel({
+        blocker: selectedWorkItem.blocker,
+        pendingRequest: selectedWorkItem.pendingRequest,
+        wait: selectedOpenWait,
+      })
+    : 'Action required';
+  const selectedAttentionRequestedBy =
+    selectedWorkItem?.blocker?.requestedBy ||
+    selectedOpenWait?.requestedBy ||
+    selectedWorkItem?.pendingRequest?.requestedBy ||
+    selectedAgent?.id;
+  const selectedAttentionTimestamp =
+    selectedWorkItem?.blocker?.timestamp ||
+    selectedOpenWait?.createdAt ||
+    selectedWorkItem?.pendingRequest?.timestamp;
+
+  const stepOrder = useMemo(
+    () =>
+      new Map(
+        (selectedWorkflow?.steps || []).map((step, index) => [step.id, index] as const),
+      ),
+    [selectedWorkflow],
+  );
+
+  const selectedTasks = useMemo(() => {
     if (!selectedWorkItem) {
       return [];
     }
-
-    const stepOrder = new Map<string, number>(
-      (selectedWorkflow?.steps || []).map((step, index) => [step.id, index] as const),
-    );
 
     return workspace.tasks
       .filter(task => task.workItemId === selectedWorkItem.id)
@@ -398,134 +434,48 @@ const Orchestrator = () => {
           (stepOrder.get(left.workflowStepId || '') ?? Number.MAX_SAFE_INTEGER) -
           (stepOrder.get(right.workflowStepId || '') ?? Number.MAX_SAFE_INTEGER),
       );
-  }, [selectedWorkItem, selectedWorkflow, workspace.tasks]);
-  const selectedManagedTask =
-    workItemManagedTasks.find(
-      task => task.workflowStepId === (selectedWorkItem?.currentStepId || displayStep?.id),
-    ) ||
-    workItemManagedTasks[workItemManagedTasks.length - 1] ||
-    null;
-  const selectedExecutionLogs = useMemo(() => {
+  }, [selectedWorkItem, stepOrder, workspace.tasks]);
+
+  const selectedRunStepIds = useMemo(
+    () => new Set(selectedRunDetail?.steps.map(step => step.id) || []),
+    [selectedRunDetail],
+  );
+
+  const selectedArtifacts = useMemo(() => {
+    if (!selectedRunDetail) {
+      return [];
+    }
+
+    return workspace.artifacts.filter(
+      artifact =>
+        artifact.runId === selectedRunDetail.run.id ||
+        (artifact.runStepId && selectedRunStepIds.has(artifact.runStepId)),
+    );
+  }, [selectedRunDetail, selectedRunStepIds, workspace.artifacts]);
+
+  const selectedLogs = useMemo(() => {
     if (!selectedWorkItem) {
       return [];
     }
 
-    const relatedIds = new Set<string>([
+    const relatedTaskIds = new Set<string>([
       selectedWorkItem.id,
-      ...workItemManagedTasks.map(task => task.id),
+      ...selectedTasks.map(task => task.id),
     ]);
 
     return workspace.executionLogs
-      .filter(log => relatedIds.has(log.taskId))
+      .filter(log => {
+        if (selectedRunDetail && log.runId === selectedRunDetail.run.id) {
+          return true;
+        }
+        return relatedTaskIds.has(log.taskId);
+      })
       .slice()
       .sort(
         (left, right) =>
           new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime(),
       );
-  }, [selectedWorkItem, workItemManagedTasks, workspace.executionLogs]);
-  const workItemArtifactView = useMemo(() => {
-    const linked: Array<{
-      key: string;
-      name: string;
-      size: string;
-      type: 'table' | 'scale' | 'file';
-      stepName: string;
-    }> = [];
-    const outputs: Array<{
-      key: string;
-      name: string;
-      status: 'completed' | 'pending';
-      stepName: string;
-      downloadUrl?: string;
-    }> = [];
-
-    workItemManagedTasks.forEach(task => {
-      const stepName =
-        selectedWorkflow?.steps.find(step => step.id === task.workflowStepId)?.name ||
-        task.title;
-
-      task.linkedArtifacts?.forEach((artifact, index) => {
-        linked.push({
-          ...artifact,
-          key: `${task.id}-linked-${index}-${artifact.name}`,
-          stepName,
-        });
-      });
-
-      task.producedOutputs?.forEach((output, index) => {
-        outputs.push({
-          ...output,
-          key: `${task.id}-output-${index}-${output.name}`,
-          stepName,
-        });
-      });
-    });
-
-    return { linked, outputs };
-  }, [selectedWorkflow, workItemManagedTasks]);
-  const executionSummary = useMemo(() => {
-    if (!selectedWorkItem) {
-      return null;
-    }
-
-    const latestSummaryLog = selectedExecutionLogs
-      .slice()
-      .reverse()
-      .find(log => typeof log.metadata?.outputSummary === 'string');
-    const latestCompletionHistory = selectedWorkItem.history
-      .slice()
-      .reverse()
-      .find(entry => entry.action === 'Execution completed' || entry.action === 'Story completed');
-    const completedSteps = workItemManagedTasks.filter(
-      task => task.status === 'COMPLETED',
-    ).length;
-    const totalSteps = selectedWorkflow?.steps.length || workItemManagedTasks.length;
-    const totalTokens = selectedExecutionLogs.reduce((sum, log) => {
-      const tokens = log.metadata?.totalTokens;
-      return typeof tokens === 'number' ? sum + tokens : sum;
-    }, 0);
-    const estimatedCostUsd = selectedExecutionLogs.reduce((sum, log) => {
-      const cost = log.metadata?.estimatedCostUsd;
-      return typeof cost === 'number' ? sum + cost : sum;
-    }, 0);
-
-    return {
-      title:
-        (typeof latestSummaryLog?.metadata?.outputTitle === 'string' &&
-          latestSummaryLog.metadata.outputTitle) ||
-        (selectedWorkItem.status === 'COMPLETED'
-          ? 'Workflow Completed'
-          : displayStep?.name || 'Execution Summary'),
-      summary:
-        (typeof latestSummaryLog?.metadata?.outputSummary === 'string' &&
-          latestSummaryLog.metadata.outputSummary) ||
-        latestCompletionHistory?.detail ||
-        'No execution summary is available yet.',
-      timestamp: latestSummaryLog?.timestamp || latestCompletionHistory?.timestamp,
-      model:
-        typeof latestSummaryLog?.metadata?.model === 'string'
-          ? latestSummaryLog.metadata.model
-          : displayAgent?.model,
-      completedSteps,
-      totalSteps,
-      totalTokens,
-      estimatedCostUsd,
-    };
-  }, [
-    displayAgent?.model,
-    displayStep?.name,
-    selectedExecutionLogs,
-    selectedWorkItem,
-    selectedWorkflow?.steps.length,
-    workItemManagedTasks,
-  ]);
-  const canStartSelectedWorkItem =
-    Boolean(selectedWorkItem && currentStep && selectedWorkItem.assignedAgentId) &&
-    selectedWorkItem?.status !== 'BLOCKED' &&
-    selectedWorkItem?.status !== 'COMPLETED' &&
-    selectedWorkItem?.status !== 'PENDING_APPROVAL' &&
-    selectedWorkItem?.pendingRequest?.type !== 'INPUT' &&
-    selectedWorkItem?.pendingRequest?.type !== 'CONFLICT_RESOLUTION';
+  }, [selectedRunDetail, selectedTasks, selectedWorkItem, workspace.executionLogs]);
 
   const stats = useMemo(
     () => ({
@@ -537,1122 +487,912 @@ const Orchestrator = () => {
     [workItems],
   );
 
-  type ExecutionState = {
-    workItems: typeof workItems;
-    tasks: typeof workspace.tasks;
-    executionLogs: typeof workspace.executionLogs;
-    currentItem: WorkItem;
-  };
+  const currentRun = selectedRunDetail?.run || selectedRunHistory[0] || null;
+  const currentRunIsActive = Boolean(
+    currentRun && ACTIVE_RUN_STATUSES.includes(currentRun.status),
+  );
+  const canStartExecution =
+    Boolean(selectedWorkItem) &&
+    !selectedWorkItem?.activeRunId &&
+    selectedWorkItem?.phase !== 'DONE';
 
-  const persistExecutionState = (state: ExecutionState) => {
-    setCapabilityWorkspaceContent(activeCapability.id, {
-      workItems: state.workItems,
-      tasks: state.tasks,
-      executionLogs: state.executionLogs,
-    });
-    setSelectedWorkItemId(state.currentItem.id);
-  };
+  const canRestartFromPhase =
+    Boolean(selectedWorkItem && currentRun && !selectedWorkItem.activeRunId) &&
+    selectedWorkItem?.phase !== 'DONE';
 
-  const applyExecutionStateTransition = ({
-    state,
-    previousItem,
-    nextItem,
-    logMessage,
-    logAgentId,
-    options,
-  }: {
-    state: ExecutionState;
-    previousItem: WorkItem;
-    nextItem: WorkItem;
-    logMessage: string;
-    logAgentId?: string;
-    options?: {
-      buildTasks?: (
-        syncedTasks: typeof workspace.tasks,
-        nextItem: WorkItem,
-        currentItem: WorkItem,
-      ) => typeof workspace.tasks;
-      logLevel?: 'INFO' | 'WARN' | 'ERROR';
-      logMetadata?: Record<string, unknown>;
-    };
-  }): ExecutionState => {
-    const workflow = workflowsById.get(nextItem.workflowId);
-    const syncedTasks = workflow
-      ? syncWorkflowManagedTasksForWorkItem({
-          allTasks: state.tasks,
-          workItem: nextItem,
-          workflow,
-          artifacts: workspace.artifacts,
-        })
-      : state.tasks;
-    const nextTasks = options?.buildTasks
-      ? options.buildTasks(syncedTasks, nextItem, previousItem)
-      : syncedTasks;
+  const actionButtonLabel =
+    selectedOpenWait?.type === 'APPROVAL'
+      ? 'Approve and continue'
+      : selectedOpenWait?.type === 'INPUT'
+      ? 'Submit details and unblock'
+      : selectedOpenWait?.type === 'CONFLICT_RESOLUTION'
+      ? 'Resolve conflict and unblock'
+      : 'Continue';
+  const resolutionPlaceholder =
+    selectedOpenWait?.type === 'APPROVAL'
+      ? 'Add approval notes, release conditions, or sign-off details.'
+      : selectedOpenWait?.type === 'INPUT'
+      ? 'Provide the missing business, technical, or governance details needed to unblock this work item.'
+      : selectedOpenWait?.type === 'CONFLICT_RESOLUTION'
+      ? 'Describe the conflict resolution, final decision, and any implementation constraints.'
+      : 'Approval note, human input, restart note, or cancellation reason.';
+  const resolutionIsRequired =
+    selectedOpenWait?.type === 'INPUT' ||
+    selectedOpenWait?.type === 'CONFLICT_RESOLUTION';
+  const canResolveSelectedWait =
+    Boolean(selectedOpenWait) &&
+    (!resolutionIsRequired || Boolean(resolutionNote.trim()));
 
-    return {
-      workItems: state.workItems.map(item =>
-        item.id === nextItem.id ? nextItem : item,
-      ),
-      tasks: nextTasks,
-      executionLogs: [
-        ...state.executionLogs,
-        {
-          id: createLogId(),
-          taskId: nextItem.id,
-          capabilityId: activeCapability.id,
-          agentId:
-            logAgentId ||
-            nextItem.assignedAgentId ||
-            nextItem.pendingRequest?.requestedBy ||
-            activeCapability.specialAgentId ||
-            workspace.agents[0]?.id ||
-            'SYSTEM',
-          timestamp: new Date().toISOString(),
-          level: options?.logLevel || 'INFO',
-          message: logMessage,
-          metadata: {
-            phase: nextItem.phase,
-            status: nextItem.status,
-            ...(options?.logMetadata || {}),
-          },
-        },
-      ],
-      currentItem: nextItem,
-    };
-  };
-
-  const updateWorkItem = (
-    workItemId: string,
-    buildNextItem: (current: WorkItem) => WorkItem,
-    logMessage: string,
-    logAgentId?: string,
-    options?: {
-      buildTasks?: (
-        syncedTasks: typeof workspace.tasks,
-        nextItem: WorkItem,
-        currentItem: WorkItem,
-      ) => typeof workspace.tasks;
-      logLevel?: 'INFO' | 'WARN' | 'ERROR';
-      logMetadata?: Record<string, unknown>;
-    },
-  ) => {
-    const currentItem = workItems.find(item => item.id === workItemId);
-    if (!currentItem) {
-      return;
+  const withAction = async (label: string, action: () => Promise<void>) => {
+    setBusyAction(label);
+    setActionError('');
+    try {
+      await action();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : 'The orchestration action failed.',
+      );
+    } finally {
+      setBusyAction(null);
     }
-
-    const nextItem = buildNextItem(currentItem);
-    persistExecutionState(
-      applyExecutionStateTransition({
-        state: {
-          workItems,
-          tasks: workspace.tasks,
-          executionLogs: workspace.executionLogs,
-          currentItem,
-        },
-        previousItem: currentItem,
-        nextItem,
-        logMessage,
-        logAgentId,
-        options,
-      }),
-    );
   };
 
-  const handleCreateWorkItem = (event: React.FormEvent) => {
+  const handleCreateWorkItem = async (event: React.FormEvent) => {
     event.preventDefault();
-
-    const workflow = workflowsById.get(draftWorkItem.workflowId);
-    if (!draftWorkItem.title.trim() || !workflow) {
+    if (!draftWorkItem.title.trim() || !draftWorkItem.workflowId) {
       return;
     }
 
-    const firstStep = workflow.steps[0];
-    const nextWorkItem: WorkItem = {
-      id: createWorkItemId(),
-      title: draftWorkItem.title.trim(),
-      description:
-        draftWorkItem.description.trim() ||
-        `Delivery story for ${activeCapability.name}.`,
-      phase: firstStep?.phase || 'BACKLOG',
-      capabilityId: activeCapability.id,
-      workflowId: workflow.id,
-      currentStepId: firstStep?.id,
-      assignedAgentId: firstStep?.agentId,
-      status: getStepStatus(firstStep),
-      priority: draftWorkItem.priority,
-      tags: draftWorkItem.tags
-        .split(',')
-        .map(tag => tag.trim())
-        .filter(Boolean),
-      pendingRequest: buildPendingRequest(firstStep),
-      history: [
-        createHistoryEntry(
-          'System',
-          'Story created',
-          `Story entered ${firstStep?.name || 'Backlog'} in ${workflow.name}.`,
-          firstStep?.phase || 'BACKLOG',
-          getStepStatus(firstStep),
-        ),
-      ],
-    };
-    const nextTasks = syncWorkflowManagedTasksForWorkItem({
-      allTasks: workspace.tasks,
-      workItem: nextWorkItem,
-      workflow,
-      artifacts: workspace.artifacts,
-    });
-
-    setCapabilityWorkspaceContent(activeCapability.id, {
-      workItems: [...workspace.workItems, nextWorkItem],
-      tasks: nextTasks,
-      executionLogs: [
-        ...workspace.executionLogs,
-        {
-          id: createLogId(),
-          taskId: nextWorkItem.id,
-          capabilityId: activeCapability.id,
-          agentId: firstStep?.agentId || workspace.agents[0]?.id || 'SYSTEM',
-          timestamp: new Date().toISOString(),
-          level: 'INFO',
-          message: `Story created and entered ${firstStep?.name || 'Backlog'} in ${workflow.name}.`,
-          metadata: {
-            phase: nextWorkItem.phase,
-            status: nextWorkItem.status,
-          },
-        },
-        {
-          id: createLogId(),
-          taskId: nextWorkItem.id,
-          capabilityId: activeCapability.id,
-          agentId: firstStep?.agentId || workspace.agents[0]?.id || 'SYSTEM',
-          timestamp: new Date().toISOString(),
-          level: 'INFO',
-          message: `Workflow generated ${workflow.steps.length} managed step tasks, including testing coverage, for ${nextWorkItem.title}.`,
-          metadata: {
-            phase: nextWorkItem.phase,
-            status: nextWorkItem.status,
-            generatedTaskCount: workflow.steps.length,
-          },
-        },
-      ],
-    });
-
-    setSelectedWorkItemId(nextWorkItem.id);
-    setActionNote('');
-    setDraftWorkItem({
-      title: '',
-      description: '',
-      workflowId: workspace.workflows[0]?.id || '',
-      priority: 'Med',
-      tags: '',
-    });
-    setIsCreateModalOpen(false);
-  };
-
-  const moveToNextStep = (item: WorkItem) => {
-    if (item.status === 'COMPLETED') {
-      return;
-    }
-
-    const workflow = workflowsById.get(item.workflowId);
-    if (!workflow) {
-      return;
-    }
-
-    const index = workflow.steps.findIndex(step => step.id === item.currentStepId);
-    const upcomingStep = index >= 0 ? workflow.steps[index + 1] : workflow.steps[0];
-
-    if (!upcomingStep) {
-      updateWorkItem(
-        item.id,
-        current => ({
-          ...current,
-          phase: 'DONE',
-          currentStepId: undefined,
-          assignedAgentId: undefined,
-          status: 'COMPLETED',
-          pendingRequest: undefined,
-          blocker: undefined,
-          history: [
-            ...current.history,
-            createHistoryEntry(
-              'System',
-              'Story completed',
-              actionNote.trim() || 'All SDLC steps were completed.',
-              'DONE',
-              'COMPLETED',
-            ),
-          ],
-        }),
-        `${item.title} completed and moved to Done.`,
-      );
-      setActionNote('');
-      return;
-    }
-
-    const pendingRequest = buildPendingRequest(upcomingStep);
-    updateWorkItem(
-      item.id,
-      current => ({
-        ...current,
-        phase: upcomingStep.phase,
-        currentStepId: upcomingStep.id,
-        assignedAgentId: upcomingStep.agentId,
-        status: getStepStatus(upcomingStep),
-        pendingRequest,
-        blocker: undefined,
-        history: [
-          ...current.history,
-          createHistoryEntry(
-            'System',
-            'Advanced workflow',
-            actionNote.trim() ||
-              `Moved into ${upcomingStep.name}.`,
-            upcomingStep.phase,
-            getStepStatus(upcomingStep),
-          ),
-        ],
-      }),
-      `${item.title} moved into ${upcomingStep.name}.`,
-      upcomingStep.agentId,
-    );
-    setActionNote('');
-  };
-
-  const blockWorkItem = (
-    item: WorkItem,
-    type: 'CONFLICT_RESOLUTION' | 'HUMAN_INPUT',
-  ) => {
-    const message =
-      actionNote.trim() ||
-      (type === 'CONFLICT_RESOLUTION'
-        ? 'Conflict resolution is required before this story can continue.'
-        : 'Human input is required before this story can continue.');
-
-    updateWorkItem(
-      item.id,
-      current => ({
-        ...current,
-        status: 'BLOCKED',
-        pendingRequest: {
-          type: type === 'CONFLICT_RESOLUTION' ? 'CONFLICT_RESOLUTION' : 'INPUT',
-          message,
-          requestedBy: current.assignedAgentId || 'SYSTEM',
-          timestamp: new Date().toISOString(),
-        },
-        blocker: {
-          type,
-          message,
-          requestedBy: current.assignedAgentId || 'SYSTEM',
-          timestamp: new Date().toISOString(),
-          status: 'OPEN',
-        },
-        history: [
-          ...current.history,
-          createHistoryEntry(
-            'System',
-            type === 'CONFLICT_RESOLUTION' ? 'Conflict raised' : 'Input requested',
-            message,
-            current.phase,
-            'BLOCKED',
-          ),
-        ],
-      }),
-      `${item.title} is blocked: ${message}`,
-    );
-    setActionNote('');
-  };
-
-  const resolveBlocker = async (item: WorkItem) => {
-    const workflow = workflowsById.get(item.workflowId);
-    const fallbackStep = workflow?.steps.find(step => step.id === item.currentStepId);
-    const nextStatus =
-      fallbackStep?.stepType === 'HUMAN_APPROVAL' ? 'PENDING_APPROVAL' : 'ACTIVE';
-
-    const nextItem: WorkItem = {
-      ...item,
-      status: nextStatus,
-      pendingRequest:
-        nextStatus === 'PENDING_APPROVAL' ? buildPendingRequest(fallbackStep) : undefined,
-      blocker: item.blocker
-        ? {
-            ...item.blocker,
-            status: 'RESOLVED',
-            resolution: actionNote.trim() || 'Blocker resolved and story re-activated.',
-          }
-        : undefined,
-      history: [
-        ...item.history,
-        createHistoryEntry(
-          'User',
-          'Blocker resolved',
-          actionNote.trim() || 'Blocker resolved and story can continue.',
-          item.phase,
-          nextStatus,
-        ),
-      ],
-    };
-    const state = applyExecutionStateTransition({
-      state: {
-        workItems,
-        tasks: workspace.tasks,
-        executionLogs: workspace.executionLogs,
-        currentItem: item,
-      },
-      previousItem: item,
-      nextItem,
-      logMessage: `${item.title} was unblocked.`,
-    });
-    setActionNote('');
-
-    if (nextItem.status === 'ACTIVE' && runtimeStatus?.configured) {
-      setRuntimeError('');
-      setIsExecutingWorkItemId(item.id);
-      try {
-        await runAutomatedWorkflow(nextItem, state);
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error
-            ? error.message
-            : 'The backend runtime could not complete this work item.';
-        setRuntimeError(errorMessage);
-      } finally {
-        setIsExecutingWorkItemId(null);
-      }
-      return;
-    }
-
-    persistExecutionState(state);
-  };
-
-  const runAutomatedWorkflow = async (
-    startingItem: WorkItem,
-    initialState?: ExecutionState,
-  ) => {
-    if (!runtimeStatus?.configured) {
-      setRuntimeError(
-        'The backend runtime is not configured yet. Add GITHUB_MODELS_TOKEN to .env.local and restart npm run dev.',
-      );
-      return;
-    }
-
-    let state: ExecutionState =
-      initialState || {
-        workItems,
-        tasks: workspace.tasks,
-        executionLogs: workspace.executionLogs,
-        currentItem: startingItem,
-      };
-    let currentItem = state.currentItem;
-    let safetyCounter = 0;
-
-    while (safetyCounter < 20) {
-      safetyCounter += 1;
-
-      const workflow = workflowsById.get(currentItem.workflowId);
-      const step = workflow?.steps.find(candidate => candidate.id === currentItem.currentStepId);
-      const agent = agentsById.get(currentItem.assignedAgentId || '');
-
-      if (!workflow || !step || !agent) {
-        throw new Error(
-          'The current work item is missing workflow, step, or agent context, so execution could not continue.',
-        );
-      }
-
-      if (
-        currentItem.status === 'COMPLETED' ||
-        currentItem.status === 'BLOCKED' ||
-        currentItem.blocker?.status === 'OPEN'
-      ) {
-        break;
-      }
-
-      if (
-        currentItem.pendingRequest?.type === 'INPUT' ||
-        currentItem.pendingRequest?.type === 'CONFLICT_RESOLUTION' ||
-        step.stepType === 'HUMAN_APPROVAL'
-      ) {
-        break;
-      }
-
-      const currentTask = state.tasks.find(
-        task =>
-          task.workItemId === currentItem.id &&
-          task.workflowStepId === currentItem.currentStepId,
-      );
-      const handoffProtocol = workflow.handoffProtocols?.find(
-        protocol =>
-          protocol.id === step.handoffProtocolId || protocol.sourceStepId === step.id,
-      );
-      const inputArtifact = workspace.artifacts.find(
-        artifact => artifact.id === step.inputArtifactId,
-      );
-      const outputArtifact = workspace.artifacts.find(
-        artifact => artifact.id === step.outputArtifactId,
-      );
-      let result;
-      try {
-        result = await sendCapabilityChat({
-          capability: activeCapability,
-          agent,
-          history: currentItem.history.slice(-6).map((entry, index) => ({
-            id: `${currentItem.id}-H-${index}`,
-            capabilityId: activeCapability.id,
-            role: 'user',
-            content: `${entry.action}: ${entry.detail}`,
-            timestamp: entry.timestamp,
-          })),
-          message: buildExecutionPrompt({
-            item: currentItem,
-            workflowName: workflow.name,
-            step,
-            agentName: agent.name,
-            taskPrompt: currentTask?.prompt,
-            protocolName: handoffProtocol?.name,
-            protocolRules: handoffProtocol?.rules,
-            inputArtifactLabel: inputArtifact
-              ? `${inputArtifact.name} (${inputArtifact.type})`
-              : undefined,
-            outputArtifactLabel: outputArtifact
-              ? `${outputArtifact.name} (${outputArtifact.type})`
-              : undefined,
-          }),
-        });
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error
-            ? error.message
-            : 'The backend runtime could not complete this work item.';
-
-        state = applyExecutionStateTransition({
-          state,
-          previousItem: currentItem,
-          nextItem: {
-            ...currentItem,
-            history: [
-              ...currentItem.history,
-              createHistoryEntry(
-                'System',
-                'Execution failed',
-                errorMessage,
-                currentItem.phase,
-                currentItem.status,
-              ),
-            ],
-          },
-          logMessage: `${currentItem.title} execution failed: ${errorMessage}`,
-          logAgentId: agent.id,
-          options: {
-            buildTasks: syncedTasks =>
-              syncedTasks.map(task =>
-                task.workItemId === currentItem.id &&
-                task.workflowStepId === step.id
-                  ? {
-                      ...task,
-                      status: 'ALERT',
-                      timestamp: formatTaskTimestamp(),
-                      executionNotes: `${task.executionNotes || ''}\nLast execution failed: ${errorMessage}`.trim(),
-                    }
-                  : task,
-              ),
-            logLevel: 'ERROR',
-            logMetadata: {
-              requestType: 'WORK_ITEM_EXECUTION',
-              stepId: step.id,
-              stepName: step.name,
-              errorMessage,
-            },
-          },
-        });
-        persistExecutionState(state);
-        throw error;
-      }
-
-      const executionSummary = summarizeOutput(result.content);
-      const currentStepIndex = workflow.steps.findIndex(
-        candidate => candidate.id === step.id,
-      );
-      const upcomingStep = workflow.steps[currentStepIndex + 1];
-      const nextStatus = upcomingStep ? getStepStatus(upcomingStep) : 'COMPLETED';
-      const nextPhase = upcomingStep?.phase || 'DONE';
-      const nextItem: WorkItem = {
-        ...currentItem,
-        phase: nextPhase,
-        currentStepId: upcomingStep?.id,
-        assignedAgentId: upcomingStep?.agentId,
-        status: nextStatus,
-        pendingRequest: buildPendingRequest(upcomingStep),
-        blocker: undefined,
-        history: [
-          ...currentItem.history,
-          createHistoryEntry(
-            agent.name,
-            'Execution completed',
-            upcomingStep
-              ? `${step.name} completed. ${executionSummary}`
-              : `Final workflow step completed. ${executionSummary}`,
-            nextPhase,
-            nextStatus,
-          ),
-        ],
-      };
-
-      state = applyExecutionStateTransition({
-        state,
-        previousItem: currentItem,
-        nextItem,
-        logMessage: upcomingStep
-          ? `${currentItem.title} executed in ${step.name} and advanced to ${upcomingStep.name}. Result: ${executionSummary}`
-          : `${currentItem.title} executed in ${step.name} and completed the workflow. Result: ${executionSummary}`,
-        logAgentId: agent.id,
-        options: {
-          buildTasks: syncedTasks =>
-            syncedTasks.map(task => {
-              if (
-                task.workItemId !== currentItem.id ||
-                task.workflowStepId !== step.id
-              ) {
-                return task;
-              }
-
-              const existingOutputs = task.producedOutputs || [];
-              const nextOutputs =
-                existingOutputs.length > 0
-                  ? existingOutputs.map(output => ({
-                      ...output,
-                      status: 'completed' as const,
-                    }))
-                  : [
-                      {
-                        name: outputArtifact?.name || `${step.name} Execution Result`,
-                        status: 'completed' as const,
-                      },
-                    ];
-
-              return {
-                ...task,
-                status: 'COMPLETED',
-                timestamp: formatTaskTimestamp(),
-                executionNotes: `${task.executionNotes || ''}\nLatest run summary: ${executionSummary}`.trim(),
-                producedOutputs: nextOutputs,
-              };
-            }),
-          logMetadata: {
-            requestType: 'WORK_ITEM_EXECUTION',
-            stepId: step.id,
-            stepName: step.name,
-            model: result.model,
-            promptTokens: result.usage.promptTokens,
-            completionTokens: result.usage.completionTokens,
-            totalTokens: result.usage.totalTokens,
-            estimatedCostUsd: result.usage.estimatedCostUsd,
-            outputTitle: outputArtifact?.name || `${step.name} Execution Result`,
-            outputSummary: executionSummary,
-            outputStatus: 'completed',
-            rawResponsePreview: executionSummary,
-          },
-        },
+    await withAction('create', async () => {
+      const nextItem = await createCapabilityWorkItem(activeCapability.id, {
+        title: draftWorkItem.title.trim(),
+        description: draftWorkItem.description.trim() || undefined,
+        workflowId: draftWorkItem.workflowId,
+        priority: draftWorkItem.priority,
+        tags: draftWorkItem.tags
+          .split(',')
+          .map(tag => tag.trim())
+          .filter(Boolean),
       });
 
-      currentItem = state.currentItem;
-      persistExecutionState(state);
-
-      if (
-        currentItem.status === 'COMPLETED' ||
-        currentItem.status === 'PENDING_APPROVAL' ||
-        currentItem.pendingRequest?.type === 'INPUT' ||
-        currentItem.pendingRequest?.type === 'CONFLICT_RESOLUTION' ||
-        currentItem.blocker?.status === 'OPEN'
-      ) {
-        break;
-      }
-    }
-
-    persistExecutionState(state);
-  };
-
-  const approveAndProceed = async (item: WorkItem) => {
-    const workflow = workflowsById.get(item.workflowId);
-    if (!workflow) {
-      return;
-    }
-
-    const index = workflow.steps.findIndex(step => step.id === item.currentStepId);
-    const upcomingStep = index >= 0 ? workflow.steps[index + 1] : workflow.steps[0];
-
-    if (!upcomingStep) {
-      moveToNextStep(item);
-      return;
-    }
-
-    const nextItem: WorkItem = {
-      ...item,
-      phase: upcomingStep.phase,
-      currentStepId: upcomingStep.id,
-      assignedAgentId: upcomingStep.agentId,
-      status: getStepStatus(upcomingStep),
-      pendingRequest: buildPendingRequest(upcomingStep),
-      blocker: undefined,
-      history: [
-        ...item.history,
-        createHistoryEntry(
-          'User',
-          'Approval granted',
-          actionNote.trim() || `Approval granted. Moving into ${upcomingStep.name}.`,
-          upcomingStep.phase,
-          getStepStatus(upcomingStep),
-        ),
-      ],
-    };
-    const state = applyExecutionStateTransition({
-      state: {
-        workItems,
-        tasks: workspace.tasks,
-        executionLogs: workspace.executionLogs,
-        currentItem: item,
-      },
-      previousItem: item,
-      nextItem,
-      logMessage: `${item.title} approved and moved into ${upcomingStep.name}.`,
-      logAgentId: upcomingStep.agentId,
+      await refreshSelection(nextItem.id);
+      setSelectedWorkItemId(nextItem.id);
+      setIsCreateModalOpen(false);
+      setDraftWorkItem({
+        title: '',
+        description: '',
+        workflowId: workspace.workflows[0]?.id || '',
+        priority: 'Med',
+        tags: '',
+      });
     });
+  };
 
-    setActionNote('');
+  const handleStartExecution = async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
 
-    if (nextItem.status === 'ACTIVE' && runtimeStatus?.configured) {
-      setRuntimeError('');
-      setIsExecutingWorkItemId(item.id);
-      try {
-        await runAutomatedWorkflow(nextItem, state);
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error
-            ? error.message
-            : 'The backend runtime could not complete this work item.';
-        setRuntimeError(errorMessage);
-      } finally {
-        setIsExecutingWorkItemId(null);
+    await withAction('start', async () => {
+      await startCapabilityWorkflowRun(activeCapability.id, selectedWorkItem.id);
+      await refreshSelection(selectedWorkItem.id);
+    });
+  };
+
+  const handleRestartExecution = async () => {
+    if (!currentRun || !selectedWorkItem) {
+      return;
+    }
+
+    await withAction('restart', async () => {
+      await restartCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+        restartFromPhase: selectedWorkItem.phase,
+      });
+      await refreshSelection(selectedWorkItem.id);
+    });
+  };
+
+  const handleResolveWait = async () => {
+    if (!currentRun || !selectedOpenWait || !selectedWorkItem) {
+      return;
+    }
+
+    const resolution = resolutionNote.trim() || actionButtonLabel;
+
+    await withAction('resolve', async () => {
+      if (selectedOpenWait.type === 'APPROVAL') {
+        await approveCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+          resolution,
+          resolvedBy: 'Capability Owner',
+        });
+      } else if (selectedOpenWait.type === 'INPUT') {
+        await provideCapabilityWorkflowRunInput(activeCapability.id, currentRun.id, {
+          resolution,
+          resolvedBy: 'Capability Owner',
+        });
+      } else {
+        await resolveCapabilityWorkflowRunConflict(activeCapability.id, currentRun.id, {
+          resolution,
+          resolvedBy: 'Capability Owner',
+        });
       }
+
+      setResolutionNote('');
+      await refreshSelection(selectedWorkItem.id);
+    });
+  };
+
+  const handleCancelRun = async () => {
+    if (!currentRun || !selectedWorkItem) {
       return;
     }
 
-    persistExecutionState(state);
+    await withAction('cancel', async () => {
+      await cancelCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+        note: resolutionNote.trim() || 'Run cancelled from the control plane.',
+      });
+      setResolutionNote('');
+      await refreshSelection(selectedWorkItem.id);
+    });
   };
 
-  const handleStartExecution = async (item: WorkItem) => {
-    if (!runtimeStatus?.configured) {
-      setRuntimeError(
-        'The backend runtime is not configured yet. Add GITHUB_MODELS_TOKEN to .env.local and restart npm run dev.',
-      );
+  const handleMoveWorkItem = async (workItemId: string, targetPhase: WorkItemPhase) => {
+    const item = workItems.find(current => current.id === workItemId);
+    if (!item || item.phase === targetPhase) {
       return;
     }
 
-    setRuntimeError('');
-    setActionNote('');
-    setIsExecutingWorkItemId(item.id);
-
-    try {
-      await runAutomatedWorkflow(item);
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error
-          ? error.message
-          : 'The backend runtime could not complete this work item.';
-
-      setRuntimeError(errorMessage);
-    } finally {
-      setIsExecutingWorkItemId(null);
-    }
+    await withAction(`move-${workItemId}`, async () => {
+      await moveCapabilityWorkItem(activeCapability.id, workItemId, {
+        targetPhase,
+        note: `Story moved to ${PHASE_META[targetPhase].label} from the orchestration board.`,
+      });
+      await refreshSelection(selectedWorkItemId === workItemId ? workItemId : undefined);
+    });
   };
 
-  const moveWorkItemToPhase = (item: WorkItem, targetPhase: WorkItemPhase) => {
-    if (item.phase === targetPhase) {
-      return;
-    }
-
-    const workflow = workflowsById.get(item.workflowId);
-    if (!workflow) {
-      return;
-    }
-
-    const targetStep = resolveStepForPhase(workflow, targetPhase, item.currentStepId);
-    if (!targetStep && targetPhase !== 'BACKLOG' && targetPhase !== 'DONE') {
-      return;
-    }
-
-    const currentPhaseOrder = getPhaseOrder(item.phase);
-    const targetPhaseOrder = getPhaseOrder(targetPhase);
-    const movingBackward = targetPhaseOrder < currentPhaseOrder;
-    const movingToDone = targetPhase === 'DONE';
-    const movingToBacklog = targetPhase === 'BACKLOG';
-    const nextStatus = movingToDone
-      ? 'COMPLETED'
-      : movingToBacklog
-      ? 'ACTIVE'
-      : getStepStatus(targetStep);
-    const nextPendingRequest =
-      movingToDone || movingToBacklog ? undefined : buildPendingRequest(targetStep);
-    const historyDetail =
-      actionNote.trim() ||
-      (movingBackward
-        ? `Story was moved back to ${PHASE_META[targetPhase].label} and restarted from that stage.`
-        : movingToDone
-        ? 'Story was marked done from the delivery board.'
-        : `Story was moved to ${PHASE_META[targetPhase].label} from the delivery board.`);
-
-    updateWorkItem(
-      item.id,
-      current => ({
-        ...current,
-        phase: targetPhase,
-        currentStepId: movingToDone || movingToBacklog ? undefined : targetStep?.id,
-        assignedAgentId: movingToDone || movingToBacklog ? undefined : targetStep?.agentId,
-        status: nextStatus,
-        pendingRequest: nextPendingRequest,
-        blocker: undefined,
-        history: [
-          ...current.history,
-          createHistoryEntry(
-            'User',
-            movingBackward ? 'Restarted from board move' : 'Board stage updated',
-            historyDetail,
-            targetPhase,
-            nextStatus,
-          ),
-        ],
-      }),
-      movingBackward
-        ? `${item.title} restarted in ${PHASE_META[targetPhase].label}.`
-        : movingToDone
-        ? `${item.title} marked done from the board.`
-        : `${item.title} moved to ${PHASE_META[targetPhase].label}.`,
-      targetStep?.agentId,
-    );
-    setActionNote('');
-  };
-
-  const resetDragState = () => {
-    setDraggedWorkItemId(null);
-    setDragOverPhase(null);
-  };
-
-  const handleDragStart = (
-    event: React.DragEvent<HTMLButtonElement>,
-    workItemId: string,
-  ) => {
-    setDraggedWorkItemId(workItemId);
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', workItemId);
-  };
-
-  const handleDropOnPhase = (
-    event: React.DragEvent<HTMLDivElement>,
-    phase: WorkItemPhase,
-  ) => {
-    event.preventDefault();
-    const workItemId =
-      event.dataTransfer.getData('text/plain') || draggedWorkItemId || '';
-    const item = workItems.find(candidate => candidate.id === workItemId);
-
-    if (item) {
-      moveWorkItemToPhase(item, phase);
-      if (!selectedWorkItemId || selectedWorkItemId === item.id) {
-        setSelectedWorkItemId(item.id);
-      }
-    }
-
-    resetDragState();
-  };
+  const groupedItems = useMemo(
+    () =>
+      SDLC_BOARD_PHASES.map(phase => ({
+        phase,
+        items: workItems.filter(item => item.phase === phase),
+      })),
+    [workItems],
+  );
 
   return (
-    <div className="flex flex-col gap-6">
-      <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[0.625rem] font-bold bg-primary/10 text-primary px-2 py-0.5 rounded uppercase tracking-widest">
-              Jira Style Delivery Board
-            </span>
-            <span className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">
-              {activeCapability.id}
-            </span>
-          </div>
-          <h1 className="text-3xl font-extrabold tracking-tight text-primary">
-            {activeCapability.name} SDLC Flow
-          </h1>
-          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-secondary">
-            Stories automatically enter the SDLC workflow, move across board phases,
-            and stop on governance or human approval gates until someone unblocks or approves them.
-            Drag a card to any phase to restart it from that stage or fast-forward it with a board move.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <div className="flex rounded-2xl border border-outline-variant/15 bg-white p-1 shadow-sm">
-            <button
-              onClick={() => setView('board')}
-              className={cn(
-                'rounded-xl px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] transition-all',
-                view === 'board'
-                  ? 'bg-primary text-white'
-                  : 'text-secondary hover:bg-surface-container-low',
-              )}
-            >
-              <span className="inline-flex items-center gap-2">
-                <Trello size={14} />
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Execution Control Plane"
+        context={activeCapability.id}
+        title={`${activeCapability.name} Orchestration`}
+        description="The backend execution worker owns workflow progression, waits, approvals, artifacts, logs, and tool execution. This screen is the enterprise control plane for launching work, staging stories intentionally, and reviewing durable run history."
+        actions={
+          <div className="flex flex-wrap items-center gap-3">
+            <Toolbar className="p-1">
+              <button
+                type="button"
+                onClick={() => setView('board')}
+                className={cn(
+                  'inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold transition-all',
+                  view === 'board' ? 'bg-primary text-white' : 'text-secondary',
+                )}
+              >
+                <LayoutGrid size={16} />
                 Board
-              </span>
-            </button>
-            <button
-              onClick={() => setView('list')}
-              className={cn(
-                'rounded-xl px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] transition-all',
-                view === 'list'
-                  ? 'bg-primary text-white'
-                  : 'text-secondary hover:bg-surface-container-low',
-              )}
-            >
-              <span className="inline-flex items-center gap-2">
-                <LayoutGrid size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={() => setView('list')}
+                className={cn(
+                  'inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold transition-all',
+                  view === 'list' ? 'bg-primary text-white' : 'text-secondary',
+                )}
+              >
+                <List size={16} />
                 List
-              </span>
+              </button>
+            </Toolbar>
+
+            <button
+              type="button"
+              onClick={() => setIsCreateModalOpen(true)}
+              className="enterprise-button enterprise-button-primary"
+            >
+              <Plus size={16} />
+              New Work Item
             </button>
           </div>
-
-          <button
-            onClick={() => setIsCreateModalOpen(true)}
-            className="inline-flex items-center gap-2 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
-          >
-            <Plus size={18} />
-            New Story
-          </button>
-        </div>
-      </header>
+        }
+      />
 
       <section className="grid gap-4 md:grid-cols-4">
         {[
-          { label: 'Active', value: stats.active },
-          { label: 'Blocked', value: stats.blocked },
-          { label: 'Pending Approval', value: stats.approvals },
-          { label: 'Completed', value: stats.completed },
-        ].map(card => (
-          <div key={card.label} className="rounded-3xl border border-outline-variant/15 bg-white p-5 shadow-sm">
-            <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">{card.label}</p>
-            <p className="mt-3 text-3xl font-extrabold text-primary">{card.value}</p>
-          </div>
+          { label: 'Active', value: stats.active, tone: 'brand' as const },
+          { label: 'Blocked', value: stats.blocked, tone: 'danger' as const },
+          { label: 'Pending Approval', value: stats.approvals, tone: 'warning' as const },
+          { label: 'Completed', value: stats.completed, tone: 'success' as const },
+        ].map(stat => (
+          <StatTile
+            key={stat.label}
+            label={stat.label}
+            value={stat.value}
+            tone={stat.tone}
+          />
         ))}
       </section>
 
-      {view === 'board' ? (
-        <div className="overflow-x-auto pb-4">
-          <div className="flex min-w-max gap-5">
-            {SDLC_BOARD_PHASES.map(phase => (
-              <section key={phase} className="w-[320px] shrink-0">
-                <div className="mb-3 flex items-center justify-between px-2">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={cn(
-                        'rounded-full px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em]',
-                        PHASE_META[phase].accent,
-                      )}
-                    >
-                      {PHASE_META[phase].label}
-                    </span>
-                    <span className="text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-secondary">
-                      {workItems.filter(item => item.phase === phase).length}
-                    </span>
-                  </div>
-                </div>
+      {runtimeError && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700">
+          {runtimeError}
+        </div>
+      )}
 
-                <div
-                  onDragOver={event => {
-                    event.preventDefault();
-                    if (draggedWorkItemId) {
-                      setDragOverPhase(phase);
-                    }
-                  }}
-                  onDragEnter={event => {
-                    event.preventDefault();
-                    if (draggedWorkItemId) {
-                      setDragOverPhase(phase);
-                    }
-                  }}
-                  onDragLeave={event => {
-                    const nextTarget = event.relatedTarget;
-                    if (
-                      dragOverPhase === phase &&
-                      (!nextTarget || !event.currentTarget.contains(nextTarget as Node))
-                    ) {
-                      setDragOverPhase(null);
-                    }
-                  }}
-                  onDrop={event => handleDropOnPhase(event, phase)}
-                  className={cn(
-                    'relative flex min-h-[420px] flex-col gap-3 rounded-[2rem] border p-3 transition-all',
-                    dragOverPhase === phase && draggedWorkItemId
-                      ? 'border-primary/30 bg-primary/5 shadow-inner'
-                      : 'border-outline-variant/10 bg-surface-container-low/40',
-                  )}
+      {actionError && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700">
+          {actionError}
+        </div>
+      )}
+
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_420px]">
+        <section className="section-card min-h-[48rem]">
+          {view === 'board' ? (
+            <div className="grid gap-4 xl:grid-cols-4 2xl:grid-cols-8">
+              {groupedItems.map(({ phase, items }) => (
+                <BoardColumn
+                  key={phase}
+                  title={PHASE_META[phase].label}
+                  count={items.length}
+                  badge={
+                    <StatusBadge tone={getStatusTone(phase)}>
+                      {PHASE_META[phase].label}
+                    </StatusBadge>
+                  }
+                  active={dragOverPhase === phase}
+                  className="transition-all"
                 >
-                  {dragOverPhase === phase && draggedWorkItemId && (
-                    <div className="pointer-events-none absolute inset-x-4 top-4 rounded-2xl border border-dashed border-primary/30 bg-white/85 px-4 py-3 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary shadow-sm">
-                      Drop here to move the story to {PHASE_META[phase].label}
-                    </div>
-                  )}
-                  {workItems
-                    .filter(item => item.phase === phase)
-                    .map(item => {
-                      const workflow = workflowsById.get(item.workflowId);
-                      const step = workflow?.steps.find(
-                        candidate => candidate.id === item.currentStepId,
-                      );
-                      const agentName =
-                        agentsById.get(item.assignedAgentId || '')?.name || 'Unassigned';
+                  <div
+                    onDragOver={event => {
+                      event.preventDefault();
+                      setDragOverPhase(phase);
+                    }}
+                    onDragLeave={() =>
+                      setDragOverPhase(current => (current === phase ? null : current))
+                    }
+                    onDrop={event => {
+                      event.preventDefault();
+                      setDragOverPhase(null);
+                      const droppedId =
+                        event.dataTransfer.getData('text/plain') || draggedWorkItemId;
+                      setDraggedWorkItemId(null);
+                      if (droppedId) {
+                        void handleMoveWorkItem(droppedId, phase);
+                      }
+                    }}
+                    className="space-y-3"
+                  >
+                    {items.map(item => {
+                      const workflow = workflowsById.get(item.workflowId) || null;
+                      const currentStep = getCurrentWorkflowStep(workflow, null, item);
+                      const agentName = item.assignedAgentId
+                        ? agentsById.get(item.assignedAgentId)?.name
+                        : undefined;
+
                       return (
-                        <WorkItemCard
+                        <motion.button
                           key={item.id}
-                          item={item}
-                          stepName={step?.name || 'Awaiting workflow step'}
-                          agentName={agentName}
-                          onDragStart={handleDragStart}
-                          onDragEnd={resetDragState}
-                          isDragging={draggedWorkItemId === item.id}
-                          onClick={id => {
-                            setSelectedWorkItemId(id);
-                            setActionNote('');
+                          layout
+                          draggable
+                          onDragStart={event => {
+                            setDraggedWorkItemId(item.id);
+                            event.dataTransfer.setData('text/plain', item.id);
                           }}
-                        />
+                          onDragEnd={() => {
+                            setDraggedWorkItemId(null);
+                            setDragOverPhase(null);
+                          }}
+                          onClick={() => setSelectedWorkItemId(item.id)}
+                          className={cn(
+                            'w-full rounded-2xl border border-outline-variant/50 bg-white p-4 text-left shadow-[0_8px_24px_rgba(12,23,39,0.04)] transition-all hover:border-primary/25',
+                            selectedWorkItemId === item.id &&
+                              'border-primary/30 ring-2 ring-primary/10',
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="form-kicker">{item.id}</p>
+                              <h3 className="mt-2 text-sm font-semibold text-on-surface">
+                                {item.title}
+                              </h3>
+                            </div>
+                            <StatusBadge tone={getStatusTone(item.status)}>
+                              {formatEnumLabel(item.status)}
+                            </StatusBadge>
+                          </div>
+
+                          <div className="mt-4 space-y-2">
+                            <div className="rounded-xl border border-outline-variant/35 bg-surface-container-low px-3 py-3">
+                              <p className="form-kicker">Current Step</p>
+                              <p className="mt-1 text-xs font-semibold text-on-surface">
+                                {currentStep?.name || 'Awaiting orchestration'}
+                              </p>
+                            </div>
+                            <div className="flex items-center justify-between text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-secondary">
+                              <span>{agentName || 'Unassigned'}</span>
+                              <span>{item.priority}</span>
+                            </div>
+                            {(item.blocker?.status === 'OPEN' || item.pendingRequest) && (
+                              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-left text-[0.75rem] text-amber-800">
+                                <div className="flex items-center gap-2 font-bold uppercase tracking-[0.16em]">
+                                  <AlertCircle size={14} />
+                                  <span>
+                                    {getAttentionLabel({
+                                      blocker: item.blocker,
+                                      pendingRequest: item.pendingRequest,
+                                    })}
+                                  </span>
+                                </div>
+                                <p className="mt-1 line-clamp-2 normal-case tracking-normal font-medium">
+                                  {getAttentionReason({
+                                    blocker: item.blocker,
+                                    pendingRequest: item.pendingRequest,
+                                  })}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </motion.button>
                       );
                     })}
-                </div>
-              </section>
-            ))}
-          </div>
-        </div>
-      ) : (
-        <section className="rounded-[2rem] border border-outline-variant/15 bg-white shadow-sm">
-          <div className="grid grid-cols-[1.4fr_1fr_1fr_0.8fr] gap-4 border-b border-outline-variant/10 px-6 py-4 text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
-            <span>Story</span>
-            <span>Current Step</span>
-            <span>Assigned Agent</span>
-            <span>Status</span>
-          </div>
-          <div className="divide-y divide-outline-variant/10">
-            {workItems.length > 0 ? (
-              workItems.map(item => {
-                const workflow = workflowsById.get(item.workflowId);
-                const step = workflow?.steps.find(candidate => candidate.id === item.currentStepId);
+
+                    {items.length === 0 && (
+                      <EmptyState
+                        title={`No work in ${PHASE_META[phase].label}`}
+                        description="Drop a work item here to restart or intentionally re-stage it."
+                        icon={WorkflowIcon}
+                        className="min-h-[10rem]"
+                      />
+                    )}
+                  </div>
+                </BoardColumn>
+              ))}
+            </div>
+          ) : (
+            <div className="data-table-shell">
+              <div className="data-table-header grid grid-cols-[1.5fr_0.85fr_0.95fr_0.95fr_1.1fr] gap-3">
+                <span>Work Item</span>
+                <span>Phase</span>
+                <span>Status</span>
+                <span>Priority</span>
+                <span>Current Step</span>
+              </div>
+              {workItems.map(item => {
+                const workflow = workflowsById.get(item.workflowId) || null;
+                const currentStep = getCurrentWorkflowStep(workflow, null, item);
+
                 return (
                   <button
                     key={item.id}
-                    onClick={() => {
-                      setSelectedWorkItemId(item.id);
-                      setActionNote('');
-                    }}
-                    className="grid w-full grid-cols-[1.4fr_1fr_1fr_0.8fr] gap-4 px-6 py-5 text-left transition-all hover:bg-surface-container-low/50"
+                    type="button"
+                    onClick={() => setSelectedWorkItemId(item.id)}
+                    className={cn(
+                      'grid w-full grid-cols-[1.5fr_0.85fr_0.95fr_0.95fr_1.1fr] gap-3 border-t border-outline-variant/35 px-4 py-4 text-left text-sm transition-all hover:bg-surface-container-low/60',
+                      selectedWorkItemId === item.id && 'bg-primary/5',
+                    )}
                   >
                     <div>
-                      <p className="text-sm font-bold text-on-surface">{item.title}</p>
-                      <p className="mt-1 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-outline">
-                        {item.id} • {PHASE_META[item.phase].label}
-                      </p>
+                      <p className="font-semibold text-on-surface">{item.title}</p>
+                      <p className="mt-1 text-xs text-secondary">{item.id}</p>
                     </div>
-                    <p className="text-sm text-secondary">{step?.name || 'Awaiting step'}</p>
-                    <p className="text-sm text-secondary">
-                      {agentsById.get(item.assignedAgentId || '')?.name || 'Unassigned'}
-                    </p>
-                    <span
-                      className={cn(
-                        'w-fit rounded-full px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em]',
-                        STATUS_META[item.status].accent,
-                      )}
-                    >
-                      {STATUS_META[item.status].label}
-                    </span>
+                    <span>{PHASE_META[item.phase].label}</span>
+                    <div>
+                      <StatusBadge tone={getStatusTone(item.status)}>
+                        {formatEnumLabel(item.status)}
+                      </StatusBadge>
+                    </div>
+                    <span>{item.priority}</span>
+                    <span>{currentStep?.name || 'Awaiting orchestration'}</span>
                   </button>
                 );
-              })
-            ) : (
-              <div className="px-6 py-20 text-center">
-                <WorkflowIcon size={40} className="mx-auto text-outline" />
-                <h3 className="mt-4 text-xl font-bold text-primary">No stories yet</h3>
-                <p className="mt-2 text-sm text-secondary">
-                  Create a story and it will enter the SDLC board automatically.
-                </p>
-              </div>
-            )}
-          </div>
+              })}
+            </div>
+          )}
         </section>
-      )}
 
-      <AnimatePresence>
-        {isCreateModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsCreateModalOpen(false)}
-              className="absolute inset-0 bg-black/40 backdrop-blur-md"
+        <DrawerShell>
+          {!selectedWorkItem ? (
+            <EmptyState
+              title="Select a work item"
+              description="Pick a story to inspect durable run history, review tool output, resume waits, or start execution from the current SDLC stage."
+              icon={WorkflowIcon}
+              className="h-full min-h-[48rem]"
             />
-            <motion.form
-              initial={{ opacity: 0, y: 20, scale: 0.98 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 20, scale: 0.98 }}
-              onSubmit={handleCreateWorkItem}
-              className="relative w-full max-w-2xl rounded-[2rem] border border-outline-variant/15 bg-white p-8 shadow-2xl"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.2em] text-primary">New Story</p>
-                  <h3 className="mt-2 text-2xl font-extrabold text-primary">Launch work into the SDLC flow</h3>
-                  <p className="mt-2 text-sm text-secondary">
-                    Every story enters the selected workflow and moves through hand-offs, governance gates, and human approvals on the board.
+          ) : (
+            <div className="flex h-full flex-col gap-6">
+              <div>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="form-kicker">{selectedWorkItem.id}</p>
+                    <h2 className="mt-2 text-2xl font-bold tracking-tight text-on-surface">
+                      {selectedWorkItem.title}
+                    </h2>
+                    <p className="mt-2 text-sm leading-relaxed text-secondary">
+                      {selectedWorkItem.description}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <StatusBadge tone={getStatusTone(selectedWorkItem.phase)}>
+                      {PHASE_META[selectedWorkItem.phase].label}
+                    </StatusBadge>
+                    <StatusBadge tone={getStatusTone(selectedWorkItem.status)}>
+                      {WORK_ITEM_STATUS_META[selectedWorkItem.status].label}
+                    </StatusBadge>
+                    {currentRun && (
+                      <StatusBadge tone={getStatusTone(currentRun.status)}>
+                        {RUN_STATUS_META[currentRun.status].label}
+                      </StatusBadge>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                    <p className="form-kicker">Current Step</p>
+                    <p className="mt-1 text-sm font-semibold text-on-surface">
+                      {selectedCurrentStep?.name || 'Awaiting orchestration'}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                    <p className="form-kicker">Active Agent</p>
+                    <p className="mt-1 text-sm font-semibold text-on-surface">
+                      {selectedAgent?.name || 'Unassigned'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4">
+                {selectedAttentionReason && (
+                  <div className="mb-4 rounded-3xl border border-amber-200 bg-amber-50 px-4 py-4 text-amber-900">
+                    <div className="flex items-start gap-3">
+                      <AlertCircle size={18} className="mt-0.5 shrink-0 text-amber-700" />
+                      <div className="min-w-0">
+                        <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-amber-700">
+                          {selectedAttentionLabel}
+                        </p>
+                        <p className="mt-2 text-sm font-semibold leading-relaxed">
+                          {selectedAttentionReason}
+                        </p>
+                        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-amber-800">
+                          <span>
+                            Requested by:{' '}
+                            <strong>
+                              {agentsById.get(selectedAttentionRequestedBy || '')?.name ||
+                                selectedAttentionRequestedBy ||
+                                'System'}
+                            </strong>
+                          </span>
+                          <span>
+                            Since: <strong>{formatTimestamp(selectedAttentionTimestamp)}</strong>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleStartExecution()}
+                    disabled={!canStartExecution || busyAction !== null}
+                    className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {busyAction === 'start' ? <LoaderCircle size={16} className="animate-spin" /> : <Play size={16} />}
+                    {selectedRunHistory.length > 0 ? 'Start from current phase' : 'Start execution'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleResolveWait()}
+                    disabled={!canResolveSelectedWait || busyAction !== null}
+                    className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {busyAction === 'resolve' ? (
+                      <LoaderCircle size={16} className="animate-spin" />
+                    ) : (
+                      <ShieldCheck size={16} />
+                    )}
+                    {actionButtonLabel}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleRestartExecution()}
+                    disabled={!canRestartFromPhase || busyAction !== null}
+                    className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {busyAction === 'restart' ? (
+                      <LoaderCircle size={16} className="animate-spin" />
+                    ) : (
+                      <RefreshCw size={16} />
+                    )}
+                    Restart run
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleCancelRun()}
+                    disabled={!currentRunIsActive || busyAction !== null}
+                    className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {busyAction === 'cancel' ? (
+                      <LoaderCircle size={16} className="animate-spin" />
+                    ) : (
+                      <Square size={16} />
+                    )}
+                    Cancel run
+                  </button>
+                </div>
+
+                <textarea
+                  value={resolutionNote}
+                  onChange={event => setResolutionNote(event.target.value)}
+                  placeholder={resolutionPlaceholder}
+                  className="field-textarea mt-3 h-24 bg-white"
+                />
+
+                {resolutionIsRequired && !resolutionNote.trim() && selectedOpenWait && (
+                  <p className="mt-2 text-xs font-medium text-amber-700">
+                    Add the missing details above to unblock this work item and continue execution.
+                  </p>
+                )}
+
+                {selectedOpenWait && (
+                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    <p className="font-bold uppercase tracking-[0.14em]">
+                      Waiting for {selectedOpenWait.type.replace('_', ' ')}
+                    </p>
+                    <p className="mt-1 leading-relaxed">{selectedOpenWait.message}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="rounded-3xl border border-outline-variant/15 bg-white p-4">
+                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                    Runtime
+                  </p>
+                  <p className="mt-2 text-sm font-bold text-on-surface">
+                    {runtimeStatus?.configured ? 'Configured' : 'Not configured'}
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed text-secondary">
+                    {runtimeStatus?.configured
+                      ? `Model runtime is ${runtimeStatus.defaultModel}.`
+                      : 'Add GITHUB_MODELS_TOKEN to enable backend execution.'}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setIsCreateModalOpen(false)}
-                  className="rounded-full p-2 text-slate-400 transition-colors hover:bg-surface-container-low hover:text-primary"
-                >
-                  <X size={20} />
-                </button>
+                <div className="rounded-3xl border border-outline-variant/15 bg-white p-4">
+                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                    Run Summary
+                  </p>
+                  <p className="mt-2 text-sm font-bold text-on-surface">
+                    {currentRun
+                      ? `Attempt ${currentRun.attemptNumber}`
+                      : 'No run started yet'}
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed text-secondary">
+                    {currentRun
+                      ? `Started ${formatTimestamp(currentRun.startedAt || currentRun.createdAt)}`
+                      : 'Launch execution to create a durable workflow run.'}
+                  </p>
+                </div>
               </div>
 
-              <div className="mt-8 grid gap-5 md:grid-cols-2">
-                <label className="space-y-2 md:col-span-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Story Title</span>
-                  <input
-                    required
-                    value={draftWorkItem.title}
-                    onChange={event =>
-                      setDraftWorkItem(prev => ({ ...prev, title: event.target.value }))
-                    }
-                    placeholder="e.g. Calculator division edge-case support"
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </label>
+              <div className="space-y-4 overflow-y-auto pr-1">
+                <section className="rounded-3xl border border-outline-variant/15 bg-white p-4">
+                  <div className="flex items-center gap-2">
+                    <WorkflowIcon size={16} className="text-primary" />
+                    <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
+                      Workflow Steps
+                    </h3>
+                  </div>
+                  <div className="mt-4 space-y-3">
+                    {(selectedWorkflow?.steps || []).map(step => {
+                      const runStep =
+                        selectedRunDetail?.steps.find(
+                          current => current.workflowStepId === step.id,
+                        ) || null;
 
-                <label className="space-y-2 md:col-span-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Description</span>
-                  <textarea
-                    value={draftWorkItem.description}
-                    onChange={event =>
-                      setDraftWorkItem(prev => ({ ...prev, description: event.target.value }))
-                    }
-                    placeholder="Describe the delivery outcome, expected behavior, or release objective."
-                    className="h-28 w-full resize-none rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </label>
+                      return (
+                        <div
+                          key={step.id}
+                          className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-bold text-on-surface">{step.name}</p>
+                              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                                {step.action}
+                              </p>
+                            </div>
+                            <DetailPill
+                              accent={
+                                runStep?.status === 'COMPLETED'
+                                  ? 'bg-emerald-100 text-emerald-700'
+                                  : runStep?.status === 'RUNNING'
+                                  ? 'bg-primary/10 text-primary'
+                                  : runStep?.status === 'WAITING'
+                                  ? 'bg-amber-100 text-amber-700'
+                                  : runStep?.status === 'FAILED'
+                                  ? 'bg-red-100 text-red-700'
+                                  : 'bg-slate-100 text-slate-700'
+                              }
+                            >
+                              {runStep?.status || 'PENDING'}
+                            </DetailPill>
+                          </div>
 
+                          <div className="mt-3 grid gap-2 text-xs text-secondary sm:grid-cols-2">
+                            <span>Phase: {PHASE_META[step.phase].label}</span>
+                            <span>
+                              Agent: {agentsById.get(step.agentId)?.name || step.agentId}
+                            </span>
+                            <span>Type: {step.stepType.replace('_', ' ')}</span>
+                            <span>Attempts: {runStep?.attemptCount || 0}</span>
+                          </div>
+
+                          {(runStep?.outputSummary || runStep?.evidenceSummary) && (
+                            <div className="mt-3 rounded-2xl bg-white px-3 py-2 text-xs leading-relaxed text-secondary">
+                              {runStep.outputSummary || runStep.evidenceSummary}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="rounded-3xl border border-outline-variant/15 bg-white p-4">
+                  <div className="flex items-center gap-2">
+                    <Wrench size={16} className="text-primary" />
+                    <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
+                      Tool Invocations
+                    </h3>
+                  </div>
+                  <div className="mt-4 space-y-3">
+                    {(selectedRunDetail?.toolInvocations || []).length === 0 && (
+                      <p className="text-sm text-secondary">No tool activity recorded yet.</p>
+                    )}
+                    {(selectedRunDetail?.toolInvocations || []).map(tool => (
+                      <div
+                        key={tool.id}
+                        className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-bold text-on-surface">{tool.toolId}</p>
+                            <p className="mt-1 text-xs text-secondary">
+                              {tool.resultSummary || 'Tool invocation recorded.'}
+                            </p>
+                          </div>
+                          <DetailPill
+                            accent={
+                              tool.status === 'COMPLETED'
+                                ? 'bg-emerald-100 text-emerald-700'
+                                : tool.status === 'FAILED'
+                                ? 'bg-red-100 text-red-700'
+                                : tool.status === 'RUNNING'
+                                ? 'bg-primary/10 text-primary'
+                                : 'bg-slate-100 text-slate-700'
+                            }
+                          >
+                            {tool.status}
+                          </DetailPill>
+                        </div>
+                        <pre className="mt-3 overflow-x-auto rounded-2xl bg-white px-3 py-2 text-[0.6875rem] leading-relaxed text-secondary">
+                          {summarizeJson(tool.request)}
+                        </pre>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="rounded-3xl border border-outline-variant/15 bg-white p-4">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 size={16} className="text-primary" />
+                    <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
+                      Artifacts and Outputs
+                    </h3>
+                  </div>
+                  <div className="mt-4 space-y-3">
+                    {selectedArtifacts.length === 0 && (
+                      <p className="text-sm text-secondary">No artifacts produced yet.</p>
+                    )}
+                    {selectedArtifacts.map(artifact => (
+                      <div
+                        key={artifact.id}
+                        className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-bold text-on-surface">{artifact.name}</p>
+                            <p className="mt-1 text-xs text-secondary">
+                              {artifact.type} · {artifact.version}
+                            </p>
+                          </div>
+                          <DetailPill accent="bg-primary/10 text-primary">
+                            {artifact.direction || 'OUTPUT'}
+                          </DetailPill>
+                        </div>
+                        {artifact.summary && (
+                          <p className="mt-3 text-xs leading-relaxed text-secondary">
+                            {artifact.summary}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="rounded-3xl border border-outline-variant/15 bg-white p-4">
+                  <div className="flex items-center gap-2">
+                    <Clock3 size={16} className="text-primary" />
+                    <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
+                      Event Timeline
+                    </h3>
+                  </div>
+                  <div className="mt-4 space-y-3">
+                    {selectedRunEvents.length === 0 && (
+                      <p className="text-sm text-secondary">No run events recorded yet.</p>
+                    )}
+                    {selectedRunEvents.map(event => (
+                      <div
+                        key={event.id}
+                        className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-bold text-on-surface">{event.message}</p>
+                            <p className="mt-1 text-xs text-secondary">
+                              {event.type} · {formatTimestamp(event.timestamp)}
+                            </p>
+                          </div>
+                          <DetailPill
+                            accent={
+                              event.level === 'ERROR'
+                                ? 'bg-red-100 text-red-700'
+                                : event.level === 'WARN'
+                                ? 'bg-amber-100 text-amber-700'
+                                : 'bg-primary/10 text-primary'
+                            }
+                          >
+                            {event.level}
+                          </DetailPill>
+                        </div>
+                        {event.details && (
+                          <pre className="mt-3 overflow-x-auto rounded-2xl bg-white px-3 py-2 text-[0.6875rem] leading-relaxed text-secondary">
+                            {summarizeJson(event.details)}
+                          </pre>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="rounded-3xl border border-outline-variant/15 bg-white p-4">
+                  <div className="flex items-center gap-2">
+                    <ArrowRight size={16} className="text-primary" />
+                    <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
+                      Execution Logs
+                    </h3>
+                  </div>
+                  <div className="mt-4 space-y-3">
+                    {selectedLogs.length === 0 && (
+                      <p className="text-sm text-secondary">No logs recorded yet.</p>
+                    )}
+                    {selectedLogs.map(log => (
+                      <div
+                        key={log.id}
+                        className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-bold text-on-surface">{log.message}</p>
+                            <p className="mt-1 text-xs text-secondary">
+                              {formatTimestamp(log.timestamp)} ·{' '}
+                              {agentsById.get(log.agentId)?.name || log.agentId}
+                            </p>
+                          </div>
+                          <DetailPill
+                            accent={
+                              log.level === 'ERROR'
+                                ? 'bg-red-100 text-red-700'
+                                : log.level === 'WARN'
+                                ? 'bg-amber-100 text-amber-700'
+                                : 'bg-primary/10 text-primary'
+                            }
+                          >
+                            {log.level}
+                          </DetailPill>
+                        </div>
+                        {log.metadata && (
+                          <pre className="mt-3 overflow-x-auto rounded-2xl bg-white px-3 py-2 text-[0.6875rem] leading-relaxed text-secondary">
+                            {summarizeJson(log.metadata)}
+                          </pre>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </div>
+            </div>
+          )}
+        </DrawerShell>
+      </div>
+
+      {isCreateModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/40 px-4 pb-8 pt-24">
+          <ModalShell
+            eyebrow="New Work Item"
+            title="Launch work into the backend SDLC engine"
+            description="Create a story, choose the workflow, and let the backend execution service own step progression, waits, artifacts, and resumable run history."
+            actions={
+              <button
+                type="button"
+                onClick={() => setIsCreateModalOpen(false)}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                Close
+              </button>
+            }
+          >
+
+            <form onSubmit={handleCreateWorkItem} className="mt-6 grid gap-5">
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Work item title
+                </span>
+                <input
+                  value={draftWorkItem.title}
+                  onChange={event =>
+                    setDraftWorkItem(prev => ({ ...prev, title: event.target.value }))
+                  }
+                  placeholder="Implement expression parser"
+                  className="field-input"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Description
+                </span>
+                <textarea
+                  value={draftWorkItem.description}
+                  onChange={event =>
+                    setDraftWorkItem(prev => ({
+                      ...prev,
+                      description: event.target.value,
+                    }))
+                  }
+                  placeholder="Describe the change, acceptance criteria, and any business context."
+                  className="field-textarea h-28"
+                />
+              </label>
+
+              <div className="grid gap-5 md:grid-cols-2">
                 <label className="space-y-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Workflow</span>
+                  <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                    Workflow
+                  </span>
                   <select
                     value={draftWorkItem.workflowId}
                     onChange={event =>
-                      setDraftWorkItem(prev => ({ ...prev, workflowId: event.target.value }))
+                      setDraftWorkItem(prev => ({
+                        ...prev,
+                        workflowId: event.target.value,
+                      }))
                     }
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    className="field-select"
                   >
                     {workspace.workflows.map(workflow => (
                       <option key={workflow.id} value={workflow.id}>
@@ -1663,7 +1403,9 @@ const Orchestrator = () => {
                 </label>
 
                 <label className="space-y-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Priority</span>
+                  <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                    Priority
+                  </span>
                   <select
                     value={draftWorkItem.priority}
                     onChange={event =>
@@ -1672,643 +1414,54 @@ const Orchestrator = () => {
                         priority: event.target.value as WorkItem['priority'],
                       }))
                     }
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
+                    className="field-select"
                   >
                     <option value="High">High</option>
                     <option value="Med">Med</option>
                     <option value="Low">Low</option>
                   </select>
                 </label>
-
-                <label className="space-y-2 md:col-span-2">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Tags</span>
-                  <input
-                    value={draftWorkItem.tags}
-                    onChange={event =>
-                      setDraftWorkItem(prev => ({ ...prev, tags: event.target.value }))
-                    }
-                    placeholder="calculator, release, approval"
-                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </label>
               </div>
 
-              <div className="mt-8 flex gap-3">
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Tags
+                </span>
+                <input
+                  value={draftWorkItem.tags}
+                  onChange={event =>
+                    setDraftWorkItem(prev => ({ ...prev, tags: event.target.value }))
+                  }
+                  placeholder="parser, math, compiler"
+                  className="field-input"
+                />
+              </label>
+
+              <div className="flex items-center justify-end gap-3 pt-2">
                 <button
                   type="button"
                   onClick={() => setIsCreateModalOpen(false)}
-                  className="flex-1 rounded-2xl border border-outline-variant/20 px-5 py-3 text-sm font-bold text-secondary transition-all hover:bg-surface-container-low"
+                  className="enterprise-button enterprise-button-secondary"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
+                  disabled={busyAction !== null}
+                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  Create Story
+                  {busyAction === 'create' ? (
+                    <LoaderCircle size={16} className="animate-spin" />
+                  ) : (
+                    <Plus size={16} />
+                  )}
+                  Create work item
                 </button>
               </div>
-            </motion.form>
-          </div>
-        )}
-
-        {selectedWorkItem && (
-          <div className="fixed inset-0 z-50 flex items-center justify-end p-4">
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setSelectedWorkItemId(null)}
-              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-            />
-            <motion.aside
-              initial={{ x: '100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '100%' }}
-              transition={{ type: 'spring', damping: 24, stiffness: 220 }}
-              className="relative flex h-full w-full max-w-2xl flex-col overflow-hidden rounded-l-[2.5rem] border-l border-outline-variant/10 bg-white shadow-2xl"
-            >
-              <div className="border-b border-outline-variant/10 p-8">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                        {selectedWorkItem.id}
-                      </span>
-                      <span
-                        className={cn(
-                          'rounded-full px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em]',
-                          PHASE_META[selectedWorkItem.phase].accent,
-                        )}
-                      >
-                        {PHASE_META[selectedWorkItem.phase].label}
-                      </span>
-                      <span
-                        className={cn(
-                          'rounded-full px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em]',
-                          STATUS_META[selectedWorkItem.status].accent,
-                        )}
-                      >
-                        {STATUS_META[selectedWorkItem.status].label}
-                      </span>
-                    </div>
-                    <h2 className="mt-3 text-2xl font-extrabold tracking-tight text-on-surface">
-                      {selectedWorkItem.title}
-                    </h2>
-                    <p className="mt-2 text-sm leading-relaxed text-secondary">
-                      {selectedWorkItem.description}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setSelectedWorkItemId(null)}
-                    className="rounded-full p-2 text-slate-400 transition-colors hover:bg-surface-container-low hover:text-primary"
-                  >
-                    <X size={22} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex-1 space-y-8 overflow-y-auto p-8">
-                <section className="rounded-[2rem] border border-outline-variant/15 bg-surface-container-low/40 p-6">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">
-                        Current Step
-                      </p>
-                      <h3 className="mt-2 text-lg font-extrabold text-primary">
-                        {displayStep?.name ||
-                          (selectedWorkItem.status === 'COMPLETED'
-                            ? 'Workflow Completed'
-                            : 'No active step')}
-                      </h3>
-                      <p className="mt-2 text-sm leading-relaxed text-secondary">
-                        {selectedWorkItem.status === 'COMPLETED'
-                          ? 'This story completed the workflow. The final executed step, generated outputs, and full run evidence are shown below.'
-                          : displayStep?.description ||
-                            'This story has not entered a workflow step yet.'}
-                      </p>
-                    </div>
-                    <div className="rounded-2xl bg-white px-4 py-3 text-right shadow-sm">
-                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Assigned</p>
-                      <p className="mt-2 text-sm font-bold text-on-surface">
-                        {displayAgent?.name ||
-                          (selectedWorkItem.status === 'COMPLETED'
-                            ? 'Workflow finished'
-                            : 'Unassigned')}
-                      </p>
-                    </div>
-                  </div>
-
-                  {displayStep && (
-                    <div className="mt-6 grid gap-4 md:grid-cols-2">
-                      <div className="rounded-2xl bg-white p-4 shadow-sm">
-                        <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Action</p>
-                        <p className="mt-2 text-sm text-on-surface">{displayStep.action}</p>
-                      </div>
-                      <div className="rounded-2xl bg-white p-4 shadow-sm">
-                        <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Handoff</p>
-                        <p className="mt-2 text-sm text-on-surface">
-                          {displayStep.handoffLabel || 'No explicit hand-off configured.'}
-                        </p>
-                        {displayStep.handoffToAgentId && (
-                          <p className="mt-2 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-secondary">
-                            Next: {agentsById.get(displayStep.handoffToAgentId)?.name || displayStep.handoffToAgentId}
-                            {displayStep.handoffToPhase ? ` • ${PHASE_META[displayStep.handoffToPhase].label}` : ''}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="mt-6 grid gap-4 md:grid-cols-2">
-                    <div className="rounded-2xl bg-white p-4 shadow-sm">
-                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                        Execution Runtime
-                      </p>
-                      <p className="mt-2 text-sm font-bold text-on-surface">
-                        {runtimeStatus?.configured
-                          ? 'GitHub Copilot runtime ready'
-                          : 'Runtime not configured'}
-                      </p>
-                      <p className="mt-1 text-[0.75rem] leading-relaxed text-secondary">
-                        {runtimeStatus?.configured
-                          ? `${displayAgent?.model || 'Configured model'} ${
-                              selectedWorkItem.status === 'COMPLETED'
-                                ? 'was used for the latest completed step through the Express API.'
-                                : 'will run the current step through the Express API.'
-                            }`
-                          : 'Add GITHUB_MODELS_TOKEN to .env.local and restart npm run dev before starting execution.'}
-                      </p>
-                    </div>
-                    <div className="rounded-2xl bg-white p-4 shadow-sm">
-                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                        Workflow Task
-                      </p>
-                      <p className="mt-2 text-sm font-bold text-on-surface">
-                        {selectedManagedTask?.title || 'No workflow task linked yet'}
-                      </p>
-                      <p className="mt-1 text-[0.75rem] leading-relaxed text-secondary">
-                        {selectedManagedTask
-                          ? `${selectedManagedTask.taskType || 'DELIVERY'} task • ${selectedManagedTask.status}`
-                          : 'This story will create and update workflow-managed tasks as execution moves through the SDLC phases.'}
-                      </p>
-                    </div>
-                  </div>
-
-                  {displayStep?.exitCriteria?.length ? (
-                    <div className="mt-6 rounded-2xl bg-white p-4 shadow-sm">
-                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Exit Criteria</p>
-                      <div className="mt-3 space-y-2">
-                        {displayStep.exitCriteria.map(item => (
-                          <div key={item} className="flex items-start gap-2 text-sm text-secondary">
-                            <CheckCircle2 size={14} className="mt-0.5 text-primary" />
-                            <span>{item}</span>
-                          </div>
-                        ))}
-                      </div>
-                      {displayStep.templatePath && (
-                        <p className="mt-4 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-outline">
-                          Template: {displayStep.templatePath}
-                        </p>
-                      )}
-                    </div>
-                  ) : null}
-                </section>
-
-                {executionSummary && (
-                  <section className="rounded-[2rem] border border-outline-variant/15 bg-white p-6 shadow-sm">
-                    <div className="flex items-center gap-3">
-                      <Sparkles size={18} className="text-primary" />
-                      <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
-                        Execution Summary
-                      </p>
-                    </div>
-                    <div className="mt-5 grid gap-4 lg:grid-cols-[1.5fr_1fr]">
-                      <div className="rounded-2xl bg-surface-container-low p-5">
-                        <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">
-                          {executionSummary.title}
-                        </p>
-                        <p className="mt-3 text-sm leading-relaxed text-on-surface">
-                          {executionSummary.summary}
-                        </p>
-                        {executionSummary.timestamp ? (
-                          <p className="mt-4 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-outline">
-                            Updated {formatTimestamp(executionSummary.timestamp)}
-                          </p>
-                        ) : null}
-                      </div>
-                      <div className="grid gap-3">
-                        <div className="rounded-2xl bg-surface-container-low px-4 py-4">
-                          <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Workflow Progress</p>
-                          <p className="mt-2 text-lg font-extrabold text-primary">
-                            {executionSummary.completedSteps}/{executionSummary.totalSteps} steps completed
-                          </p>
-                        </div>
-                        <div className="rounded-2xl bg-surface-container-low px-4 py-4">
-                          <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Runtime Usage</p>
-                          <p className="mt-2 text-sm font-bold text-on-surface">
-                            {executionSummary.totalTokens > 0
-                              ? `${executionSummary.totalTokens.toLocaleString()} tokens`
-                              : 'No token usage recorded yet'}
-                          </p>
-                          <p className="mt-1 text-[0.75rem] text-secondary">
-                            {executionSummary.model
-                              ? `${executionSummary.model} • $${executionSummary.estimatedCostUsd.toFixed(4)} estimated`
-                              : `$${executionSummary.estimatedCostUsd.toFixed(4)} estimated`}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-                )}
-
-                <section className="rounded-[2rem] border border-outline-variant/15 bg-white p-6 shadow-sm">
-                  <div className="flex items-center gap-3">
-                    <WorkflowIcon size={18} className="text-primary" />
-                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
-                      Artifacts & Outputs
-                    </p>
-                  </div>
-                  <div className="mt-5 grid gap-5 lg:grid-cols-2">
-                    <div className="space-y-3">
-                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                        Linked Artifacts
-                      </p>
-                      {workItemArtifactView.linked.length > 0 ? (
-                        workItemArtifactView.linked.map(artifact => (
-                          <div key={artifact.key} className="rounded-2xl bg-surface-container-low p-4">
-                            <div className="flex items-center justify-between gap-3">
-                              <p className="text-sm font-bold text-on-surface">{artifact.name}</p>
-                              <span className="text-[0.625rem] font-bold uppercase tracking-[0.16em] text-outline">
-                                {artifact.type}
-                              </span>
-                            </div>
-                            <p className="mt-2 text-[0.75rem] text-secondary">
-                              {artifact.stepName} • {artifact.size}
-                            </p>
-                          </div>
-                        ))
-                      ) : (
-                        <p className="rounded-2xl bg-surface-container-low p-4 text-sm text-secondary">
-                          No linked artifacts were recorded for this story yet.
-                        </p>
-                      )}
-                    </div>
-                    <div className="space-y-3">
-                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                        Produced Outputs
-                      </p>
-                      {workItemArtifactView.outputs.length > 0 ? (
-                        workItemArtifactView.outputs.map(output => (
-                          <div key={output.key} className="rounded-2xl bg-surface-container-low p-4">
-                            <div className="flex items-center justify-between gap-3">
-                              <p className="text-sm font-bold text-on-surface">{output.name}</p>
-                              <span
-                                className={cn(
-                                  'rounded-full px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em]',
-                                  output.status === 'completed'
-                                    ? 'bg-emerald-100 text-emerald-700'
-                                    : 'bg-slate-100 text-slate-700',
-                                )}
-                              >
-                                {output.status}
-                              </span>
-                            </div>
-                            <p className="mt-2 text-[0.75rem] text-secondary">
-                              {output.stepName}
-                            </p>
-                          </div>
-                        ))
-                      ) : (
-                        <p className="rounded-2xl bg-surface-container-low p-4 text-sm text-secondary">
-                          No produced outputs were recorded for this story yet.
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </section>
-
-                <section className="rounded-[2rem] border border-outline-variant/15 bg-white p-6 shadow-sm">
-                  <div className="flex items-center gap-3">
-                    <Clock size={18} className="text-primary" />
-                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
-                      Workflow Step Evidence
-                    </p>
-                  </div>
-                  <div className="mt-5 space-y-3">
-                    {workItemManagedTasks.length > 0 ? (
-                      workItemManagedTasks.map(task => {
-                        const stepName =
-                          selectedWorkflow?.steps.find(step => step.id === task.workflowStepId)
-                            ?.name || task.title;
-
-                        return (
-                          <div key={task.id} className="rounded-2xl bg-surface-container-low p-4">
-                            <div className="flex flex-wrap items-center justify-between gap-3">
-                              <div>
-                                <p className="text-sm font-bold text-on-surface">{stepName}</p>
-                                <p className="mt-1 text-[0.75rem] text-secondary">
-                                  {task.taskType || 'DELIVERY'} • {task.phase || 'Workflow'}
-                                </p>
-                              </div>
-                              <span
-                                className={cn(
-                                  'rounded-full px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em]',
-                                  task.status === 'COMPLETED'
-                                    ? 'bg-emerald-100 text-emerald-700'
-                                    : task.status === 'ALERT'
-                                    ? 'bg-error/10 text-error'
-                                    : task.status === 'PROCESSING'
-                                    ? 'bg-primary/10 text-primary'
-                                    : 'bg-slate-100 text-slate-700',
-                                )}
-                              >
-                                {task.status}
-                              </span>
-                            </div>
-                            <p className="mt-3 text-sm leading-relaxed text-secondary">
-                              {task.executionNotes || 'No execution notes recorded for this step yet.'}
-                            </p>
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <p className="rounded-2xl bg-surface-container-low p-4 text-sm text-secondary">
-                        No workflow-managed step evidence is available for this story yet.
-                      </p>
-                    )}
-                  </div>
-                </section>
-
-                {runtimeError && (
-                  <section className="rounded-[2rem] border border-error/20 bg-error/5 p-6">
-                    <div className="flex items-center gap-3 text-error">
-                      <AlertCircle size={18} />
-                      <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em]">
-                        Execution Error
-                      </p>
-                    </div>
-                    <p className="mt-3 text-sm leading-relaxed text-on-surface">
-                      {runtimeError}
-                    </p>
-                  </section>
-                )}
-
-                {selectedWorkItem.pendingRequest && (
-                  <section className="rounded-[2rem] border border-amber-200 bg-amber-50 p-6">
-                    <div className="flex items-center gap-3 text-amber-700">
-                      <ShieldCheck size={18} />
-                      <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em]">
-                        {selectedWorkItem.pendingRequest.type === 'APPROVAL'
-                          ? 'Approval Required'
-                          : selectedWorkItem.pendingRequest.type === 'CONFLICT_RESOLUTION'
-                          ? 'Conflict Resolution Needed'
-                          : 'Human Input Needed'}
-                      </p>
-                    </div>
-                    <p className="mt-3 text-sm leading-relaxed text-amber-900">
-                      {selectedWorkItem.pendingRequest.message}
-                    </p>
-                    <p className="mt-3 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-amber-700">
-                      Requested by {agentsById.get(selectedWorkItem.pendingRequest.requestedBy)?.name || selectedWorkItem.pendingRequest.requestedBy}
-                    </p>
-                  </section>
-                )}
-
-                {selectedWorkItem.blocker?.status === 'OPEN' && (
-                  <section className="rounded-[2rem] border border-error/20 bg-error/5 p-6">
-                    <div className="flex items-center gap-3 text-error">
-                      <AlertCircle size={18} />
-                      <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em]">
-                        {selectedWorkItem.blocker.type === 'CONFLICT_RESOLUTION'
-                          ? 'Conflict Resolution'
-                          : 'Human Input Blocker'}
-                      </p>
-                    </div>
-                    <p className="mt-3 text-sm leading-relaxed text-on-surface">
-                      {selectedWorkItem.blocker.message}
-                    </p>
-                  </section>
-                )}
-
-                <section className="rounded-[2rem] border border-outline-variant/15 bg-white p-6 shadow-sm">
-                  <div className="flex items-center gap-3">
-                    <Sparkles size={18} className="text-primary" />
-                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
-                      Story History
-                    </p>
-                  </div>
-                  <div className="mt-5 space-y-4">
-                    {selectedWorkItem.history.length > 0 ? (
-                      selectedWorkItem.history
-                        .slice()
-                        .reverse()
-                        .map(entry => (
-                          <div key={entry.id} className="flex gap-4 rounded-2xl bg-surface-container-low p-4">
-                            <div className="mt-0.5 h-2.5 w-2.5 rounded-full bg-primary" />
-                            <div className="min-w-0 flex-1">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <p className="text-sm font-bold text-on-surface">{entry.action}</p>
-                                <span className="text-[0.625rem] font-bold uppercase tracking-[0.16em] text-outline">
-                                  {entry.actor}
-                                </span>
-                              </div>
-                              <p className="mt-1 text-sm leading-relaxed text-secondary">{entry.detail}</p>
-                              <p className="mt-2 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-outline">
-                                {formatTimestamp(entry.timestamp)}
-                              </p>
-                            </div>
-                          </div>
-                        ))
-                    ) : (
-                      <p className="text-sm text-secondary">No story history yet.</p>
-                    )}
-                  </div>
-                </section>
-
-                <section className="rounded-[2rem] border border-outline-variant/15 bg-slate-950 p-6 text-slate-200 shadow-sm">
-                  <div className="flex items-center gap-3">
-                    <WorkflowIcon size={18} className="text-white" />
-                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-slate-400">
-                      Execution Logs
-                    </p>
-                  </div>
-                  <div className="mt-5 space-y-3 font-mono text-[0.75rem]">
-                    {selectedExecutionLogs.length > 0 ? (
-                      selectedExecutionLogs.slice().reverse().map(log => (
-                        <div key={log.id} className="rounded-2xl bg-slate-900/70 p-4">
-                          <div className="flex gap-4">
-                            <span className="shrink-0 text-slate-500">
-                              [{formatTimestamp(log.timestamp)}]
-                            </span>
-                            <span className="text-slate-200">{log.message}</span>
-                          </div>
-                          {typeof log.metadata?.outputSummary === 'string' ? (
-                            <p className="mt-3 text-[0.75rem] leading-relaxed text-slate-300">
-                              Summary: {log.metadata.outputSummary}
-                            </p>
-                          ) : null}
-                          {typeof log.metadata?.model === 'string' ||
-                          typeof log.metadata?.totalTokens === 'number' ||
-                          typeof log.metadata?.estimatedCostUsd === 'number' ? (
-                            <p className="mt-3 text-[0.6875rem] uppercase tracking-[0.16em] text-slate-500">
-                              {[
-                                typeof log.metadata?.model === 'string'
-                                  ? log.metadata.model
-                                  : null,
-                                typeof log.metadata?.totalTokens === 'number'
-                                  ? `${log.metadata.totalTokens.toLocaleString()} tokens`
-                                  : null,
-                                typeof log.metadata?.estimatedCostUsd === 'number'
-                                  ? `$${log.metadata.estimatedCostUsd.toFixed(4)} est.`
-                                  : null,
-                              ]
-                                .filter(Boolean)
-                                .join(' • ')}
-                            </p>
-                          ) : null}
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-slate-500">No logs recorded for this story yet.</p>
-                    )}
-                  </div>
-                </section>
-              </div>
-
-              <div className="border-t border-outline-variant/10 bg-white p-6">
-                <label className="block">
-                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Resolution or notes</span>
-                  <textarea
-                    value={actionNote}
-                    onChange={event => setActionNote(event.target.value)}
-                    placeholder="Add release notes, unblock comments, conflict resolution details, or approval context."
-                    className="mt-3 h-24 w-full resize-none rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                  />
-                </label>
-
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-                  <button
-                    onClick={() => selectedWorkItem && handleStartExecution(selectedWorkItem)}
-                    disabled={
-                      !canStartSelectedWorkItem ||
-                      !runtimeStatus?.configured ||
-                      isExecutingWorkItemId === selectedWorkItem.id
-                    }
-                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-primary/20 bg-primary/5 px-4 py-3 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-primary transition-all hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {isExecutingWorkItemId === selectedWorkItem.id ? (
-                      <>
-                        <LoaderCircle size={14} className="animate-spin" />
-                        Running
-                      </>
-                    ) : selectedWorkItem.status === 'COMPLETED' ? (
-                      <>
-                        <CheckCircle2 size={14} />
-                        Completed
-                      </>
-                    ) : selectedWorkItem.status === 'PENDING_APPROVAL' ? (
-                      <>
-                        <ShieldCheck size={14} />
-                        Awaiting Approval
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles size={14} />
-                        Start Execution
-                      </>
-                    )}
-                  </button>
-                  <button
-                    onClick={() => selectedWorkItem && blockWorkItem(selectedWorkItem, 'CONFLICT_RESOLUTION')}
-                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-outline-variant/20 px-4 py-3 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-secondary transition-all hover:border-primary/20 hover:bg-surface-container-low"
-                  >
-                    <AlertCircle size={14} />
-                    Flag Conflict
-                  </button>
-                  <button
-                    onClick={() => selectedWorkItem && blockWorkItem(selectedWorkItem, 'HUMAN_INPUT')}
-                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-outline-variant/20 px-4 py-3 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-secondary transition-all hover:border-primary/20 hover:bg-surface-container-low"
-                  >
-                    <MessageSquare size={14} />
-                    Need Input
-                  </button>
-                  <button
-                    onClick={() => selectedWorkItem && resolveBlocker(selectedWorkItem)}
-                    disabled={selectedWorkItem.blocker?.status !== 'OPEN'}
-                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-outline-variant/20 px-4 py-3 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-secondary transition-all hover:border-primary/20 hover:bg-surface-container-low disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <Wrench size={14} />
-                    Unblock
-                  </button>
-                  <button
-                    onClick={() =>
-                      selectedWorkItem &&
-                      (selectedWorkItem.status === 'PENDING_APPROVAL'
-                        ? approveAndProceed(selectedWorkItem)
-                        : moveToNextStep(selectedWorkItem))
-                    }
-                    disabled={
-                      selectedWorkItem.status === 'BLOCKED' ||
-                      selectedWorkItem.status === 'COMPLETED' ||
-                      isExecutingWorkItemId === selectedWorkItem.id
-                    }
-                    className="inline-flex items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-3 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {selectedWorkItem.status === 'COMPLETED' ? (
-                      <>
-                        <CheckCircle2 size={14} />
-                        Story Completed
-                      </>
-                    ) : selectedWorkItem.status === 'PENDING_APPROVAL' ? (
-                      <>
-                        <ShieldCheck size={14} />
-                        Approve & Proceed
-                      </>
-                    ) : (
-                      <>
-                        <Send size={14} />
-                        {nextStep ? 'Move Forward' : 'Complete Story'}
-                      </>
-                    )}
-                  </button>
-                </div>
-
-                {selectedWorkflow?.steps?.length ? (
-                  <div className="mt-5 flex flex-wrap items-center gap-2">
-                    {selectedWorkflow.steps.map(step => {
-                      const isCurrent =
-                        selectedWorkItem.status !== 'COMPLETED' &&
-                        step.id === selectedWorkItem.currentStepId;
-                      const isComplete =
-                        selectedWorkItem.status === 'COMPLETED' ||
-                        selectedWorkflow.steps.findIndex(candidate => candidate.id === step.id) <
-                          displayStepIndex;
-
-                      return (
-                        <div
-                          key={step.id}
-                          className={cn(
-                            'inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-[0.625rem] font-bold uppercase tracking-[0.16em]',
-                            isCurrent
-                              ? 'bg-primary text-white'
-                              : isComplete
-                              ? 'bg-emerald-100 text-emerald-700'
-                              : 'bg-surface-container-low text-secondary',
-                          )}
-                        >
-                          <span>{step.name}</span>
-                          {isCurrent ? <ChevronRight size={12} /> : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : null}
-              </div>
-            </motion.aside>
-          </div>
-        )}
-      </AnimatePresence>
+            </form>
+          </ModalShell>
+        </div>
+      )}
     </div>
   );
 };

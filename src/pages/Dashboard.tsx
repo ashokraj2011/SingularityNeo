@@ -1,57 +1,43 @@
 import React, { useMemo, useState } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Bolt, 
-  Network, 
-  ShieldCheck, 
-  RefreshCw, 
-  ArrowRight, 
-  Cloud, 
-  Shield, 
-  BarChart3, 
-  Zap,
-  Cpu,
-  Plus,
-  Clock,
-  Globe,
-  Database,
+import {
   Activity,
+  ArrowRight,
+  Bolt,
+  CheckCircle2,
+  Clock3,
+  Database,
+  FileText,
+  FolderGit2,
+  Globe,
+  Layers,
+  RefreshCw,
+  ShieldCheck,
+  Sparkles,
+  Workflow,
 } from 'lucide-react';
-import { BLUEPRINTS } from '../constants';
-import { cn } from '../lib/utils';
-import { Status, WorkItem } from '../types';
-import { useCapability } from '../context/CapabilityContext';
 import { useNavigate } from 'react-router-dom';
-
-const StatusBadge = ({ status }: { status: Status | WorkItem['status'] }) => {
-  const styles: Record<string, string> = {
-    STABLE: "bg-primary-fixed text-primary border border-primary/20",
-    ALERT: "bg-error-container text-on-error-container border border-error/20",
-    BETA: "bg-secondary-container text-secondary border border-secondary/20",
-    PENDING: "bg-surface-container-high text-secondary border border-outline-variant/30",
-    VERIFIED: "bg-primary-fixed-dim/30 text-primary border border-primary/20",
-    RUNNING: "bg-primary-fixed/50 text-primary border border-primary/30",
-    IN_PROGRESS: "bg-secondary-container/50 text-secondary border border-secondary/30",
-    PROCESSING: "bg-amber-100 text-amber-800 border border-amber-200",
-    QUEUED: "bg-slate-100 text-slate-600 border border-slate-200",
-    COMPLETED: "bg-primary/10 text-primary border border-primary/20",
-    ACTIVE: "bg-primary/10 text-primary border border-primary/20",
-    BLOCKED: "bg-error/10 text-error border border-error/20",
-    PENDING_APPROVAL: "bg-amber-100 text-amber-800 border border-amber-200",
-  };
-
-  return (
-    <span className={cn("px-2 py-0.5 rounded text-[0.625rem] font-bold uppercase tracking-wider", styles[status] || styles.PENDING)}>
-      {status}
-    </span>
-  );
-};
+import { BLUEPRINTS } from '../constants';
+import { useCapability } from '../context/CapabilityContext';
+import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
+import { cn } from '../lib/utils';
+import {
+  DataTable,
+  EmptyState,
+  PageHeader,
+  SectionCard,
+  StatTile,
+  StatusBadge,
+  Toolbar,
+} from '../components/EnterpriseUI';
 
 const Dashboard = () => {
   const navigate = useNavigate();
   const { activeCapability, getCapabilityWorkspace } = useCapability();
-  const [taskFilter, setTaskFilter] = useState<'ALL' | 'QUEUED' | 'PROCESSING' | 'COMPLETED'>('ALL');
+  const [taskFilter, setTaskFilter] = useState<
+    'ALL' | 'QUEUED' | 'PROCESSING' | 'COMPLETED'
+  >('ALL');
   const workspace = getCapabilityWorkspace(activeCapability.id);
+
   const agentsById = useMemo(
     () => new Map(workspace.agents.map(agent => [agent.id, agent.name])),
     [workspace.agents],
@@ -61,9 +47,10 @@ const Dashboard = () => {
     [workspace.workflows],
   );
 
-  const filteredBlueprints = useMemo(() => {
-    return BLUEPRINTS.filter(bp => bp.capabilityId === activeCapability.id);
-  }, [activeCapability]);
+  const filteredBlueprints = useMemo(
+    () => BLUEPRINTS.filter(bp => bp.capabilityId === activeCapability.id),
+    [activeCapability.id],
+  );
 
   const liveWorkPackages = useMemo(
     () =>
@@ -78,12 +65,60 @@ const Dashboard = () => {
     [workspace.workItems],
   );
 
+  const filteredTasks = useMemo(() => {
+    if (taskFilter === 'ALL') {
+      return workspace.tasks;
+    }
+    return workspace.tasks.filter(task => task.status === taskFilter);
+  }, [taskFilter, workspace.tasks]);
+
+  const dashboardStats = useMemo(
+    () => [
+      {
+        label: 'Active Work',
+        value: workspace.workItems.filter(item => item.status === 'ACTIVE').length,
+        helper: `${workspace.workItems.filter(item => item.status === 'COMPLETED').length} completed`,
+        icon: Activity,
+        tone: 'brand' as const,
+      },
+      {
+        label: 'Agents',
+        value: workspace.agents.length,
+        helper: `${workspace.agents.filter(agent => agent.isBuiltIn).length} built-in`,
+        icon: Sparkles,
+        tone: 'info' as const,
+      },
+      {
+        label: 'Artifacts',
+        value: workspace.artifacts.length,
+        helper: `${workspace.executionLogs.length} execution logs`,
+        icon: FileText,
+        tone: 'success' as const,
+      },
+      {
+        label: 'Approvals & Blocks',
+        value:
+          workspace.workItems.filter(
+            item => item.status === 'BLOCKED' || item.status === 'PENDING_APPROVAL',
+          ).length,
+        helper: `${workspace.workItems.filter(item => item.status === 'BLOCKED').length} blocked`,
+        icon: ShieldCheck,
+        tone:
+          workspace.workItems.some(item => item.status === 'BLOCKED')
+            ? ('danger' as const)
+            : ('warning' as const),
+      },
+    ],
+    [workspace.agents, workspace.artifacts.length, workspace.executionLogs.length, workspace.workItems],
+  );
+
   const recommendedSteps = useMemo(() => {
     const recommendations: Array<{
       key: string;
       title: string;
       desc: string;
       icon: typeof ShieldCheck;
+      tone: 'brand' | 'warning' | 'success';
       onClick: () => void;
     }> = [];
 
@@ -94,9 +129,11 @@ const Dashboard = () => {
         title: `Unblock ${blockedItem.title}`,
         desc:
           blockedItem.blocker?.message ||
-          `Resolve the blocker in ${blockedItem.phase.toLowerCase()} and restart the workflow.`,
+          `Resolve the blocker in ${blockedItem.phase.toLowerCase()} and continue the workflow run.`,
         icon: RefreshCw,
-        onClick: () => navigate(`/orchestrator?selected=${encodeURIComponent(blockedItem.id)}`),
+        tone: 'warning',
+        onClick: () =>
+          navigate(`/orchestrator?selected=${encodeURIComponent(blockedItem.id)}`),
       });
     }
 
@@ -109,8 +146,9 @@ const Dashboard = () => {
         title: `Approve ${pendingApprovalItem.title}`,
         desc:
           pendingApprovalItem.pendingRequest?.message ||
-          `Review the approval gate for ${pendingApprovalItem.title}.`,
+          `Review the governance gate and release the work item forward.`,
         icon: ShieldCheck,
+        tone: 'warning',
         onClick: () =>
           navigate(`/orchestrator?selected=${encodeURIComponent(pendingApprovalItem.id)}`),
       });
@@ -125,28 +163,32 @@ const Dashboard = () => {
         title: `Continue ${activeItem.title}`,
         desc:
           currentStep?.description ||
-          `Move the story forward from ${activeItem.phase.toLowerCase()} when the step is ready.`,
+          `Inspect the current step and runtime evidence before advancing execution.`,
         icon: ArrowRight,
-        onClick: () => navigate(`/orchestrator?selected=${encodeURIComponent(activeItem.id)}`),
+        tone: 'brand',
+        onClick: () =>
+          navigate(`/orchestrator?selected=${encodeURIComponent(activeItem.id)}`),
       });
     }
 
     if (recommendations.length === 0 && workspace.workflows.length > 0) {
       recommendations.push({
         key: 'create-work-package',
-        title: 'Create Work Package',
-        desc: 'Launch a new story into the active SDLC flow for this capability.',
+        title: 'Launch new work package',
+        desc: 'Create a new story and place it into the active SDLC workflow.',
         icon: Bolt,
+        tone: 'brand',
         onClick: () => navigate('/orchestrator?new=1'),
       });
     }
 
     if (recommendations.length === 0) {
       recommendations.push({
-        key: 'design-workflow',
-        title: 'Define Workflow',
-        desc: 'Create or refine the capability workflow before starting delivery execution.',
-        icon: Activity,
+        key: 'define-workflow',
+        title: 'Define workflow',
+        desc: 'Set up the enterprise workflow before starting capability delivery.',
+        icon: Workflow,
+        tone: 'success',
         onClick: () => navigate('/designer'),
       });
     }
@@ -154,317 +196,367 @@ const Dashboard = () => {
     return recommendations.slice(0, 3);
   }, [navigate, workspace.workItems, workspace.workflows, workflowsById]);
 
-  const filteredTasks = useMemo(() => {
-    const capabilityTasks = workspace.tasks;
-    if (taskFilter === 'ALL') return capabilityTasks;
-    return capabilityTasks.filter(task => task.status === taskFilter);
-  }, [taskFilter, workspace.tasks]);
+  const architectureFacts = [
+    {
+      label: 'Applications',
+      value: activeCapability.applications.length,
+      detail:
+        activeCapability.applications.slice(0, 3).join(', ') ||
+        'No applications registered yet',
+      icon: Globe,
+    },
+    {
+      label: 'APIs & Services',
+      value: activeCapability.apis.length,
+      detail:
+        activeCapability.apis.slice(0, 3).join(', ') || 'No services registered yet',
+      icon: Layers,
+    },
+    {
+      label: 'Data Stores',
+      value: activeCapability.databases.length,
+      detail:
+        activeCapability.databases.slice(0, 3).join(', ') ||
+        'No databases registered yet',
+      icon: Database,
+    },
+    {
+      label: 'Git Repositories',
+      value: activeCapability.gitRepositories.length,
+      detail:
+        activeCapability.gitRepositories.slice(0, 2).join(', ') ||
+        'No repositories linked yet',
+      icon: FolderGit2,
+    },
+  ];
 
   return (
-    <div className="space-y-8">
-      {/* Header Area */}
-      <div className="flex justify-between items-end">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[0.625rem] font-bold bg-primary/10 text-primary px-2 py-0.5 rounded uppercase tracking-widest">Capability Context</span>
-            <span className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">{activeCapability.id}</span>
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Capability Overview"
+        context={activeCapability.id}
+        title={`${activeCapability.name} Command Center`}
+        description="Operational overview for the active capability, including live work, governance pressure, evidence output, and recommended next actions."
+        actions={
+          <>
+            <button
+              type="button"
+              onClick={() => navigate('/team')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              <Sparkles size={16} />
+              Manage agents
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/orchestrator?new=1')}
+              className="enterprise-button enterprise-button-primary"
+            >
+              <Bolt size={16} />
+              New work package
+            </button>
+          </>
+        }
+      >
+        <Toolbar className="w-fit">
+          <div className="min-w-[10rem]">
+            <p className="form-kicker">Domain</p>
+            <p className="mt-1 text-sm font-semibold text-on-surface">
+              {activeCapability.domain || 'Unassigned'}
+            </p>
           </div>
-          <h2 className="text-3xl font-extrabold text-primary tracking-tight">{activeCapability.name}</h2>
-          <p className="text-secondary mt-1 max-w-2xl leading-relaxed">{activeCapability.description}</p>
-        </div>
-        <div className="flex gap-3">
-          <button 
-            onClick={() => navigate('/team')}
-            className="px-6 py-3 bg-secondary text-white rounded-xl font-bold flex items-center gap-2 shadow-lg shadow-secondary/10 hover:translate-y-[-2px] transition-transform"
-          >
-            <Plus size={18} />
-            <span>Create Agent</span>
-          </button>
-          <button
-            onClick={() => navigate('/orchestrator?new=1')}
-            className="px-6 py-3 bg-primary text-white rounded-xl font-bold flex items-center gap-2 shadow-lg shadow-primary/10 hover:translate-y-[-2px] transition-transform"
-          >
-            <Bolt size={18} />
-            <span>New Work Package</span>
-          </button>
-        </div>
+          <div className="hidden h-10 w-px bg-outline-variant/50 sm:block" />
+          <div className="min-w-[10rem]">
+            <p className="form-kicker">Business Unit</p>
+            <p className="mt-1 text-sm font-semibold text-on-surface">
+              {activeCapability.businessUnit || 'Unassigned'}
+            </p>
+          </div>
+          <div className="hidden h-10 w-px bg-outline-variant/50 sm:block" />
+          <div className="min-w-[10rem]">
+            <p className="form-kicker">Primary Workflow</p>
+            <p className="mt-1 text-sm font-semibold text-on-surface">
+              {workspace.workflows[0]?.name || 'No workflow'}
+            </p>
+          </div>
+        </Toolbar>
+      </PageHeader>
+
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {dashboardStats.map(stat => (
+          <StatTile
+            key={stat.label}
+            label={stat.label}
+            value={stat.value}
+            helper={stat.helper}
+            icon={stat.icon}
+            tone={stat.tone}
+          />
+        ))}
+      </section>
+
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(22rem,0.7fr)]">
+        <SectionCard
+          title="Capability footprint"
+          description="Core systems, services, repositories, and delivery context tied to this capability."
+          icon={Layers}
+          action={
+            <button
+              type="button"
+              onClick={() => navigate('/capabilities/metadata')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              Open metadata
+            </button>
+          }
+        >
+          <div className="grid gap-4 md:grid-cols-2">
+            {architectureFacts.map(item => (
+              <div
+                key={item.label}
+                className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="stat-label">{item.label}</p>
+                    <p className="mt-2 text-2xl font-bold tracking-tight text-on-surface">
+                      {item.value}
+                    </p>
+                  </div>
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-primary/10 bg-white text-primary">
+                    <item.icon size={16} />
+                  </div>
+                </div>
+                <p className="mt-3 text-xs leading-relaxed text-secondary">
+                  {item.detail}
+                </p>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+
+        <SectionCard
+          title="Recommended next steps"
+          description="Focused actions based on the live state of work items, approvals, and workflow runs."
+          icon={ShieldCheck}
+          tone="brand"
+        >
+          <div className="space-y-3">
+            {recommendedSteps.map(step => (
+              <button
+                key={step.key}
+                type="button"
+                onClick={step.onClick}
+                className="flex w-full items-start gap-3 rounded-2xl border border-primary/10 bg-white px-4 py-4 text-left transition-all hover:border-primary/20 hover:bg-primary/5"
+              >
+                <div
+                  className={cn(
+                    'mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border',
+                    step.tone === 'warning'
+                      ? 'border-amber-200 bg-amber-50 text-amber-700'
+                      : step.tone === 'success'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : 'border-primary/10 bg-primary/10 text-primary',
+                  )}
+                >
+                  <step.icon size={16} />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-on-surface">{step.title}</p>
+                  <p className="mt-1 text-sm leading-relaxed text-secondary">
+                    {step.desc}
+                  </p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </SectionCard>
       </div>
 
-      {/* Hero Section - Capability Command Center */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="lg:col-span-2 bg-white p-8 rounded-xl shadow-sm border border-outline-variant/10 relative overflow-hidden group"
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+        <SectionCard
+          title="Recent work packages"
+          description="Latest work items in this capability with owning workflow and current status."
+          icon={Workflow}
+          action={
+            <button
+              type="button"
+              onClick={() => navigate('/orchestrator')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              Open orchestrator
+            </button>
+          }
         >
-          <div className="relative z-10">
-            <div className="flex justify-between items-start mb-6">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-primary/10 rounded-lg text-primary">
-                  <Activity size={20} />
-                </div>
-                <h3 className="text-lg font-bold text-primary">Capability Command Center</h3>
+          <DataTable
+            header={
+              <div className="grid grid-cols-[1.3fr_1fr_0.9fr_0.9fr] gap-3">
+                <span>Work Item</span>
+                <span>Workflow</span>
+                <span>Status</span>
+                <span>Owner</span>
               </div>
-              <div className="bg-tertiary-fixed-dim/20 text-tertiary px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim animate-pulse"></span>
-                System Live
-              </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-8">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2 text-slate-400 mb-1">
-                  <Globe size={14} />
-                  <span className="text-[0.625rem] font-bold uppercase tracking-wider">Applications</span>
-                </div>
-                <p className="text-3xl font-bold text-on-surface">{activeCapability.applications.length}</p>
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {activeCapability.applications.map(app => (
-                    <span key={app} className="text-[0.625rem] bg-surface-container-high px-1.5 py-0.5 rounded text-secondary font-medium">{app}</span>
-                  ))}
-                </div>
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center gap-2 text-slate-400 mb-1">
-                  <Cpu size={14} />
-                  <span className="text-[0.625rem] font-bold uppercase tracking-wider">APIs & Services</span>
-                </div>
-                <p className="text-3xl font-bold text-on-surface">{activeCapability.apis.length}</p>
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {activeCapability.apis.map(api => (
-                    <span key={api} className="text-[0.625rem] bg-surface-container-high px-1.5 py-0.5 rounded text-secondary font-medium">{api}</span>
-                  ))}
-                </div>
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center gap-2 text-slate-400 mb-1">
-                  <Database size={14} />
-                  <span className="text-[0.625rem] font-bold uppercase tracking-wider">Databases</span>
-                </div>
-                <p className="text-3xl font-bold text-on-surface">{activeCapability.databases.length}</p>
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {activeCapability.databases.map(db => (
-                    <span key={db} className="text-[0.625rem] bg-surface-container-high px-1.5 py-0.5 rounded text-secondary font-medium">{db}</span>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-8 pt-6 border-t border-outline-variant/10 flex items-center justify-between">
-              <div className="flex items-center gap-6">
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                  <span className="text-xs font-bold text-primary uppercase tracking-wider">Integrity Verified</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Clock size={14} className="text-slate-400" />
-                  <span className="text-xs font-medium text-slate-500 tracking-tight">Last sync: 2m ago</span>
-                </div>
-              </div>
-              <button className="text-xs font-bold text-primary flex items-center gap-1 hover:underline">
-                View Topology <ArrowRight size={14} />
-              </button>
-            </div>
-          </div>
-          <div className="absolute top-0 right-0 w-1/3 h-full pointer-events-none opacity-5">
-            <Network size={240} className="absolute -top-12 -right-12" />
-          </div>
-        </motion.div>
-
-        <motion.div 
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          className="bg-primary text-white p-8 rounded-xl flex flex-col justify-between shadow-xl shadow-primary/20"
-        >
-          <div>
-            <h4 className="text-lg font-bold mb-4">Recommended Next Steps</h4>
-            <div className="space-y-4">
-              {recommendedSteps.map(step => (
-                <button
-                  key={step.key}
-                  onClick={step.onClick}
-                  className="flex w-full gap-4 rounded-xl bg-white/10 p-3 text-left transition-colors hover:bg-white/15 group"
-                >
-                  <div className="w-10 h-10 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
-                    <step.icon size={18} />
-                  </div>
-                  <div>
-                    <p className="text-sm font-bold">{step.title}</p>
-                    <p className="text-[0.6875rem] text-primary-fixed-dim">{step.desc}</p>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-          <button
-            onClick={() => navigate('/orchestrator')}
-            className="w-full mt-6 py-3 bg-white text-primary rounded-xl font-bold text-sm hover:bg-surface-container-low transition-colors"
+            }
           >
-            View Full Analysis
-          </button>
-        </motion.div>
-      </section>
-
-      {/* Portfolio Grid */}
-      <section>
-        <div className="flex items-center justify-between mb-6">
-          <h3 className="text-xl font-bold text-primary">Lifecycle Portfolio</h3>
-          <button className="text-sm font-bold text-primary flex items-center gap-1 hover:underline">
-            View All Blueprints <ArrowRight size={14} />
-          </button>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {filteredBlueprints.map((bp, i) => {
-            const Icon = bp.title.includes('Cloud') ? Cloud : bp.title.includes('Security') ? Shield : bp.title.includes('Data') ? BarChart3 : Zap;
-            return (
-              <motion.div 
-                key={bp.id}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.1 }}
-                className={cn(
-                  "bg-surface-container-low p-6 rounded-xl border-l-4 hover:shadow-md transition-shadow group cursor-pointer",
-                  bp.status === 'STABLE' ? "border-primary" : bp.status === 'ALERT' ? "border-error" : "border-secondary"
-                )}
-              >
-                <div className="flex justify-between items-start mb-4">
-                  <Icon size={24} className="text-primary group-hover:scale-110 transition-transform" />
-                  <span className="text-xs font-bold text-slate-400">{bp.version}</span>
-                </div>
-                <h4 className="font-bold text-on-surface mb-1">{bp.title}</h4>
-                <p className="text-xs text-secondary mb-4">{bp.description}</p>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm font-bold text-primary">{bp.activeIds} Active IDs</span>
-                  <StatusBadge status={bp.status} />
-                </div>
-              </motion.div>
-            );
-          })}
-          {filteredBlueprints.length === 0 && (
-            <div className="col-span-full py-12 text-center glass-panel border-dashed">
-              <p className="text-sm text-slate-400 italic">No blueprints registered for this capability context.</p>
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* Tables Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <div className="bg-white rounded-xl shadow-sm border border-outline-variant/10 overflow-hidden">
-          <div className="p-6 border-b border-outline-variant/10 flex justify-between items-center">
-            <h3 className="font-bold text-primary">Work-ID Fabric</h3>
-            <span className="text-[0.6875rem] font-bold uppercase text-slate-400">Latest Packages</span>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead className="bg-surface-container-low">
-                <tr>
-                  <th className="px-6 py-4 text-[0.6875rem] font-bold uppercase text-slate-500">Work ID</th>
-                  <th className="px-6 py-4 text-[0.6875rem] font-bold uppercase text-slate-500">Workflow</th>
-                  <th className="px-6 py-4 text-[0.6875rem] font-bold uppercase text-slate-500">Status</th>
-                  <th className="px-6 py-4 text-[0.6875rem] font-bold uppercase text-slate-500">Owner</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-outline-variant/10">
-                {liveWorkPackages.map((workItem) => (
-                  <tr
-                    key={workItem.id}
-                    onClick={() =>
-                      navigate(`/orchestrator?selected=${encodeURIComponent(workItem.id)}`)
-                    }
-                    className="cursor-pointer transition-colors hover:bg-surface-container-low"
+            {liveWorkPackages.length > 0 ? (
+              liveWorkPackages.map(workItem => (
+                <button
+                  key={workItem.id}
+                  type="button"
+                  onClick={() =>
+                    navigate(`/orchestrator?selected=${encodeURIComponent(workItem.id)}`)
+                  }
+                  className="grid w-full grid-cols-[1.3fr_1fr_0.9fr_0.9fr] gap-3 border-t border-outline-variant/35 px-4 py-4 text-left text-sm transition-all hover:bg-surface-container-low"
+                >
+                  <div>
+                    <p className="font-semibold text-on-surface">{workItem.title}</p>
+                    <p className="mt-1 text-xs text-secondary">{workItem.id}</p>
+                  </div>
+                  <span className="text-secondary">
+                    {workflowsById.get(workItem.workflowId)?.name || 'Workflow not found'}
+                  </span>
+                  <div>
+                    <StatusBadge tone={getStatusTone(workItem.status)}>
+                      {formatEnumLabel(workItem.status)}
+                    </StatusBadge>
+                  </div>
+                  <span className="text-secondary">
+                    {agentsById.get(workItem.assignedAgentId || '') || 'Unassigned'}
+                  </span>
+                </button>
+              ))
+            ) : (
+              <EmptyState
+                title="No live work packages"
+                description="Create a new work package to start capability execution and see it appear here."
+                icon={Bolt}
+                className="m-4 min-h-[12rem]"
+                action={
+                  <button
+                    type="button"
+                    onClick={() => navigate('/orchestrator?new=1')}
+                    className="enterprise-button enterprise-button-primary"
                   >
-                    <td className="px-6 py-4 font-bold text-primary text-sm">{workItem.id}</td>
-                    <td className="px-6 py-4 text-sm text-secondary">
-                      {workflowsById.get(workItem.workflowId)?.name || 'Workflow not found'}
-                    </td>
-                    <td className="px-6 py-4"><StatusBadge status={workItem.status} /></td>
-                    <td className="px-6 py-4 flex items-center gap-2">
-                      <div className="w-6 h-6 rounded-full bg-surface-container-highest" />
-                      <span className="text-xs font-medium text-slate-600">
-                        {agentsById.get(workItem.assignedAgentId || '') || 'Unassigned'}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                {liveWorkPackages.length === 0 && (
-                  <tr>
-                    <td colSpan={4} className="px-6 py-12 text-center text-sm text-slate-400 italic">
-                      No active work packages in this context.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+                    <Bolt size={16} />
+                    Create work package
+                  </button>
+                }
+              />
+            )}
+          </DataTable>
+        </SectionCard>
 
-        <div className="bg-white rounded-xl shadow-sm border border-outline-variant/10 overflow-hidden">
-          <div className="p-6 border-b border-outline-variant/10 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-            <div>
-              <h3 className="font-bold text-primary">Agent Task Flow</h3>
-              <p className="text-[0.625rem] font-medium text-slate-400 uppercase tracking-wider">Live Stream</p>
-            </div>
-            <div className="flex bg-surface-container-low p-1 rounded-lg">
-              {(['ALL', 'QUEUED', 'PROCESSING', 'COMPLETED'] as const).map((status) => (
+        <SectionCard
+          title="Agent task flow"
+          description="Live task stream across the selected capability."
+          icon={Activity}
+          action={
+            <Toolbar className="border-0 bg-transparent p-0 shadow-none">
+              {(['ALL', 'QUEUED', 'PROCESSING', 'COMPLETED'] as const).map(status => (
                 <button
                   key={status}
+                  type="button"
                   onClick={() => setTaskFilter(status)}
                   className={cn(
-                    "px-3 py-1.5 text-[0.6875rem] font-bold rounded-md transition-all",
-                    taskFilter === status 
-                      ? "bg-white text-primary shadow-sm" 
-                      : "text-secondary hover:text-primary"
+                    'rounded-xl px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] transition-all',
+                    taskFilter === status
+                      ? 'bg-primary text-white'
+                      : 'bg-surface-container-low text-secondary hover:text-on-surface',
                   )}
                 >
                   {status}
                 </button>
               ))}
-            </div>
-          </div>
-          <div className="p-6 space-y-4 max-h-[400px] overflow-y-auto">
-            <AnimatePresence mode="popLayout">
-              {filteredTasks.length > 0 ? (
-                filteredTasks.map((task, i) => (
-                  <motion.div 
-                    layout
-                    initial={{ opacity: 0, x: -10 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    key={task.id} 
-                    className="flex items-center gap-4 group"
-                  >
-                    <div className={cn(
-                      "w-2 h-2 rounded-full ring-4 shrink-0",
-                      task.status === 'PROCESSING' ? "bg-amber-500 ring-amber-500/20" : 
-                      task.status === 'COMPLETED' ? "bg-primary ring-primary/20" :
-                      task.status === 'QUEUED' ? "bg-slate-400 ring-slate-400/20" :
-                      "bg-slate-300 ring-slate-300/20"
-                    )} />
-                    <div className={cn(
-                      "flex-1 flex justify-between items-center pb-4",
-                      i !== filteredTasks.length - 1 && "border-b border-outline-variant/10"
-                    )}>
-                      <div>
-                        <p className="text-sm font-bold text-on-surface">{task.title}</p>
-                        <div className="flex items-center gap-2">
-                          <p className="text-[0.6875rem] text-slate-400">Agent ID: {task.id}</p>
-                          <StatusBadge status={task.status} />
-                        </div>
-                      </div>
-                      <span className="text-[0.6875rem] font-bold text-slate-400">{task.timestamp}</span>
+            </Toolbar>
+          }
+        >
+          <div className="max-h-[28rem] space-y-3 overflow-y-auto pr-1">
+            {filteredTasks.length > 0 ? (
+              filteredTasks.map(task => (
+                <div
+                  key={task.id}
+                  className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-on-surface">{task.title}</p>
+                      <p className="mt-1 text-xs text-secondary">
+                        {task.agent} • {task.timestamp}
+                      </p>
                     </div>
-                  </motion.div>
-                ))
-              ) : (
-                <div className="py-12 text-center">
-                  <p className="text-sm text-secondary font-medium italic">No tasks found for this status.</p>
+                    <StatusBadge tone={getStatusTone(task.status)}>
+                      {formatEnumLabel(task.status)}
+                    </StatusBadge>
+                  </div>
+                  {task.executionNotes ? (
+                    <p className="mt-3 text-sm leading-relaxed text-secondary">
+                      {task.executionNotes}
+                    </p>
+                  ) : null}
                 </div>
-              )}
-            </AnimatePresence>
+              ))
+            ) : (
+              <EmptyState
+                title="No tasks for this filter"
+                description="Change the filter or start more execution activity to populate the stream."
+                icon={Clock3}
+                className="min-h-[12rem]"
+              />
+            )}
           </div>
-        </div>
+        </SectionCard>
       </div>
+
+      <SectionCard
+        title="Workflow blueprints"
+        description="Registered blueprint and architecture references mapped to this capability."
+        icon={Layers}
+        action={
+          <button
+            type="button"
+            onClick={() => navigate('/designer')}
+            className="enterprise-button enterprise-button-secondary"
+          >
+            View design workspace
+            <ArrowRight size={16} />
+          </button>
+        }
+      >
+        {filteredBlueprints.length > 0 ? (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            {filteredBlueprints.map(blueprint => (
+              <div
+                key={blueprint.id}
+                className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-on-surface">
+                      {blueprint.title}
+                    </p>
+                    <p className="mt-1 text-xs text-secondary">
+                      {blueprint.description}
+                    </p>
+                  </div>
+                  <StatusBadge tone={getStatusTone(blueprint.status)}>
+                    {formatEnumLabel(blueprint.status)}
+                  </StatusBadge>
+                </div>
+                <div className="mt-4 flex items-center justify-between text-xs font-medium text-secondary">
+                  <span>{blueprint.version}</span>
+                  <span>{blueprint.activeIds} active IDs</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            title="No blueprints linked"
+            description="Use the design workspace to define or register enterprise workflow blueprints for this capability."
+            icon={FileText}
+          />
+        )}
+      </SectionCard>
     </div>
   );
 };

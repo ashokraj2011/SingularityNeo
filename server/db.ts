@@ -39,6 +39,7 @@ const schemaStatements = [
       team_names TEXT[] NOT NULL DEFAULT '{}',
       stakeholders JSONB NOT NULL DEFAULT '[]'::jsonb,
       additional_metadata JSONB NOT NULL DEFAULT '[]'::jsonb,
+      execution_config JSONB NOT NULL DEFAULT '{}'::jsonb,
       status TEXT NOT NULL,
       special_agent_id TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -140,6 +141,20 @@ const schemaStatements = [
       direction TEXT,
       connected_agent_id TEXT,
       source_workflow_id TEXT,
+      work_item_id TEXT,
+      artifact_kind TEXT,
+      phase TEXT,
+      source_run_id TEXT,
+      source_run_step_id TEXT,
+      source_wait_id TEXT,
+      handoff_from_agent_id TEXT,
+      handoff_to_agent_id TEXT,
+      content_format TEXT,
+      mime_type TEXT,
+      file_name TEXT,
+      content_text TEXT,
+      content_json JSONB,
+      downloadable BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
@@ -162,6 +177,9 @@ const schemaStatements = [
       timestamp TEXT NOT NULL,
       prompt TEXT,
       execution_notes TEXT,
+      run_id TEXT,
+      run_step_id TEXT,
+      tool_invocation_id TEXT,
       linked_artifacts JSONB NOT NULL DEFAULT '[]'::jsonb,
       produced_outputs JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -178,6 +196,9 @@ const schemaStatements = [
       timestamp TEXT NOT NULL,
       level TEXT NOT NULL,
       message TEXT NOT NULL,
+      run_id TEXT,
+      run_step_id TEXT,
+      tool_invocation_id TEXT,
       metadata JSONB,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
@@ -211,10 +232,138 @@ const schemaStatements = [
       tags TEXT[] NOT NULL DEFAULT '{}',
       pending_request JSONB,
       blocker JSONB,
+      active_run_id TEXT,
+      last_run_id TEXT,
       history JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_workflow_runs (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      work_item_id TEXT NOT NULL,
+      workflow_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      attempt_number INTEGER NOT NULL,
+      workflow_snapshot JSONB NOT NULL,
+      current_step_id TEXT,
+      current_phase TEXT,
+      assigned_agent_id TEXT,
+      pause_reason TEXT,
+      current_wait_id TEXT,
+      terminal_outcome TEXT,
+      restart_from_phase TEXT,
+      lease_owner TEXT,
+      lease_expires_at TIMESTAMPTZ,
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_workflow_run_steps (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      workflow_step_id TEXT NOT NULL,
+      step_index INTEGER NOT NULL,
+      phase TEXT NOT NULL,
+      name TEXT NOT NULL,
+      step_type TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      evidence_summary TEXT,
+      output_summary TEXT,
+      wait_id TEXT,
+      last_tool_invocation_id TEXT,
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      metadata JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, run_id)
+        REFERENCES capability_workflow_runs(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_tool_invocations (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      run_step_id TEXT NOT NULL,
+      tool_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      request JSONB NOT NULL DEFAULT '{}'::jsonb,
+      result_summary TEXT,
+      working_directory TEXT,
+      exit_code INTEGER,
+      stdout_preview TEXT,
+      stderr_preview TEXT,
+      retryable BOOLEAN NOT NULL DEFAULT FALSE,
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, run_id)
+        REFERENCES capability_workflow_runs(capability_id, id)
+        ON DELETE CASCADE,
+      FOREIGN KEY (capability_id, run_step_id)
+        REFERENCES capability_workflow_run_steps(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_run_events (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      work_item_id TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      level TEXT NOT NULL,
+      type TEXT NOT NULL,
+      message TEXT NOT NULL,
+      run_step_id TEXT,
+      tool_invocation_id TEXT,
+      details JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, run_id)
+        REFERENCES capability_workflow_runs(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_run_waits (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      run_step_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      message TEXT NOT NULL,
+      requested_by TEXT NOT NULL,
+      resolution TEXT,
+      resolved_by TEXT,
+      payload JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      resolved_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, run_id)
+        REFERENCES capability_workflow_runs(capability_id, id)
+        ON DELETE CASCADE,
+      FOREIGN KEY (capability_id, run_step_id)
+        REFERENCES capability_workflow_run_steps(capability_id, id)
+        ON DELETE CASCADE
     )
   `,
 ];
@@ -239,6 +388,10 @@ const migrationStatements = [
   `
     ALTER TABLE capabilities
     ADD COLUMN IF NOT EXISTS additional_metadata JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE capabilities
+    ADD COLUMN IF NOT EXISTS execution_config JSONB NOT NULL DEFAULT '{}'::jsonb
   `,
   `
     ALTER TABLE capability_agents
@@ -269,8 +422,28 @@ const migrationStatements = [
     ADD COLUMN IF NOT EXISTS phase TEXT
   `,
   `
+    ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS run_id TEXT
+  `,
+  `
+    ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS run_step_id TEXT
+  `,
+  `
+    ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS tool_invocation_id TEXT
+  `,
+  `
     ALTER TABLE capability_work_items
     ADD COLUMN IF NOT EXISTS blocker JSONB
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS active_run_id TEXT
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS last_run_id TEXT
   `,
   `
     ALTER TABLE capability_work_items
@@ -279,6 +452,114 @@ const migrationStatements = [
   `
     ALTER TABLE capability_workflows
     ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'CAPABILITY'
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS run_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS run_step_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS tool_invocation_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS summary TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS work_item_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS artifact_kind TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS phase TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS source_run_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS source_run_step_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS source_wait_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS handoff_from_agent_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS handoff_to_agent_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS content_format TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS mime_type TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS file_name TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS content_text TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS content_json JSONB
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS downloadable BOOLEAN NOT NULL DEFAULT FALSE
+  `,
+  `
+    ALTER TABLE capability_execution_logs
+    ADD COLUMN IF NOT EXISTS run_id TEXT
+  `,
+  `
+    ALTER TABLE capability_execution_logs
+    ADD COLUMN IF NOT EXISTS run_step_id TEXT
+  `,
+  `
+    ALTER TABLE capability_execution_logs
+    ADD COLUMN IF NOT EXISTS tool_invocation_id TEXT
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_workflow_runs_status_idx
+    ON capability_workflow_runs (status, updated_at)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_workflow_runs_work_item_idx
+    ON capability_workflow_runs (capability_id, work_item_id, created_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_run_events_run_idx
+    ON capability_run_events (capability_id, run_id, created_at ASC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_run_waits_run_idx
+    ON capability_run_waits (capability_id, run_id, created_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_artifacts_work_item_idx
+    ON capability_artifacts (capability_id, work_item_id, created_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_artifacts_run_idx
+    ON capability_artifacts (capability_id, source_run_id, created_at DESC)
   `,
 ];
 
