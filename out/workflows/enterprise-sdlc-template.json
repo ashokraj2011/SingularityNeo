@@ -13,53 +13,157 @@
   ],
   "steps": [
     {
+      "name": "Planning & Stakeholder Synthesis",
+      "type": "DELIVERY",
+      "phase": "ANALYSIS",
+      "agent": "Planning Agent",
+      "handoffTo": "Business Analyst",
+      "inputArtifacts": [
+        "Capability Charter",
+        "Stakeholder Requirements",
+        "Capability Operating Model",
+        "Cross-Agent Input Briefs"
+      ],
+      "outputArtifacts": [
+        "Planning Report",
+        "Delivery Milestone Plan",
+        "Stakeholder Alignment Summary",
+        "Planning Assumptions Log"
+      ]
+    },
+    {
       "name": "Business Analysis",
       "type": "DELIVERY",
       "phase": "ANALYSIS",
       "agent": "Business Analyst",
-      "handoffTo": "Architect"
+      "handoffTo": "Architect",
+      "inputArtifacts": [
+        "Capability Charter",
+        "Stakeholder Requirements",
+        "Planning Report",
+        "Stakeholder Priorities Register",
+        "Jira Story Context",
+        "Domain Constraints Register"
+      ],
+      "outputArtifacts": [
+        "Requirements Specification",
+        "Acceptance Criteria Matrix",
+        "Assumptions Log",
+        "Dependency Register"
+      ]
     },
     {
       "name": "Solution Design",
       "type": "DELIVERY",
       "phase": "DESIGN",
       "agent": "Architect",
-      "handoffTo": "Software Developer"
+      "handoffTo": "Software Developer",
+      "inputArtifacts": [
+        "Requirements Specification",
+        "Acceptance Criteria Matrix",
+        "Architecture Intake Packet",
+        "Existing Solution Context"
+      ],
+      "outputArtifacts": [
+        "Solution Design Document",
+        "Architecture Decision Log",
+        "API and Integration Contract",
+        "Implementation Guardrails"
+      ]
     },
     {
       "name": "Implementation",
       "type": "DELIVERY",
       "phase": "DEVELOPMENT",
       "agent": "Software Developer",
-      "handoffTo": "QA"
+      "handoffTo": "QA",
+      "inputArtifacts": [
+        "Solution Design Document",
+        "Architecture Decision Log",
+        "Developer Handoff Packet",
+        "Acceptance Criteria Matrix"
+      ],
+      "outputArtifacts": [
+        "Code Change Set",
+        "Developer Test Evidence",
+        "Implementation Notes",
+        "Build Candidate Manifest"
+      ]
     },
     {
       "name": "Quality Assurance",
       "type": "DELIVERY",
       "phase": "QA",
       "agent": "QA",
-      "handoffTo": "Validation Agent"
+      "handoffTo": "Validation Agent",
+      "inputArtifacts": [
+        "Build Candidate Manifest",
+        "Acceptance Criteria Matrix",
+        "QA Intake Packet",
+        "Implementation Notes"
+      ],
+      "outputArtifacts": [
+        "Test Execution Report",
+        "Defect and Risk Log",
+        "Release Recommendation",
+        "QA Sign-off Notes"
+      ]
     },
     {
       "name": "Governance Gate",
       "type": "GOVERNANCE_GATE",
       "phase": "GOVERNANCE",
       "agent": "Validation Agent",
-      "approvalRoles": ["Development Manager", "Team Lead"]
+      "approvalRoles": ["Development Manager", "Team Lead"],
+      "inputArtifacts": [
+        "Validation Evidence Pack",
+        "Governance Review Summary",
+        "Defect and Risk Log",
+        "Release Recommendation"
+      ],
+      "outputArtifacts": [
+        "Governance Assessment",
+        "Risk and Control Record",
+        "Policy Exception Log",
+        "Approval Brief"
+      ]
     },
     {
       "name": "Human Approval",
       "type": "HUMAN_APPROVAL",
       "phase": "RELEASE",
       "agent": "Capability Owning Agent",
-      "approvalRoles": ["Development Manager", "Squad Leader", "Team Lead"]
+      "approvalRoles": ["Development Manager", "Squad Leader", "Team Lead"],
+      "inputArtifacts": [
+        "Human Approval Packet",
+        "Release Readiness Record",
+        "Rollback Plan",
+        "Release Window Details"
+      ],
+      "outputArtifacts": [
+        "Approval Decision Record",
+        "Release Authorization",
+        "Approver Comments Log"
+      ]
     },
     {
       "name": "Release Execution",
       "type": "DELIVERY",
       "phase": "RELEASE",
       "agent": "DevOps",
-      "handoffTo": "Capability Owning Agent"
+      "handoffTo": "Capability Owning Agent",
+      "inputArtifacts": [
+        "Deployment Authorization Packet",
+        "Release Authorization",
+        "Deployment Plan",
+        "Rollback Plan"
+      ],
+      "outputArtifacts": [
+        "Deployment Summary",
+        "Production Verification Report",
+        "Release Notes",
+        "Hypercare Handoff"
+      ]
     }
   ]
 }

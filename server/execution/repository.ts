@@ -30,6 +30,18 @@ const asIso = (value: unknown) =>
 const asJson = <T>(value: unknown, fallback: T): T =>
   value && typeof value === 'object' ? (value as T) : fallback;
 
+const serializeJson = (value: unknown, fallback?: unknown) => {
+  if (value === undefined) {
+    return fallback === undefined ? null : JSON.stringify(fallback);
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  return JSON.stringify(value);
+};
+
 const createId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 
@@ -167,43 +179,41 @@ const getRunDetailTx = async (
   capabilityId: string,
   runId: string,
 ): Promise<WorkflowRunDetail> => {
-  const [runResult, stepResult, waitResult, toolResult] = await Promise.all([
-    client.query(
-      `
-        SELECT *
-        FROM capability_workflow_runs
-        WHERE capability_id = $1 AND id = $2
-      `,
-      [capabilityId, runId],
-    ),
-    client.query(
-      `
-        SELECT *
-        FROM capability_workflow_run_steps
-        WHERE capability_id = $1 AND run_id = $2
-        ORDER BY step_index ASC, created_at ASC
-      `,
-      [capabilityId, runId],
-    ),
-    client.query(
-      `
-        SELECT *
-        FROM capability_run_waits
-        WHERE capability_id = $1 AND run_id = $2
-        ORDER BY created_at ASC, id ASC
-      `,
-      [capabilityId, runId],
-    ),
-    client.query(
-      `
-        SELECT *
-        FROM capability_tool_invocations
-        WHERE capability_id = $1 AND run_id = $2
-        ORDER BY created_at ASC, id ASC
-      `,
-      [capabilityId, runId],
-    ),
-  ]);
+  const runResult = await client.query(
+    `
+      SELECT *
+      FROM capability_workflow_runs
+      WHERE capability_id = $1 AND id = $2
+    `,
+    [capabilityId, runId],
+  );
+  const stepResult = await client.query(
+    `
+      SELECT *
+      FROM capability_workflow_run_steps
+      WHERE capability_id = $1 AND run_id = $2
+      ORDER BY step_index ASC, created_at ASC
+    `,
+    [capabilityId, runId],
+  );
+  const waitResult = await client.query(
+    `
+      SELECT *
+      FROM capability_run_waits
+      WHERE capability_id = $1 AND run_id = $2
+      ORDER BY created_at ASC, id ASC
+    `,
+    [capabilityId, runId],
+  );
+  const toolResult = await client.query(
+    `
+      SELECT *
+      FROM capability_tool_invocations
+      WHERE capability_id = $1 AND run_id = $2
+      ORDER BY created_at ASC, id ASC
+    `,
+    [capabilityId, runId],
+  );
 
   if (!runResult.rowCount) {
     throw new Error(`Workflow run ${runId} was not found.`);
@@ -585,7 +595,7 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
         run.currentStepId || null,
         run.currentPhase || null,
         run.assignedAgentId || null,
-        run.branchState || {},
+        serializeJson(run.branchState, {}),
         run.pauseReason || null,
         run.currentWaitId || null,
         run.terminalOutcome || null,
@@ -634,10 +644,10 @@ export const updateWorkflowRunStep = async (
         step.outputSummary || null,
         step.waitId || null,
         step.lastToolInvocationId || null,
-        step.retrievalReferences || [],
+        serializeJson(step.retrievalReferences, []),
         step.startedAt || null,
         step.completedAt || null,
-        step.metadata || null,
+        serializeJson(step.metadata),
       ],
     );
 
@@ -678,7 +688,7 @@ export const insertRunEvent = async (event: RunEvent): Promise<RunEvent> => {
       event.runStepId || null,
       event.toolInvocationId || null,
       event.spanId || null,
-      event.details || null,
+      serializeJson(event.details),
     ],
   );
 
@@ -734,7 +744,7 @@ export const createRunWait = async (
       wait.spanId || null,
       wait.resolution || null,
       wait.resolvedBy || null,
-      wait.payload || null,
+      serializeJson(wait.payload),
       wait.createdAt || new Date().toISOString(),
       wait.resolvedAt || null,
     ],
@@ -806,7 +816,7 @@ export const createToolInvocation = async (
         created_at,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW())
       RETURNING *
     `,
     [
@@ -818,7 +828,7 @@ export const createToolInvocation = async (
       invocation.spanId || null,
       invocation.toolId,
       invocation.status,
-      invocation.request,
+      serializeJson(invocation.request, {}),
       invocation.resultSummary || null,
       invocation.workingDirectory || null,
       invocation.exitCode ?? null,
@@ -867,7 +877,7 @@ export const updateToolInvocation = async (
       invocation.capabilityId,
       invocation.id,
       invocation.status,
-      invocation.request,
+      serializeJson(invocation.request, {}),
       invocation.resultSummary || null,
       invocation.workingDirectory || null,
       invocation.exitCode ?? null,

@@ -1,0 +1,348 @@
+import type {
+  AgentLearningProfileDetail,
+  CapabilityAgent,
+} from '../../src/types';
+import { requestGitHubModel } from '../githubModels';
+import {
+  getCapabilityMemoryCorpus,
+  listMemoryDocuments,
+  refreshCapabilityMemory,
+} from '../memory';
+import { getCapabilityBundle } from '../repository';
+import {
+  type AgentLearningJobRecord,
+  getAgentLearningProfile,
+  listAgentSessionSummaries,
+  listAgentsNeedingLearning,
+  queueAgentLearningJob,
+  updateAgentLearningJob,
+  upsertAgentLearningProfile,
+} from './repository';
+
+const tokenize = (value: string) =>
+  value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map(token => token.trim())
+    .filter(token => token.length > 2);
+
+const unique = (values: string[]) => [...new Set(values.filter(Boolean))];
+
+const extractJsonObject = (value: string) => {
+  const start = value.indexOf('{');
+  const end = value.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error('Learning summarizer did not return JSON.');
+  }
+
+  return JSON.parse(value.slice(start, end + 1)) as {
+    summary?: string;
+    highlights?: string[];
+    contextBlock?: string;
+  };
+};
+
+const buildAgentKeywordSet = (agent: CapabilityAgent) =>
+  new Set(
+    unique(
+      [
+        agent.name,
+        agent.role,
+        agent.objective,
+        agent.systemPrompt,
+        ...(agent.skillIds || []),
+        ...(agent.learningNotes || []),
+        ...(agent.documentationSources || []),
+        ...(agent.inputArtifacts || []),
+        ...(agent.outputArtifacts || []),
+      ].flatMap(value => tokenize(value || '')),
+    ),
+  );
+
+const getSourceWeight = (sourceType?: string) => {
+  switch (sourceType) {
+    case 'ARTIFACT':
+      return 60;
+    case 'HANDOFF':
+      return 56;
+    case 'HUMAN_INTERACTION':
+      return 52;
+    case 'WORK_ITEM':
+      return 36;
+    case 'CAPABILITY_METADATA':
+      return 32;
+    case 'REPOSITORY_FILE':
+      return 28;
+    case 'CHAT_SESSION':
+      return 20;
+    default:
+      return 12;
+  }
+};
+
+const rankCorpusForAgent = (
+  agent: CapabilityAgent,
+  corpus: Awaited<ReturnType<typeof getCapabilityMemoryCorpus>>,
+) => {
+  const keywords = buildAgentKeywordSet(agent);
+
+  return [...corpus]
+    .map(item => {
+      const text = `${item.document.title}\n${item.document.contentPreview}\n${item.combinedContent}`;
+      const tokens = tokenize(text);
+      const overlap = tokens.reduce(
+        (count, token) => count + (keywords.has(token) ? 1 : 0),
+        0,
+      );
+      const artifactBias =
+        item.document.metadata?.artifactId ||
+        item.document.sourceType === 'ARTIFACT' ||
+        item.document.sourceType === 'HANDOFF' ||
+        item.document.sourceType === 'HUMAN_INTERACTION'
+          ? 8
+          : 0;
+
+      return {
+        ...item,
+        score: getSourceWeight(item.document.sourceType) + overlap + artifactBias,
+      };
+    })
+    .sort((left, right) => right.score - left.score);
+};
+
+const summarizeAgentLearning = async ({
+  agent,
+  selectedCorpus,
+}: {
+  agent: CapabilityAgent;
+  selectedCorpus: Awaited<ReturnType<typeof getCapabilityMemoryCorpus>>;
+}) => {
+  const payload = selectedCorpus
+    .map((item, index) =>
+      [
+        `[Source ${index + 1}] ${item.document.title}`,
+        `Type: ${item.document.sourceType} / ${item.document.tier}`,
+        `Preview: ${item.document.contentPreview}`,
+        `Content: ${item.combinedContent.slice(0, 1800)}`,
+      ].join('\n'),
+    )
+    .join('\n\n');
+
+  const response = await requestGitHubModel({
+    model: agent.model,
+    timeoutMs: 15000,
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You build concise learning profiles for enterprise delivery agents. Return strict JSON only.',
+      },
+      {
+        role: 'user',
+        content: [
+          `Agent name: ${agent.name}`,
+          `Agent role: ${agent.role}`,
+          `Objective: ${agent.objective}`,
+          `Input artifacts: ${(agent.inputArtifacts || []).join(', ') || 'None'}`,
+          `Output artifacts: ${(agent.outputArtifacts || []).join(', ') || 'None'}`,
+          `Documentation sources: ${(agent.documentationSources || []).join(', ') || 'None'}`,
+          '',
+          'Using the source material below, produce JSON with this shape:',
+          '{"summary":"...","highlights":["..."],"contextBlock":"..."}',
+          '',
+          'Rules:',
+          '- summary: 2-3 sentences',
+          '- highlights: 5 to 8 short bullets as strings',
+          '- contextBlock: a compact reusable context block for future Copilot sessions',
+          '- focus on capability-specific knowledge, constraints, artifacts, and operating context',
+          '- do not invent facts outside the sources',
+          '',
+          payload,
+        ].join('\n'),
+      },
+    ],
+  });
+
+  return extractJsonObject(response.content);
+};
+
+export const queueCapabilityAgentLearningRefresh = async (
+  capabilityId: string,
+  requestReason: string,
+) => {
+  const bundle = await getCapabilityBundle(capabilityId);
+  await Promise.all(
+    bundle.workspace.agents.map(agent =>
+      queueAgentLearningJob({
+        capabilityId,
+        agentId: agent.id,
+        requestReason,
+        makeStale: true,
+      }),
+    ),
+  );
+};
+
+export const queueSingleAgentLearningRefresh = async (
+  capabilityId: string,
+  agentId: string,
+  requestReason: string,
+) =>
+  queueAgentLearningJob({
+    capabilityId,
+    agentId,
+    requestReason,
+    makeStale: true,
+  });
+
+export const getAgentLearningProfileDetail = async (
+  capabilityId: string,
+  agentId: string,
+): Promise<AgentLearningProfileDetail> => {
+  const bundle = await getCapabilityBundle(capabilityId);
+  const agent = bundle.workspace.agents.find(current => current.id === agentId);
+  if (!agent) {
+    throw new Error(`Agent ${agentId} was not found in capability ${capabilityId}.`);
+  }
+
+  const profile = await getAgentLearningProfile(capabilityId, agentId);
+
+  return {
+    capabilityId,
+    agentId,
+    profile,
+    documents: profile.sourceDocumentIds.length
+      ? (await listMemoryDocuments(capabilityId)).filter(document =>
+          profile.sourceDocumentIds.includes(document.id),
+        )
+      : [],
+    sessions: await listAgentSessionSummaries(capabilityId, agentId),
+  };
+};
+
+export const ensureAgentLearningBackfill = async () => {
+  const missing = await listAgentsNeedingLearning();
+  await Promise.all(
+    missing.map(agent =>
+      queueAgentLearningJob({
+        capabilityId: agent.capabilityId,
+        agentId: agent.agentId,
+        requestReason: 'startup-backfill',
+      }),
+    ),
+  );
+  return missing.length;
+};
+
+export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
+  const capabilityId = job.capabilityId;
+  const bundle = await getCapabilityBundle(capabilityId);
+  const agent = bundle.workspace.agents.find(current => current.id === job.agentId);
+
+  if (!agent) {
+    await updateAgentLearningJob({
+      ...job,
+      status: 'FAILED',
+      error: `Agent ${job.agentId} was not found.`,
+      completedAt: new Date().toISOString(),
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+    });
+    return;
+  }
+
+  await upsertAgentLearningProfile({
+    capabilityId,
+    agentId: agent.id,
+    profile: {
+      ...agent.learningProfile,
+      status: 'LEARNING',
+      lastRequestedAt: job.requestedAt,
+      lastError: undefined,
+    },
+  });
+
+  try {
+    await refreshCapabilityMemory(capabilityId, {
+      requeueAgents: false,
+      requestReason: `agent-learning:${agent.id}`,
+    });
+
+    const corpus = await getCapabilityMemoryCorpus(capabilityId);
+    const ranked = rankCorpusForAgent(agent, corpus);
+    const selected = ranked.slice(0, Math.min(12, ranked.length));
+
+    const summarized =
+      selected.length > 0
+        ? await summarizeAgentLearning({
+            agent,
+            selectedCorpus: selected,
+          })
+        : {
+            summary: `${agent.name} does not have capability memory sources available yet.`,
+            highlights: ['No indexed capability artifacts or documents were available.'],
+            contextBlock:
+              'No indexed capability memory was available yet. Ask for updated capability artifacts or refresh learning after documents are added.',
+          };
+
+    const sourceDocumentIds = selected.map(item => item.document.id);
+    const sourceArtifactIds = unique(
+      selected
+        .map(item =>
+          typeof item.document.metadata?.artifactId === 'string'
+            ? item.document.metadata.artifactId
+            : undefined,
+        )
+        .filter(Boolean) as string[],
+    );
+
+    await upsertAgentLearningProfile({
+      capabilityId,
+      agentId: agent.id,
+      profile: {
+        status: 'READY',
+        summary: summarized.summary?.trim() || '',
+        highlights: (summarized.highlights || []).map(item => item.trim()).filter(Boolean).slice(0, 8),
+        contextBlock: summarized.contextBlock?.trim() || '',
+        sourceDocumentIds,
+        sourceArtifactIds,
+        sourceCount: selected.length,
+        refreshedAt: new Date().toISOString(),
+        lastRequestedAt: job.requestedAt,
+      },
+    });
+
+    await updateAgentLearningJob({
+      ...job,
+      status: 'COMPLETED',
+      completedAt: new Date().toISOString(),
+      error: undefined,
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Agent learning failed unexpectedly.';
+
+    await upsertAgentLearningProfile({
+      capabilityId,
+      agentId: agent.id,
+      profile: {
+        ...agent.learningProfile,
+        status: 'ERROR',
+        lastRequestedAt: job.requestedAt,
+        lastError: message,
+      },
+    });
+
+    await updateAgentLearningJob({
+      ...job,
+      status: 'FAILED',
+      completedAt: new Date().toISOString(),
+      error: message,
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+    });
+    throw error;
+  }
+};

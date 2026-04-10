@@ -5,7 +5,11 @@ import {
   renewRunLease,
   updateWorkflowRun,
 } from './repository';
-import { processWorkflowRun } from './service';
+import { processWorkflowRun, reconcileWorkflowRunFailure } from './service';
+import {
+  GitHubProviderRateLimitError,
+  isGitHubProviderRateLimitError,
+} from '../githubModels';
 
 const LEASE_MS = 30000;
 const HEARTBEAT_MS = 10000;
@@ -19,6 +23,8 @@ const workerId = `exec-worker-${process.pid}-${Math.random()
 let pollTimer: NodeJS.Timeout | null = null;
 let wakeTimer: NodeJS.Timeout | null = null;
 let processing = false;
+
+const clampRetryDelayMs = (value?: number) => Math.min(Math.max(value || 30_000, 5_000), 120_000);
 
 const runOnce = async () => {
   if (processing) {
@@ -48,21 +54,36 @@ const runOnce = async () => {
           const detail = await getWorkflowRunDetail(run.capabilityId, run.id);
           await processWorkflowRun(detail);
         } catch (error) {
+          if (isGitHubProviderRateLimitError(error)) {
+            const retryAfterMs = clampRetryDelayMs(
+              error instanceof GitHubProviderRateLimitError ? error.retryAfterMs : undefined,
+            );
+            const retryAt = new Date(Date.now() + retryAfterMs).toISOString();
+
+            await updateWorkflowRun({
+              ...run,
+              status: 'RUNNING',
+              terminalOutcome: undefined,
+              completedAt: undefined,
+              leaseOwner: undefined,
+              leaseExpiresAt: retryAt,
+            }).catch(() => undefined);
+
+            console.warn(
+              `Workflow run ${run.id} hit a provider rate limit. Retrying after ${retryAt}.`,
+              error,
+            );
+            return;
+          }
+
           const message =
             error instanceof Error
               ? error.message
               : 'Workflow execution failed unexpectedly.';
-          await updateWorkflowRun({
-            ...run,
-            status: 'FAILED',
-            terminalOutcome: message,
-            completedAt: new Date().toISOString(),
-            leaseOwner: undefined,
-            leaseExpiresAt: undefined,
-          }).catch(() => undefined);
-          await releaseRunLease({
+          await reconcileWorkflowRunFailure({
             capabilityId: run.capabilityId,
             runId: run.id,
+            message,
           }).catch(() => undefined);
           console.error(`Workflow run ${run.id} failed.`, error);
         } finally {

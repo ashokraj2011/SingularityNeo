@@ -4,8 +4,10 @@ import {
   Database,
   RefreshCw,
   Search,
+  Bot,
 } from 'lucide-react';
 import {
+  fetchAgentLearningProfile,
   fetchMemoryDocuments,
   refreshCapabilityMemoryIndex,
   searchCapabilityMemory,
@@ -21,7 +23,7 @@ import {
   Toolbar,
 } from '../components/EnterpriseUI';
 import { formatEnumLabel } from '../lib/enterprise';
-import type { MemoryDocument, MemorySearchResult } from '../types';
+import type { AgentLearningProfileDetail, MemoryDocument, MemorySearchResult } from '../types';
 
 const formatTimestamp = (value?: string) => {
   if (!value) {
@@ -40,10 +42,13 @@ const formatTimestamp = (value?: string) => {
 };
 
 const MemoryExplorer = () => {
-  const { activeCapability } = useCapability();
+  const { activeCapability, getCapabilityWorkspace } = useCapability();
   const { success } = useToast();
+  const workspace = getCapabilityWorkspace(activeCapability.id);
   const [documents, setDocuments] = useState<MemoryDocument[]>([]);
   const [results, setResults] = useState<MemorySearchResult[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState('');
+  const [learningDetail, setLearningDetail] = useState<AgentLearningProfileDetail | null>(null);
   const [query, setQuery] = useState('');
   const [selectedDocumentId, setSelectedDocumentId] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -52,7 +57,10 @@ const MemoryExplorer = () => {
 
   const loadDocuments = async () => {
     try {
-      const nextDocuments = await fetchMemoryDocuments(activeCapability.id);
+      const nextDocuments = await fetchMemoryDocuments(
+        activeCapability.id,
+        selectedAgentId || undefined,
+      );
       setDocuments(nextDocuments);
       setSelectedDocumentId(current => current || nextDocuments[0]?.id || '');
       setError('');
@@ -65,11 +73,35 @@ const MemoryExplorer = () => {
     }
   };
 
+  const loadLearningDetail = async () => {
+    if (!selectedAgentId) {
+      setLearningDetail(null);
+      return;
+    }
+
+    try {
+      setLearningDetail(
+        await fetchAgentLearningProfile(activeCapability.id, selectedAgentId),
+      );
+    } catch (nextError) {
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : 'Unable to load agent learning profile.',
+      );
+    }
+  };
+
+  useEffect(() => {
+    setSelectedAgentId('');
+  }, [activeCapability.id]);
+
   useEffect(() => {
     void loadDocuments();
+    void loadLearningDetail();
     setResults([]);
     setQuery('');
-  }, [activeCapability.id]);
+  }, [activeCapability.id, selectedAgentId]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -104,6 +136,8 @@ const MemoryExplorer = () => {
       const nextResults = await searchCapabilityMemory(
         activeCapability.id,
         query.trim(),
+        8,
+        selectedAgentId || undefined,
       );
       setResults(nextResults);
       setSelectedDocumentId(nextResults[0]?.document.id || '');
@@ -131,6 +165,9 @@ const MemoryExplorer = () => {
     () => results.find(result => result.document.id === selectedDocumentId) || null,
     [results, selectedDocumentId],
   );
+
+  const selectedAgent =
+    workspace.agents.find(agent => agent.id === selectedAgentId) || null;
 
   return (
     <div className="space-y-6">
@@ -181,7 +218,22 @@ const MemoryExplorer = () => {
         description="Search across capability memory and inspect the exact document/chunk provenance used by the backend."
         icon={Search}
       >
-        <Toolbar className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+        <Toolbar className="grid gap-3 md:grid-cols-[220px_minmax(0,1fr)_auto]">
+          <label className="space-y-2">
+            <span className="form-kicker">Agent View</span>
+            <select
+              value={selectedAgentId}
+              onChange={event => setSelectedAgentId(event.target.value)}
+              className="field-select"
+            >
+              <option value="">All capability memory</option>
+              {workspace.agents.map(agent => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="space-y-2">
             <span className="form-kicker">Search Memory</span>
             <input
@@ -270,11 +322,125 @@ const MemoryExplorer = () => {
         </SectionCard>
 
         <SectionCard
-          title="Selected Memory"
-          description="Inspect provenance, freshness, and the exact chunk text returned to the runtime."
+          title={selectedAgent ? `${selectedAgent.name} Learning View` : 'Selected Memory'}
+          description={
+            selectedAgent
+              ? 'See the learned summary, context block, session scopes, and selected source provenance for this agent.'
+              : 'Inspect provenance, freshness, and the exact chunk text returned to the runtime.'
+          }
           icon={Database}
         >
-          {selectedDocument ? (
+          {selectedAgent ? (
+            <div className="space-y-5">
+              <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-4">
+                <div className="flex items-center gap-2">
+                  <Bot size={15} className="text-primary" />
+                  <p className="form-kicker">Learning Status</p>
+                </div>
+                <p className="mt-3 text-base font-semibold text-on-surface">
+                  {formatEnumLabel(
+                    learningDetail?.profile.status || selectedAgent.learningProfile.status,
+                  )}
+                </p>
+                <p className="mt-2 text-sm text-secondary">
+                  {learningDetail?.profile.summary ||
+                    selectedAgent.learningProfile.summary ||
+                    'This agent has not produced a learned summary yet.'}
+                </p>
+              </div>
+
+              <KeyValueList
+                items={[
+                  {
+                    label: 'Source Count',
+                    value: String(
+                      learningDetail?.profile.sourceCount ||
+                        selectedAgent.learningProfile.sourceCount ||
+                        0,
+                    ),
+                  },
+                  {
+                    label: 'Highlights',
+                    value: String(
+                      learningDetail?.profile.highlights.length ||
+                        selectedAgent.learningProfile.highlights.length ||
+                        0,
+                    ),
+                  },
+                  {
+                    label: 'Refreshed',
+                    value: formatTimestamp(
+                      learningDetail?.profile.refreshedAt ||
+                        selectedAgent.learningProfile.refreshedAt,
+                    ),
+                  },
+                  {
+                    label: 'Session Scopes',
+                    value: String(
+                      learningDetail?.sessions.length ||
+                        selectedAgent.sessionSummaries.length ||
+                        0,
+                    ),
+                  },
+                ]}
+              />
+
+              <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-4">
+                <p className="form-kicker">Context Block</p>
+                <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-secondary">
+                  {learningDetail?.profile.contextBlock ||
+                    selectedAgent.learningProfile.contextBlock ||
+                    'No reusable context block has been generated yet.'}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-4">
+                <p className="form-kicker">Highlights</p>
+                {(learningDetail?.profile.highlights ||
+                  selectedAgent.learningProfile.highlights ||
+                  []
+                ).length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    {(learningDetail?.profile.highlights ||
+                      selectedAgent.learningProfile.highlights ||
+                      []
+                    ).map(highlight => (
+                      <p key={highlight} className="text-sm text-secondary">
+                        {highlight}
+                      </p>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm text-secondary">
+                    Learning highlights will appear here after the background refresh completes.
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-4">
+                <p className="form-kicker">Resumable Sessions</p>
+                {(learningDetail?.sessions || selectedAgent.sessionSummaries).length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    {(learningDetail?.sessions || selectedAgent.sessionSummaries).map(session => (
+                      <div key={`${session.scope}:${session.scopeId || 'general'}`} className="rounded-2xl bg-white px-3 py-3">
+                        <p className="text-sm font-semibold text-on-surface">
+                          {formatEnumLabel(session.scope)}
+                          {session.scopeId ? ` · ${session.scopeId}` : ''}
+                        </p>
+                        <p className="text-xs text-secondary">
+                          {session.requestCount} requests · {session.totalTokens.toLocaleString()} tokens · {formatTimestamp(session.lastUsedAt)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm text-secondary">
+                    No resumable Copilot sessions have been persisted for this agent yet.
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : selectedDocument ? (
             <div className="space-y-5">
               <KeyValueList
                 items={[

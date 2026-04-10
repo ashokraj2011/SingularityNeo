@@ -97,6 +97,71 @@ const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS capability_agent_learning_profiles (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'NOT_STARTED',
+      summary TEXT NOT NULL DEFAULT '',
+      highlights JSONB NOT NULL DEFAULT '[]'::jsonb,
+      context_block TEXT NOT NULL DEFAULT '',
+      source_document_ids TEXT[] NOT NULL DEFAULT '{}',
+      source_artifact_ids TEXT[] NOT NULL DEFAULT '{}',
+      source_count INTEGER NOT NULL DEFAULT 0,
+      refreshed_at TIMESTAMPTZ,
+      last_requested_at TIMESTAMPTZ,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, agent_id),
+      FOREIGN KEY (capability_id, agent_id)
+        REFERENCES capability_agents(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_agent_learning_jobs (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      request_reason TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_expires_at TIMESTAMPTZ,
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, agent_id)
+        REFERENCES capability_agents(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_agent_sessions (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      scope_id TEXT NOT NULL DEFAULT '',
+      session_id TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      model TEXT NOT NULL,
+      request_count INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, agent_id)
+        REFERENCES capability_agents(capability_id, id)
+        ON DELETE CASCADE,
+      UNIQUE (capability_id, agent_id, scope, scope_id, fingerprint)
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS capability_messages (
       capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
       id TEXT NOT NULL,
@@ -917,6 +982,18 @@ const migrationStatements = [
   `
     CREATE INDEX IF NOT EXISTS capability_eval_runs_suite_idx
     ON capability_eval_runs (capability_id, suite_id, created_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_agent_learning_jobs_status_idx
+    ON capability_agent_learning_jobs (status, requested_at ASC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_agent_learning_jobs_agent_idx
+    ON capability_agent_learning_jobs (capability_id, agent_id, created_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_agent_sessions_agent_idx
+    ON capability_agent_sessions (capability_id, agent_id, last_used_at DESC)
   `,
 ];
 

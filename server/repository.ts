@@ -31,11 +31,16 @@ import {
   buildOwnerAgent,
   buildSeededAgents,
   buildWelcomeMessage,
+  createDefaultAgentLearningProfile,
   materializeWorkspace,
 } from './workspace';
 import { getDefaultCapabilityWorkflows } from '../src/lib/standardWorkflow';
 import { normalizeExecutionConfig } from '../src/lib/executionConfig';
 import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../src/lib/workflowGraph';
+import {
+  listAgentLearningProfilesTx,
+  listAgentSessionSummariesTx,
+} from './agentLearning/repository';
 
 type CapabilityBundle = {
   capability: Capability;
@@ -106,9 +111,13 @@ const agentFromRow = (row: Record<string, any>): CapabilityAgent => ({
   isBuiltIn: Boolean(row.is_built_in),
   learningNotes: asStringArray(row.learning_notes),
   skillIds: asStringArray(row.skill_ids),
-  provider: row.provider,
+  provider: process.env.COPILOT_CLI_URL?.trim()
+    ? 'GitHub Copilot SDK'
+    : row.provider,
   model: row.model,
   tokenLimit: Number(row.token_limit || 0),
+  learningProfile: createDefaultAgentLearningProfile(),
+  sessionSummaries: [],
   usage: {
     requestCount: 0,
     promptTokens: 0,
@@ -1056,64 +1065,61 @@ const repairWorkItemProjectionsTx = async (client: PoolClient) => {
   );
 
   for (const missing of missingResult.rows) {
-    const [runResult, firstTaskResult, runEventResult, waitResult, workflowFallbackResult] =
-      await Promise.all([
-        client.query(
-          `
-            SELECT *
-            FROM capability_workflow_runs
-            WHERE capability_id = $1 AND work_item_id = $2
-            ORDER BY attempt_number DESC, created_at DESC
-            LIMIT 1
-          `,
-          [missing.capability_id, missing.work_item_id],
-        ),
-        client.query(
-          `
-            SELECT *
-            FROM capability_tasks
-            WHERE capability_id = $1 AND work_item_id = $2
-            ORDER BY created_at ASC, id ASC
-            LIMIT 1
-          `,
-          [missing.capability_id, missing.work_item_id],
-        ),
-        client.query(
-          `
-            SELECT *
-            FROM capability_run_events
-            WHERE capability_id = $1 AND work_item_id = $2 AND type = 'RUN_CREATED'
-            ORDER BY created_at ASC, id ASC
-            LIMIT 1
-          `,
-          [missing.capability_id, missing.work_item_id],
-        ),
-        client.query(
-          `
-            SELECT waits.*
-            FROM capability_workflow_runs runs
-            JOIN capability_run_waits waits
-              ON waits.capability_id = runs.capability_id
-             AND waits.run_id = runs.id
-            WHERE runs.capability_id = $1
-              AND runs.work_item_id = $2
-              AND waits.status = 'OPEN'
-            ORDER BY waits.created_at DESC, waits.id DESC
-            LIMIT 1
-          `,
-          [missing.capability_id, missing.work_item_id],
-        ),
-        client.query(
-          `
-            SELECT id
-            FROM capability_workflows
-            WHERE capability_id = $1
-            ORDER BY created_at ASC, id ASC
-            LIMIT 1
-          `,
-          [missing.capability_id],
-        ),
-      ]);
+    const runResult = await client.query(
+      `
+        SELECT *
+        FROM capability_workflow_runs
+        WHERE capability_id = $1 AND work_item_id = $2
+        ORDER BY attempt_number DESC, created_at DESC
+        LIMIT 1
+      `,
+      [missing.capability_id, missing.work_item_id],
+    );
+    const firstTaskResult = await client.query(
+      `
+        SELECT *
+        FROM capability_tasks
+        WHERE capability_id = $1 AND work_item_id = $2
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+      `,
+      [missing.capability_id, missing.work_item_id],
+    );
+    const runEventResult = await client.query(
+      `
+        SELECT *
+        FROM capability_run_events
+        WHERE capability_id = $1 AND work_item_id = $2 AND type = 'RUN_CREATED'
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+      `,
+      [missing.capability_id, missing.work_item_id],
+    );
+    const waitResult = await client.query(
+      `
+        SELECT waits.*
+        FROM capability_workflow_runs runs
+        JOIN capability_run_waits waits
+          ON waits.capability_id = runs.capability_id
+         AND waits.run_id = runs.id
+        WHERE runs.capability_id = $1
+          AND runs.work_item_id = $2
+          AND waits.status = 'OPEN'
+        ORDER BY waits.created_at DESC, waits.id DESC
+        LIMIT 1
+      `,
+      [missing.capability_id, missing.work_item_id],
+    );
+    const workflowFallbackResult = await client.query(
+      `
+        SELECT id
+        FROM capability_workflows
+        WHERE capability_id = $1
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+      `,
+      [missing.capability_id],
+    );
 
     const latestRun = runResult.rows[0];
     const firstTask = firstTaskResult.rows[0];
@@ -1330,8 +1336,16 @@ const getCapabilityWorkspaceTx = async (
     `,
     [capability.id],
   );
+  const learningProfilesByAgent = await listAgentLearningProfilesTx(client, capability.id);
+  const sessionSummariesByAgent = await listAgentSessionSummariesTx(client, capability.id);
 
-  const agents = agentResult.rows.map(agentFromRow);
+  const agents = agentResult.rows.map(agentFromRow).map(agent => ({
+    ...agent,
+    learningProfile:
+      learningProfilesByAgent.get(agent.id) || agent.learningProfile,
+    sessionSummaries:
+      sessionSummariesByAgent.get(agent.id) || agent.sessionSummaries,
+  }));
   const tasks = taskResult.rows.map(taskFromRow);
   const executionLogs = logResult.rows.map(executionLogFromRow);
 

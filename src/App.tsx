@@ -1,11 +1,12 @@
 import { Suspense, lazy } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { Layout } from './components/Layout';
+import ErrorBoundary from './components/ErrorBoundary';
 import { CapabilityProvider } from './context/CapabilityContext';
 import { ToastProvider } from './context/ToastContext';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
-const Designer = lazy(() => import('./pages/Designer'));
+const WorkflowDesignerNeo = lazy(() => import('./pages/WorkflowDesignerNeo'));
 const Tasks = lazy(() => import('./pages/Tasks'));
 const Ledger = lazy(() => import('./pages/Ledger'));
 const Team = lazy(() => import('./pages/Team'));
@@ -47,26 +48,29 @@ export default function App() {
       <CapabilityProvider>
         <Router>
           <Layout>
-            <Suspense fallback={<RouteLoader />}>
-              <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/designer" element={<Designer />} />
-                <Route path="/tasks" element={<Tasks />} />
-                <Route path="/ledger" element={<Ledger />} />
-                <Route path="/team" element={<Team />} />
-                <Route path="/skills" element={<SkillLibrary />} />
-                <Route path="/studio" element={<Studio />} />
-                <Route path="/chat" element={<Chat />} />
-                <Route path="/orchestrator" element={<Orchestrator />} />
-                <Route path="/artifact-designer" element={<ArtifactDesigner />} />
-                <Route path="/capabilities/new" element={<CapabilitySetup />} />
-                <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
-                <Route path="/run-console" element={<RunConsole />} />
-                <Route path="/memory" element={<MemoryExplorer />} />
-                <Route path="/evals" element={<EvalCenter />} />
-                <Route path="*" element={<Dashboard />} />
-              </Routes>
-            </Suspense>
+            <ErrorBoundary>
+              <Suspense fallback={<RouteLoader />}>
+                <Routes>
+                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/designer" element={<WorkflowDesignerNeo />} />
+                  <Route path="/workflow-designer-neo" element={<WorkflowDesignerNeo />} />
+                  <Route path="/tasks" element={<Tasks />} />
+                  <Route path="/ledger" element={<Ledger />} />
+                  <Route path="/team" element={<Team />} />
+                  <Route path="/skills" element={<SkillLibrary />} />
+                  <Route path="/studio" element={<Studio />} />
+                  <Route path="/chat" element={<Chat />} />
+                  <Route path="/orchestrator" element={<Orchestrator />} />
+                  <Route path="/artifact-designer" element={<ArtifactDesigner />} />
+                  <Route path="/capabilities/new" element={<CapabilitySetup />} />
+                  <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
+                  <Route path="/run-console" element={<RunConsole />} />
+                  <Route path="/memory" element={<MemoryExplorer />} />
+                  <Route path="/evals" element={<EvalCenter />} />
+                  <Route path="*" element={<Dashboard />} />
+                </Routes>
+              </Suspense>
+            </ErrorBoundary>
           </Layout>
         </Router>
       </CapabilityProvider>

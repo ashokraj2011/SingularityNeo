@@ -1,6 +1,7 @@
-import React, { useMemo, useState, useTransition } from 'react';
+import React, { useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import {
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   Bot,
@@ -25,9 +26,10 @@ const slugify = (value: string) =>
 
 export default function CapabilitySetup() {
   const navigate = useNavigate();
-  const { capabilities, createCapability } = useCapability();
-  const { success } = useToast();
-  const [isSaving, startTransition] = useTransition();
+  const { bootStatus, capabilities, createCapability, lastSyncError } = useCapability();
+  const { success, error: showError } = useToast();
+  const [isSaving, setIsSaving] = useState(false);
+  const [submitError, setSubmitError] = useState('');
   const [form, setForm] = useState({
     name: '',
     domain: '',
@@ -53,14 +55,16 @@ export default function CapabilitySetup() {
     setForm(prev => ({ ...prev, [field]: value }));
   };
 
-  const handleCreate = (event: React.FormEvent) => {
+  const handleCreate = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!canCreate) {
       return;
     }
 
-    const capability: Capability = {
-      id: `CAP-${Math.random().toString().slice(2, 5)}`,
+    setIsSaving(true);
+    setSubmitError('');
+
+    const capability: Omit<Capability, 'id'> & { id?: string } = {
       name: form.name.trim(),
       domain: form.domain.trim(),
       parentCapabilityId: form.parentCapabilityId || undefined,
@@ -85,14 +89,23 @@ export default function CapabilitySetup() {
       skillLibrary: [],
     };
 
-    startTransition(() => {
-      createCapability(capability);
+    try {
+      const bundle = await createCapability(capability);
       success(
         'Capability created',
-        `${capability.name} is ready for metadata and team setup.`,
+        `${bundle.capability.name} is ready for metadata and team setup.`,
       );
       navigate('/capabilities/metadata');
-    });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to create the capability right now.';
+      setSubmitError(message);
+      showError('Capability creation failed', message);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -149,6 +162,13 @@ export default function CapabilitySetup() {
           </div>
 
           <div className="mt-8 grid gap-6 md:grid-cols-2">
+            {submitError ? (
+              <div className="md:col-span-2 flex items-start gap-3 rounded-2xl border border-error/15 bg-error/5 px-4 py-3 text-sm text-error">
+                <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+                <p>{submitError}</p>
+              </div>
+            ) : null}
+
             <label className="space-y-2">
               <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">Capability name</span>
               <input
@@ -223,7 +243,7 @@ export default function CapabilitySetup() {
             </div>
             <button
               type="submit"
-              disabled={!canCreate || isSaving}
+              disabled={!canCreate || isSaving || bootStatus !== 'ready'}
               className="inline-flex items-center gap-2 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {isSaving ? 'Creating...' : 'Create capability'}
@@ -233,6 +253,18 @@ export default function CapabilitySetup() {
         </motion.form>
 
         <aside className="space-y-4">
+          {bootStatus !== 'ready' ? (
+            <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-900">
+              <div className="flex items-start gap-3">
+                <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                <p>
+                  Capability creation is unavailable until the workspace finishes syncing with the backend.
+                  {lastSyncError ? ` ${lastSyncError}` : ''}
+                </p>
+              </div>
+            </div>
+          ) : null}
+
           <div className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
             <p className="text-[0.625rem] font-bold uppercase tracking-[0.25em] text-outline">What happens next</p>
             <div className="mt-4 space-y-3">

@@ -32,6 +32,8 @@ const isObject = (value: unknown): value is Record<string, any> =>
 
 export const isVisibleWorkflowNode = (nodeType: WorkflowNodeType) =>
   nodeType === 'DELIVERY' ||
+  nodeType === 'EVENT' ||
+  nodeType === 'ALERT' ||
   nodeType === 'GOVERNANCE_GATE' ||
   nodeType === 'HUMAN_APPROVAL' ||
   nodeType === 'RELEASE' ||
@@ -288,6 +290,7 @@ export const deriveWorkflowStepsFromGraph = (workflow: Workflow): WorkflowStep[]
         allowedToolIds: node.allowedToolIds,
         preferredWorkspacePath: node.preferredWorkspacePath,
         executionNotes: node.executionNotes,
+        artifactContract: node.artifactContract,
       } satisfies WorkflowStep;
     });
 };
@@ -322,6 +325,7 @@ const createLinearGraph = (workflow: Workflow): Workflow => {
       allowedToolIds: step.allowedToolIds,
       preferredWorkspacePath: step.preferredWorkspacePath,
       executionNotes: step.executionNotes,
+      artifactContract: step.artifactContract,
     })),
     {
       id: endNodeId,
@@ -736,6 +740,9 @@ export const createWorkflowNode = (
   preferredWorkspacePath: values.preferredWorkspacePath,
   executionNotes: values.executionNotes,
   etlConfig: values.etlConfig,
+  eventConfig: values.eventConfig,
+  alertConfig: values.alertConfig,
+  artifactContract: values.artifactContract,
 });
 
 export const createWorkflowEdge = (

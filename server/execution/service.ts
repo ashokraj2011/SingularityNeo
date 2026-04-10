@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   AgentTask,
   Artifact,
@@ -6,6 +8,7 @@ import {
   ExecutionLog,
   MemoryReference,
   RunWait,
+  RunEvent,
   RunWaitType,
   ToolAdapterId,
   Workflow,
@@ -38,10 +41,7 @@ import {
   isVisibleWorkflowNode,
   normalizeWorkflowGraph,
 } from '../../src/lib/workflowGraph';
-import {
-  buildCapabilitySystemPrompt,
-  requestGitHubModel,
-} from '../githubModels';
+import { invokeScopedCapabilitySession } from '../githubModels';
 import { buildMemoryContext, refreshCapabilityMemory } from '../memory';
 import { evaluateToolPolicy } from '../policy';
 import {
@@ -79,6 +79,86 @@ const MAX_AGENT_TOOL_LOOPS = 8;
 const createHistoryId = () => `HIST-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createLogId = () => `LOG-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createArtifactId = () => `ART-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+
+const normalizeDirectoryPath = (value: string) => {
+  const trimmed = value.trim();
+  return trimmed ? path.resolve(trimmed) : '';
+};
+
+const getCapabilityWorkspaceRoots = (capability: Capability) =>
+  Array.from(
+    new Set(
+      [
+        capability.executionConfig.defaultWorkspacePath,
+        ...(capability.executionConfig.allowedWorkspacePaths || []),
+        ...(capability.localDirectories || []),
+      ]
+        .map(value => normalizeDirectoryPath(value || ''))
+        .filter(Boolean),
+    ),
+  );
+
+const detectWorkspaceProfile = (workspaceRoots: string[]) => {
+  const sampledFiles: string[] = [];
+  let detectedStack = 'Generic text/code workspace';
+
+  for (const root of workspaceRoots) {
+    if (!root || !fs.existsSync(root)) {
+      continue;
+    }
+
+    const candidates = [
+      'pyproject.toml',
+      'requirements.txt',
+      'setup.py',
+      'Pipfile',
+      'pytest.ini',
+      'tox.ini',
+      'package.json',
+      'README.md',
+      'calculator.py',
+    ];
+
+    for (const relativePath of candidates) {
+      const absolutePath = path.join(root, relativePath);
+      if (fs.existsSync(absolutePath)) {
+        sampledFiles.push(relativePath);
+      }
+    }
+
+    const topLevel = fs.readdirSync(root, { withFileTypes: true }).slice(0, 80);
+    const nestedPythonEntry = topLevel.find(entry => {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) {
+        return false;
+      }
+      return fs.existsSync(path.join(root, entry.name, 'pyproject.toml')) ||
+        fs.existsSync(path.join(root, entry.name, 'requirements.txt')) ||
+        fs.existsSync(path.join(root, entry.name, 'setup.py')) ||
+        fs.existsSync(path.join(root, entry.name, 'calculator.py'));
+    });
+
+    if (nestedPythonEntry) {
+      const nestedRoot = nestedPythonEntry.name;
+      ['pyproject.toml', 'requirements.txt', 'setup.py', 'calculator.py', 'README.md'].forEach(file => {
+        if (fs.existsSync(path.join(root, nestedRoot, file))) {
+          sampledFiles.push(`${nestedRoot}/${file}`);
+        }
+      });
+    }
+  }
+
+  const dedupedFiles = Array.from(new Set(sampledFiles));
+  if (dedupedFiles.some(file => /(^|\/)(pyproject\.toml|requirements\.txt|setup\.py|Pipfile|calculator\.py)$/i.test(file))) {
+    detectedStack = 'Python workspace';
+  } else if (dedupedFiles.some(file => /(^|\/)package\.json$/i.test(file))) {
+    detectedStack = 'Node.js workspace';
+  }
+
+  return {
+    detectedStack,
+    sampledFiles: dedupedFiles.slice(0, 8),
+  };
+};
 
 type ExecutionDecision =
   | {
@@ -143,6 +223,100 @@ const formatTaskTimestamp = () =>
 
 const summarizeOutput = (value: string) =>
   value.replace(/\s+/g, ' ').trim().slice(0, 280);
+
+const compactMarkdownSummary = (value: string) =>
+  summarizeOutput(
+    value
+      .replace(/```[\s\S]*?```/g, match =>
+        match
+          .replace(/^```[\w-]*\n?/, '')
+          .replace(/```$/, '')
+          .trim(),
+      )
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/^>\s?/gm, '')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+      .replace(/^\s*[-*]\s+/gm, '')
+      .replace(/^\s*\d+\.\s+/gm, '')
+      .replace(/\|/g, ' ')
+      .replace(/^-{3,}$/gm, '')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  );
+
+const formatToolLabel = (toolId: ToolAdapterId) =>
+  toolId
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, character => character.toUpperCase());
+
+const buildDecisionProgressMessage = (decision: ExecutionDecision) => {
+  if (decision.action === 'invoke_tool') {
+    return `Prepared ${formatToolLabel(decision.toolCall.toolId)} for the next execution move.`;
+  }
+
+  if (decision.action === 'complete') {
+    return 'Prepared a completion update for this workflow step.';
+  }
+
+  if (decision.action === 'pause_for_input') {
+    return 'Prepared a human input request for this workflow step.';
+  }
+
+  if (decision.action === 'pause_for_approval') {
+    return 'Prepared an approval request for this workflow step.';
+  }
+
+  return 'Prepared a failure outcome for this workflow step.';
+};
+
+const emitRunProgressEvent = async ({
+  capabilityId,
+  runId,
+  workItemId,
+  runStepId,
+  toolInvocationId,
+  traceId,
+  spanId,
+  type = 'STEP_PROGRESS',
+  level = 'INFO',
+  message,
+  details,
+}: {
+  capabilityId: string;
+  runId: string;
+  workItemId: string;
+  runStepId?: string;
+  toolInvocationId?: string;
+  traceId?: string;
+  spanId?: string;
+  type?: string;
+  level?: RunEvent['level'];
+  message: string;
+  details?: Record<string, unknown>;
+}) => {
+  try {
+    await insertRunEvent(
+      createRunEvent({
+        capabilityId,
+        runId,
+        workItemId,
+        runStepId,
+        toolInvocationId,
+        traceId,
+        spanId,
+        type,
+        level,
+        message,
+        details,
+      }),
+    );
+  } catch (error) {
+    console.warn('Failed to emit workflow progress event.', error);
+  }
+};
 
 const createHistoryEntry = (
   actor: string,
@@ -437,37 +611,72 @@ const requestStepDecision = async ({
   const toolDescriptions = allowedToolIds.length
     ? listToolDescriptions(allowedToolIds).join('\n')
     : 'No tools are allowed for this step.';
+  const approvedWorkspacePaths = getCapabilityWorkspaceRoots(capability);
+  const workspaceProfile = detectWorkspaceProfile(approvedWorkspacePaths);
+  const workspaceGuidance = approvedWorkspacePaths.length
+    ? [
+        capability.executionConfig.defaultWorkspacePath
+          ? `Default approved workspace path: ${capability.executionConfig.defaultWorkspacePath}`
+          : null,
+        `Approved workspace paths: ${approvedWorkspacePaths.join(', ')}`,
+        `Detected workspace profile: ${workspaceProfile.detectedStack}`,
+        workspaceProfile.sampledFiles.length
+          ? `Observed workspace files: ${workspaceProfile.sampledFiles.join(', ')}`
+          : null,
+        'When using workspace tools, prefer relative file paths and omit workspacePath unless you intentionally need a non-default approved workspace.',
+        'If you do provide workspacePath, it must exactly match one of the approved workspace paths.',
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : 'No approved workspace paths are configured for this capability.';
   const startedAt = Date.now();
   const memoryContext = await buildMemoryContext({
     capabilityId: capability.id || workItem.capabilityId,
+    agentId: agent.id,
     queryText: [workItem.title, workItem.description, step.action, step.name]
       .filter(Boolean)
       .join('\n'),
   });
 
-  const response = await requestGitHubModel({
-    model: agent.model,
-    maxTokens: Math.min(agent.tokenLimit, 2000),
-    temperature: 0.1,
-    messages: [
-      {
-        role: 'developer',
-        content:
-          'You are an execution engine inside a capability workflow. Return JSON only with no markdown.',
-      },
-      {
-        role: 'system',
-        content: `${buildCapabilitySystemPrompt({
-          capability,
-          agent,
-        })}\n\nCurrent workflow: ${workflow.name}\nCurrent step: ${step.name}\nCurrent phase: ${workItem.phase}\nCurrent step attempt: ${runStep.attemptCount}\nStep objective: ${step.action}\nStep guidance: ${step.description || 'None'}\nExecution notes: ${step.executionNotes || 'None'}\nWorkflow hand-off context from prior completed steps:\n${handoffContext || 'None'}\nResolved human input/conflict context for this step:\n${resolvedWaitContext || 'None'}\nRetrieved memory context:\n${memoryContext.prompt || 'None'}\nAllowed tools:\n${toolDescriptions}\n\nUse prior-step hand-offs, retrieved memory, and resolved human inputs as authoritative downstream context. Do not ask for information that is already present in those sections. If you truly need more input, explain exactly what new gap remains and why the existing context is insufficient.\n\nReturn JSON with one of these shapes:\n1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"src/index.ts"}}}\n2. {"action":"complete","reasoning":"...","summary":"..."}\n3. {"action":"pause_for_input","reasoning":"...","wait":{"type":"INPUT","message":"..."}}\n4. {"action":"pause_for_approval","reasoning":"...","wait":{"type":"APPROVAL","message":"..."}}\n5. {"action":"fail","reasoning":"...","summary":"..."}\nOnly choose tool ids from the allowed list. If no tools are allowed, either complete, pause, or fail.`,
-      },
-      ...toolHistory,
-      {
-        role: 'user',
-        content: `Story title: ${workItem.title}\nStory request: ${workItem.description}\nDecide the next execution action for this workflow step.`,
-      },
-    ],
+  const response = await invokeScopedCapabilitySession({
+    capability,
+    agent,
+    scope: workItem.id ? 'WORK_ITEM' : 'TASK',
+    scopeId: workItem.id || runStep.id,
+    developerPrompt:
+      'You are an execution engine inside a capability workflow. Return JSON only with no markdown.',
+    memoryPrompt: memoryContext.prompt || undefined,
+    prompt: [
+      `Current workflow: ${workflow.name}`,
+      `Current step: ${step.name}`,
+      `Current phase: ${workItem.phase}`,
+      `Current step attempt: ${runStep.attemptCount}`,
+      `Step objective: ${step.action}`,
+      `Step guidance: ${step.description || 'None'}`,
+      `Execution notes: ${step.executionNotes || 'None'}`,
+      `Workflow hand-off context from prior completed steps:\n${handoffContext || 'None'}`,
+      `Resolved human input/conflict context for this step:\n${resolvedWaitContext || 'None'}`,
+      `Allowed tools:\n${toolDescriptions}`,
+      `Workspace policy:\n${workspaceGuidance}`,
+      toolHistory.length
+        ? `Prior tool loop transcript:\n${toolHistory
+            .map(item => `${item.role.toUpperCase()}: ${item.content}`)
+            .join('\n\n')}`
+        : null,
+      'Use prior-step hand-offs, retrieved memory, and resolved human inputs as authoritative downstream context. Do not ask for information that is already present in those sections. If you truly need more input, explain exactly what new gap remains and why the existing context is insufficient.',
+      'Return JSON with one of these shapes:',
+      '1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"README.md"}}}',
+      '2. {"action":"complete","reasoning":"...","summary":"..."}',
+      '3. {"action":"pause_for_input","reasoning":"...","wait":{"type":"INPUT","message":"..."}}',
+      '4. {"action":"pause_for_approval","reasoning":"...","wait":{"type":"APPROVAL","message":"..."}}',
+      '5. {"action":"fail","reasoning":"...","summary":"..."}',
+      'Only choose tool ids from the allowed list. If no tools are allowed, either complete, pause, or fail.',
+      `Story title: ${workItem.title}`,
+      `Story request: ${workItem.description}`,
+      'Decide the next execution action for this workflow step.',
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
   });
 
   return {
@@ -1160,7 +1369,7 @@ const buildArtifactFromStepCompletion = ({
   runId: detail.run.id,
   runStepId: getCurrentRunStep(detail).id,
   toolInvocationId,
-  summary,
+  summary: compactMarkdownSummary(summary),
   artifactKind: 'PHASE_OUTPUT',
   phase: step.phase,
   workItemId: detail.run.workItemId,
@@ -1207,7 +1416,9 @@ const buildHandoffArtifact = ({
   sourceWorkflowId: detail.run.workflowId,
   runId: detail.run.id,
   runStepId: runStep.id,
-  summary: `Handoff from ${step.name} to ${nextStep.name}. ${summary}`,
+  summary: compactMarkdownSummary(
+    `Handoff from ${step.name} to ${nextStep.name}. ${summary}`,
+  ),
   artifactKind: 'HANDOFF_PACKET',
   phase: nextStep.phase,
   workItemId: detail.run.workItemId,
@@ -1272,7 +1483,7 @@ const buildHumanInteractionArtifact = ({
     sourceWorkflowId: detail.run.workflowId,
     runId: detail.run.id,
     runStepId: runStep.id,
-    summary: resolution,
+    summary: compactMarkdownSummary(resolution),
     artifactKind,
     phase: step.phase,
     workItemId: detail.run.workItemId,
@@ -1837,6 +2048,23 @@ const completeRunWithWait = async ({
       leaseExpiresAt: undefined,
     })
   ).run;
+  await emitRunProgressEvent({
+    capabilityId: detail.run.capabilityId,
+    runId: detail.run.id,
+    workItemId: detail.run.workItemId,
+    runStepId: currentRunStep.id,
+    traceId: detail.run.traceId,
+    spanId: currentRunStep.spanId,
+    type: 'STEP_WAITING',
+    level: waitType === 'CONFLICT_RESOLUTION' ? 'WARN' : 'INFO',
+    message: waitMessage,
+    details: {
+      stage: 'STEP_WAITING',
+      waitType,
+      stepName: currentRunStep.name,
+      phase: detail.run.currentPhase,
+    },
+  });
   const nextDetail = await getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
   await syncWaitingProjection({
     detail: nextDetail,
@@ -1877,6 +2105,22 @@ const failRun = async ({
       currentWaitId: undefined,
     })
   ).run;
+  await emitRunProgressEvent({
+    capabilityId: detail.run.capabilityId,
+    runId: detail.run.id,
+    workItemId: detail.run.workItemId,
+    runStepId: currentRunStep.id,
+    traceId: detail.run.traceId,
+    spanId: currentRunStep.spanId,
+    type: 'STEP_FAILED',
+    level: 'ERROR',
+    message,
+    details: {
+      stage: 'STEP_FAILED',
+      stepName: currentRunStep.name,
+      phase: detail.run.currentPhase,
+    },
+  });
   const nextDetail = await getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
   await syncFailedProjection({
     detail: nextDetail,
@@ -1887,6 +2131,73 @@ const failRun = async ({
     capabilityId: detail.run.capabilityId,
     runId: detail.run.id,
   });
+  return nextDetail;
+};
+
+export const reconcileWorkflowRunFailure = async ({
+  capabilityId,
+  runId,
+  message,
+}: {
+  capabilityId: string;
+  runId: string;
+  message: string;
+}) => {
+  const detail = await getWorkflowRunDetail(capabilityId, runId);
+  const currentRunStep = getCurrentRunStep(detail);
+
+  if (
+    currentRunStep.status !== 'FAILED' &&
+    currentRunStep.status !== 'COMPLETED'
+  ) {
+    await updateWorkflowRunStep({
+      ...currentRunStep,
+      status: 'FAILED',
+      completedAt: currentRunStep.completedAt || new Date().toISOString(),
+      outputSummary: message,
+      evidenceSummary: message,
+    });
+  }
+
+  const nextRun = (
+    await updateWorkflowRun({
+      ...detail.run,
+      status: 'FAILED',
+      terminalOutcome: message,
+      completedAt: detail.run.completedAt || new Date().toISOString(),
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+      currentWaitId: undefined,
+    })
+  ).run;
+
+  await emitRunProgressEvent({
+    capabilityId,
+    runId,
+    workItemId: detail.run.workItemId,
+    runStepId: currentRunStep.id,
+    traceId: detail.run.traceId,
+    spanId: currentRunStep.spanId,
+    type: 'STEP_FAILED',
+    level: 'ERROR',
+    message,
+    details: {
+      stage: 'STEP_FAILED',
+      stepName: currentRunStep.name,
+      phase: detail.run.currentPhase,
+    },
+  });
+
+  const nextDetail = await getWorkflowRunDetail(capabilityId, nextRun.id);
+  await syncFailedProjection({
+    detail: nextDetail,
+    message,
+  });
+  await refreshCapabilityMemory(capabilityId).catch(() => undefined);
+  await releaseRunLease({
+    capabilityId,
+    runId,
+  }).catch(() => undefined);
   return nextDetail;
 };
 
@@ -1950,6 +2261,23 @@ const executeAutomatedStep = async (
     agent,
     historyMessage: `${step.name} is now executing on the backend worker.`,
   });
+  await emitRunProgressEvent({
+    capabilityId: detail.run.capabilityId,
+    runId: detail.run.id,
+    workItemId: detail.run.workItemId,
+    runStepId: currentRunStep.id,
+    traceId,
+    spanId: stepSpan.id,
+    message: `${agent.name} started ${step.name}.`,
+    details: {
+      stage: 'STEP_STARTED',
+      stepName: step.name,
+      phase: step.phase,
+      attemptCount: currentRunStep.attemptCount,
+      agentId: agent.id,
+      agentName: agent.name,
+    },
+  });
 
   const toolHistory: Array<{ role: 'assistant' | 'user'; content: string }> = [];
   let hasApprovedDeployment = runningDetail.steps.some(
@@ -1980,6 +2308,22 @@ const executeAutomatedStep = async (
       resolvedWaitContext,
     });
     const decision = decisionEnvelope.decision;
+    await emitRunProgressEvent({
+      capabilityId: detail.run.capabilityId,
+      runId: detail.run.id,
+      workItemId: detail.run.workItemId,
+      runStepId: currentRunStep.id,
+      traceId,
+      spanId: stepSpan.id,
+      message: `Grounded ${step.name} with ${decisionEnvelope.retrievalReferences.length} capability reference${decisionEnvelope.retrievalReferences.length === 1 ? '' : 's'}.`,
+      details: {
+        stage: 'CONTEXT_GROUNDED',
+        stepName: step.name,
+        retrievalCount: decisionEnvelope.retrievalReferences.length,
+        model: decisionEnvelope.model,
+        iteration: iteration + 1,
+      },
+    });
     currentRunStep = await updateWorkflowRunStep({
       ...currentRunStep,
       retrievalReferences: decisionEnvelope.retrievalReferences,
@@ -1987,6 +2331,23 @@ const executeAutomatedStep = async (
         ...(currentRunStep.metadata || {}),
         lastDecisionModel: decisionEnvelope.model,
         lastDecisionTokens: decisionEnvelope.usage.totalTokens,
+      },
+    });
+    await emitRunProgressEvent({
+      capabilityId: detail.run.capabilityId,
+      runId: detail.run.id,
+      workItemId: detail.run.workItemId,
+      runStepId: currentRunStep.id,
+      traceId,
+      spanId: stepSpan.id,
+      message: buildDecisionProgressMessage(decision),
+      details: {
+        stage: 'DECISION_READY',
+        stepName: step.name,
+        action: decision.action,
+        model: decisionEnvelope.model,
+        retrievalCount: decisionEnvelope.retrievalReferences.length,
+        iteration: iteration + 1,
       },
     });
     await recordUsageMetrics({
@@ -2104,6 +2465,22 @@ const executeAutomatedStep = async (
         policyDecisionId: policyDecision.id,
         startedAt: new Date().toISOString(),
       });
+      await emitRunProgressEvent({
+        capabilityId: detail.run.capabilityId,
+        runId: detail.run.id,
+        workItemId: detail.run.workItemId,
+        runStepId: currentRunStep.id,
+        traceId,
+        spanId: toolSpan.id,
+        type: 'TOOL_STARTED',
+        message: `Running ${formatToolLabel(decision.toolCall.toolId)} for ${step.name}.`,
+        details: {
+          stage: 'TOOL_STARTED',
+          stepName: step.name,
+          toolId: decision.toolCall.toolId,
+          iteration: iteration + 1,
+        },
+      });
       const toolStartedAt = Date.now();
 
       try {
@@ -2192,6 +2569,23 @@ const executeAutomatedStep = async (
       } catch (error) {
         const message =
           error instanceof Error ? error.message : 'Tool execution failed unexpectedly.';
+        await emitRunProgressEvent({
+          capabilityId: detail.run.capabilityId,
+          runId: detail.run.id,
+          workItemId: detail.run.workItemId,
+          runStepId: currentRunStep.id,
+          toolInvocationId,
+          traceId,
+          spanId: toolSpan.id,
+          type: 'TOOL_FAILED',
+          level: 'ERROR',
+          message: `${formatToolLabel(decision.toolCall.toolId)} failed: ${message}`,
+          details: {
+            stage: 'TOOL_FAILED',
+            stepName: step.name,
+            toolId: decision.toolCall.toolId,
+          },
+        });
         await updateToolInvocation({
           ...toolInvocation,
           status: 'FAILED',
@@ -2241,6 +2635,22 @@ const executeAutomatedStep = async (
         evidenceSummary: decision.reasoning,
         outputSummary: decision.summary,
         retrievalReferences: decisionEnvelope.retrievalReferences,
+      });
+      await emitRunProgressEvent({
+        capabilityId: detail.run.capabilityId,
+        runId: detail.run.id,
+        workItemId: detail.run.workItemId,
+        runStepId: currentRunStep.id,
+        traceId,
+        spanId: stepSpan.id,
+        type: 'STEP_COMPLETED',
+        message: decision.summary,
+        details: {
+          stage: 'STEP_COMPLETED',
+          stepName: step.name,
+          phase: step.phase,
+          artifactName: artifact.name,
+        },
       });
       const currentNode = getCurrentWorkflowNode(runningDetail);
       const transition = await resolveGraphTransition({

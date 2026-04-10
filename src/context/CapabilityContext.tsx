@@ -1,6 +1,7 @@
 import React, { createContext, ReactNode, useContext, useEffect, useRef, useState } from 'react';
 import {
   AgentOutputRecord,
+  AgentLearningProfile,
   AgentUsage,
   Capability,
   CapabilityAgent,
@@ -24,6 +25,9 @@ import {
   addCapabilitySkillRecord,
   appendCapabilityMessageRecord,
   createCapabilityRecord,
+  type CapabilityBundle,
+  type CreateCapabilityAgentInput,
+  type CreateCapabilityInput,
   fetchAppState,
   fetchCapabilityBundle,
   replaceCapabilityWorkspaceContentRecord,
@@ -38,30 +42,41 @@ import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowG
 import { useToast } from './ToastContext';
 
 interface CapabilityContextType {
+  bootStatus: 'loading' | 'ready' | 'degraded';
+  lastSyncError?: string;
+  mutationStatusByCapability: Record<
+    string,
+    {
+      status: 'idle' | 'pending' | 'error';
+      error?: string;
+    }
+  >;
   activeCapability: Capability;
   setActiveCapability: (capability: Capability) => void;
   capabilities: Capability[];
   capabilityWorkspaces: CapabilityWorkspace[];
-  addCapability: (capability: Capability) => void;
-  createCapability: (capability: Capability) => void;
+  createCapability: (capability: CreateCapabilityInput) => Promise<CapabilityBundle>;
   getCapabilityWorkspace: (capabilityId: string) => CapabilityWorkspace;
-  updateCapabilityMetadata: (capabilityId: string, updates: Partial<Capability>) => void;
-  addCapabilitySkill: (capabilityId: string, skill: Skill) => void;
-  removeCapabilitySkill: (capabilityId: string, skillId: string) => void;
+  updateCapabilityMetadata: (
+    capabilityId: string,
+    updates: Partial<Capability>,
+  ) => Promise<CapabilityBundle>;
+  addCapabilitySkill: (capabilityId: string, skill: Skill) => Promise<CapabilityBundle>;
+  removeCapabilitySkill: (capabilityId: string, skillId: string) => Promise<CapabilityBundle>;
   addCapabilityAgent: (
     capabilityId: string,
-    agent: Omit<CapabilityAgent, 'capabilityId'>,
-  ) => void;
+    agent: CreateCapabilityAgentInput,
+  ) => Promise<CapabilityBundle>;
   updateCapabilityAgent: (
     capabilityId: string,
     agentId: string,
     updates: Partial<CapabilityAgent>,
-  ) => void;
+  ) => Promise<CapabilityBundle>;
   appendCapabilityMessage: (
     capabilityId: string,
     message: Omit<CapabilityChatMessage, 'capabilityId'>,
-  ) => void;
-  setActiveChatAgent: (capabilityId: string, agentId: string) => void;
+  ) => Promise<CapabilityWorkspace>;
+  setActiveChatAgent: (capabilityId: string, agentId: string) => Promise<CapabilityWorkspace>;
   setCapabilityWorkspaceContent: (
     capabilityId: string,
     updates: Partial<
@@ -70,15 +85,53 @@ interface CapabilityContextType {
         'workflows' | 'artifacts' | 'tasks' | 'executionLogs' | 'learningUpdates' | 'workItems'
       >
     >,
-  ) => void;
+  ) => Promise<CapabilityWorkspace>;
   refreshCapabilityBundle: (capabilityId: string) => Promise<CapabilityWorkspace | null>;
+  retryInitialSync: () => Promise<boolean>;
 }
 
 const CapabilityContext = createContext<CapabilityContextType | undefined>(undefined);
 const SEEDED_CAPABILITY_IDS = new Set(CAPABILITIES.map(capability => capability.id));
-const DEFAULT_AGENT_PROVIDER = 'GitHub Copilot API' as const;
+const DEFAULT_AGENT_PROVIDER = 'GitHub Copilot SDK' as const;
 const DEFAULT_AGENT_MODEL = COPILOT_MODEL_OPTIONS[0].id;
 const DEFAULT_AGENT_TOKEN_LIMIT = 12000;
+const DEMO_MODE_ENABLED =
+  ((import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
+    ?.VITE_ENABLE_DEMO_MODE || '') === 'true';
+const EMPTY_CAPABILITY: Capability = {
+  id: '',
+  name: '',
+  domain: '',
+  businessUnit: '',
+  description: '',
+  applications: [],
+  apis: [],
+  databases: [],
+  gitRepositories: [],
+  localDirectories: [],
+  teamNames: [],
+  stakeholders: [],
+  additionalMetadata: [],
+  executionConfig: {
+    defaultWorkspacePath: undefined,
+    allowedWorkspacePaths: [],
+    commandTemplates: [],
+    deploymentTargets: [],
+  },
+  status: 'PENDING',
+  specialAgentId: '',
+  skillLibrary: [],
+};
+
+const createDefaultAgentLearningProfile = (): AgentLearningProfile => ({
+  status: 'NOT_STARTED',
+  summary: '',
+  highlights: [],
+  contextBlock: '',
+  sourceDocumentIds: [],
+  sourceArtifactIds: [],
+  sourceCount: 0,
+});
 
 const slugify = (value: string) =>
   value
@@ -227,6 +280,8 @@ const withAgentDefaults = (
   provider: agent.provider || DEFAULT_AGENT_PROVIDER,
   model: agent.model || DEFAULT_AGENT_MODEL,
   tokenLimit: agent.tokenLimit || DEFAULT_AGENT_TOKEN_LIMIT,
+  learningProfile: agent.learningProfile || createDefaultAgentLearningProfile(),
+  sessionSummaries: agent.sessionSummaries || [],
   usage:
     workspaceContent
       ? buildAgentUsage(
@@ -284,6 +339,8 @@ const buildOwnerAgent = (capability: Capability): CapabilityAgent => {
     provider: DEFAULT_AGENT_PROVIDER,
     model: DEFAULT_AGENT_MODEL,
     tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
+    learningProfile: createDefaultAgentLearningProfile(),
+    sessionSummaries: [],
     usage: buildAgentUsage(capability.id, ownerAgentId),
     previousOutputs: buildPreviousOutputs(capability.id, ownerAgentId),
   };
@@ -313,6 +370,8 @@ const buildBuiltInAgents = (capability: Capability): CapabilityAgent[] =>
       provider: DEFAULT_AGENT_PROVIDER,
       model: DEFAULT_AGENT_MODEL,
       tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
+      learningProfile: createDefaultAgentLearningProfile(),
+      sessionSummaries: [],
       usage: buildAgentUsage(capability.id, agentId),
       previousOutputs: buildPreviousOutputs(capability.id, agentId),
     };
@@ -423,6 +482,8 @@ const buildSeededAgents = (
       provider: DEFAULT_AGENT_PROVIDER,
       model: DEFAULT_AGENT_MODEL,
       tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
+      learningProfile: createDefaultAgentLearningProfile(),
+      sessionSummaries: [],
       usage: buildAgentUsage(capability.id, agentId),
       previousOutputs: buildPreviousOutputs(capability.id, agentId),
     });
@@ -491,7 +552,7 @@ const upsertWorkspace = (items: CapabilityWorkspace[], next: CapabilityWorkspace
 const mergeCapabilities = (persistedCapabilities: Capability[]) =>
   persistedCapabilities.reduce(
     (items, capability) => upsertCapability(items, capability),
-    [...CAPABILITIES],
+    DEMO_MODE_ENABLED ? [...CAPABILITIES] : [],
   );
 
 const upsertCapabilitySkill = (skills: Skill[], nextSkill: Skill) =>
@@ -505,12 +566,12 @@ const normalizeWorkspace = (
 ): CapabilityWorkspace => {
   const seededWorkspace = buildCapabilityWorkspace(
     capability,
-    SEEDED_CAPABILITY_IDS.has(capability.id),
+    DEMO_MODE_ENABLED && SEEDED_CAPABILITY_IDS.has(capability.id),
   );
   const existingOwnerAgent = workspace?.agents?.find(agent => agent.isOwner);
   const nextOwnerAgent = {
-    ...(existingOwnerAgent || seededWorkspace.agents[0]),
     ...buildOwnerAgent(capability),
+    ...(existingOwnerAgent || seededWorkspace.agents[0]),
     capabilityId: capability.id,
     isOwner: true,
   };
@@ -562,11 +623,11 @@ const getPreferredActiveCapability = (
   capabilities[0];
 
 const readInitialState = () => {
-  const capabilities = [...CAPABILITIES];
+  const capabilities = DEMO_MODE_ENABLED ? [...CAPABILITIES] : [];
 
   return {
     capabilities,
-    activeCapability: getPreferredActiveCapability(capabilities),
+    activeCapability: getPreferredActiveCapability(capabilities) || EMPTY_CAPABILITY,
     capabilityWorkspaces: capabilities.map(capability =>
       buildCapabilityWorkspace(capability, true),
     ),
@@ -587,7 +648,8 @@ const normalizeAppState = (
     ),
   );
   const nextActiveCapability =
-    getPreferredActiveCapability(nextCapabilities, preferredActiveCapabilityId);
+    getPreferredActiveCapability(nextCapabilities, preferredActiveCapabilityId) ||
+    EMPTY_CAPABILITY;
 
   return {
     capabilities: nextCapabilities,
@@ -599,51 +661,163 @@ const normalizeAppState = (
 export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
   const { error: showErrorToast } = useToast();
   const initialState = useRef(readInitialState()).current;
+  const [bootStatus, setBootStatus] = useState<'loading' | 'ready' | 'degraded'>('loading');
+  const [lastSyncError, setLastSyncError] = useState('');
   const [capabilities, setCapabilities] = useState<Capability[]>(initialState.capabilities);
-  const [activeCapability, setActiveCapability] = useState<Capability>(initialState.activeCapability);
+  const [activeCapability, setActiveCapabilityState] = useState<Capability>(
+    initialState.activeCapability,
+  );
   const [capabilityWorkspaces, setCapabilityWorkspaces] = useState<CapabilityWorkspace[]>(
     initialState.capabilityWorkspaces,
   );
+  const [mutationStatusByCapability, setMutationStatusByCapability] = useState<
+    Record<string, { status: 'idle' | 'pending' | 'error'; error?: string }>
+  >({});
   const mutationQueueRef = useRef<Record<string, Promise<unknown>>>({});
+  const capabilitiesRef = useRef(capabilities);
+  const activeCapabilityRef = useRef(activeCapability);
+  const capabilityWorkspacesRef = useRef(capabilityWorkspaces);
+
+  useEffect(() => {
+    capabilitiesRef.current = capabilities;
+  }, [capabilities]);
+
+  useEffect(() => {
+    activeCapabilityRef.current = activeCapability;
+  }, [activeCapability]);
+
+  useEffect(() => {
+    capabilityWorkspacesRef.current = capabilityWorkspaces;
+  }, [capabilityWorkspaces]);
+
+  const setMutationStatus = (
+    capabilityId: string,
+    status: 'idle' | 'pending' | 'error',
+    error?: string,
+  ) => {
+    if (!capabilityId) {
+      return;
+    }
+    setMutationStatusByCapability(prev => ({
+      ...prev,
+      [capabilityId]: {
+        status,
+        error,
+      },
+    }));
+  };
+
+  const clearMutationStatus = (capabilityId: string) => {
+    if (!capabilityId) {
+      return;
+    }
+    setMutationStatusByCapability(prev => {
+      if (!prev[capabilityId]) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [capabilityId]: {
+          status: 'idle',
+        },
+      };
+    });
+  };
 
   const syncCapabilityBundleState = (
     bundle: { capability: Capability; workspace: CapabilityWorkspace },
-    preferredActiveCapabilityId?: string,
+    options?: {
+      activateCapabilityId?: string;
+      allowArchivedFallback?: boolean;
+    },
   ) => {
-    setCapabilities(prev => upsertCapability(prev, bundle.capability));
+    const normalizedWorkspace = normalizeWorkspace(bundle.capability, bundle.workspace);
+    const nextCapabilities = upsertCapability(capabilitiesRef.current, bundle.capability);
+    const nextWorkspaces = upsertWorkspace(
+      capabilityWorkspacesRef.current,
+      normalizedWorkspace,
+    );
+    const currentActiveCapability = activeCapabilityRef.current;
+
+    setCapabilities(nextCapabilities);
+    setCapabilityWorkspaces(nextWorkspaces);
+
+    if (
+      options?.activateCapabilityId === bundle.capability.id ||
+      currentActiveCapability.id === bundle.capability.id ||
+      !currentActiveCapability.id
+    ) {
+      if (bundle.capability.status === 'ARCHIVED' && options?.allowArchivedFallback) {
+        setActiveCapabilityState(
+          getPreferredActiveCapability(
+            nextCapabilities.filter(capability => capability.id !== bundle.capability.id),
+          ) || bundle.capability,
+        );
+      } else {
+        setActiveCapabilityState(bundle.capability);
+      }
+      return;
+    }
+
+    const nextActiveCapability = nextCapabilities.find(
+      capability => capability.id === currentActiveCapability.id,
+    );
+    if (nextActiveCapability) {
+      setActiveCapabilityState(nextActiveCapability);
+    }
+  };
+
+  const syncWorkspaceState = (
+    capabilityId: string,
+    workspace: CapabilityWorkspace,
+  ) => {
+    const capability =
+      capabilitiesRef.current.find(item => item.id === capabilityId) ||
+      activeCapabilityRef.current;
+    if (!capability?.id) {
+      return;
+    }
+
     setCapabilityWorkspaces(prev =>
-      upsertWorkspace(
-        prev,
-        normalizeWorkspace(bundle.capability, bundle.workspace),
-      ),
+      upsertWorkspace(prev, normalizeWorkspace(capability, workspace)),
     );
-    setActiveCapability(prev =>
-      prev.id === (preferredActiveCapabilityId || bundle.capability.id)
-        ? bundle.capability
-        : prev,
-    );
+  };
+
+  const runInitialSync = async () => {
+    setBootStatus('loading');
+    try {
+      const nextState = normalizeAppState(await fetchAppState(), activeCapabilityRef.current.id);
+      setCapabilities(nextState.capabilities);
+      setCapabilityWorkspaces(nextState.capabilityWorkspaces);
+      setActiveCapabilityState(nextState.activeCapability);
+      setLastSyncError('');
+      setBootStatus('ready');
+      return true;
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to hydrate capability state from the API.';
+      console.warn('Failed to hydrate capability state from the API.', error);
+      setLastSyncError(message);
+      setBootStatus('degraded');
+      if (!capabilitiesRef.current.length) {
+        setCapabilities([]);
+        setCapabilityWorkspaces([]);
+        setActiveCapabilityState(EMPTY_CAPABILITY);
+      }
+      return false;
+    }
   };
 
   useEffect(() => {
     let isMounted = true;
 
-    fetchAppState()
-      .then(state => {
-        if (!isMounted) {
-          return;
-        }
-
-        const nextState = normalizeAppState(state);
-        setCapabilities(nextState.capabilities);
-        setCapabilityWorkspaces(nextState.capabilityWorkspaces);
-        setActiveCapability(current =>
-          nextState.capabilities.find(capability => capability.id === current.id) ||
-          nextState.activeCapability,
-        );
-      })
-      .catch(error => {
-        console.warn('Failed to hydrate capability state from the API.', error);
-      });
+    void runInitialSync().then(result => {
+      if (!isMounted || result) {
+        return;
+      }
+    });
 
     return () => {
       isMounted = false;
@@ -662,8 +836,11 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
 
   const getCapabilityById = (capabilityId: string) =>
     capabilities.find(capability => capability.id === capabilityId) ||
-    CAPABILITIES.find(capability => capability.id === capabilityId) ||
-    activeCapability;
+    (DEMO_MODE_ENABLED
+      ? CAPABILITIES.find(capability => capability.id === capabilityId)
+      : undefined) ||
+    activeCapabilityRef.current ||
+    EMPTY_CAPABILITY;
 
   const getCapabilityWorkspace = (capabilityId: string) => {
     const existingWorkspace = capabilityWorkspaces.find(
@@ -674,7 +851,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     }
     return buildCapabilityWorkspace(
       getCapabilityById(capabilityId),
-      SEEDED_CAPABILITY_IDS.has(capabilityId),
+      DEMO_MODE_ENABLED && SEEDED_CAPABILITY_IDS.has(capabilityId),
     );
   };
 
@@ -686,259 +863,123 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     showErrorToast('Unable to save changes', `The latest ${scope} update could not be synced to the API.`);
   };
 
-  const addCapability = (newCapability: Capability) => {
-    setCapabilities(prev => upsertCapability(prev, newCapability));
-    setCapabilityWorkspaces(prev =>
-      prev.some(workspace => workspace.capabilityId === newCapability.id)
-        ? prev
-        : [...prev, buildCapabilityWorkspace(newCapability)],
-    );
-
-    void queueCapabilityMutation(newCapability.id, () =>
-      createCapabilityRecord(newCapability),
-    ).catch(error => {
-      logMutationFailure(`capability ${newCapability.id}`, error);
-    });
+  const ensureWritableState = () => {
+    if (bootStatus !== 'ready') {
+      throw new Error(
+        lastSyncError ||
+          'The workspace is offline or still loading. Restore sync before making durable changes.',
+      );
+    }
   };
 
-  const createCapability = (newCapability: Capability) => {
-    addCapability(newCapability);
-    setActiveCapability(newCapability);
+  const createCapability = async (newCapability: CreateCapabilityInput) => {
+    ensureWritableState();
+    const pendingKey = newCapability.id || `NEW-${Date.now()}`;
+    setMutationStatus(pendingKey, 'pending');
+
+    try {
+      const bundle = await createCapabilityRecord(newCapability);
+      syncCapabilityBundleState(bundle, {
+        activateCapabilityId: bundle.capability.id,
+      });
+      clearMutationStatus(pendingKey);
+      clearMutationStatus(bundle.capability.id);
+      setLastSyncError('');
+      setBootStatus('ready');
+      return bundle;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to create capability.';
+      setMutationStatus(pendingKey, 'error', message);
+      logMutationFailure(`capability ${newCapability.name || pendingKey}`, error);
+      throw error;
+    }
   };
 
   const updateCapabilityMetadata = (
     capabilityId: string,
     updates: Partial<Capability>,
   ) => {
-    let updatedCapability: Capability | null = null;
-    const nextCapabilities = capabilities.map(capability => {
-      if (capability.id !== capabilityId) {
-        return capability;
-      }
+    ensureWritableState();
+    setMutationStatus(capabilityId, 'pending');
 
-      updatedCapability = { ...capability, ...updates };
-      return updatedCapability;
-    });
-
-    setCapabilities(nextCapabilities);
-
-    setActiveCapability(prev => {
-      if (prev.id !== capabilityId) {
-        return (
-          nextCapabilities.find(capability => capability.id === prev.id) || prev
-        );
-      }
-
-      const nextCapability =
-        updatedCapability ||
-        nextCapabilities.find(capability => capability.id === capabilityId) ||
-        prev;
-
-      if (nextCapability.status === 'ARCHIVED') {
-        return (
-          getPreferredActiveCapability(
-            nextCapabilities.filter(
-              capability => capability.id !== capabilityId,
-            ),
-          ) || nextCapability
-        );
-      }
-
-      return nextCapability;
-    });
-
-    setCapabilityWorkspaces(prev => {
-      const capability = updatedCapability || getCapabilityById(capabilityId);
-      const existingWorkspace =
-        prev.find(workspace => workspace.capabilityId === capabilityId) ||
-        buildCapabilityWorkspace(capability, SEEDED_CAPABILITY_IDS.has(capabilityId));
-
-      const ownerAgent = existingWorkspace.agents.find(agent => agent.isOwner);
-      const nextOwnerAgent = ownerAgent
-        ? {
-            ...ownerAgent,
-            id: capability.specialAgentId || ownerAgent.id,
-            objective: `Own the end-to-end delivery context for ${capability.name} and coordinate all downstream agents within this capability.`,
-            systemPrompt: `You are the capability owner for ${capability.name}. Ground every decision, workflow, and team action in the capability's domain, documentation, and governance context.`,
-            documentationSources: getCapabilityDocumentationSources(capability),
-            learningNotes: [
-              `${capability.name} team context is isolated to this capability.`,
-              `All downstream chats, agents, and workflows should remain aligned to ${capability.domain || capability.name}.`,
-            ],
-          }
-        : buildOwnerAgent(capability);
-
-      const remainingAgents = existingWorkspace.agents.filter(agent => !agent.isOwner);
-      const nextWorkspace: CapabilityWorkspace = {
-        ...existingWorkspace,
-        agents: mergeWorkspaceAgents(
-          capability,
-          nextOwnerAgent,
-          [nextOwnerAgent, ...remainingAgents],
-          existingWorkspace.tasks,
-          existingWorkspace.executionLogs,
-        ),
-        activeChatAgentId:
-          existingWorkspace.activeChatAgentId && existingWorkspace.activeChatAgentId !== ownerAgent?.id
-            ? existingWorkspace.activeChatAgentId
-            : nextOwnerAgent.id,
-      };
-
-      return upsertWorkspace(prev, nextWorkspace);
-    });
-
-    void queueCapabilityMutation(capabilityId, () =>
-      updateCapabilityRecord(capabilityId, updates),
-    ).catch(error => {
+    return queueCapabilityMutation(capabilityId, async () => {
+      const bundle = await updateCapabilityRecord(capabilityId, updates);
+      syncCapabilityBundleState(bundle, { allowArchivedFallback: true });
+      clearMutationStatus(capabilityId);
+      return bundle;
+    }).catch(error => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : `Unable to update capability ${capabilityId}.`;
+      setMutationStatus(capabilityId, 'error', message);
       logMutationFailure(`capability metadata for ${capabilityId}`, error);
-    });
+      throw error;
+    }) as Promise<CapabilityBundle>;
   };
 
   const addCapabilitySkill = (capabilityId: string, skill: Skill) => {
-    let updatedCapability: Capability | null = null;
+    ensureWritableState();
+    setMutationStatus(capabilityId, 'pending');
 
-    setCapabilities(prev =>
-      prev.map(capability => {
-        if (capability.id !== capabilityId) {
-          return capability;
-        }
-
-        updatedCapability = {
-          ...capability,
-          skillLibrary: upsertCapabilitySkill(capability.skillLibrary, skill),
-        };
-        return updatedCapability;
-      }),
-    );
-
-    setActiveCapability(prev => {
-      if (prev.id !== capabilityId) {
-        return prev;
-      }
-
-      const nextCapability = {
-        ...prev,
-        skillLibrary: upsertCapabilitySkill(prev.skillLibrary, skill),
-      };
-      updatedCapability = nextCapability;
-      return nextCapability;
-    });
-
-    setCapabilityWorkspaces(prev => {
-      const capability = updatedCapability || getCapabilityById(capabilityId);
-      const existingWorkspace =
-        prev.find(workspace => workspace.capabilityId === capabilityId) ||
-        buildCapabilityWorkspace(capability, SEEDED_CAPABILITY_IDS.has(capabilityId));
-
-      return upsertWorkspace(prev, {
-        ...existingWorkspace,
-        agents: existingWorkspace.agents.map(agent =>
-          withAgentDefaults(capability, agent, {
-            tasks: existingWorkspace.tasks,
-            executionLogs: existingWorkspace.executionLogs,
-          }),
-        ),
-      });
-    });
-
-    void queueCapabilityMutation(capabilityId, () =>
-      addCapabilitySkillRecord(capabilityId, skill),
-    ).catch(error => {
+    return queueCapabilityMutation(capabilityId, async () => {
+      const bundle = await addCapabilitySkillRecord(capabilityId, skill);
+      syncCapabilityBundleState(bundle);
+      clearMutationStatus(capabilityId);
+      return bundle;
+    }).catch(error => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : `Unable to add skill ${skill.id}.`;
+      setMutationStatus(capabilityId, 'error', message);
       logMutationFailure(`capability skill ${skill.id} for ${capabilityId}`, error);
-    });
+      throw error;
+    }) as Promise<CapabilityBundle>;
   };
 
   const removeCapabilitySkill = (capabilityId: string, skillId: string) => {
-    let updatedCapability: Capability | null = null;
+    ensureWritableState();
+    setMutationStatus(capabilityId, 'pending');
 
-    setCapabilities(prev =>
-      prev.map(capability => {
-        if (capability.id !== capabilityId) {
-          return capability;
-        }
-
-        updatedCapability = {
-          ...capability,
-          skillLibrary: capability.skillLibrary.filter(skill => skill.id !== skillId),
-        };
-        return updatedCapability;
-      }),
-    );
-
-    setActiveCapability(prev => {
-      if (prev.id !== capabilityId) {
-        return prev;
-      }
-
-      const nextCapability = {
-        ...prev,
-        skillLibrary: prev.skillLibrary.filter(skill => skill.id !== skillId),
-      };
-      updatedCapability = nextCapability;
-      return nextCapability;
-    });
-
-    setCapabilityWorkspaces(prev => {
-      const capability = updatedCapability || getCapabilityById(capabilityId);
-      const existingWorkspace =
-        prev.find(workspace => workspace.capabilityId === capabilityId) ||
-        buildCapabilityWorkspace(capability, SEEDED_CAPABILITY_IDS.has(capabilityId));
-
-      return upsertWorkspace(prev, {
-        ...existingWorkspace,
-        agents: existingWorkspace.agents.map(agent =>
-          withAgentDefaults(
-            capability,
-            {
-              ...agent,
-              skillIds: agent.skillIds.filter(id => id !== skillId),
-            },
-            {
-              tasks: existingWorkspace.tasks,
-              executionLogs: existingWorkspace.executionLogs,
-            },
-          ),
-        ),
-      });
-    });
-
-    void queueCapabilityMutation(capabilityId, () =>
-      removeCapabilitySkillRecord(capabilityId, skillId),
-    ).catch(error => {
+    return queueCapabilityMutation(capabilityId, async () => {
+      const bundle = await removeCapabilitySkillRecord(capabilityId, skillId);
+      syncCapabilityBundleState(bundle);
+      clearMutationStatus(capabilityId);
+      return bundle;
+    }).catch(error => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : `Unable to remove skill ${skillId}.`;
+      setMutationStatus(capabilityId, 'error', message);
       logMutationFailure(`capability skill ${skillId} for ${capabilityId}`, error);
-    });
+      throw error;
+    }) as Promise<CapabilityBundle>;
   };
 
   const addCapabilityAgent = (
     capabilityId: string,
-    agent: Omit<CapabilityAgent, 'capabilityId'>,
+    agent: CreateCapabilityAgentInput,
   ) => {
-    const capability = getCapabilityById(capabilityId);
+    ensureWritableState();
+    setMutationStatus(capabilityId, 'pending');
 
-    setCapabilityWorkspaces(prev => {
-      const existingWorkspace =
-        prev.find(workspace => workspace.capabilityId === capabilityId) ||
-        buildCapabilityWorkspace(capability, SEEDED_CAPABILITY_IDS.has(capabilityId));
-
-      const nextWorkspace: CapabilityWorkspace = {
-        ...existingWorkspace,
-        agents: [
-          ...existingWorkspace.agents,
-          withAgentDefaults(capability, {
-            ...agent,
-            capabilityId,
-          }),
-        ],
-      };
-
-      return upsertWorkspace(prev, nextWorkspace);
-    });
-
-    void queueCapabilityMutation(capabilityId, () =>
-      addCapabilityAgentRecord(capabilityId, agent),
-    ).catch(error => {
-      logMutationFailure(`agent ${agent.id} for ${capabilityId}`, error);
-    });
+    return queueCapabilityMutation(capabilityId, async () => {
+      const bundle = await addCapabilityAgentRecord(capabilityId, agent);
+      syncCapabilityBundleState(bundle);
+      clearMutationStatus(capabilityId);
+      return bundle;
+    }).catch(error => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : `Unable to add agent to ${capabilityId}.`;
+      setMutationStatus(capabilityId, 'error', message);
+      logMutationFailure(`agent ${agent.name || agent.id || 'new'} for ${capabilityId}`, error);
+      throw error;
+    }) as Promise<CapabilityBundle>;
   };
 
   const updateCapabilityAgent = (
@@ -946,81 +987,64 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     agentId: string,
     updates: Partial<CapabilityAgent>,
   ) => {
-    const capability = getCapabilityById(capabilityId);
+    ensureWritableState();
+    setMutationStatus(capabilityId, 'pending');
 
-    setCapabilityWorkspaces(prev => {
-      const existingWorkspace =
-        prev.find(workspace => workspace.capabilityId === capabilityId) ||
-        buildCapabilityWorkspace(capability, SEEDED_CAPABILITY_IDS.has(capabilityId));
-
-      const nextWorkspace: CapabilityWorkspace = {
-        ...existingWorkspace,
-        agents: existingWorkspace.agents.map(agent =>
-          agent.id === agentId ? withAgentDefaults(capability, { ...agent, ...updates }) : agent,
-        ),
-      };
-
-      return upsertWorkspace(prev, nextWorkspace);
-    });
-
-    void queueCapabilityMutation(capabilityId, () =>
-      updateCapabilityAgentRecord(capabilityId, agentId, updates),
-    ).catch(error => {
+    return queueCapabilityMutation(capabilityId, async () => {
+      const bundle = await updateCapabilityAgentRecord(capabilityId, agentId, updates);
+      syncCapabilityBundleState(bundle);
+      clearMutationStatus(capabilityId);
+      return bundle;
+    }).catch(error => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : `Unable to update agent ${agentId}.`;
+      setMutationStatus(capabilityId, 'error', message);
       logMutationFailure(`agent ${agentId} for ${capabilityId}`, error);
-    });
+      throw error;
+    }) as Promise<CapabilityBundle>;
   };
 
   const appendCapabilityMessage = (
     capabilityId: string,
     message: Omit<CapabilityChatMessage, 'capabilityId'>,
   ) => {
-    const capability = getCapabilityById(capabilityId);
+    ensureWritableState();
 
-    setCapabilityWorkspaces(prev => {
-      const existingWorkspace =
-        prev.find(workspace => workspace.capabilityId === capabilityId) ||
-        buildCapabilityWorkspace(capability, SEEDED_CAPABILITY_IDS.has(capabilityId));
-
-      const nextWorkspace: CapabilityWorkspace = {
-        ...existingWorkspace,
-        messages: [
-          ...existingWorkspace.messages,
-          {
-            ...message,
-            capabilityId,
-          },
-        ],
-      };
-
-      return upsertWorkspace(prev, nextWorkspace);
-    });
-
-    void queueCapabilityMutation(capabilityId, () =>
-      appendCapabilityMessageRecord(capabilityId, message),
-    ).catch(error => {
+    return queueCapabilityMutation(capabilityId, async () => {
+      const workspace = await appendCapabilityMessageRecord(capabilityId, message);
+      syncWorkspaceState(capabilityId, workspace);
+      clearMutationStatus(capabilityId);
+      return workspace;
+    }).catch(error => {
+      setMutationStatus(
+        capabilityId,
+        'error',
+        error instanceof Error ? error.message : 'Unable to append chat message.',
+      );
       logMutationFailure(`chat message ${message.id} for ${capabilityId}`, error);
-    });
+      throw error;
+    }) as Promise<CapabilityWorkspace>;
   };
 
   const setActiveChatAgent = (capabilityId: string, agentId: string) => {
-    const capability = getCapabilityById(capabilityId);
+    ensureWritableState();
 
-    setCapabilityWorkspaces(prev => {
-      const existingWorkspace =
-        prev.find(workspace => workspace.capabilityId === capabilityId) ||
-        buildCapabilityWorkspace(capability, SEEDED_CAPABILITY_IDS.has(capabilityId));
-
-      return upsertWorkspace(prev, {
-        ...existingWorkspace,
-        activeChatAgentId: agentId,
-      });
-    });
-
-    void queueCapabilityMutation(capabilityId, () =>
-      setActiveChatAgentRecord(capabilityId, agentId),
-    ).catch(error => {
+    return queueCapabilityMutation(capabilityId, async () => {
+      const workspace = await setActiveChatAgentRecord(capabilityId, agentId);
+      syncWorkspaceState(capabilityId, workspace);
+      clearMutationStatus(capabilityId);
+      return workspace;
+    }).catch(error => {
+      setMutationStatus(
+        capabilityId,
+        'error',
+        error instanceof Error ? error.message : 'Unable to switch the active chat agent.',
+      );
       logMutationFailure(`active chat agent ${agentId} for ${capabilityId}`, error);
-    });
+      throw error;
+    }) as Promise<CapabilityWorkspace>;
   };
 
   const setCapabilityWorkspaceContent = (
@@ -1032,66 +1056,66 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
       >
     >,
   ) => {
-    const capability = getCapabilityById(capabilityId);
+    ensureWritableState();
+    setMutationStatus(capabilityId, 'pending');
 
-    setCapabilityWorkspaces(prev => {
-      const existingWorkspace =
-        prev.find(workspace => workspace.capabilityId === capabilityId) ||
-        buildCapabilityWorkspace(capability, SEEDED_CAPABILITY_IDS.has(capabilityId));
-      const draftWorkspace: CapabilityWorkspace = {
-        ...existingWorkspace,
-        ...updates,
-      };
-
-      return upsertWorkspace(prev, {
-        ...draftWorkspace,
-        agents: draftWorkspace.agents.map(agent => ({
-          ...withAgentDefaults(capability, agent, {
-            tasks: draftWorkspace.tasks,
-            executionLogs: draftWorkspace.executionLogs,
-          }),
-          usage: buildAgentUsage(
-            capabilityId,
-            agent.id,
-            draftWorkspace.tasks,
-            draftWorkspace.executionLogs,
-          ),
-          previousOutputs: buildPreviousOutputs(
-            capabilityId,
-            agent.id,
-            draftWorkspace.tasks,
-            draftWorkspace.executionLogs,
-          ),
-        })),
-      });
-    });
-
-    void queueCapabilityMutation(capabilityId, () =>
-      replaceCapabilityWorkspaceContentRecord(capabilityId, updates),
-    ).catch(error => {
+    return queueCapabilityMutation(capabilityId, async () => {
+      const workspace = await replaceCapabilityWorkspaceContentRecord(capabilityId, updates);
+      syncWorkspaceState(capabilityId, workspace);
+      clearMutationStatus(capabilityId);
+      return workspace;
+    }).catch(error => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : `Unable to update workspace content for ${capabilityId}.`;
+      setMutationStatus(capabilityId, 'error', message);
       logMutationFailure(`workspace content for ${capabilityId}`, error);
-    });
+      throw error;
+    }) as Promise<CapabilityWorkspace>;
   };
 
   const refreshCapabilityBundle = async (capabilityId: string) => {
     try {
       const bundle = await fetchCapabilityBundle(capabilityId);
-      syncCapabilityBundleState(bundle, capabilityId);
+      syncCapabilityBundleState(bundle, {
+        activateCapabilityId:
+          activeCapabilityRef.current.id === capabilityId ? capabilityId : undefined,
+      });
+      setLastSyncError('');
+      setBootStatus('ready');
       return normalizeWorkspace(bundle.capability, bundle.workspace);
     } catch (error) {
-      logMutationFailure(`workspace refresh for ${capabilityId}`, error);
+      setLastSyncError(
+        error instanceof Error
+          ? error.message
+          : `Unable to refresh workspace ${capabilityId}.`,
+      );
+      setBootStatus('degraded');
       return null;
     }
   };
 
+  useEffect(() => {
+    if (bootStatus !== 'ready' || !activeCapability.id) {
+      return;
+    }
+
+    void refreshCapabilityBundle(activeCapability.id);
+  }, [activeCapability.id]);
+
   return (
     <CapabilityContext.Provider
       value={{
+        bootStatus,
+        lastSyncError,
+        mutationStatusByCapability,
         activeCapability,
-        setActiveCapability,
+        setActiveCapability: capability => {
+          setActiveCapabilityState(capability);
+        },
         capabilities,
         capabilityWorkspaces,
-        addCapability,
         createCapability,
         getCapabilityWorkspace,
         updateCapabilityMetadata,
@@ -1103,6 +1127,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
         setActiveChatAgent,
         setCapabilityWorkspaceContent,
         refreshCapabilityBundle,
+        retryInitialSync: runInitialSync,
       }}
     >
       {children}

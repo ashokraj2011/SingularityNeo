@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type {
   Capability,
   CapabilityWorkspace,
@@ -10,6 +12,7 @@ import type {
 } from '../src/types';
 import { getPlatformFeatureState, query, transaction } from './db';
 import { getCapabilityBundle } from './repository';
+import { getAgentLearningProfile, queueAgentLearningJob } from './agentLearning/repository';
 
 const EMBEDDING_DIMENSIONS = getPlatformFeatureState().memoryEmbeddingDimensions;
 
@@ -33,6 +36,24 @@ const normalizeText = (value: string) =>
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+
+const normalizeDirectoryPath = (value: string) => {
+  const trimmed = value.trim();
+  return trimmed ? path.resolve(trimmed) : '';
+};
+
+const getCapabilityWorkspaceRoots = (capability: Capability) =>
+  Array.from(
+    new Set(
+      [
+        capability.executionConfig.defaultWorkspacePath,
+        ...(capability.executionConfig.allowedWorkspacePaths || []),
+        ...(capability.localDirectories || []),
+      ]
+        .map(value => normalizeDirectoryPath(value || ''))
+        .filter(Boolean),
+    ),
+  );
 
 const splitIntoChunks = (content: string, limit = 900) => {
   const normalized = normalizeText(content);
@@ -310,6 +331,12 @@ const buildCapabilityMetadataContent = (capability: Capability) =>
     capability.ownerTeam ? `Owner team: ${capability.ownerTeam}` : null,
     capability.teamNames.length ? `Associated teams: ${capability.teamNames.join(', ')}` : null,
     capability.gitRepositories.length ? `Git repositories: ${capability.gitRepositories.join(', ')}` : null,
+    capability.executionConfig.defaultWorkspacePath
+      ? `Default workspace path: ${capability.executionConfig.defaultWorkspacePath}`
+      : null,
+    capability.executionConfig.allowedWorkspacePaths.length
+      ? `Approved workspace paths: ${capability.executionConfig.allowedWorkspacePaths.join(', ')}`
+      : null,
     capability.localDirectories.length ? `Local directories: ${capability.localDirectories.join(', ')}` : null,
     capability.documentationNotes ? `Documentation notes: ${capability.documentationNotes}` : null,
     capability.stakeholders.length
@@ -332,6 +359,8 @@ const buildSources = (
     title: string;
     sourceType: MemorySourceType;
     tier: MemoryStoreTier;
+    sourceUri?: string;
+    sourceId?: string;
     metadata?: Record<string, any>;
     content: string;
   }> = [
@@ -340,6 +369,7 @@ const buildSources = (
       title: `${capability.name} Capability Profile`,
       sourceType: 'CAPABILITY_METADATA',
       tier: 'LONG_TERM',
+      sourceId: capability.id,
       metadata: {
         capabilityId: capability.id,
       },
@@ -348,18 +378,37 @@ const buildSources = (
   ];
 
   workspace.artifacts.forEach(artifact => {
+    const isHumanInteraction =
+      artifact.artifactKind === 'INPUT_NOTE' ||
+      artifact.artifactKind === 'CONFLICT_RESOLUTION' ||
+      artifact.artifactKind === 'APPROVAL_RECORD';
+    const sourceType: MemorySourceType = isHumanInteraction
+      ? 'HUMAN_INTERACTION'
+      : artifact.artifactKind === 'HANDOFF_PACKET'
+      ? 'HANDOFF'
+      : 'ARTIFACT';
+
     sources.push({
-      id: createMemoryDocumentId(capability.id, artifact.artifactKind === 'HANDOFF_PACKET' ? 'HANDOFF' : 'ARTIFACT', artifact.id),
+      id: createMemoryDocumentId(capability.id, sourceType, artifact.id),
       title: artifact.name,
-      sourceType: artifact.artifactKind === 'HANDOFF_PACKET' ? 'HANDOFF' : 'ARTIFACT',
+      sourceType,
       tier:
         artifact.artifactKind === 'INPUT_NOTE' || artifact.artifactKind === 'CONFLICT_RESOLUTION'
           ? 'SESSION'
+          : artifact.artifactKind === 'APPROVAL_RECORD'
+          ? 'LONG_TERM'
           : 'LONG_TERM',
+      sourceId: artifact.id,
       metadata: {
+        artifactId: artifact.id,
         workItemId: artifact.workItemId,
         phase: artifact.phase,
         traceId: artifact.traceId,
+        artifactKind: artifact.artifactKind,
+        sourceRunId: artifact.sourceRunId || artifact.runId,
+        sourceRunStepId: artifact.sourceRunStepId || artifact.runStepId,
+        handoffFromAgentId: artifact.handoffFromAgentId,
+        handoffToAgentId: artifact.handoffToAgentId,
       },
       content:
         artifact.contentText ||
@@ -375,7 +424,9 @@ const buildSources = (
       title: item.title,
       sourceType: 'WORK_ITEM',
       tier: item.status === 'COMPLETED' ? 'LONG_TERM' : 'WORKING',
+      sourceId: item.id,
       metadata: {
+        workItemId: item.id,
         phase: item.phase,
         status: item.status,
       },
@@ -403,6 +454,7 @@ const buildSources = (
       title: `${capability.name} Recent Chat Session`,
       sourceType: 'CHAT_SESSION',
       tier: 'SESSION',
+      sourceId: `${capability.id}-session`,
       metadata: {
         messageCount: recentMessages.length,
       },
@@ -415,9 +467,181 @@ const buildSources = (
   return sources;
 };
 
-export const refreshCapabilityMemory = async (capabilityId: string) => {
+const TEXT_EXTENSIONS = new Set([
+  '.md',
+  '.mdx',
+  '.txt',
+  '.json',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.ini',
+  '.cfg',
+  '.py',
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+]);
+
+const SKIP_DIRECTORIES = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'build',
+  'coverage',
+  '.next',
+  '.turbo',
+]);
+
+const collectRepositoryFiles = (directoryPath: string, limit = 12) => {
+  const resolvedRoot = path.resolve(directoryPath);
+  if (!fs.existsSync(resolvedRoot)) {
+    return [] as Array<{ absolutePath: string; relativePath: string }>;
+  }
+
+  const matches: Array<{ absolutePath: string; relativePath: string; score: number }> = [];
+
+  const visit = (currentPath: string, depth: number) => {
+    if (matches.length >= limit) {
+      return;
+    }
+
+    const entries = fs.readdirSync(currentPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (matches.length >= limit) {
+        return;
+      }
+
+      const absolutePath = path.join(currentPath, entry.name);
+      const relativePath = path.relative(resolvedRoot, absolutePath);
+
+      if (entry.isDirectory()) {
+        if (depth >= 3 || SKIP_DIRECTORIES.has(entry.name)) {
+          continue;
+        }
+        visit(absolutePath, depth + 1);
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      const extension = path.extname(entry.name).toLowerCase();
+      const isReadme = /^readme/i.test(entry.name);
+      const isDocPath = relativePath.startsWith(`docs${path.sep}`);
+      const isConfig =
+        entry.name === 'package.json' ||
+        entry.name === 'pyproject.toml' ||
+        entry.name === 'requirements.txt' ||
+        entry.name === 'setup.py' ||
+        entry.name === 'Pipfile' ||
+        entry.name === 'pytest.ini' ||
+        entry.name === 'tox.ini' ||
+        entry.name === 'tsconfig.json' ||
+        entry.name.endsWith('.config.ts') ||
+        entry.name.endsWith('.config.js');
+
+      if (!(isReadme || isDocPath || isConfig || TEXT_EXTENSIONS.has(extension))) {
+        continue;
+      }
+
+      try {
+        const stat = fs.statSync(absolutePath);
+        if (stat.size > 80_000) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+
+      let score = 10;
+      if (isReadme) score += 50;
+      if (isDocPath) score += 30;
+      if (isConfig) score += 20;
+      if (/artifact|workflow|design|requirement|runbook|architecture/i.test(relativePath)) {
+        score += 12;
+      }
+
+      matches.push({ absolutePath, relativePath, score });
+    }
+  };
+
+  visit(resolvedRoot, 0);
+
+  return matches
+    .sort((left, right) => right.score - left.score)
+    .slice(0, limit)
+    .map(({ absolutePath, relativePath }) => ({ absolutePath, relativePath }));
+};
+
+const buildRepositoryFileSources = (capability: Capability) => {
+  const repoSources: Array<{
+    id: string;
+    title: string;
+    sourceType: MemorySourceType;
+    tier: MemoryStoreTier;
+    sourceUri?: string;
+    sourceId?: string;
+    metadata?: Record<string, any>;
+    content: string;
+  }> = [];
+
+  getCapabilityWorkspaceRoots(capability).forEach(directoryPath => {
+    collectRepositoryFiles(directoryPath).forEach(file => {
+      try {
+        const content = fs.readFileSync(file.absolutePath, 'utf8').trim();
+        if (!content) {
+          return;
+        }
+
+        const sourceId = `${directoryPath}:${file.relativePath}`;
+        repoSources.push({
+          id: createMemoryDocumentId(capability.id, 'REPOSITORY_FILE', sourceId),
+          title: `Repository File · ${file.relativePath}`,
+          sourceType: 'REPOSITORY_FILE',
+          tier: 'LONG_TERM',
+          sourceUri: file.absolutePath,
+          sourceId,
+          metadata: {
+            path: file.absolutePath,
+            relativePath: file.relativePath,
+            workspacePath: directoryPath,
+          },
+          content,
+        });
+      } catch {
+        // Ignore unreadable repository files.
+      }
+    });
+  });
+
+  return repoSources;
+};
+
+const getAgentSourceFilter = async (capabilityId: string, agentId?: string) => {
+  if (!agentId) {
+    return null;
+  }
+
+  const profile = await getAgentLearningProfile(capabilityId, agentId);
+  if (!profile.sourceDocumentIds.length) {
+    return null;
+  }
+
+  return new Set(profile.sourceDocumentIds);
+};
+
+export const refreshCapabilityMemory = async (
+  capabilityId: string,
+  options?: { requeueAgents?: boolean; requestReason?: string },
+) => {
   const bundle = await getCapabilityBundle(capabilityId);
-  const sources = buildSources(bundle.capability, bundle.workspace);
+  const sources = [
+    ...buildSources(bundle.capability, bundle.workspace),
+    ...buildRepositoryFileSources(bundle.capability),
+  ];
 
   await transaction(async () => {
     for (const source of sources) {
@@ -427,7 +651,13 @@ export const refreshCapabilityMemory = async (capabilityId: string) => {
         title: source.title,
         sourceType: source.sourceType,
         tier: source.tier,
-        sourceId: source.metadata?.workItemId || source.metadata?.capabilityId || source.id,
+        sourceId:
+          source.sourceId ||
+          source.metadata?.artifactId ||
+          source.metadata?.workItemId ||
+          source.metadata?.capabilityId ||
+          source.id,
+        sourceUri: source.sourceUri,
         freshness: source.tier === 'WORKING' ? 'HOT' : source.tier === 'SESSION' ? 'WARM' : 'COLD',
         metadata: source.metadata,
         content: source.content,
@@ -435,10 +665,27 @@ export const refreshCapabilityMemory = async (capabilityId: string) => {
     }
   });
 
+  if (options?.requeueAgents !== false) {
+    await Promise.all(
+      bundle.workspace.agents.map(agent =>
+        queueAgentLearningJob({
+          capabilityId,
+          agentId: agent.id,
+          requestReason: options?.requestReason || 'memory-refresh',
+          makeStale: true,
+        }).catch(() => undefined),
+      ),
+    );
+  }
+
   return listMemoryDocuments(capabilityId);
 };
 
-export const listMemoryDocuments = async (capabilityId: string) => {
+export const listMemoryDocuments = async (
+  capabilityId: string,
+  agentId?: string,
+) => {
+  const sourceFilter = await getAgentSourceFilter(capabilityId, agentId);
   const result = await query(
     `
       SELECT *
@@ -449,20 +696,36 @@ export const listMemoryDocuments = async (capabilityId: string) => {
     [capabilityId],
   );
 
-  return result.rows.map(documentFromRow);
+  return result.rows
+    .map(documentFromRow)
+    .filter(document => {
+      if (sourceFilter === null) {
+        return true;
+      }
+      if (sourceFilter.size === 0) {
+        return false;
+      }
+      return sourceFilter.has(document.id);
+    });
 };
 
 export const searchCapabilityMemory = async ({
   capabilityId,
+  agentId,
   queryText,
   limit = 8,
 }: {
   capabilityId: string;
+  agentId?: string;
   queryText: string;
   limit?: number;
 }): Promise<MemorySearchResult[]> => {
   const normalizedQuery = normalizeText(queryText);
   if (!normalizedQuery) {
+    return [];
+  }
+  const sourceFilter = await getAgentSourceFilter(capabilityId, agentId);
+  if (sourceFilter && sourceFilter.size === 0) {
     return [];
   }
 
@@ -515,19 +778,101 @@ export const searchCapabilityMemory = async ({
       };
     })
     .sort((left, right) => (right.reference.score || 0) - (left.reference.score || 0))
+    .filter(item => {
+      if (sourceFilter === null) {
+        return true;
+      }
+      return sourceFilter.has(item.document.id);
+    })
     .slice(0, limit);
+};
+
+export const getCapabilityMemoryCorpus = async (
+  capabilityId: string,
+  agentId?: string,
+) => {
+  const sourceFilter = await getAgentSourceFilter(capabilityId, agentId);
+  if (sourceFilter && sourceFilter.size === 0) {
+    return [] as Array<{
+      document: MemoryDocument;
+      chunks: MemoryChunk[];
+      combinedContent: string;
+    }>;
+  }
+
+  const result = await query(
+    `
+      SELECT
+        docs.*,
+        chunks.id AS chunk_id,
+        chunks.chunk_index,
+        chunks.content,
+        chunks.token_estimate,
+        chunks.metadata AS chunk_metadata,
+        chunks.created_at AS chunk_created_at
+      FROM capability_memory_documents docs
+      LEFT JOIN capability_memory_chunks chunks
+        ON chunks.capability_id = docs.capability_id
+       AND chunks.document_id = docs.id
+      WHERE docs.capability_id = $1
+      ORDER BY docs.updated_at DESC, docs.id DESC, chunks.chunk_index ASC
+    `,
+    [capabilityId],
+  );
+
+  const byDocument = new Map<
+    string,
+    {
+      document: MemoryDocument;
+      chunks: MemoryChunk[];
+      combinedContent: string;
+    }
+  >();
+
+  result.rows.forEach(row => {
+    const record = row as Record<string, any>;
+    const document = documentFromRow(record);
+    if (sourceFilter && !sourceFilter.has(document.id)) {
+      return;
+    }
+
+    const existing =
+      byDocument.get(document.id) ||
+      {
+        document,
+        chunks: [],
+        combinedContent: '',
+      };
+
+    if (record.chunk_id) {
+      const chunk = chunkFromRow(record);
+      existing.chunks.push(chunk);
+      existing.combinedContent = existing.chunks
+        .map(current => current.content)
+        .filter(Boolean)
+        .join('\n\n');
+    } else if (!existing.combinedContent) {
+      existing.combinedContent = document.contentPreview;
+    }
+
+    byDocument.set(document.id, existing);
+  });
+
+  return [...byDocument.values()];
 };
 
 export const buildMemoryContext = async ({
   capabilityId,
+  agentId,
   queryText,
   limit = 5,
 }: {
   capabilityId: string;
+  agentId?: string;
   queryText: string;
   limit?: number;
 }) => {
-  const results = await searchCapabilityMemory({ capabilityId, queryText, limit });
+  const results = await searchCapabilityMemory({ capabilityId, agentId, queryText, limit });
   return {
     results,
     prompt:

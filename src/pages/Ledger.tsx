@@ -17,8 +17,10 @@ import {
   TerminalSquare,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import ArtifactPreview from '../components/ArtifactPreview';
 import { useCapability } from '../context/CapabilityContext';
 import { getStatusTone } from '../lib/enterprise';
+import { compactMarkdownPreview } from '../lib/markdown';
 import {
   fetchArtifactContent,
   fetchCompletedWorkOrders,
@@ -114,11 +116,6 @@ const PreviewPane = ({
     );
   }
 
-  const body =
-    content.contentFormat === 'JSON'
-      ? JSON.stringify(content.contentJson || {}, null, 2)
-      : content.contentText || 'No preview is available for this artifact.';
-
   return (
     <div className="rounded-3xl border border-outline-variant/15 bg-surface-container-low">
       <div className="flex items-center justify-between border-b border-outline-variant/10 px-5 py-4">
@@ -132,9 +129,17 @@ const PreviewPane = ({
           {content.contentFormat}
         </span>
       </div>
-      <pre className="max-h-[26rem] overflow-auto whitespace-pre-wrap px-5 py-5 text-sm leading-relaxed text-secondary">
-        {body}
-      </pre>
+      <div className="px-5 py-5">
+        <ArtifactPreview
+          format={content.contentFormat}
+          content={
+            content.contentFormat === 'JSON'
+              ? JSON.stringify(content.contentJson || {}, null, 2)
+              : content.contentText || ''
+          }
+          emptyLabel="No preview is available for this artifact."
+        />
+      </div>
     </div>
   );
 };
@@ -500,6 +505,14 @@ const Ledger = () => {
               {record.runAttempt && <span>Attempt {record.runAttempt}</span>}
               {record.sourceAgentName && <span>{record.sourceAgentName}</span>}
             </div>
+            {(record.artifact.summary || record.artifact.description) && (
+              <p className="mt-3 text-xs leading-relaxed text-secondary">
+                {compactMarkdownPreview(
+                  record.artifact.summary || record.artifact.description,
+                  180,
+                )}
+              </p>
+            )}
           </button>
         );
       })}
@@ -759,9 +772,12 @@ const Ledger = () => {
                       {selectedArtifact.artifact.name}
                     </h2>
                     <p className="mt-2 text-sm leading-relaxed text-secondary">
-                      {selectedArtifact.artifact.summary ||
-                        selectedArtifact.artifact.description ||
-                        'This evidence record is stored in the capability ledger.'}
+                      {compactMarkdownPreview(
+                        selectedArtifact.artifact.summary ||
+                          selectedArtifact.artifact.description ||
+                          'This evidence record is stored in the capability ledger.',
+                        320,
+                      )}
                     </p>
                   </div>
 

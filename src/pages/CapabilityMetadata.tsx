@@ -1,15 +1,18 @@
-import React, { useEffect, useMemo, useState, useTransition } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import {
+  AlertTriangle,
   ArrowRight,
   Bot,
   Building2,
   Database,
   FolderCode,
   GitBranch,
+  KeyRound,
   Layers,
   Link2,
   Plus,
+  RefreshCw,
   Save,
   Trash2,
   Users,
@@ -20,6 +23,13 @@ import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { cn } from '../lib/utils';
 import {
+  clearRuntimeCredentials,
+  fetchRuntimeStatus,
+  updateRuntimeCredentials,
+  type RuntimeStatus,
+} from '../lib/api';
+import {
+  Capability,
   CapabilityDeploymentTarget,
   CapabilityExecutionCommandTemplate,
   CapabilityMetadataEntry,
@@ -119,12 +129,17 @@ export default function CapabilityMetadata() {
   const navigate = useNavigate();
   const {
     activeCapability,
+    bootStatus,
     capabilities,
     getCapabilityWorkspace,
+    lastSyncError,
     updateCapabilityMetadata,
   } = useCapability();
-  const { success } = useToast();
-  const [isSaving, startTransition] = useTransition();
+  const { success, error: showError } = useToast();
+  const [isSaving, setIsSaving] = useState(false);
+  const [isUpdatingRuntime, setIsUpdatingRuntime] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [lastSavedAt, setLastSavedAt] = useState('');
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const ownerAgent = workspace.agents.find(agent => agent.isOwner) || workspace.agents[0];
   const siblingCapabilities = capabilities.filter(
@@ -167,6 +182,9 @@ export default function CapabilityMetadata() {
         ? activeCapability.additionalMetadata
         : [createMetadataEntry()],
   });
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimeStatusError, setRuntimeStatusError] = useState('');
+  const [runtimeTokenInput, setRuntimeTokenInput] = useState('');
 
   useEffect(() => {
     setForm({
@@ -202,7 +220,38 @@ export default function CapabilityMetadata() {
           ? activeCapability.additionalMetadata
           : [createMetadataEntry()],
     });
+    setSaveError('');
+    setLastSavedAt('');
   }, [activeCapability]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    fetchRuntimeStatus()
+      .then(status => {
+        if (!isMounted) {
+          return;
+        }
+
+        setRuntimeStatus(status);
+        setRuntimeStatusError('');
+      })
+      .catch(error => {
+        if (!isMounted) {
+          return;
+        }
+
+        setRuntimeStatusError(
+          error instanceof Error
+            ? error.message
+            : 'Unable to load GitHub runtime identity.',
+        );
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const canSave = Boolean(
     form.name.trim() &&
@@ -221,6 +270,24 @@ export default function CapabilityMetadata() {
   );
   const capabilityLifecycleLabel =
     activeCapability.status === 'ARCHIVED' ? 'Inactive' : 'Active';
+  const runtimeAccessLabel =
+    runtimeStatus?.runtimeAccessMode === 'copilot-session'
+      ? 'Copilot session'
+      : runtimeStatus?.runtimeAccessMode === 'headless-cli'
+      ? 'Headless CLI'
+      : runtimeStatus?.runtimeAccessMode === 'http-fallback'
+      ? 'HTTP fallback'
+      : 'Unconfigured';
+  const runtimeTokenSourceLabel =
+    runtimeStatus?.tokenSource === 'headless-cli'
+      ? 'COPILOT_CLI_URL'
+      : runtimeStatus?.tokenSource === 'runtime-override'
+      ? 'UI override'
+      : runtimeStatus?.tokenSource === 'GITHUB_MODELS_TOKEN'
+      ? 'GITHUB_MODELS_TOKEN'
+      : runtimeStatus?.tokenSource === 'GITHUB_TOKEN'
+      ? 'GITHUB_TOKEN'
+      : 'No credential';
 
   const metadataSummary = useMemo(
     () => [
@@ -242,8 +309,103 @@ export default function CapabilityMetadata() {
   );
 
   const setField = (field: keyof typeof form, value: string) => {
+    setSaveError('');
     setForm(prev => ({ ...prev, [field]: value }));
   };
+
+  const formPayload = useMemo<Partial<Capability>>(
+    () => ({
+      name: form.name.trim(),
+      domain: form.domain.trim(),
+      parentCapabilityId: form.parentCapabilityId || undefined,
+      businessUnit: form.businessUnit.trim(),
+      ownerTeam: form.ownerTeam.trim() || undefined,
+      description: form.description.trim(),
+      confluenceLink: form.confluenceLink.trim() || undefined,
+      jiraBoardLink: form.jiraBoardLink.trim() || undefined,
+      documentationNotes: form.documentationNotes.trim() || undefined,
+      applications: textToList(form.applications),
+      apis: textToList(form.apis),
+      databases: textToList(form.databases),
+      gitRepositories: textToList(form.gitRepositories),
+      localDirectories: textToList(form.localDirectories),
+      executionConfig: {
+        defaultWorkspacePath: form.defaultWorkspacePath.trim() || undefined,
+        allowedWorkspacePaths: textToList(form.allowedWorkspacePaths),
+        commandTemplates: parseJsonArray<CapabilityExecutionCommandTemplate>(
+          form.commandTemplates,
+          activeCapability.executionConfig.commandTemplates,
+        ),
+        deploymentTargets: parseJsonArray<CapabilityDeploymentTarget>(
+          form.deploymentTargets,
+          activeCapability.executionConfig.deploymentTargets,
+        ),
+      },
+      teamNames: textToList(form.teamNames),
+      stakeholders: filteredStakeholders,
+      additionalMetadata: filteredMetadataEntries,
+    }),
+    [
+      activeCapability.executionConfig.commandTemplates,
+      activeCapability.executionConfig.deploymentTargets,
+      filteredMetadataEntries,
+      filteredStakeholders,
+      form.allowedWorkspacePaths,
+      form.apis,
+      form.applications,
+      form.businessUnit,
+      form.commandTemplates,
+      form.confluenceLink,
+      form.databases,
+      form.defaultWorkspacePath,
+      form.deploymentTargets,
+      form.description,
+      form.documentationNotes,
+      form.domain,
+      form.gitRepositories,
+      form.jiraBoardLink,
+      form.localDirectories,
+      form.name,
+      form.ownerTeam,
+      form.parentCapabilityId,
+      form.teamNames,
+    ],
+  );
+  const activeCapabilitySnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        name: activeCapability.name,
+        domain: activeCapability.domain || '',
+        parentCapabilityId: activeCapability.parentCapabilityId || undefined,
+        businessUnit: activeCapability.businessUnit || '',
+        ownerTeam: activeCapability.ownerTeam || undefined,
+        description: activeCapability.description,
+        confluenceLink: activeCapability.confluenceLink || undefined,
+        jiraBoardLink: activeCapability.jiraBoardLink || undefined,
+        documentationNotes: activeCapability.documentationNotes || undefined,
+        applications: activeCapability.applications,
+        apis: activeCapability.apis,
+        databases: activeCapability.databases,
+        gitRepositories: activeCapability.gitRepositories,
+        localDirectories: activeCapability.localDirectories,
+        executionConfig: activeCapability.executionConfig,
+        teamNames: activeCapability.teamNames,
+        stakeholders: activeCapability.stakeholders.filter(hasStakeholderContent),
+        additionalMetadata: activeCapability.additionalMetadata.filter(hasMetadataEntryContent),
+      }),
+    [activeCapability],
+  );
+  const formSnapshot = useMemo(() => JSON.stringify(formPayload), [formPayload]);
+  const saveState =
+    isSaving
+      ? 'saving'
+      : saveError
+        ? 'error'
+        : formSnapshot !== activeCapabilitySnapshot
+          ? 'unsaved'
+          : lastSavedAt
+            ? 'saved'
+            : 'idle';
 
   const updateStakeholder = (
     index: number,
@@ -306,51 +468,36 @@ export default function CapabilityMetadata() {
   };
 
   const handleSave = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!canSave) {
-      return;
-    }
+    void (async () => {
+      event.preventDefault();
+      if (!canSave || bootStatus !== 'ready') {
+        return;
+      }
 
-    startTransition(() => {
-      updateCapabilityMetadata(activeCapability.id, {
-        name: form.name.trim(),
-        domain: form.domain.trim(),
-        parentCapabilityId: form.parentCapabilityId || undefined,
-        businessUnit: form.businessUnit.trim(),
-        ownerTeam: form.ownerTeam.trim() || undefined,
-        description: form.description.trim(),
-        confluenceLink: form.confluenceLink.trim() || undefined,
-        jiraBoardLink: form.jiraBoardLink.trim() || undefined,
-        documentationNotes: form.documentationNotes.trim() || undefined,
-        applications: textToList(form.applications),
-        apis: textToList(form.apis),
-        databases: textToList(form.databases),
-        gitRepositories: textToList(form.gitRepositories),
-        localDirectories: textToList(form.localDirectories),
-        executionConfig: {
-          defaultWorkspacePath: form.defaultWorkspacePath.trim() || undefined,
-          allowedWorkspacePaths: textToList(form.allowedWorkspacePaths),
-          commandTemplates: parseJsonArray<CapabilityExecutionCommandTemplate>(
-            form.commandTemplates,
-            activeCapability.executionConfig.commandTemplates,
-          ),
-          deploymentTargets: parseJsonArray<CapabilityDeploymentTarget>(
-            form.deploymentTargets,
-            activeCapability.executionConfig.deploymentTargets,
-          ),
-        },
-        teamNames: textToList(form.teamNames),
-        stakeholders: filteredStakeholders,
-        additionalMetadata: filteredMetadataEntries,
-      });
-      success(
-        'Capability metadata saved',
-        `${form.name.trim()} now has the latest business, execution, and stakeholder details.`,
-      );
-    });
+      setIsSaving(true);
+      setSaveError('');
+      try {
+        await updateCapabilityMetadata(activeCapability.id, formPayload);
+        setLastSavedAt(new Date().toISOString());
+        success(
+          'Capability metadata saved',
+          `${form.name.trim()} now has the latest business, execution, and stakeholder details.`,
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Unable to save capability metadata.';
+        setSaveError(message);
+        showError('Capability metadata save failed', message);
+      } finally {
+        setIsSaving(false);
+      }
+    })();
   };
 
   const handleStatusToggle = () => {
+    void (async () => {
     const nextStatus = activeCapability.status === 'ARCHIVED' ? 'STABLE' : 'ARCHIVED';
     const confirmed = window.confirm(
       `${
@@ -362,15 +509,95 @@ export default function CapabilityMetadata() {
       return;
     }
 
-    updateCapabilityMetadata(activeCapability.id, {
-      status: nextStatus,
-    });
-    success(
-      nextStatus === 'ARCHIVED'
-        ? 'Capability made inactive'
-        : 'Capability reactivated',
-      `${activeCapability.name} lifecycle state was updated.`,
-    );
+    try {
+      await updateCapabilityMetadata(activeCapability.id, {
+        status: nextStatus,
+      });
+      setLastSavedAt(new Date().toISOString());
+      success(
+        nextStatus === 'ARCHIVED'
+          ? 'Capability made inactive'
+          : 'Capability reactivated',
+        `${activeCapability.name} lifecycle state was updated.`,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to update the capability lifecycle state.';
+      setSaveError(message);
+      showError('Capability lifecycle update failed', message);
+    }
+    })();
+  };
+
+  const refreshRuntimeIdentity = async () => {
+    try {
+      const status = await fetchRuntimeStatus();
+      setRuntimeStatus(status);
+      setRuntimeStatusError('');
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to refresh runtime identity.';
+      setRuntimeStatusError(message);
+      showError('Runtime refresh failed', message);
+    }
+  };
+
+  const handleRuntimeOverrideSave = async () => {
+    const nextToken = runtimeTokenInput.trim();
+    if (!nextToken) {
+      showError('GitHub token required', 'Paste a GitHub token before saving the runtime override.');
+      return;
+    }
+
+    setIsUpdatingRuntime(true);
+    try {
+      const status = await updateRuntimeCredentials(nextToken);
+      setRuntimeStatus(status);
+      setRuntimeStatusError('');
+      setRuntimeTokenInput('');
+      success(
+        'Runtime key updated',
+        status.githubIdentity?.login
+          ? `The backend is now using @${status.githubIdentity.login}.`
+          : 'The backend is now using the runtime override key.',
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to update the runtime key.';
+      setRuntimeStatusError(message);
+      showError('Runtime key update failed', message);
+    } finally {
+      setIsUpdatingRuntime(false);
+    }
+  };
+
+  const handleRuntimeOverrideClear = async () => {
+    setIsUpdatingRuntime(true);
+    try {
+      const status = await clearRuntimeCredentials();
+      setRuntimeStatus(status);
+      setRuntimeStatusError('');
+      setRuntimeTokenInput('');
+      success(
+        'Runtime override cleared',
+        'The backend reverted to the server environment token configuration.',
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to clear the runtime override.';
+      setRuntimeStatusError(message);
+      showError('Runtime override clear failed', message);
+    } finally {
+      setIsUpdatingRuntime(false);
+    }
   };
 
   return (
@@ -414,6 +641,26 @@ export default function CapabilityMetadata() {
           className="section-card"
         >
           <div className="grid gap-8">
+            {bootStatus !== 'ready' || saveError ? (
+              <div
+                className={cn(
+                  'rounded-2xl border px-4 py-3 text-sm',
+                  saveError
+                    ? 'border-error/15 bg-error/5 text-error'
+                    : 'border-amber-200 bg-amber-50 text-amber-900',
+                )}
+              >
+                <div className="flex items-start gap-3">
+                  <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+                  <p>
+                    {saveError ||
+                      lastSyncError ||
+                      'The capability workspace is still syncing. Metadata changes are disabled until the backend is ready.'}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
             <section className="grid gap-5 md:grid-cols-2">
               <div className="md:col-span-2 flex items-center gap-3">
                 <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
@@ -885,9 +1132,35 @@ export default function CapabilityMetadata() {
               Back to dashboard
             </button>
             <div className="flex items-center gap-3">
+              <StatusBadge
+                tone={
+                  saveState === 'error'
+                    ? 'danger'
+                    : saveState === 'saving'
+                      ? 'info'
+                      : saveState === 'saved'
+                        ? 'success'
+                        : saveState === 'unsaved'
+                          ? 'warning'
+                          : 'neutral'
+                }
+              >
+                {saveState === 'saving'
+                  ? 'Saving'
+                  : saveState === 'saved'
+                    ? `Saved ${new Date(lastSavedAt).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}`
+                    : saveState === 'unsaved'
+                      ? 'Unsaved changes'
+                      : saveState === 'error'
+                        ? 'Save failed'
+                        : 'No changes'}
+              </StatusBadge>
               <button
                 type="submit"
-                disabled={!canSave || isSaving}
+                disabled={!canSave || isSaving || bootStatus !== 'ready'}
                 className="inline-flex items-center gap-2 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <Save size={16} />
@@ -906,6 +1179,130 @@ export default function CapabilityMetadata() {
         </motion.form>
 
         <aside className="space-y-4 xl:sticky xl:top-28 xl:self-start">
+          <SectionCard
+            title="GitHub runtime identity"
+            description="See how the backend is reaching Copilot, which GitHub identity is visible, and whether the app is using headless CLI or token-based access."
+            tone="brand"
+          >
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge tone={runtimeStatus?.configured ? 'success' : 'warning'}>
+                  {runtimeStatus?.configured ? 'Configured' : 'Not configured'}
+                </StatusBadge>
+                <StatusBadge tone={runtimeStatus?.runtimeAccessMode !== 'unconfigured' ? 'success' : 'warning'}>
+                  {runtimeAccessLabel}
+                </StatusBadge>
+                <StatusBadge tone="info">{runtimeTokenSourceLabel}</StatusBadge>
+              </div>
+
+              <div className="rounded-2xl bg-surface-container-low p-4">
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-primary shadow-sm">
+                    <KeyRound size={18} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      Active GitHub identity
+                    </p>
+                    <p className="mt-2 text-sm font-bold text-on-surface">
+                      {runtimeStatus?.githubIdentity?.login
+                        ? `@${runtimeStatus.githubIdentity.login}`
+                        : 'Identity unavailable'}
+                    </p>
+                    <p className="mt-1 text-sm text-secondary">
+                      {runtimeStatus?.githubIdentity?.name ||
+                        runtimeStatus?.githubIdentityError ||
+                        runtimeStatusError ||
+                        'The runtime has not resolved a GitHub identity yet.'}
+                    </p>
+                    {runtimeStatus?.githubIdentity?.profileUrl ? (
+                      <a
+                        href={runtimeStatus.githubIdentity.profileUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-2 inline-flex text-xs font-bold uppercase tracking-[0.18em] text-primary transition-colors hover:text-primary/80"
+                      >
+                        Open GitHub profile
+                      </a>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl bg-surface-container-low p-4">
+                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                    Default model
+                  </p>
+                  <p className="mt-2 text-sm font-bold text-on-surface">
+                    {runtimeStatus?.defaultModel || 'Not resolved'}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-surface-container-low p-4">
+                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                    Model catalog
+                  </p>
+                  <p className="mt-2 text-sm font-bold text-on-surface">
+                    {runtimeStatus?.modelCatalogSource === 'runtime'
+                      ? 'Live runtime catalog'
+                      : 'Fallback catalog'}
+                  </p>
+                </div>
+              </div>
+
+              {(runtimeStatusError || runtimeStatus?.githubIdentityError) ? (
+                <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+                  <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                  <p>{runtimeStatusError || runtimeStatus?.githubIdentityError}</p>
+                </div>
+              ) : null}
+
+              <label className="space-y-2 block">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Runtime override key
+                </span>
+                <input
+                  type="password"
+                  value={runtimeTokenInput}
+                  onChange={event => setRuntimeTokenInput(event.target.value)}
+                  placeholder="Paste a GitHub token for the backend runtime"
+                  className="field-input"
+                />
+                <p className="text-xs text-secondary">
+                  This override applies immediately to the running backend and masks the server env token until you clear it or restart the server.
+                </p>
+              </label>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleRuntimeOverrideSave()}
+                  disabled={isUpdatingRuntime || !runtimeTokenInput.trim()}
+                  className="enterprise-button enterprise-button-brand-muted disabled:opacity-50"
+                >
+                  {isUpdatingRuntime ? 'Saving key' : 'Use this key'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleRuntimeOverrideClear()}
+                  disabled={isUpdatingRuntime}
+                  className="enterprise-button enterprise-button-secondary disabled:opacity-50"
+                >
+                  Revert to server env
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void refreshRuntimeIdentity()}
+                  disabled={isUpdatingRuntime}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-outline-variant/15 px-4 py-2.5 text-xs font-bold uppercase tracking-[0.18em] text-secondary transition-all hover:bg-surface-container-low disabled:opacity-50"
+                >
+                  <RefreshCw size={14} />
+                  Refresh status
+                </button>
+              </div>
+            </div>
+          </SectionCard>
+
           <SectionCard
             title="Capability status"
             description="Use this to keep a capability active for day-to-day delivery or move it to an inactive state without deleting its history."

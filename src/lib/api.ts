@@ -1,9 +1,11 @@
 import {
+  AgentLearningProfileDetail,
   ArtifactContentResponse,
   Capability,
   CapabilityAgent,
   CapabilityChatMessage,
   CapabilityWorkspace,
+  CopilotSessionMonitorSnapshot,
   CompletedWorkOrderDetail,
   CompletedWorkOrderSummary,
   ChatStreamEvent,
@@ -12,6 +14,7 @@ import {
   EvalSuite,
   LedgerArtifactRecord,
   MemoryDocument,
+  MemoryReference,
   MemorySearchResult,
   RunEvent,
   RunConsoleSnapshot,
@@ -30,7 +33,20 @@ export interface RuntimeStatus {
   endpoint: string;
   tokenSource: string | null;
   defaultModel: string;
+  modelCatalogSource?: 'runtime' | 'fallback';
+  runtimeAccessMode?: 'copilot-session' | 'headless-cli' | 'http-fallback' | 'unconfigured';
+  httpFallbackEnabled?: boolean;
+  lastRuntimeError?: string | null;
   streaming?: boolean;
+  githubIdentity?: {
+    id: number;
+    login: string;
+    name?: string;
+    avatarUrl?: string;
+    profileUrl?: string;
+    type?: string;
+  } | null;
+  githubIdentityError?: string | null;
   platformFeatures?: {
     pgvectorAvailable: boolean;
     memoryEmbeddingDimensions: number;
@@ -57,6 +73,22 @@ export interface CapabilityChatResponse {
   responseId: string | null;
   createdAt: string;
   traceId?: string;
+  sessionId?: string;
+  sessionScope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  sessionScopeId?: string;
+  isNewSession?: boolean;
+}
+
+export interface CapabilityChatStreamResult {
+  termination: 'complete' | 'recovered' | 'interrupted' | 'empty';
+  draftContent: string;
+  completeEvent: ChatStreamEvent | null;
+  error?: string;
+  retryAfterMs?: number;
+  memoryReferences: MemoryReference[];
+  sawDelta: boolean;
+  sawComplete: boolean;
+  sawError: boolean;
 }
 
 export interface AppState {
@@ -68,6 +100,12 @@ export interface CapabilityBundle {
   capability: Capability;
   workspace: CapabilityWorkspace;
 }
+
+export type CreateCapabilityInput = Omit<Capability, 'id'> & { id?: string };
+
+export type CreateCapabilityAgentInput = Omit<CapabilityAgent, 'capabilityId' | 'id'> & {
+  id?: string;
+};
 
 export interface CodeWorkspaceStatus {
   path: string;
@@ -97,6 +135,7 @@ interface CapabilityChatRequest {
   agent: CapabilityAgent;
   history: CapabilityChatMessage[];
   message: string;
+  sessionMode?: 'resume' | 'fresh';
 }
 
 const getError = async (response: Response) => {
@@ -123,6 +162,20 @@ const requestJson = async <T>(input: string, init?: RequestInit): Promise<T> => 
 
 export const fetchRuntimeStatus = async (): Promise<RuntimeStatus> =>
   requestJson<RuntimeStatus>('/api/runtime/status');
+
+export const updateRuntimeCredentials = async (
+  token: string,
+): Promise<RuntimeStatus> =>
+  requestJson<RuntimeStatus>('/api/runtime/credentials', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ token }),
+  });
+
+export const clearRuntimeCredentials = async (): Promise<RuntimeStatus> =>
+  requestJson<RuntimeStatus>('/api/runtime/credentials', {
+    method: 'DELETE',
+  });
 
 export const sendCapabilityChat = async (
   payload: CapabilityChatRequest,
@@ -183,7 +236,7 @@ export const getWorkItemEvidenceBundleDownloadUrl = (
   `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/evidence-bundle`;
 
 export const createCapabilityRecord = async (
-  capability: Capability,
+  capability: CreateCapabilityInput,
 ): Promise<CapabilityBundle> =>
   requestJson<CapabilityBundle>('/api/capabilities', {
     method: 'POST',
@@ -230,7 +283,7 @@ export const removeCapabilitySkillRecord = async (
 
 export const addCapabilityAgentRecord = async (
   capabilityId: string,
-  agent: Omit<CapabilityAgent, 'capabilityId'>,
+  agent: CreateCapabilityAgentInput,
 ): Promise<CapabilityBundle> =>
   requestJson<CapabilityBundle>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agents`,
@@ -462,6 +515,13 @@ export const fetchRunConsoleSnapshot = async (
     `/api/capabilities/${encodeURIComponent(capabilityId)}/run-console`,
   );
 
+export const fetchCopilotSessionMonitor = async (
+  capabilityId: string,
+): Promise<CopilotSessionMonitorSnapshot> =>
+  requestJson<CopilotSessionMonitorSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/copilot-sessions`,
+  );
+
 export const fetchTelemetrySpans = async (
   capabilityId: string,
   limit = 80,
@@ -480,18 +540,24 @@ export const fetchTelemetryMetrics = async (
 
 export const fetchMemoryDocuments = async (
   capabilityId: string,
+  agentId?: string,
 ): Promise<MemoryDocument[]> =>
   requestJson<MemoryDocument[]>(
-    `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/documents`,
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/documents${
+      agentId ? `?agentId=${encodeURIComponent(agentId)}` : ''
+    }`,
   );
 
 export const searchCapabilityMemory = async (
   capabilityId: string,
   queryText: string,
   limit = 8,
+  agentId?: string,
 ): Promise<MemorySearchResult[]> =>
   requestJson<MemorySearchResult[]>(
-    `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/search?q=${encodeURIComponent(queryText)}&limit=${limit}`,
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/search?q=${encodeURIComponent(queryText)}&limit=${limit}${
+      agentId ? `&agentId=${encodeURIComponent(agentId)}` : ''
+    }`,
   );
 
 export const refreshCapabilityMemoryIndex = async (
@@ -499,6 +565,27 @@ export const refreshCapabilityMemoryIndex = async (
 ): Promise<MemoryDocument[]> =>
   requestJson<MemoryDocument[]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/refresh`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const fetchAgentLearningProfile = async (
+  capabilityId: string,
+  agentId: string,
+): Promise<AgentLearningProfileDetail> =>
+  requestJson<AgentLearningProfileDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning`,
+  );
+
+export const refreshAgentLearningProfile = async (
+  capabilityId: string,
+  agentId: string,
+): Promise<AgentLearningProfileDetail> =>
+  requestJson<AgentLearningProfileDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning/refresh`,
     {
       method: 'POST',
       headers: jsonHeaders,
@@ -546,12 +633,34 @@ export const streamCapabilityChat = async (
   handlers: {
     onEvent: (event: ChatStreamEvent) => void;
   },
-) => {
-  const response = await fetch('/api/runtime/chat/stream', {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify(payload),
-  });
+  options?: {
+    signal?: AbortSignal;
+  },
+): Promise<CapabilityChatStreamResult> => {
+  let response: Response;
+  try {
+    response = await fetch('/api/runtime/chat/stream', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+      signal: options?.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return {
+        termination: 'empty',
+        draftContent: '',
+        completeEvent: null,
+        error: 'Streaming response was stopped before completion.',
+        memoryReferences: [],
+        sawDelta: false,
+        sawComplete: false,
+        sawError: false,
+      };
+    }
+
+    throw error;
+  }
 
   if (!response.ok) {
     throw new Error(await getError(response));
@@ -564,40 +673,119 @@ export const streamCapabilityChat = async (
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffered = '';
+  let draftContent = '';
+  let completeEvent: ChatStreamEvent | null = null;
+  let sawDelta = false;
+  let sawComplete = false;
+  let sawError = false;
+  let streamError = '';
+  let retryAfterMs: number | undefined;
+  let memoryReferences: MemoryReference[] = [];
+  let aborted = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  const processFrame = (frame: string) => {
+    const trimmedFrame = frame.trim();
+    if (!trimmedFrame) {
+      return;
     }
 
-    buffered += decoder.decode(value, { stream: true });
-    const frames = buffered.split('\n\n');
-    buffered = frames.pop() || '';
-
-    for (const frame of frames) {
-      const eventType =
-        frame
-          .split('\n')
-          .find(line => line.startsWith('event:'))
-          ?.replace(/^event:\s*/, '')
-          .trim() || 'message';
-      const data = frame
+    const eventType =
+      trimmedFrame
         .split('\n')
-        .filter(line => line.startsWith('data:'))
-        .map(line => line.replace(/^data:\s*/, ''))
-        .join('\n');
+        .find(line => line.startsWith('event:'))
+        ?.replace(/^event:\s*/, '')
+        .trim() || 'message';
+    const data = trimmedFrame
+      .split('\n')
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.replace(/^data:\s*/, ''))
+      .join('\n');
 
-      if (!data) {
-        continue;
+    if (!data) {
+      return;
+    }
+
+    try {
+      const streamEvent = JSON.parse(data) as ChatStreamEvent;
+      const normalizedEvent = {
+        ...streamEvent,
+        type: streamEvent.type || (eventType as ChatStreamEvent['type']),
+      };
+
+      if (normalizedEvent.type === 'memory') {
+        memoryReferences = normalizedEvent.memoryReferences || [];
+      }
+      if (normalizedEvent.type === 'delta' && normalizedEvent.content) {
+        sawDelta = true;
+        draftContent += normalizedEvent.content;
+      }
+      if (normalizedEvent.type === 'complete') {
+        sawComplete = true;
+        completeEvent = normalizedEvent;
+        draftContent = normalizedEvent.content || draftContent;
+        memoryReferences = normalizedEvent.memoryReferences || memoryReferences;
+      }
+      if (normalizedEvent.type === 'error') {
+        sawError = true;
+        streamError = normalizedEvent.error || 'The backend runtime ended this stream early.';
+        retryAfterMs = normalizedEvent.retryAfterMs;
       }
 
-      const payload = JSON.parse(data) as ChatStreamEvent;
+      handlers.onEvent(normalizedEvent);
+    } catch {
+      // Ignore malformed trailing frames so partial streamed output can still recover.
+    }
+  };
 
-      handlers.onEvent({
-        ...payload,
-        type: payload.type || (eventType as ChatStreamEvent['type']),
-      });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffered += decoder.decode(value, { stream: !done });
+
+      const frames = buffered.split('\n\n');
+      const trailingFrame = done ? '' : frames.pop() || '';
+
+      for (const frame of frames) {
+        processFrame(frame);
+      }
+
+      if (done) {
+        if (trailingFrame.trim()) {
+          processFrame(trailingFrame);
+        }
+        break;
+      }
+
+      buffered = trailingFrame;
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      aborted = true;
+    } else {
+      throw error;
     }
   }
+
+  const trimmedDraft = draftContent.trim();
+  const termination = sawComplete
+    ? 'complete'
+    : trimmedDraft
+      ? sawError || aborted
+        ? 'interrupted'
+        : 'recovered'
+      : 'empty';
+
+  return {
+    termination,
+    draftContent,
+    completeEvent,
+    error:
+      streamError ||
+      (aborted ? 'Streaming response was stopped before completion.' : undefined),
+    retryAfterMs,
+    memoryReferences,
+    sawDelta,
+    sawComplete,
+    sawError,
+  };
 };

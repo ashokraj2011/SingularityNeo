@@ -55,17 +55,28 @@ import {
   listLedgerArtifacts,
 } from './ledger';
 import {
-  buildCapabilitySystemPrompt,
+  GitHubProviderRateLimitError,
   defaultModel,
   getConfiguredToken,
-  githubModelsApiUrl,
+  getConfiguredTokenSource,
   invokeCapabilityChat,
+  invokeCapabilityChatStream,
+  listManagedCopilotSessions,
+  listAvailableRuntimeModels,
   normalizeModel,
-  requestGitHubModelStream,
-  staticModels,
   type ChatHistoryMessage,
 } from './githubModels';
 import { buildMemoryContext, listMemoryDocuments, refreshCapabilityMemory, searchCapabilityMemory } from './memory';
+import {
+  ensureAgentLearningBackfill,
+  getAgentLearningProfileDetail,
+  queueCapabilityAgentLearningRefresh,
+  queueSingleAgentLearningRefresh,
+} from './agentLearning/service';
+import {
+  startAgentLearningWorker,
+  wakeAgentLearningWorker,
+} from './agentLearning/worker';
 import { evaluateBranchPolicy, listPolicyDecisions } from './policy';
 import { subscribeToRunEvents } from './eventBus';
 import { getEvalRunDetail, listEvalRuns, listEvalSuites, runEvalSuite } from './evals';
@@ -78,7 +89,10 @@ import {
   recordUsageMetrics,
   startTelemetrySpan,
 } from './telemetry';
-import { getPlatformFeatureState } from './db';
+import { getMissingRuntimeConfigurationMessage } from './runtimePolicy';
+import { sendApiError } from './api/errors';
+import { buildRuntimeStatus } from './runtimeStatus';
+import { registerRuntimeRoutes } from './routes/runtime';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -87,11 +101,112 @@ const app = express();
 const port = Number(process.env.PORT || '3001');
 const execFileAsync = promisify(execFile);
 
+const slugify = (value: string) =>
+  value
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24);
+
+const createRuntimeId = (prefix: string) =>
+  `${prefix}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+
+const ensureCapabilityCreatePayload = (
+  capability: Partial<Capability> | undefined,
+): Capability | null => {
+  if (!capability?.name || !capability?.description) {
+    return null;
+  }
+
+  return {
+    ...capability,
+    id: capability.id?.trim() || createRuntimeId('CAP'),
+    domain: capability.domain || '',
+    description: capability.description,
+    applications: capability.applications || [],
+    apis: capability.apis || [],
+    databases: capability.databases || [],
+    gitRepositories: capability.gitRepositories || [],
+    localDirectories: capability.localDirectories || [],
+    teamNames: capability.teamNames || [],
+    stakeholders: capability.stakeholders || [],
+    additionalMetadata: capability.additionalMetadata || [],
+    skillLibrary: capability.skillLibrary || [],
+    status: capability.status || 'PENDING',
+    executionConfig: capability.executionConfig || {
+      allowedWorkspacePaths: [],
+      commandTemplates: [],
+      deploymentTargets: [],
+    },
+  } as Capability;
+};
+
+const ensureAgentCreatePayload = (
+  capabilityId: string,
+  agent: Partial<Omit<CapabilityAgent, 'capabilityId'>> | undefined,
+): Omit<CapabilityAgent, 'capabilityId'> | null => {
+  if (!agent?.name || !agent?.role || !agent?.objective) {
+    return null;
+  }
+
+  return {
+    ...agent,
+    id:
+      agent.id?.trim() ||
+      `AGENT-${slugify(capabilityId)}-${slugify(agent.name || 'CUSTOM')}-${Math.random()
+        .toString(36)
+        .slice(2, 5)
+        .toUpperCase()}`,
+    name: agent.name,
+    role: agent.role,
+    objective: agent.objective,
+    systemPrompt: agent.systemPrompt || '',
+    initializationStatus: agent.initializationStatus || 'READY',
+    documentationSources: agent.documentationSources || [],
+    inputArtifacts: agent.inputArtifacts || [],
+    outputArtifacts: agent.outputArtifacts || [],
+    learningNotes: agent.learningNotes || [],
+    skillIds: agent.skillIds || [],
+    provider: agent.provider || 'GitHub Copilot SDK',
+    model: agent.model || defaultModel,
+    tokenLimit:
+      typeof agent.tokenLimit === 'number' && Number.isFinite(agent.tokenLimit)
+        ? agent.tokenLimit
+        : 12000,
+    learningProfile: agent.learningProfile,
+    sessionSummaries: agent.sessionSummaries || [],
+    usage: agent.usage,
+    previousOutputs: agent.previousOutputs || [],
+    isBuiltIn: agent.isBuiltIn,
+    isOwner: agent.isOwner,
+  } as Omit<CapabilityAgent, 'capabilityId'>;
+};
+
+const resolveWritableAgentModel = async (requestedModel?: string) => {
+  const requested = normalizeModel(requestedModel || defaultModel);
+
+  try {
+    const { models } = await listAvailableRuntimeModels();
+    const selected =
+      models.find(
+        model =>
+          normalizeModel(model.id) === requested ||
+          normalizeModel(model.apiModelId) === requested,
+      ) || models[0];
+
+    return selected?.apiModelId || requested;
+  } catch {
+    return requested;
+  }
+};
+
 type ChatRequestBody = {
   capability?: Capability;
   agent?: CapabilityAgent;
   history?: ChatHistoryMessage[];
   message?: string;
+  sessionMode?: 'resume' | 'fresh';
 };
 
 type WorkspacePatchBody = Partial<
@@ -122,7 +237,23 @@ const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 const distDir = path.resolve(projectRoot, 'dist');
 
-const normalizeDirectoryPath = (value: string) => path.resolve(value.trim());
+const normalizeDirectoryPath = (value: string) => {
+  const trimmed = value.trim();
+  return trimmed ? path.resolve(trimmed) : '';
+};
+
+const getCapabilityWorkspaceRoots = (capability: Capability) =>
+  Array.from(
+    new Set(
+      [
+        capability.executionConfig?.defaultWorkspacePath,
+        ...(capability.executionConfig?.allowedWorkspacePaths || []),
+        ...(capability.localDirectories || []),
+      ]
+        .map(value => normalizeDirectoryPath(value || ''))
+        .filter(Boolean),
+    ),
+  );
 const toSafeDownloadName = (value: string) =>
   value
     .toLowerCase()
@@ -194,22 +325,7 @@ const inspectCodeWorkspace = async (directoryPath: string): Promise<CodeWorkspac
 };
 
 const sendRepositoryError = (response: express.Response, error: unknown) => {
-  const message =
-    error instanceof Error ? error.message : 'The persistence request failed unexpectedly.';
-  const status =
-    /not found/i.test(message)
-      ? 404
-      : /already has an active or waiting workflow run|already exists/i.test(message)
-      ? 409
-      : /required|invalid|must/i.test(message)
-      ? 400
-      : /not configured/i.test(message)
-      ? 503
-      : /not registered|forbidden|not allowed/i.test(message)
-      ? 403
-      : 500;
-
-  response.status(status).json({ error: message });
+  sendApiError(response, error);
 };
 
 const parseActor = (value: unknown, fallback: string) => {
@@ -224,6 +340,111 @@ const writeSseEvent = (
 ) => {
   response.write(`event: ${event}\n`);
   response.write(`data: ${JSON.stringify(payload)}\n\n`);
+};
+
+const isRuntimeConfigured = () => {
+  const tokenSource = getConfiguredTokenSource();
+  return tokenSource === 'headless-cli' || Boolean(getConfiguredToken());
+};
+
+const buildCopilotSessionMonitorSnapshot = async (capabilityId: string) => {
+  const [bundle, runtimeStatus] = await Promise.all([
+    getCapabilityBundle(capabilityId),
+    buildRuntimeStatus(),
+  ]);
+  const managedSessions = listManagedCopilotSessions().filter(
+    session => session.capabilityId === capabilityId,
+  );
+  const liveSessionIds = new Set(managedSessions.map(session => session.sessionId));
+  const sessionRows = new Map<
+    string,
+    {
+      sessionId: string;
+      agentId?: string;
+      agentName: string;
+      scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+      scopeId?: string;
+      lastUsedAt: string;
+      createdAt?: string;
+      model: string;
+      requestCount: number;
+      totalTokens: number;
+      live: boolean;
+      resumable: boolean;
+      state: 'ACTIVE' | 'STORED';
+    }
+  >();
+
+  bundle.workspace.agents.forEach(agent => {
+    agent.sessionSummaries.forEach(session => {
+      sessionRows.set(session.sessionId, {
+        sessionId: session.sessionId,
+        agentId: agent.id,
+        agentName: agent.name,
+        scope: session.scope,
+        scopeId: session.scopeId,
+        lastUsedAt: session.lastUsedAt,
+        model: session.model,
+        requestCount: session.requestCount,
+        totalTokens: session.totalTokens,
+        live: liveSessionIds.has(session.sessionId),
+        resumable: true,
+        state: liveSessionIds.has(session.sessionId) ? 'ACTIVE' : 'STORED',
+      });
+    });
+  });
+
+  managedSessions.forEach(session => {
+    const current = sessionRows.get(session.sessionId);
+    sessionRows.set(session.sessionId, {
+      sessionId: session.sessionId,
+      agentId: current?.agentId || session.agentId,
+      agentName: current?.agentName || session.agentName || 'Unknown agent',
+      scope: current?.scope || session.scope || 'GENERAL_CHAT',
+      scopeId: current?.scopeId || session.scopeId,
+      lastUsedAt: current?.lastUsedAt || session.lastUsedAt,
+      createdAt: session.createdAt,
+      model: current?.model || session.model || runtimeStatus.defaultModel,
+      requestCount: current?.requestCount || 0,
+      totalTokens: current?.totalTokens || 0,
+      live: true,
+      resumable: true,
+      state: 'ACTIVE',
+    });
+  });
+
+  const sessions = [...sessionRows.values()].sort(
+    (left, right) =>
+      new Date(right.lastUsedAt).getTime() - new Date(left.lastUsedAt).getTime(),
+  );
+
+  return {
+    capabilityId,
+    runtime: {
+      configured: runtimeStatus.configured,
+      provider: runtimeStatus.provider,
+      runtimeAccessMode: runtimeStatus.runtimeAccessMode,
+      tokenSource: runtimeStatus.tokenSource,
+      defaultModel: runtimeStatus.defaultModel,
+      githubIdentity: runtimeStatus.githubIdentity
+        ? {
+            login: runtimeStatus.githubIdentity.login,
+            name: runtimeStatus.githubIdentity.name,
+          }
+        : null,
+      activeManagedSessions: managedSessions.length,
+    },
+    summary: {
+      activeSessionCount: sessions.filter(session => session.live).length,
+      storedSessionCount: sessions.length,
+      resumableSessionCount: sessions.filter(session => session.resumable).length,
+      totalTokens: sessions.reduce((total, session) => total + session.totalTokens, 0),
+      generalChatCount: sessions.filter(session => session.scope === 'GENERAL_CHAT').length,
+      workItemCount: sessions.filter(session => session.scope === 'WORK_ITEM').length,
+      taskCount: sessions.filter(session => session.scope === 'TASK').length,
+    },
+    sessions,
+  };
 };
 
 app.use((request, response, next) => {
@@ -282,6 +503,16 @@ app.get('/api/capabilities/:capabilityId/run-console', async (request, response)
   }
 });
 
+app.get('/api/capabilities/:capabilityId/copilot-sessions', async (request, response) => {
+  try {
+    response.json(
+      await buildCopilotSessionMonitorSnapshot(request.params.capabilityId),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
 app.get('/api/capabilities/:capabilityId/telemetry/spans', async (request, response) => {
   try {
     response.json(
@@ -310,7 +541,12 @@ app.get('/api/capabilities/:capabilityId/telemetry/metrics', async (request, res
 
 app.get('/api/capabilities/:capabilityId/memory/documents', async (request, response) => {
   try {
-    response.json(await listMemoryDocuments(request.params.capabilityId));
+    response.json(
+      await listMemoryDocuments(
+        request.params.capabilityId,
+        String(request.query.agentId || '').trim() || undefined,
+      ),
+    );
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -321,6 +557,7 @@ app.get('/api/capabilities/:capabilityId/memory/search', async (request, respons
     response.json(
       await searchCapabilityMemory({
         capabilityId: request.params.capabilityId,
+        agentId: String(request.query.agentId || '').trim() || undefined,
         queryText: String(request.query.q || ''),
         limit: Number(request.query.limit || 8),
       }),
@@ -332,7 +569,44 @@ app.get('/api/capabilities/:capabilityId/memory/search', async (request, respons
 
 app.post('/api/capabilities/:capabilityId/memory/refresh', async (request, response) => {
   try {
-    response.json(await refreshCapabilityMemory(request.params.capabilityId));
+    const documents = await refreshCapabilityMemory(request.params.capabilityId, {
+      requeueAgents: true,
+      requestReason: 'manual-memory-refresh',
+    });
+    wakeAgentLearningWorker();
+    response.json(documents);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/agents/:agentId/learning', async (request, response) => {
+  try {
+    response.json(
+      await getAgentLearningProfileDetail(
+        request.params.capabilityId,
+        request.params.agentId,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/agents/:agentId/learning/refresh', async (request, response) => {
+  try {
+    await queueSingleAgentLearningRefresh(
+      request.params.capabilityId,
+      request.params.agentId,
+      'manual-agent-refresh',
+    );
+    wakeAgentLearningWorker();
+    response.json(
+      await getAgentLearningProfileDetail(
+        request.params.capabilityId,
+        request.params.agentId,
+      ),
+    );
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -467,16 +741,21 @@ app.get(
 );
 
 app.post('/api/capabilities', async (request, response) => {
-  const capability = request.body as Capability | undefined;
-  if (!capability?.id || !capability?.name || !capability?.description) {
+  const capability = ensureCapabilityCreatePayload(
+    request.body as Partial<Capability> | undefined,
+  );
+  if (!capability) {
     response.status(400).json({
-      error: 'Capability id, name, and description are required.',
+      error: 'Capability name and description are required.',
     });
     return;
   }
 
   try {
-    response.status(201).json(await createCapabilityRecord(capability));
+    await createCapabilityRecord(capability);
+    await queueCapabilityAgentLearningRefresh(capability.id, 'capability-created');
+    wakeAgentLearningWorker();
+    response.status(201).json(await getCapabilityBundle(capability.id));
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -484,12 +763,20 @@ app.post('/api/capabilities', async (request, response) => {
 
 app.patch('/api/capabilities/:capabilityId', async (request, response) => {
   try {
-    response.json(
-      await updateCapabilityRecord(
-        request.params.capabilityId,
-        request.body as Partial<Capability>,
-      ),
+    await updateCapabilityRecord(
+      request.params.capabilityId,
+      request.body as Partial<Capability>,
     );
+    await refreshCapabilityMemory(request.params.capabilityId, {
+      requeueAgents: true,
+      requestReason: 'capability-updated',
+    }).catch(() => undefined);
+    await queueCapabilityAgentLearningRefresh(
+      request.params.capabilityId,
+      'capability-updated',
+    );
+    wakeAgentLearningWorker();
+    response.json(await getCapabilityBundle(request.params.capabilityId));
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -505,8 +792,14 @@ app.post('/api/capabilities/:capabilityId/skills', async (request, response) => 
   }
 
   try {
+    await addCapabilitySkillRecord(request.params.capabilityId, skill);
+    await queueCapabilityAgentLearningRefresh(
+      request.params.capabilityId,
+      'capability-skill-added',
+    );
+    wakeAgentLearningWorker();
     response.status(201).json(
-      await addCapabilitySkillRecord(request.params.capabilityId, skill),
+      await getCapabilityBundle(request.params.capabilityId),
     );
   } catch (error) {
     sendRepositoryError(response, error);
@@ -515,29 +808,44 @@ app.post('/api/capabilities/:capabilityId/skills', async (request, response) => 
 
 app.delete('/api/capabilities/:capabilityId/skills/:skillId', async (request, response) => {
   try {
-    response.json(
-      await removeCapabilitySkillRecord(
-        request.params.capabilityId,
-        request.params.skillId,
-      ),
+    await removeCapabilitySkillRecord(
+      request.params.capabilityId,
+      request.params.skillId,
     );
+    await queueCapabilityAgentLearningRefresh(
+      request.params.capabilityId,
+      'capability-skill-removed',
+    );
+    wakeAgentLearningWorker();
+    response.json(await getCapabilityBundle(request.params.capabilityId));
   } catch (error) {
     sendRepositoryError(response, error);
   }
 });
 
 app.post('/api/capabilities/:capabilityId/agents', async (request, response) => {
-  const agent = request.body as Omit<CapabilityAgent, 'capabilityId'> | undefined;
-  if (!agent?.id || !agent?.name || !agent?.role || !agent?.objective) {
+  const agent = ensureAgentCreatePayload(
+    request.params.capabilityId,
+    request.body as Partial<Omit<CapabilityAgent, 'capabilityId'>> | undefined,
+  );
+  if (!agent) {
     response.status(400).json({
-      error: 'Agent id, name, role, and objective are required.',
+      error: 'Agent name, role, and objective are required.',
     });
     return;
   }
 
   try {
+    agent.model = await resolveWritableAgentModel(agent.model);
+    await addCapabilityAgentRecord(request.params.capabilityId, agent);
+    await queueSingleAgentLearningRefresh(
+      request.params.capabilityId,
+      agent.id,
+      'agent-created',
+    );
+    wakeAgentLearningWorker();
     response.status(201).json(
-      await addCapabilityAgentRecord(request.params.capabilityId, agent),
+      await getCapabilityBundle(request.params.capabilityId),
     );
   } catch (error) {
     sendRepositoryError(response, error);
@@ -546,13 +854,23 @@ app.post('/api/capabilities/:capabilityId/agents', async (request, response) => 
 
 app.patch('/api/capabilities/:capabilityId/agents/:agentId', async (request, response) => {
   try {
-    response.json(
-      await updateCapabilityAgentRecord(
-        request.params.capabilityId,
-        request.params.agentId,
-        request.body as Partial<CapabilityAgent>,
-      ),
+    const updates = request.body as Partial<CapabilityAgent>;
+    if (updates.model) {
+      updates.model = await resolveWritableAgentModel(updates.model);
+    }
+
+    await updateCapabilityAgentRecord(
+      request.params.capabilityId,
+      request.params.agentId,
+      updates,
     );
+    await queueSingleAgentLearningRefresh(
+      request.params.capabilityId,
+      request.params.agentId,
+      'agent-updated',
+    );
+    wakeAgentLearningWorker();
+    response.json(await getCapabilityBundle(request.params.capabilityId));
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -594,12 +912,23 @@ app.patch('/api/capabilities/:capabilityId/chat-agent', async (request, response
 
 app.patch('/api/capabilities/:capabilityId/workspace', async (request, response) => {
   try {
-    response.json(
-      await replaceCapabilityWorkspaceContentRecord(
-        request.params.capabilityId,
-        request.body as WorkspacePatchBody,
-      ),
+    const workspace = await replaceCapabilityWorkspaceContentRecord(
+      request.params.capabilityId,
+      request.body as WorkspacePatchBody,
     );
+    if (
+      request.body?.artifacts ||
+      request.body?.workItems ||
+      request.body?.workflows ||
+      request.body?.learningUpdates
+    ) {
+      await refreshCapabilityMemory(request.params.capabilityId, {
+        requeueAgents: true,
+        requestReason: 'workspace-content-updated',
+      }).catch(() => undefined);
+      wakeAgentLearningWorker();
+    }
+    response.json(workspace);
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -839,7 +1168,7 @@ app.get('/api/capabilities/:capabilityId/code-workspaces', async (request, respo
   try {
     const bundle = await getCapabilityBundle(request.params.capabilityId);
     const workspaces = await Promise.all(
-      bundle.capability.localDirectories.map(directoryPath =>
+      getCapabilityWorkspaceRoots(bundle.capability).map(directoryPath =>
         inspectCodeWorkspace(directoryPath),
       ),
     );
@@ -864,7 +1193,7 @@ app.post('/api/capabilities/:capabilityId/code-workspaces/branch', async (reques
   try {
     const bundle = await getCapabilityBundle(request.params.capabilityId);
     const allowedPaths = new Set(
-      bundle.capability.localDirectories.map(normalizeDirectoryPath),
+      getCapabilityWorkspaceRoots(bundle.capability),
     );
     const resolvedPath = normalizeDirectoryPath(requestedPath);
 
@@ -901,35 +1230,12 @@ app.post('/api/capabilities/:capabilityId/code-workspaces/branch', async (reques
   }
 });
 
-app.get('/api/runtime/status', (_request, response) => {
-  const token = getConfiguredToken();
-  const platformFeatures = getPlatformFeatureState();
-
-  response.json({
-    configured: Boolean(token),
-    provider: 'GitHub Copilot API',
-    endpoint: `${githubModelsApiUrl}/chat/completions`,
-    tokenSource: process.env.GITHUB_MODELS_TOKEN
-      ? 'GITHUB_MODELS_TOKEN'
-      : process.env.GITHUB_TOKEN
-      ? 'GITHUB_TOKEN'
-      : null,
-    defaultModel,
-    availableModels: staticModels.map(model => ({
-      ...model,
-      apiModelId: normalizeModel(model.id),
-    })),
-    streaming: true,
-    platformFeatures,
-  });
-});
+registerRuntimeRoutes(app);
 
 app.post('/api/runtime/chat', async (request, response) => {
-  const token = getConfiguredToken();
-  if (!token) {
+  if (!isRuntimeConfigured()) {
     response.status(503).json({
-      error:
-        'GitHub Models is not configured. Add GITHUB_MODELS_TOKEN to .env.local and restart the server.',
+      error: getMissingRuntimeConfigurationMessage(),
     });
     return;
   }
@@ -944,58 +1250,68 @@ app.post('/api/runtime/chat', async (request, response) => {
   }
 
   try {
+    const bundle = await getCapabilityBundle(body.capability.id);
+    const liveAgent =
+      bundle.workspace.agents.find(agent => agent.id === body.agent?.id) || body.agent;
+    const liveCapability = bundle.capability;
     const traceId = createTraceId();
     const span = await startTelemetrySpan({
-      capabilityId: body.capability.id,
+      capabilityId: liveCapability.id,
       traceId,
       entityType: 'CHAT',
-      entityId: body.agent.id,
-      name: `Capability chat: ${body.agent.name}`,
+      entityId: liveAgent.id,
+      name: `Capability chat: ${liveAgent.name}`,
       status: 'RUNNING',
-      model: body.agent.model,
+      model: liveAgent.model,
       attributes: {
-        capabilityId: body.capability.id,
-        agentId: body.agent.id,
+        capabilityId: liveCapability.id,
+        agentId: liveAgent.id,
       },
     });
     const memoryContext = await buildMemoryContext({
-      capabilityId: body.capability.id,
+      capabilityId: liveCapability.id,
+      agentId: liveAgent.id,
       queryText: message,
     });
     const chatResponse = await invokeCapabilityChat({
-      capability: body.capability,
-      agent: body.agent,
+      capability: liveCapability,
+      agent: liveAgent,
       history: body.history || [],
       message,
+      resetSession: body.sessionMode === 'fresh',
       memoryPrompt: memoryContext.prompt
         ? `Retrieved memory context:\n${memoryContext.prompt}`
         : undefined,
     });
     await finishTelemetrySpan({
-      capabilityId: body.capability.id,
+      capabilityId: liveCapability.id,
       spanId: span.id,
       status: 'OK',
       costUsd: chatResponse.usage.estimatedCostUsd,
       tokenUsage: chatResponse.usage,
       attributes: {
         memoryHits: memoryContext.results.length,
+        sessionMode: body.sessionMode || 'resume',
+        isNewSession: String(Boolean(chatResponse.isNewSession)),
       },
     });
     await recordUsageMetrics({
-      capabilityId: body.capability.id,
+      capabilityId: liveCapability.id,
       traceId,
       scopeType: 'CHAT',
-      scopeId: body.agent.id,
+      scopeId: liveAgent.id,
       totalTokens: chatResponse.usage.totalTokens,
       costUsd: chatResponse.usage.estimatedCostUsd,
       tags: {
         model: chatResponse.model,
+        sessionMode: body.sessionMode || 'resume',
       },
     });
 
     response.json({
       ...chatResponse,
       traceId,
+      sessionMode: body.sessionMode || 'resume',
       memoryReferences: memoryContext.results.map(result => result.reference),
     });
   } catch (error) {
@@ -1004,11 +1320,9 @@ app.post('/api/runtime/chat', async (request, response) => {
 });
 
 app.post('/api/runtime/chat/stream', async (request, response) => {
-  const token = getConfiguredToken();
-  if (!token) {
+  if (!isRuntimeConfigured()) {
     response.status(503).json({
-      error:
-        'GitHub Models is not configured. Add GITHUB_MODELS_TOKEN to .env.local and restart the server.',
+      error: getMissingRuntimeConfigurationMessage(),
     });
     return;
   }
@@ -1028,73 +1342,52 @@ app.post('/api/runtime/chat/stream', async (request, response) => {
   response.flushHeaders?.();
 
   const traceId = createTraceId();
-  const memoryContext = await buildMemoryContext({
-    capabilityId: body.capability.id,
-    queryText: message,
-  });
 
   writeSseEvent(response, 'start', {
     type: 'start',
     traceId,
     createdAt: new Date().toISOString(),
-  });
-  writeSseEvent(response, 'memory', {
-    type: 'memory',
-    traceId,
-    memoryReferences: memoryContext.results.map(result => result.reference),
+    sessionMode: body.sessionMode || 'resume',
   });
 
   try {
+    const bundle = await getCapabilityBundle(body.capability.id);
+    const liveAgent =
+      bundle.workspace.agents.find(agent => agent.id === body.agent?.id) || body.agent;
+    const liveCapability = bundle.capability;
+    const memoryContext = await buildMemoryContext({
+      capabilityId: liveCapability.id,
+      agentId: liveAgent.id,
+      queryText: message,
+    });
+    writeSseEvent(response, 'memory', {
+      type: 'memory',
+      traceId,
+      memoryReferences: memoryContext.results.map(result => result.reference),
+    });
     const span = await startTelemetrySpan({
-      capabilityId: body.capability.id,
+      capabilityId: liveCapability.id,
       traceId,
       entityType: 'CHAT',
-      entityId: body.agent.id,
-      name: `Capability chat stream: ${body.agent.name}`,
+      entityId: liveAgent.id,
+      name: `Capability chat stream: ${liveAgent.name}`,
       status: 'RUNNING',
-      model: body.agent.model,
+      model: liveAgent.model,
       attributes: {
-        capabilityId: body.capability.id,
-        agentId: body.agent.id,
+        capabilityId: liveCapability.id,
+        agentId: liveAgent.id,
         streamed: true,
       },
     });
-    const normalizedHistory = (body.history || [])
-      .filter(item => item?.content?.trim())
-      .slice(-10)
-      .map(item => ({
-        role: item.role === 'agent' ? 'assistant' : 'user',
-        content: item.content!.trim(),
-      })) as Array<{ role: 'assistant' | 'user'; content: string }>;
-
-    const streamed = await requestGitHubModelStream({
-      model: body.agent.model,
-      maxTokens: Number(body.agent.tokenLimit || 1200),
-      temperature: 0.2,
-      messages: [
-        {
-          role: 'developer',
-          content:
-            'You are operating inside an enterprise capability workspace. Stay scoped to the provided capability and agent context, and be explicit when context is missing.',
-        },
-        {
-          role: 'system',
-          content: [
-            buildCapabilitySystemPrompt({
-              capability: body.capability,
-              agent: body.agent,
-            }),
-            memoryContext.prompt ? `Retrieved memory context:\n${memoryContext.prompt}` : null,
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
-        },
-        ...normalizedHistory,
-        {
-          role: 'user',
-          content: message,
-        },
-      ],
+    const streamed = await invokeCapabilityChatStream({
+      capability: liveCapability,
+      agent: liveAgent,
+      history: body.history || [],
+      message,
+      resetSession: body.sessionMode === 'fresh',
+      memoryPrompt: memoryContext.prompt
+        ? `Retrieved memory context:\n${memoryContext.prompt}`
+        : undefined,
       onDelta: delta => {
         writeSseEvent(response, 'delta', {
           type: 'delta',
@@ -1105,7 +1398,7 @@ app.post('/api/runtime/chat/stream', async (request, response) => {
     });
 
     await finishTelemetrySpan({
-      capabilityId: body.capability.id,
+      capabilityId: liveCapability.id,
       spanId: span.id,
       status: 'OK',
       costUsd: streamed.usage.estimatedCostUsd,
@@ -1113,18 +1406,21 @@ app.post('/api/runtime/chat/stream', async (request, response) => {
       attributes: {
         memoryHits: memoryContext.results.length,
         streamed: true,
+        sessionMode: body.sessionMode || 'resume',
+        isNewSession: String(Boolean(streamed.isNewSession)),
       },
     });
     await recordUsageMetrics({
-      capabilityId: body.capability.id,
+      capabilityId: liveCapability.id,
       traceId,
       scopeType: 'CHAT',
-      scopeId: body.agent.id,
+      scopeId: liveAgent.id,
       totalTokens: streamed.usage.totalTokens,
       costUsd: streamed.usage.estimatedCostUsd,
       tags: {
         model: streamed.model,
         streamed: 'true',
+        sessionMode: body.sessionMode || 'resume',
       },
     });
 
@@ -1135,6 +1431,11 @@ app.post('/api/runtime/chat/stream', async (request, response) => {
       createdAt: streamed.createdAt,
       model: streamed.model,
       usage: streamed.usage,
+      sessionId: streamed.sessionId,
+      sessionScope: streamed.sessionScope,
+      sessionScopeId: streamed.sessionScopeId,
+      isNewSession: streamed.isNewSession,
+      sessionMode: body.sessionMode || 'resume',
       memoryReferences: memoryContext.results.map(result => result.reference),
     });
     response.end();
@@ -1142,6 +1443,9 @@ app.post('/api/runtime/chat/stream', async (request, response) => {
     writeSseEvent(response, 'error', {
       type: 'error',
       traceId,
+      sessionMode: body.sessionMode || 'resume',
+      retryAfterMs:
+        error instanceof GitHubProviderRateLimitError ? error.retryAfterMs : undefined,
       error:
         error instanceof Error
           ? error.message
@@ -1165,7 +1469,10 @@ const startServer = async () => {
   const state = await fetchAppState();
   await Promise.all(
     state.capabilities.map(capability =>
-      refreshCapabilityMemory(capability.id).catch(() => undefined),
+      refreshCapabilityMemory(capability.id, {
+        requeueAgents: true,
+        requestReason: 'startup-memory-refresh',
+      }).catch(() => undefined),
     ),
   );
   await Promise.all(
@@ -1173,10 +1480,26 @@ const startServer = async () => {
       listEvalSuites(capability.id).catch(() => undefined),
     ),
   );
+  await ensureAgentLearningBackfill().catch(() => undefined);
   startExecutionWorker();
+  startAgentLearningWorker();
+  wakeAgentLearningWorker();
 
-  app.listen(port, () => {
+  const server = app.listen(port);
+  server.on('listening', () => {
     console.log(`Singularity Neo API listening on http://localhost:${port}`);
+  });
+  server.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(
+        `Singularity Neo API could not start because port ${port} is already in use. ` +
+          `Stop the existing backend process or start this server with PORT=<free-port>.`,
+      );
+      process.exit(1);
+    }
+
+    console.error('Singularity Neo API listener failed.', error);
+    process.exit(1);
   });
 };
 

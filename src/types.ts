@@ -88,6 +88,90 @@ export interface AgentOutputRecord {
   artifactId?: string;
 }
 
+export type AgentLearningStatus =
+  | 'NOT_STARTED'
+  | 'QUEUED'
+  | 'LEARNING'
+  | 'READY'
+  | 'STALE'
+  | 'ERROR';
+
+export type AgentSessionScope = 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+
+export interface AgentLearningProfile {
+  status: AgentLearningStatus;
+  summary: string;
+  highlights: string[];
+  contextBlock: string;
+  sourceDocumentIds: string[];
+  sourceArtifactIds: string[];
+  sourceCount: number;
+  refreshedAt?: string;
+  lastRequestedAt?: string;
+  lastError?: string;
+}
+
+export interface AgentSessionSummary {
+  sessionId: string;
+  scope: AgentSessionScope;
+  scopeId?: string;
+  lastUsedAt: string;
+  model: string;
+  requestCount: number;
+  totalTokens: number;
+}
+
+export interface CopilotSessionMonitorEntry {
+  sessionId: string;
+  agentId?: string;
+  agentName: string;
+  scope: AgentSessionScope;
+  scopeId?: string;
+  lastUsedAt: string;
+  createdAt?: string;
+  model: string;
+  requestCount: number;
+  totalTokens: number;
+  live: boolean;
+  resumable: boolean;
+  state: 'ACTIVE' | 'STORED';
+}
+
+export interface CopilotSessionMonitorSnapshot {
+  capabilityId: string;
+  runtime: {
+    configured: boolean;
+    provider: string;
+    runtimeAccessMode?: 'copilot-session' | 'headless-cli' | 'http-fallback' | 'unconfigured';
+    httpFallbackEnabled?: boolean;
+    tokenSource: string | null;
+    defaultModel: string;
+    githubIdentity?: {
+      login: string;
+      name?: string;
+    } | null;
+    activeManagedSessions: number;
+  };
+  summary: {
+    activeSessionCount: number;
+    storedSessionCount: number;
+    resumableSessionCount: number;
+    totalTokens: number;
+    generalChatCount: number;
+    workItemCount: number;
+    taskCount: number;
+  };
+  sessions: CopilotSessionMonitorEntry[];
+}
+
+export interface AgentLearningProfileDetail {
+  capabilityId: string;
+  agentId: string;
+  profile: AgentLearningProfile;
+  documents: MemoryDocument[];
+  sessions: AgentSessionSummary[];
+}
+
 export interface CapabilityAgent {
   id: string;
   capabilityId: string;
@@ -103,11 +187,13 @@ export interface CapabilityAgent {
   isBuiltIn?: boolean;
   learningNotes?: string[];
   skillIds: string[];
-  provider: 'GitHub Copilot API';
+  provider: 'GitHub Copilot SDK' | 'GitHub Copilot API';
   model: string;
   tokenLimit: number;
   usage: AgentUsage;
   previousOutputs: AgentOutputRecord[];
+  learningProfile: AgentLearningProfile;
+  sessionSummaries: AgentSessionSummary[];
 }
 
 export interface CapabilityChatMessage {
@@ -254,6 +340,8 @@ export type ToolAdapterId =
 export type WorkflowNodeType =
   | 'START'
   | 'DELIVERY'
+  | 'EVENT'
+  | 'ALERT'
   | 'GOVERNANCE_GATE'
   | 'HUMAN_APPROVAL'
   | 'DECISION'
@@ -279,6 +367,25 @@ export interface WorkflowNodeEtlConfig {
   joinKey?: string;
   aggregateFunction?: string;
   schemaHint?: string;
+}
+
+export type WorkflowEventTrigger = 'ON_ENTER' | 'ON_SUCCESS' | 'ON_FAILURE';
+
+export interface WorkflowEventConfig {
+  eventName?: string;
+  eventSource?: string;
+  trigger?: WorkflowEventTrigger;
+  payloadTemplate?: string;
+}
+
+export type WorkflowAlertSeverity = 'INFO' | 'WARNING' | 'CRITICAL';
+
+export interface WorkflowAlertConfig {
+  severity?: WorkflowAlertSeverity;
+  channel?: string;
+  notifyRoles?: string[];
+  messageTemplate?: string;
+  requiresAcknowledgement?: boolean;
 }
 
 export type WorkflowPublishState = 'DRAFT' | 'VALIDATED' | 'PUBLISHED';
@@ -322,6 +429,9 @@ export interface WorkflowNode {
   preferredWorkspacePath?: string;
   executionNotes?: string;
   etlConfig?: WorkflowNodeEtlConfig;
+  eventConfig?: WorkflowEventConfig;
+  alertConfig?: WorkflowAlertConfig;
+  artifactContract?: WorkflowArtifactContract;
 }
 
 export interface WorkflowEdge {
@@ -369,6 +479,7 @@ export interface WorkflowStep {
   allowedToolIds?: ToolAdapterId[];
   preferredWorkspacePath?: string;
   executionNotes?: string;
+  artifactContract?: WorkflowArtifactContract;
 }
 
 export interface Workflow {
@@ -386,6 +497,7 @@ export interface Workflow {
   workflowType?: 'SDLC' | 'Operational' | 'Governance' | 'Custom';
   scope?: 'CAPABILITY' | 'GLOBAL';
   summary?: string;
+  archivedAt?: string;
 }
 
 export interface ExecutionLog {
@@ -915,6 +1027,11 @@ export interface ChatStreamEvent {
     | 'delta'
     | 'complete'
     | 'error';
+  sessionMode?: 'resume' | 'fresh';
+  sessionId?: string;
+  sessionScope?: AgentSessionScope;
+  sessionScopeId?: string;
+  isNewSession?: boolean;
   content?: string;
   createdAt?: string;
   model?: string;
@@ -927,6 +1044,7 @@ export interface ChatStreamEvent {
   traceId?: string;
   memoryReferences?: MemoryReference[];
   error?: string;
+  retryAfterMs?: number;
 }
 
 export interface CapabilityWorkspace {

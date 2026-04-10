@@ -1,561 +1,554 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Activity,
+  AlertTriangle,
   ArrowRight,
-  Bolt,
+  Bot,
+  BriefcaseBusiness,
   CheckCircle2,
-  Clock3,
+  ClipboardCheck,
   Database,
   FileText,
   FolderGit2,
-  Globe,
-  Layers,
-  RefreshCw,
+  Gauge,
+  MessageSquareText,
+  PlayCircle,
   ShieldCheck,
   Sparkles,
   Workflow,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { BLUEPRINTS } from '../constants';
-import { useCapability } from '../context/CapabilityContext';
-import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
-import { cn } from '../lib/utils';
 import {
-  DataTable,
+  buildCapabilityExperience,
+  getAgentHealth,
+  getBusinessWorkStatusLabel,
+  getReadinessLabel,
+  getReadinessTone,
+} from '../lib/capabilityExperience';
+import { getStatusTone } from '../lib/enterprise';
+import { fetchRuntimeStatus, type RuntimeStatus } from '../lib/api';
+import { cn } from '../lib/utils';
+import { useCapability } from '../context/CapabilityContext';
+import {
   EmptyState,
   PageHeader,
   SectionCard,
-  StatTile,
   StatusBadge,
-  Toolbar,
 } from '../components/EnterpriseUI';
+
+const advancedTools = [
+  {
+    label: 'Memory Explorer',
+    description: 'Inspect capability memory, learned sources, and search grounding.',
+    path: '/memory',
+    icon: Database,
+  },
+  {
+    label: 'Run Console',
+    description: 'Open runtime telemetry, traces, policy decisions, and live run events.',
+    path: '/run-console',
+    icon: Gauge,
+  },
+  {
+    label: 'Eval Center',
+    description: 'Review structured quality checks for agents and workflows.',
+    path: '/evals',
+    icon: ClipboardCheck,
+  },
+  {
+    label: 'Skill Library',
+    description: 'Manage reusable capability skills and specialist behaviors.',
+    path: '/skills',
+    icon: Sparkles,
+  },
+];
 
 const Dashboard = () => {
   const navigate = useNavigate();
   const { activeCapability, getCapabilityWorkspace } = useCapability();
-  const [taskFilter, setTaskFilter] = useState<
-    'ALL' | 'QUEUED' | 'PROCESSING' | 'COMPLETED'
-  >('ALL');
   const workspace = getCapabilityWorkspace(activeCapability.id);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
 
-  const agentsById = useMemo(
-    () => new Map(workspace.agents.map(agent => [agent.id, agent.name])),
-    [workspace.agents],
-  );
-  const workflowsById = useMemo(
-    () => new Map(workspace.workflows.map(workflow => [workflow.id, workflow])),
-    [workspace.workflows],
-  );
+  useEffect(() => {
+    let isMounted = true;
 
-  const filteredBlueprints = useMemo(
-    () => BLUEPRINTS.filter(bp => bp.capabilityId === activeCapability.id),
-    [activeCapability.id],
-  );
+    fetchRuntimeStatus()
+      .then(status => {
+        if (isMounted) {
+          setRuntimeStatus(status);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setRuntimeStatus({
+            configured: false,
+            provider: 'GitHub Copilot SDK',
+            endpoint: '',
+            tokenSource: null,
+            defaultModel: '',
+            availableModels: [],
+            lastRuntimeError: 'Runtime status could not be loaded.',
+          });
+        }
+      });
 
-  const liveWorkPackages = useMemo(
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const experience = useMemo(
     () =>
-      workspace.workItems
-        .slice()
-        .sort((left, right) => {
-          const leftTimestamp = left.history[left.history.length - 1]?.timestamp || '';
-          const rightTimestamp = right.history[right.history.length - 1]?.timestamp || '';
-          return rightTimestamp.localeCompare(leftTimestamp);
-        })
-        .slice(0, 8),
-    [workspace.workItems],
+      buildCapabilityExperience({
+        capability: activeCapability,
+        workspace,
+        runtimeStatus,
+      }),
+    [activeCapability, runtimeStatus, workspace],
   );
 
-  const filteredTasks = useMemo(() => {
-    if (taskFilter === 'ALL') {
-      return workspace.tasks;
-    }
-    return workspace.tasks.filter(task => task.status === taskFilter);
-  }, [taskFilter, workspace.tasks]);
-
-  const dashboardStats = useMemo(
-    () => [
-      {
-        label: 'Active Work',
-        value: workspace.workItems.filter(item => item.status === 'ACTIVE').length,
-        helper: `${workspace.workItems.filter(item => item.status === 'COMPLETED').length} completed`,
-        icon: Activity,
-        tone: 'brand' as const,
-      },
-      {
-        label: 'Agents',
-        value: workspace.agents.length,
-        helper: `${workspace.agents.filter(agent => agent.isBuiltIn).length} built-in`,
-        icon: Sparkles,
-        tone: 'info' as const,
-      },
-      {
-        label: 'Artifacts',
-        value: workspace.artifacts.length,
-        helper: `${workspace.executionLogs.length} execution logs`,
-        icon: FileText,
-        tone: 'success' as const,
-      },
-      {
-        label: 'Approvals & Blocks',
-        value:
-          workspace.workItems.filter(
-            item => item.status === 'BLOCKED' || item.status === 'PENDING_APPROVAL',
-          ).length,
-        helper: `${workspace.workItems.filter(item => item.status === 'BLOCKED').length} blocked`,
-        icon: ShieldCheck,
-        tone:
-          workspace.workItems.some(item => item.status === 'BLOCKED')
-            ? ('danger' as const)
-            : ('warning' as const),
-      },
-    ],
-    [workspace.agents, workspace.artifacts.length, workspace.executionLogs.length, workspace.workItems],
+  const ownerHealth = getAgentHealth(experience.ownerAgent);
+  const activeWork = workspace.workItems
+    .filter(item => item.status !== 'COMPLETED')
+    .slice()
+    .sort((left, right) => {
+      const leftTime = left.history[left.history.length - 1]?.timestamp || '';
+      const rightTime = right.history[right.history.length - 1]?.timestamp || '';
+      return rightTime.localeCompare(leftTime);
+    })
+    .slice(0, 4);
+  const latestOutputs = workspace.artifacts
+    .filter(artifact => artifact.direction !== 'INPUT')
+    .slice()
+    .sort((left, right) => right.created.localeCompare(left.created))
+    .slice(0, 4);
+  const publishedWorkflow = workspace.workflows.find(
+    workflow => !workflow.archivedAt && workflow.publishState === 'PUBLISHED',
   );
-
-  const recommendedSteps = useMemo(() => {
-    const recommendations: Array<{
-      key: string;
-      title: string;
-      desc: string;
-      icon: typeof ShieldCheck;
-      tone: 'brand' | 'warning' | 'success';
-      onClick: () => void;
-    }> = [];
-
-    const blockedItem = workspace.workItems.find(item => item.status === 'BLOCKED');
-    if (blockedItem) {
-      recommendations.push({
-        key: `blocked-${blockedItem.id}`,
-        title: `Unblock ${blockedItem.title}`,
-        desc:
-          blockedItem.blocker?.message ||
-          `Resolve the blocker in ${blockedItem.phase.toLowerCase()} and continue the workflow run.`,
-        icon: RefreshCw,
-        tone: 'warning',
-        onClick: () =>
-          navigate(`/orchestrator?selected=${encodeURIComponent(blockedItem.id)}`),
-      });
-    }
-
-    const pendingApprovalItem = workspace.workItems.find(
-      item => item.status === 'PENDING_APPROVAL',
-    );
-    if (pendingApprovalItem) {
-      recommendations.push({
-        key: `approval-${pendingApprovalItem.id}`,
-        title: `Approve ${pendingApprovalItem.title}`,
-        desc:
-          pendingApprovalItem.pendingRequest?.message ||
-          `Review the governance gate and release the work item forward.`,
-        icon: ShieldCheck,
-        tone: 'warning',
-        onClick: () =>
-          navigate(`/orchestrator?selected=${encodeURIComponent(pendingApprovalItem.id)}`),
-      });
-    }
-
-    const activeItem = workspace.workItems.find(item => item.status === 'ACTIVE');
-    if (activeItem) {
-      const workflow = workflowsById.get(activeItem.workflowId);
-      const currentStep = workflow?.steps.find(step => step.id === activeItem.currentStepId);
-      recommendations.push({
-        key: `continue-${activeItem.id}`,
-        title: `Continue ${activeItem.title}`,
-        desc:
-          currentStep?.description ||
-          `Inspect the current step and runtime evidence before advancing execution.`,
-        icon: ArrowRight,
-        tone: 'brand',
-        onClick: () =>
-          navigate(`/orchestrator?selected=${encodeURIComponent(activeItem.id)}`),
-      });
-    }
-
-    if (recommendations.length === 0 && workspace.workflows.length > 0) {
-      recommendations.push({
-        key: 'create-work-package',
-        title: 'Launch new work package',
-        desc: 'Create a new story and place it into the active SDLC workflow.',
-        icon: Bolt,
-        tone: 'brand',
-        onClick: () => navigate('/orchestrator?new=1'),
-      });
-    }
-
-    if (recommendations.length === 0) {
-      recommendations.push({
-        key: 'define-workflow',
-        title: 'Define workflow',
-        desc: 'Set up the enterprise workflow before starting capability delivery.',
-        icon: Workflow,
-        tone: 'success',
-        onClick: () => navigate('/designer'),
-      });
-    }
-
-    return recommendations.slice(0, 3);
-  }, [navigate, workspace.workItems, workspace.workflows, workflowsById]);
-
-  const architectureFacts = [
-    {
-      label: 'Applications',
-      value: activeCapability.applications.length,
-      detail:
-        activeCapability.applications.slice(0, 3).join(', ') ||
-        'No applications registered yet',
-      icon: Globe,
-    },
-    {
-      label: 'APIs & Services',
-      value: activeCapability.apis.length,
-      detail:
-        activeCapability.apis.slice(0, 3).join(', ') || 'No services registered yet',
-      icon: Layers,
-    },
-    {
-      label: 'Data Stores',
-      value: activeCapability.databases.length,
-      detail:
-        activeCapability.databases.slice(0, 3).join(', ') ||
-        'No databases registered yet',
-      icon: Database,
-    },
-    {
-      label: 'Git Repositories',
-      value: activeCapability.gitRepositories.length,
-      detail:
-        activeCapability.gitRepositories.slice(0, 2).join(', ') ||
-        'No repositories linked yet',
-      icon: FolderGit2,
-    },
-  ];
+  const primaryWorkflow =
+    publishedWorkflow || workspace.workflows.find(workflow => !workflow.archivedAt);
 
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow="Capability Overview"
+        eyebrow="Capability Home"
         context={activeCapability.id}
-        title={`${activeCapability.name} Command Center`}
-        description="Operational overview for the active capability, including live work, governance pressure, evidence output, and recommended next actions."
+        title={activeCapability.name}
+        description={
+          activeCapability.description ||
+          'A guided workspace for readiness, active work, collaboration, and evidence.'
+        }
         actions={
           <>
             <button
               type="button"
-              onClick={() => navigate('/team')}
+              onClick={() => navigate('/chat')}
               className="enterprise-button enterprise-button-secondary"
             >
-              <Sparkles size={16} />
-              Manage agents
+              <MessageSquareText size={16} />
+              Chat with team
             </button>
             <button
               type="button"
-              onClick={() => navigate('/orchestrator?new=1')}
+              onClick={() => navigate(experience.nextAction.path)}
               className="enterprise-button enterprise-button-primary"
             >
-              <Bolt size={16} />
-              New work package
+              <ArrowRight size={16} />
+              {experience.nextAction.actionLabel}
             </button>
           </>
         }
       >
-        <Toolbar className="w-fit">
-          <div className="min-w-[10rem]">
-            <p className="form-kicker">Domain</p>
-            <p className="mt-1 text-sm font-semibold text-on-surface">
-              {activeCapability.domain || 'Unassigned'}
+        <div className="grid max-w-5xl gap-3 md:grid-cols-3">
+          <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+            <p className="form-kicker">Readiness</p>
+            <p className="mt-2 text-3xl font-bold tracking-tight text-on-surface">
+              {experience.readinessScore}%
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-secondary">
+              {experience.readinessItems.filter(item => item.status === 'READY').length} of{' '}
+              {experience.readinessItems.length} setup checks are ready.
             </p>
           </div>
-          <div className="hidden h-10 w-px bg-outline-variant/50 sm:block" />
-          <div className="min-w-[10rem]">
-            <p className="form-kicker">Business Unit</p>
-            <p className="mt-1 text-sm font-semibold text-on-surface">
-              {activeCapability.businessUnit || 'Unassigned'}
+          <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+            <p className="form-kicker">Copilot</p>
+            <div className="mt-2 flex items-center gap-2">
+              <StatusBadge tone={experience.runtimeHealth.tone}>
+                {experience.runtimeHealth.label}
+              </StatusBadge>
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-secondary">
+              {experience.runtimeHealth.description}
             </p>
           </div>
-          <div className="hidden h-10 w-px bg-outline-variant/50 sm:block" />
-          <div className="min-w-[10rem]">
-            <p className="form-kicker">Primary Workflow</p>
-            <p className="mt-1 text-sm font-semibold text-on-surface">
-              {workspace.workflows[0]?.name || 'No workflow'}
+          <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+            <p className="form-kicker">Owner collaborator</p>
+            <div className="mt-2 flex items-center gap-2">
+              <StatusBadge tone={ownerHealth.tone}>{ownerHealth.label}</StatusBadge>
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-secondary">
+              {experience.ownerAgent?.name || ownerHealth.description}
             </p>
           </div>
-        </Toolbar>
+        </div>
       </PageHeader>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {dashboardStats.map(stat => (
-          <StatTile
-            key={stat.label}
-            label={stat.label}
-            value={stat.value}
-            helper={stat.helper}
-            icon={stat.icon}
-            tone={stat.tone}
-          />
+        {[
+          {
+            label: 'Active work',
+            value: experience.activeWorkCount,
+            helper: 'Items currently moving',
+            icon: BriefcaseBusiness,
+            tone: 'brand' as const,
+          },
+          {
+            label: 'Needs attention',
+            value: experience.blockerCount + experience.approvalCount,
+            helper: `${experience.blockerCount} blocked, ${experience.approvalCount} approvals`,
+            icon: AlertTriangle,
+            tone:
+              experience.blockerCount > 0
+                ? ('danger' as const)
+                : experience.approvalCount > 0
+                ? ('warning' as const)
+                : ('success' as const),
+          },
+          {
+            label: 'Delivered work',
+            value: experience.completedWorkCount,
+            helper: 'Completed work items',
+            icon: CheckCircle2,
+            tone: 'success' as const,
+          },
+          {
+            label: 'Evidence outputs',
+            value: experience.latestOutputCount,
+            helper: 'Artifacts and handoffs',
+            icon: FileText,
+            tone: 'info' as const,
+          },
+        ].map(item => (
+          <div key={item.label} className="stat-tile">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="stat-label">{item.label}</p>
+                <p className="stat-value">{item.value}</p>
+              </div>
+              <div
+                className={cn(
+                  'stat-icon',
+                  item.tone === 'danger'
+                    ? 'border-red-200 bg-red-50 text-red-700'
+                    : item.tone === 'warning'
+                    ? 'border-amber-200 bg-amber-50 text-amber-800'
+                    : item.tone === 'success'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : item.tone === 'brand'
+                    ? 'border-primary/15 bg-primary/10 text-primary'
+                    : 'border-secondary/15 bg-secondary-container/50 text-secondary',
+                )}
+              >
+                <item.icon size={16} />
+              </div>
+            </div>
+            <div className="stat-helper">{item.helper}</div>
+          </div>
         ))}
       </section>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(22rem,0.7fr)]">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(24rem,0.9fr)]">
         <SectionCard
-          title="Capability footprint"
-          description="Core systems, services, repositories, and delivery context tied to this capability."
-          icon={Layers}
-          action={
-            <button
-              type="button"
-              onClick={() => navigate('/capabilities/metadata')}
-              className="enterprise-button enterprise-button-secondary"
-            >
-              Open metadata
-            </button>
-          }
+          title="Today"
+          description="The clearest next move for this capability."
+          icon={ShieldCheck}
+          tone="brand"
         >
-          <div className="grid gap-4 md:grid-cols-2">
-            {architectureFacts.map(item => (
-              <div
-                key={item.label}
-                className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="stat-label">{item.label}</p>
-                    <p className="mt-2 text-2xl font-bold tracking-tight text-on-surface">
-                      {item.value}
-                    </p>
-                  </div>
-                  <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-primary/10 bg-white text-primary">
-                    <item.icon size={16} />
-                  </div>
-                </div>
-                <p className="mt-3 text-xs leading-relaxed text-secondary">
-                  {item.detail}
+          <div className="rounded-[1.6rem] border border-primary/15 bg-white px-5 py-5">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="min-w-0">
+                <StatusBadge tone={experience.nextAction.tone}>
+                  Recommended next action
+                </StatusBadge>
+                <h2 className="mt-3 text-2xl font-bold tracking-tight text-on-surface">
+                  {experience.nextAction.title}
+                </h2>
+                <p className="mt-2 max-w-2xl text-sm leading-7 text-secondary">
+                  {experience.nextAction.description}
                 </p>
               </div>
-            ))}
+              <button
+                type="button"
+                onClick={() => navigate(experience.nextAction.path)}
+                className="enterprise-button enterprise-button-primary shrink-0"
+              >
+                <ArrowRight size={16} />
+                {experience.nextAction.actionLabel}
+              </button>
+            </div>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <button
+              type="button"
+              onClick={() => navigate('/orchestrator')}
+              className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white"
+            >
+              <p className="text-sm font-semibold text-on-surface">Open Work</p>
+              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                Approvals, blockers, active work, and restart controls.
+              </p>
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/team')}
+              className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white"
+            >
+              <p className="text-sm font-semibold text-on-surface">Open Team</p>
+              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                Collaborators, readiness, learning refresh, and chat handoff.
+              </p>
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/ledger')}
+              className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white"
+            >
+              <p className="text-sm font-semibold text-on-surface">Open Evidence</p>
+              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                Completed work, artifacts, handoffs, and acceptance evidence.
+              </p>
+            </button>
           </div>
         </SectionCard>
 
         <SectionCard
-          title="Recommended next steps"
-          description="Focused actions based on the live state of work items, approvals, and workflow runs."
-          icon={ShieldCheck}
-          tone="brand"
+          title="Readiness checklist"
+          description="Plain-language setup health for business users."
+          icon={ClipboardCheck}
         >
           <div className="space-y-3">
-            {recommendedSteps.map(step => (
+            {experience.readinessItems.map(item => (
               <button
-                key={step.key}
+                key={item.id}
                 type="button"
-                onClick={step.onClick}
-                className="flex w-full items-start gap-3 rounded-2xl border border-primary/10 bg-white px-4 py-4 text-left transition-all hover:border-primary/20 hover:bg-primary/5"
+                onClick={() => navigate(item.path)}
+                className="flex w-full items-start justify-between gap-3 rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3 text-left transition hover:border-primary/20 hover:bg-white"
               >
-                <div
-                  className={cn(
-                    'mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border',
-                    step.tone === 'warning'
-                      ? 'border-amber-200 bg-amber-50 text-amber-700'
-                      : step.tone === 'success'
-                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                      : 'border-primary/10 bg-primary/10 text-primary',
-                  )}
-                >
-                  <step.icon size={16} />
-                </div>
                 <div className="min-w-0">
-                  <p className="text-sm font-semibold text-on-surface">{step.title}</p>
-                  <p className="mt-1 text-sm leading-relaxed text-secondary">
-                    {step.desc}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold text-on-surface">{item.label}</p>
+                    <StatusBadge tone={getReadinessTone(item.status)}>
+                      {getReadinessLabel(item.status)}
+                    </StatusBadge>
+                  </div>
+                  <p className="mt-1 text-xs leading-relaxed text-secondary">
+                    {item.description}
                   </p>
                 </div>
+                <ArrowRight size={15} className="mt-1 shrink-0 text-outline" />
               </button>
             ))}
           </div>
         </SectionCard>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <SectionCard
-          title="Recent work packages"
-          description="Latest work items in this capability with owning workflow and current status."
-          icon={Workflow}
+          title="Delivery"
+          description="Business-facing work currently moving through the capability."
+          icon={PlayCircle}
           action={
             <button
               type="button"
-              onClick={() => navigate('/orchestrator')}
+              onClick={() => navigate('/orchestrator?new=1')}
               className="enterprise-button enterprise-button-secondary"
             >
-              Open orchestrator
+              New work
             </button>
           }
         >
-          <DataTable
-            header={
-              <div className="grid grid-cols-[1.3fr_1fr_0.9fr_0.9fr] gap-3">
-                <span>Work Item</span>
-                <span>Workflow</span>
-                <span>Status</span>
-                <span>Owner</span>
-              </div>
-            }
-          >
-            {liveWorkPackages.length > 0 ? (
-              liveWorkPackages.map(workItem => (
+          {activeWork.length > 0 ? (
+            <div className="space-y-3">
+              {activeWork.map(item => (
                 <button
-                  key={workItem.id}
+                  key={item.id}
                   type="button"
                   onClick={() =>
-                    navigate(`/orchestrator?selected=${encodeURIComponent(workItem.id)}`)
+                    navigate(`/orchestrator?selected=${encodeURIComponent(item.id)}`)
                   }
-                  className="grid w-full grid-cols-[1.3fr_1fr_0.9fr_0.9fr] gap-3 border-t border-outline-variant/35 px-4 py-4 text-left text-sm transition-all hover:bg-surface-container-low"
+                  className="flex w-full items-start justify-between gap-3 rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white"
                 >
-                  <div>
-                    <p className="font-semibold text-on-surface">{workItem.title}</p>
-                    <p className="mt-1 text-xs text-secondary">{workItem.id}</p>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-on-surface">{item.title}</p>
+                    <p className="mt-1 text-xs text-secondary">
+                      {item.phase.toLowerCase()} • {item.priority} priority
+                    </p>
                   </div>
-                  <span className="text-secondary">
-                    {workflowsById.get(workItem.workflowId)?.name || 'Workflow not found'}
-                  </span>
-                  <div>
-                    <StatusBadge tone={getStatusTone(workItem.status)}>
-                      {formatEnumLabel(workItem.status)}
-                    </StatusBadge>
-                  </div>
-                  <span className="text-secondary">
-                    {agentsById.get(workItem.assignedAgentId || '') || 'Unassigned'}
-                  </span>
+                  <StatusBadge tone={getStatusTone(item.status)}>
+                    {getBusinessWorkStatusLabel(item.status)}
+                  </StatusBadge>
                 </button>
-              ))
-            ) : (
-              <EmptyState
-                title="No live work packages"
-                description="Create a new work package to start capability execution and see it appear here."
-                icon={Bolt}
-                className="m-4 min-h-[12rem]"
-                action={
-                  <button
-                    type="button"
-                    onClick={() => navigate('/orchestrator?new=1')}
-                    className="enterprise-button enterprise-button-primary"
-                  >
-                    <Bolt size={16} />
-                    Create work package
-                  </button>
-                }
-              />
-            )}
-          </DataTable>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              title="No active work yet"
+              description="Create the first work item when the capability is ready for delivery."
+              icon={BriefcaseBusiness}
+              className="min-h-[14rem]"
+              action={
+                <button
+                  type="button"
+                  onClick={() => navigate('/orchestrator?new=1')}
+                  className="enterprise-button enterprise-button-primary"
+                >
+                  Create work
+                </button>
+              }
+            />
+          )}
         </SectionCard>
 
         <SectionCard
-          title="Agent task flow"
-          description="Live task stream across the selected capability."
-          icon={Activity}
+          title="Evidence"
+          description="Recent outputs, artifacts, and handoffs produced by capability work."
+          icon={FileText}
           action={
-            <Toolbar className="border-0 bg-transparent p-0 shadow-none">
-              {(['ALL', 'QUEUED', 'PROCESSING', 'COMPLETED'] as const).map(status => (
-                <button
-                  key={status}
-                  type="button"
-                  onClick={() => setTaskFilter(status)}
-                  className={cn(
-                    'rounded-xl px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] transition-all',
-                    taskFilter === status
-                      ? 'bg-primary text-white'
-                      : 'bg-surface-container-low text-secondary hover:text-on-surface',
-                  )}
-                >
-                  {status}
-                </button>
-              ))}
-            </Toolbar>
+            <button
+              type="button"
+              onClick={() => navigate('/ledger')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              Open evidence
+            </button>
           }
         >
-          <div className="max-h-[28rem] space-y-3 overflow-y-auto pr-1">
-            {filteredTasks.length > 0 ? (
-              filteredTasks.map(task => (
-                <div
-                  key={task.id}
-                  className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4"
+          {latestOutputs.length > 0 ? (
+            <div className="space-y-3">
+              {latestOutputs.map(artifact => (
+                <button
+                  key={artifact.id}
+                  type="button"
+                  onClick={() => navigate('/ledger')}
+                  className="flex w-full items-start gap-3 rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white"
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold text-on-surface">{task.title}</p>
-                      <p className="mt-1 text-xs text-secondary">
-                        {task.agent} • {task.timestamp}
-                      </p>
-                    </div>
-                    <StatusBadge tone={getStatusTone(task.status)}>
-                      {formatEnumLabel(task.status)}
-                    </StatusBadge>
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-primary/10 bg-white text-primary">
+                    <FileText size={16} />
                   </div>
-                  {task.executionNotes ? (
-                    <p className="mt-3 text-sm leading-relaxed text-secondary">
-                      {task.executionNotes}
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-on-surface">
+                      {artifact.name}
                     </p>
-                  ) : null}
-                </div>
-              ))
-            ) : (
-              <EmptyState
-                title="No tasks for this filter"
-                description="Change the filter or start more execution activity to populate the stream."
-                icon={Clock3}
-                className="min-h-[12rem]"
-              />
-            )}
-          </div>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      {artifact.summary || artifact.description || artifact.type}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              title="No evidence yet"
+              description="Completed work will produce artifacts, handoffs, and delivery evidence here."
+              icon={FileText}
+              className="min-h-[14rem]"
+            />
+          )}
         </SectionCard>
       </div>
 
       <SectionCard
-        title="Workflow blueprints"
-        description="Registered blueprint and architecture references mapped to this capability."
-        icon={Layers}
-        action={
-          <button
-            type="button"
-            onClick={() => navigate('/designer')}
-            className="enterprise-button enterprise-button-secondary"
-          >
-            View design workspace
-            <ArrowRight size={16} />
-          </button>
-        }
+        title="Capability foundation"
+        description="The core setup behind this business capability."
+        icon={Workflow}
       >
-        {filteredBlueprints.length > 0 ? (
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            {filteredBlueprints.map(blueprint => (
-              <div
-                key={blueprint.id}
-                className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-semibold text-on-surface">
-                      {blueprint.title}
-                    </p>
-                    <p className="mt-1 text-xs text-secondary">
-                      {blueprint.description}
-                    </p>
-                  </div>
-                  <StatusBadge tone={getStatusTone(blueprint.status)}>
-                    {formatEnumLabel(blueprint.status)}
-                  </StatusBadge>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {[
+            {
+              label: 'Workflow',
+              value: primaryWorkflow?.name || 'Not defined',
+              helper: primaryWorkflow?.publishState || 'Create or publish workflow',
+              icon: Workflow,
+              path: '/designer',
+            },
+            {
+              label: 'Applications',
+              value: activeCapability.applications.length,
+              helper: activeCapability.applications.slice(0, 2).join(', ') || 'No apps listed',
+              icon: BriefcaseBusiness,
+              path: '/capabilities/metadata',
+            },
+            {
+              label: 'Repositories',
+              value: activeCapability.gitRepositories.length + activeCapability.localDirectories.length,
+              helper:
+                activeCapability.gitRepositories[0] ||
+                activeCapability.localDirectories[0] ||
+                'No source workspace linked',
+              icon: FolderGit2,
+              path: '/capabilities/metadata',
+            },
+            {
+              label: 'Collaborators',
+              value: workspace.agents.length,
+              helper: `${workspace.agents.filter(agent => agent.learningProfile.status === 'READY').length} ready`,
+              icon: Bot,
+              path: '/team',
+            },
+          ].map(item => (
+            <button
+              key={item.label}
+              type="button"
+              onClick={() => navigate(item.path)}
+              className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="stat-label">{item.label}</p>
+                  <p className="mt-2 truncate text-xl font-bold tracking-tight text-on-surface">
+                    {item.value}
+                  </p>
                 </div>
-                <div className="mt-4 flex items-center justify-between text-xs font-medium text-secondary">
-                  <span>{blueprint.version}</span>
-                  <span>{blueprint.activeIds} active IDs</span>
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-primary/10 bg-white text-primary">
+                  <item.icon size={16} />
                 </div>
               </div>
-            ))}
-          </div>
-        ) : (
-          <EmptyState
-            title="No blueprints linked"
-            description="Use the design workspace to define or register enterprise workflow blueprints for this capability."
-            icon={FileText}
-          />
-        )}
+              <p className="mt-3 truncate text-xs leading-relaxed text-secondary">
+                {item.helper}
+              </p>
+            </button>
+          ))}
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="Advanced tools"
+        description="Technical diagnostics and builder tools remain available, but they are no longer the main business journey."
+        icon={Gauge}
+        tone="muted"
+      >
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {advancedTools.map(tool => (
+            <button
+              key={tool.path}
+              type="button"
+              onClick={() => navigate(tool.path)}
+              className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4 text-left transition hover:border-primary/20 hover:bg-surface-container-low"
+            >
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-outline-variant/50 bg-surface-container-low text-secondary">
+                  <tool.icon size={16} />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-on-surface">{tool.label}</p>
+                  <p className="mt-1 text-xs leading-relaxed text-secondary">
+                    {tool.description}
+                  </p>
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
       </SectionCard>
     </div>
   );

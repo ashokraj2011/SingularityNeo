@@ -139,7 +139,7 @@ const Tasks = () => {
     [workspace.agents],
   );
 
-  const handleCreateTask = (event: React.FormEvent) => {
+  const handleCreateTask = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!draftTask.title.trim() || !draftTask.agentId) {
       return;
@@ -173,7 +173,8 @@ const Tasks = () => {
       producedOutputs: [],
     };
 
-    setCapabilityWorkspaceContent(activeCapability.id, {
+    try {
+      await setCapabilityWorkspaceContent(activeCapability.id, {
       tasks: [...workspace.tasks, newTask],
       executionLogs: [
         ...workspace.executionLogs,
@@ -187,18 +188,21 @@ const Tasks = () => {
           message: `Task queued for ${selectedAgent.name} inside ${activeCapability.name}.`,
         },
       ],
-    });
+      });
 
-    setSelectedTaskId(newTask.id);
-    setDraftTask({
-      title: '',
-      agentId: workspace.agents[0]?.id || '',
-      priority: 'High',
-      prompt: '',
-      artifactId: workspace.artifacts[0]?.id || '',
-    });
-    setIsCreateModalOpen(false);
-    success('Task created', `${newTask.title} was queued for ${selectedAgent.name}.`);
+      setSelectedTaskId(newTask.id);
+      setDraftTask({
+        title: '',
+        agentId: workspace.agents[0]?.id || '',
+        priority: 'High',
+        prompt: '',
+        artifactId: workspace.artifacts[0]?.id || '',
+      });
+      setIsCreateModalOpen(false);
+      success('Task created', `${newTask.title} was queued for ${selectedAgent.name}.`);
+    } catch {
+      // Context mutation paths already emit failure toasts.
+    }
   };
 
   const getIconForType = (type: string) => {
@@ -735,13 +739,19 @@ const Tasks = () => {
                                 </div>
                                 <button
                                   onClick={() => {
+                                    void (async () => {
                                     if (!isApplied) {
-                                      addCapabilitySkill(activeCapability.id, suggestedSkill);
-                                      success(
-                                        'Skill applied',
-                                        `${suggestedSkill.name} was added from learning updates.`,
-                                      );
+                                      try {
+                                        await addCapabilitySkill(activeCapability.id, suggestedSkill);
+                                        success(
+                                          'Skill applied',
+                                          `${suggestedSkill.name} was added from learning updates.`,
+                                        );
+                                      } catch {
+                                        // Context mutation paths already emit failure toasts.
+                                      }
                                     }
+                                    })();
                                   }}
                                   className="text-[0.625rem] font-bold text-primary flex items-center gap-1 uppercase tracking-widest hover:underline disabled:no-underline disabled:text-slate-300"
                                   disabled={isApplied}

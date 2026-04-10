@@ -1,0 +1,6022 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Archive,
+  ArchiveRestore,
+  AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle2,
+  Copy,
+  Download,
+  Eye,
+  EyeOff,
+  GitBranch,
+  Hand,
+  Keyboard,
+  LayoutTemplate,
+  Maximize2,
+  Minimize2,
+  MoreHorizontal,
+  Moon,
+  PanelLeft,
+  Play,
+  Plus,
+  Radio,
+  Redo2,
+  Route,
+  ScanLine,
+  Search,
+  ShieldCheck,
+  Sparkles,
+  Split,
+  Sun,
+  Trash2,
+  Undo2,
+  UnfoldVertical,
+  Workflow as WorkflowIcon,
+  Wrench,
+  X,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { useCapability } from '../context/CapabilityContext';
+import { useToast } from '../context/ToastContext';
+import {
+  EmptyState,
+  FormSection,
+  ModalShell,
+  SectionCard,
+  StatusBadge,
+} from '../components/EnterpriseUI';
+import {
+  applyStandardArtifactsToWorkflow,
+  createStandardCapabilityWorkflow,
+} from '../lib/standardWorkflow';
+import {
+  autoLayoutWorkflowGraph,
+  buildWorkflowFromGraph,
+  createWorkflowEdge,
+  createWorkflowNode,
+  getOutgoingWorkflowEdges,
+  getWorkflowEdges,
+  getWorkflowNode,
+  getWorkflowNodeDimensions,
+  getWorkflowNodeOrder,
+  getWorkflowNodes,
+  getWorkflowPublishState,
+  isVisibleWorkflowNode,
+  normalizeWorkflowGraph,
+  validateWorkflowGraph,
+  WORKFLOW_GRAPH_PHASES,
+} from '../lib/workflowGraph';
+import { cn } from '../lib/utils';
+import type {
+  ToolAdapterId,
+  WorkItemPhase,
+  Workflow,
+  WorkflowEdge,
+  WorkflowNode,
+  WorkflowNodeType,
+  WorkflowPublishState,
+} from '../types';
+
+const NODE_TYPE_OPTIONS: Array<{
+  type: WorkflowNodeType;
+  label: string;
+  description: string;
+}> = [
+  { type: 'DELIVERY', label: 'Delivery Step', description: 'Agent-owned work inside a delivery phase.' },
+  { type: 'EVENT', label: 'Event', description: 'Emit a workflow event or signal for downstream systems and evidence.' },
+  { type: 'ALERT', label: 'Alert', description: 'Raise an operational alert with severity, routing, and acknowledgement rules.' },
+  { type: 'DECISION', label: 'Decision', description: 'Route the work item based on review or execution outcome.' },
+  { type: 'PARALLEL_SPLIT', label: 'Parallel Split', description: 'Send work to multiple agents or tracks in parallel.' },
+  { type: 'PARALLEL_JOIN', label: 'Parallel Join', description: 'Wait for parallel tracks and consolidate evidence.' },
+  { type: 'GOVERNANCE_GATE', label: 'Governance Gate', description: 'Pause for risk, control, or compliance checks.' },
+  { type: 'HUMAN_APPROVAL', label: 'Human Approval', description: 'Pause for human sign-off, clarification, or unblock.' },
+  { type: 'RELEASE', label: 'Release Step', description: 'Complete release or deployment work.' },
+  { type: 'END', label: 'End', description: 'Close the workflow path.' },
+  { type: 'EXTRACT', label: 'Legacy Source Step', description: 'Legacy ETL node kept for compatibility.' },
+  { type: 'TRANSFORM', label: 'Legacy Transform Step', description: 'Legacy ETL node kept for compatibility.' },
+  { type: 'LOAD', label: 'Legacy Target Step', description: 'Legacy ETL node kept for compatibility.' },
+  { type: 'FILTER', label: 'Legacy Validation Step', description: 'Legacy ETL node kept for compatibility.' },
+];
+
+const EDGE_CONDITION_OPTIONS: WorkflowEdge['conditionType'][] = [
+  'DEFAULT',
+  'SUCCESS',
+  'FAILURE',
+  'APPROVED',
+  'REJECTED',
+  'PARALLEL',
+  'CUSTOM',
+];
+
+const TOOL_OPTIONS: ToolAdapterId[] = [
+  'workspace_list',
+  'workspace_read',
+  'workspace_search',
+  'git_status',
+  'workspace_write',
+  'run_build',
+  'run_test',
+  'run_docs',
+  'run_deploy',
+];
+
+const NODE_TYPE_TONE: Record<WorkflowNodeType, string> = {
+  START: 'bg-slate-100 text-slate-700 border-slate-200',
+  DELIVERY: 'bg-primary/10 text-primary border-primary/20',
+  EVENT: 'bg-cyan-100 text-cyan-700 border-cyan-200',
+  ALERT: 'bg-red-100 text-red-700 border-red-200',
+  GOVERNANCE_GATE: 'bg-amber-100 text-amber-800 border-amber-200',
+  HUMAN_APPROVAL: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200',
+  DECISION: 'bg-sky-100 text-sky-700 border-sky-200',
+  PARALLEL_SPLIT: 'bg-violet-100 text-violet-700 border-violet-200',
+  PARALLEL_JOIN: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+  RELEASE: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+  END: 'bg-slate-900 text-white border-slate-900',
+  EXTRACT: 'bg-slate-100 text-slate-600 border-slate-200',
+  TRANSFORM: 'bg-slate-100 text-slate-600 border-slate-200',
+  LOAD: 'bg-slate-100 text-slate-600 border-slate-200',
+  FILTER: 'bg-slate-100 text-slate-600 border-slate-200',
+};
+
+const PUBLISH_STATE_TONE: Record<WorkflowPublishState, 'neutral' | 'info' | 'success'> = {
+  DRAFT: 'neutral',
+  VALIDATED: 'info',
+  PUBLISHED: 'success',
+};
+
+const PALETTE_GROUPS: Array<{
+  title: string;
+  description: string;
+  phase: Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'>;
+  items: Array<{
+    type: WorkflowNodeType;
+    label: string;
+    defaultPhase: Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'>;
+    action: string;
+  }>;
+}> = [
+  {
+    title: 'Delivery',
+    description: 'Core agent work for analysis, design, engineering, QA, and release.',
+    phase: 'DEVELOPMENT',
+    items: [
+      { type: 'DELIVERY', label: 'Analysis Task', defaultPhase: 'ANALYSIS', action: 'Analyze the request, shape requirements, and record assumptions.' },
+      { type: 'DELIVERY', label: 'Design Task', defaultPhase: 'DESIGN', action: 'Create the design approach, interfaces, and implementation plan.' },
+      { type: 'DELIVERY', label: 'Implementation Task', defaultPhase: 'DEVELOPMENT', action: 'Implement the code or system change and capture technical evidence.' },
+      { type: 'DELIVERY', label: 'QA Task', defaultPhase: 'QA', action: 'Test the change, verify acceptance criteria, and record outcomes.' },
+      { type: 'RELEASE', label: 'Release Task', defaultPhase: 'RELEASE', action: 'Prepare and complete the release with deployment evidence.' },
+    ],
+  },
+  {
+    title: 'Routing',
+    description: 'Branch, split, and rejoin work between agent tracks.',
+    phase: 'DESIGN',
+    items: [
+      { type: 'DECISION', label: 'Decision', defaultPhase: 'DESIGN', action: 'Choose the next path based on criteria or result.' },
+      { type: 'PARALLEL_SPLIT', label: 'Parallel Split', defaultPhase: 'DESIGN', action: 'Start multiple downstream workstreams in parallel.' },
+      { type: 'PARALLEL_JOIN', label: 'Parallel Join', defaultPhase: 'QA', action: 'Wait for parallel workstreams and consolidate outputs.' },
+    ],
+  },
+  {
+    title: 'Controls',
+    description: 'Governance, approvals, and human interactions.',
+    phase: 'GOVERNANCE',
+    items: [
+      { type: 'GOVERNANCE_GATE', label: 'Governance Gate', defaultPhase: 'GOVERNANCE', action: 'Check controls, evidence, policy, and governance requirements.' },
+      { type: 'HUMAN_APPROVAL', label: 'Human Approval', defaultPhase: 'GOVERNANCE', action: 'Pause for human approval, clarification, or unblock.' },
+      { type: 'END', label: 'End', defaultPhase: 'RELEASE', action: 'Close the workflow path and mark the run complete.' },
+    ],
+  },
+  {
+    title: 'Signals',
+    description: 'Emit events and raise alerts as part of the workflow execution path.',
+    phase: 'GOVERNANCE',
+    items: [
+      { type: 'EVENT', label: 'Workflow Event', defaultPhase: 'DEVELOPMENT', action: 'Emit a workflow event with a structured payload for telemetry, automation, or hand-off triggers.' },
+      { type: 'ALERT', label: 'Operational Alert', defaultPhase: 'GOVERNANCE', action: 'Raise an alert with severity, routing, and acknowledgement expectations for operators or stakeholders.' },
+    ],
+  },
+];
+
+const slugify = (value?: string | null) =>
+  (value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24);
+
+const createWorkflowId = (capabilityId: string, name: string) =>
+  `WF-${slugify(capabilityId)}-${slugify(name || 'WORKFLOW')}`;
+
+const createDesignerCopyId = (prefix: 'WF' | 'NODE' | 'EDGE', label: string) =>
+  `${prefix}-${slugify(label || prefix)}-${Date.now().toString(36).toUpperCase()}-${Math.random()
+    .toString(36)
+    .slice(2, 6)
+    .toUpperCase()}`;
+
+const createCopyName = (sourceName?: string | null, existingNames: Array<string | undefined | null> = []) => {
+  const safeSourceName = (sourceName || '').trim() || 'Untitled';
+  const normalizedExistingNames = new Set(
+    existingNames
+      .map(name => (name || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const baseName =
+    safeSourceName.replace(/\s+copy(?:\s+\d+)?$/i, '').trim() || safeSourceName;
+  let index = 1;
+  let candidate = `${baseName} Copy`;
+
+  while (normalizedExistingNames.has(candidate.toLowerCase())) {
+    index += 1;
+    candidate = `${baseName} Copy ${index}`;
+  }
+
+  return candidate;
+};
+
+const phaseLabel = (phase: WorkItemPhase) =>
+  phase
+    .toLowerCase()
+    .split('_')
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+
+const splitArtifactLines = (value: string) =>
+  value
+    .split('\n')
+    .map(entry => entry.trim())
+    .filter(Boolean);
+
+const cloneArtifactContract = (artifactContract?: WorkflowNode['artifactContract']) =>
+  artifactContract
+    ? {
+        ...artifactContract,
+        requiredInputs: artifactContract.requiredInputs
+          ? [...artifactContract.requiredInputs]
+          : undefined,
+        expectedOutputs: artifactContract.expectedOutputs
+          ? [...artifactContract.expectedOutputs]
+          : undefined,
+      }
+    : undefined;
+
+const getNodeArtifactInputs = (node: WorkflowNode) =>
+  node.artifactContract?.requiredInputs?.length
+    ? node.artifactContract.requiredInputs
+    : node.inputArtifactId
+    ? [node.inputArtifactId]
+    : [];
+
+const getNodeArtifactOutputs = (node: WorkflowNode) =>
+  node.artifactContract?.expectedOutputs?.length
+    ? node.artifactContract.expectedOutputs
+    : node.outputArtifactId
+    ? [node.outputArtifactId]
+    : [];
+
+const getArtifactPreview = (artifacts: string[], max = 2) =>
+  artifacts.slice(0, max).join(', ');
+
+const isLegacyEtlNodeType = (type: WorkflowNodeType) =>
+  type === 'EXTRACT' || type === 'TRANSFORM' || type === 'LOAD' || type === 'FILTER';
+
+const getNodeTypeLabel = (type: WorkflowNodeType) =>
+  NODE_TYPE_OPTIONS.find(option => option.type === type)?.label || type;
+
+const getNodeIcon = (type: WorkflowNodeType) => {
+  switch (type) {
+    case 'EVENT':
+      return Radio;
+    case 'ALERT':
+      return AlertTriangle;
+    case 'DECISION':
+      return GitBranch;
+    case 'PARALLEL_SPLIT':
+      return Split;
+    case 'PARALLEL_JOIN':
+      return UnfoldVertical;
+    case 'GOVERNANCE_GATE':
+      return ShieldCheck;
+    case 'HUMAN_APPROVAL':
+      return CheckCircle2;
+    case 'RELEASE':
+      return Sparkles;
+    default:
+      return WorkflowIcon;
+  }
+};
+
+const getSamplePath = (workflow: Workflow) => {
+  const normalized = buildWorkflowFromGraph(normalizeWorkflowGraph(workflow));
+  const path: Array<{ nodeId: string; label: string; note?: string }> = [];
+  const visited = new Set<string>();
+  let currentNode = getWorkflowNode(normalized, normalized.entryNodeId);
+  let safetyCounter = 0;
+
+  while (currentNode && !visited.has(currentNode.id) && safetyCounter < 40) {
+    safetyCounter += 1;
+    visited.add(currentNode.id);
+
+    if (currentNode.type !== 'START') {
+      path.push({
+        nodeId: currentNode.id,
+        label: currentNode.name,
+        note:
+          currentNode.type === 'HUMAN_APPROVAL'
+            ? 'Pauses for approval'
+            : currentNode.type === 'EVENT'
+            ? 'Emits a workflow event'
+            : currentNode.type === 'ALERT'
+            ? 'Raises an alert'
+            : currentNode.type === 'PARALLEL_SPLIT'
+            ? 'Creates parallel branches'
+            : currentNode.type === 'PARALLEL_JOIN'
+            ? 'Waits for branches to join'
+            : undefined,
+      });
+    }
+
+    if (currentNode.type === 'END') {
+      break;
+    }
+
+    const nextEdge = getOutgoingWorkflowEdges(normalized, currentNode.id)[0];
+    if (!nextEdge) {
+      break;
+    }
+
+    currentNode = getWorkflowNode(normalized, nextEdge.toNodeId);
+  }
+
+  return path;
+};
+
+const getNodeValidationMessages = (
+  workflow: Workflow,
+  selectedNodeId?: string,
+  selectedEdgeId?: string,
+) => {
+  const validation = validateWorkflowGraph(workflow);
+  return {
+    all: validation.errors,
+    selected:
+      validation.errors.filter(
+        error => error.nodeId === selectedNodeId || error.edgeId === selectedEdgeId,
+      ) || [],
+    nodeIdsWithErrors: new Set(validation.errors.map(error => error.nodeId).filter(Boolean)),
+  };
+};
+
+const getEdgePath = (fromNode: WorkflowNode, toNode: WorkflowNode) => {
+  const { width, height } = getWorkflowNodeDimensions();
+  const startX = fromNode.layout.x + width;
+  const startY = fromNode.layout.y + height / 2;
+  const endX = toNode.layout.x;
+  const endY = toNode.layout.y + height / 2;
+  const controlX = Math.max((startX + endX) / 2, startX + 40);
+
+  return `M ${startX} ${startY} C ${controlX} ${startY}, ${controlX} ${endY}, ${endX} ${endY}`;
+};
+
+const getDropCoordinates = (
+  event: React.DragEvent<HTMLDivElement>,
+  element: HTMLDivElement,
+  scale: number,
+) => {
+  const bounds = element.getBoundingClientRect();
+  return {
+    x: (event.clientX - bounds.left + element.scrollLeft) / scale - 110,
+    y: (event.clientY - bounds.top + element.scrollTop) / scale - 54,
+  };
+};
+
+const getCanvasPointFromMouse = (
+  clientX: number,
+  clientY: number,
+  element: HTMLDivElement,
+  scale: number,
+) => {
+  const bounds = element.getBoundingClientRect();
+  return {
+    x: (clientX - bounds.left + element.scrollLeft) / scale,
+    y: (clientY - bounds.top + element.scrollTop) / scale,
+  };
+};
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+type WorkflowHistoryEntry = {
+  id: string;
+  label: string;
+  description?: string;
+  timestamp: string;
+  snapshot: string;
+  workflows: Workflow[];
+};
+
+type CanvasWidgetKey = 'library' | 'palette' | 'tree' | 'insights';
+type WidgetDockMode = 'free' | 'left' | 'right';
+type NeoInsightsTab = 'overview' | 'validation' | 'history' | 'simulation';
+type NeoInspectorMode = 'workflow' | 'node' | 'edge';
+type NeoContextMenuState =
+  | {
+      x: number;
+      y: number;
+      type: 'node' | 'edge';
+      targetId: string;
+    }
+  | null;
+
+type WorkflowStudioProps = {
+  variant?: 'standard' | 'neo';
+};
+
+const NEO_LAYOUT_STORAGE_KEY = 'singularity.workflow-designer-neo.layout';
+type NeoStudioTheme = 'dark' | 'light';
+type NeoStudioLayout = {
+  activePanel: CanvasWidgetKey;
+  panelOpen: boolean;
+  floatingPanel: boolean;
+  laneVisibility: boolean;
+  minimapCollapsed: boolean;
+  inspectorCollapsed: boolean;
+  canvasScale: number;
+  insightsTab: NeoInsightsTab;
+  theme: NeoStudioTheme;
+};
+
+const readNeoStudioLayout = (): NeoStudioLayout => {
+  if (typeof window === 'undefined') {
+    return {
+      activePanel: 'palette' as CanvasWidgetKey,
+      panelOpen: true,
+      floatingPanel: false,
+      laneVisibility: true,
+      minimapCollapsed: false,
+      inspectorCollapsed: false,
+      canvasScale: 1,
+      insightsTab: 'overview' as NeoInsightsTab,
+      theme: 'dark' as NeoStudioTheme,
+    };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(NEO_LAYOUT_STORAGE_KEY);
+    if (!raw) {
+      return {
+        activePanel: 'palette' as CanvasWidgetKey,
+        panelOpen: true,
+        floatingPanel: false,
+        laneVisibility: true,
+        minimapCollapsed: false,
+        inspectorCollapsed: false,
+        canvasScale: 1,
+        insightsTab: 'overview' as NeoInsightsTab,
+        theme: 'dark' as NeoStudioTheme,
+      };
+    }
+
+    const parsed = JSON.parse(raw) as Partial<{
+      activePanel: CanvasWidgetKey;
+      panelOpen: boolean;
+      floatingPanel: boolean;
+      laneVisibility: boolean;
+      minimapCollapsed: boolean;
+      inspectorCollapsed: boolean;
+      canvasScale: number;
+      insightsTab: NeoInsightsTab;
+      theme: NeoStudioTheme;
+    }>;
+
+    return {
+      activePanel: parsed.activePanel || 'palette',
+      panelOpen: parsed.panelOpen ?? true,
+      floatingPanel: parsed.floatingPanel ?? false,
+      laneVisibility: parsed.laneVisibility ?? true,
+      minimapCollapsed: parsed.minimapCollapsed ?? false,
+      inspectorCollapsed: parsed.inspectorCollapsed ?? false,
+      canvasScale:
+        typeof parsed.canvasScale === 'number' && Number.isFinite(parsed.canvasScale)
+          ? clamp(parsed.canvasScale, 0.65, 1.35)
+          : 1,
+      insightsTab: parsed.insightsTab || 'overview',
+      theme: parsed.theme === 'light' ? 'light' : 'dark',
+    };
+  } catch {
+    return {
+      activePanel: 'palette' as CanvasWidgetKey,
+      panelOpen: true,
+      floatingPanel: false,
+      laneVisibility: true,
+      minimapCollapsed: false,
+      inspectorCollapsed: false,
+      canvasScale: 1,
+      insightsTab: 'overview' as NeoInsightsTab,
+      theme: 'dark' as NeoStudioTheme,
+    };
+  }
+};
+
+const cloneWorkflowSet = (items: Workflow[]) =>
+  items.map(workflow => buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)));
+
+const serializeWorkflowSet = (items: Workflow[]) => JSON.stringify(items);
+
+const createHistoryEntry = (
+  label: string,
+  description: string | undefined,
+  workflows: Workflow[],
+): WorkflowHistoryEntry => {
+  const normalizedWorkflows = cloneWorkflowSet(workflows);
+  return {
+    id: `HISTORY-${Date.now().toString(36).toUpperCase()}-${Math.random()
+      .toString(36)
+      .slice(2, 6)
+      .toUpperCase()}`,
+    label,
+    description,
+    timestamp: new Date().toISOString(),
+    snapshot: serializeWorkflowSet(normalizedWorkflows),
+    workflows: normalizedWorkflows,
+  };
+};
+
+const snapToGridValue = (value: number, enabled: boolean) =>
+  enabled ? Math.round(value / 24) * 24 : value;
+
+const WORKFLOW_LANE_TOP = 48;
+const WORKFLOW_LANE_HEIGHT = 176;
+const WORKFLOW_LANE_X_OFFSET = 32;
+const WORKFLOW_LANE_LABEL_WIDTH = 168;
+const WORKFLOW_LANE_PHASES = WORKFLOW_GRAPH_PHASES;
+
+const getLaneIndex = (phase: WorkItemPhase) =>
+  Math.max(WORKFLOW_LANE_PHASES.indexOf(phase as never), 0);
+
+const getLanePhaseFromY = (y: number): Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'> => {
+  const rawIndex = Math.round((y - WORKFLOW_LANE_TOP) / WORKFLOW_LANE_HEIGHT);
+  const laneIndex = clamp(rawIndex, 0, WORKFLOW_LANE_PHASES.length - 1);
+  return WORKFLOW_LANE_PHASES[laneIndex];
+};
+
+const getLaneY = (phase: WorkItemPhase) =>
+  WORKFLOW_LANE_TOP + getLaneIndex(phase) * WORKFLOW_LANE_HEIGHT;
+
+const getLaneAlignedLayout = (
+  x: number,
+  y: number,
+  snapEnabled: boolean,
+  phase?: WorkItemPhase,
+) => {
+  const resolvedPhase = phase && WORKFLOW_LANE_PHASES.includes(phase as never)
+    ? (phase as Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'>)
+    : getLanePhaseFromY(y);
+
+  return {
+    phase: resolvedPhase,
+    x: snapToGridValue(Math.max(x, WORKFLOW_LANE_X_OFFSET), snapEnabled),
+    y: getLaneY(resolvedPhase),
+  };
+};
+
+export default function WorkflowStudio({
+  variant = 'standard',
+}: WorkflowStudioProps) {
+  const navigate = useNavigate();
+  const isNeo = variant === 'neo';
+  const initialNeoLayout = useMemo(() => readNeoStudioLayout(), []);
+  const { activeCapability, getCapabilityWorkspace, setCapabilityWorkspaceContent } =
+    useCapability();
+  const { success, info, warning } = useToast();
+  const workspace = getCapabilityWorkspace(activeCapability.id);
+  const workflows = useMemo(
+    () =>
+      workspace.workflows.map(workflow =>
+        buildWorkflowFromGraph(
+          normalizeWorkflowGraph(applyStandardArtifactsToWorkflow(activeCapability, workflow)),
+        ),
+      ),
+    [activeCapability, workspace.workflows],
+  );
+  const activeWorkflows = useMemo(
+    () => workflows.filter(workflow => workflow.status !== 'ARCHIVED'),
+    [workflows],
+  );
+  const archivedWorkflows = useMemo(
+    () => workflows.filter(workflow => workflow.status === 'ARCHIVED'),
+    [workflows],
+  );
+
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>(
+    activeWorkflows[0]?.id || '',
+  );
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [connectFromNodeId, setConnectFromNodeId] = useState<string | null>(null);
+  const [dragLinkFromNodeId, setDragLinkFromNodeId] = useState<string | null>(null);
+  const [dragLinkPosition, setDragLinkPosition] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  const [canvasScale, setCanvasScale] = useState(initialNeoLayout.canvasScale);
+  const [snapToGrid, setSnapToGrid] = useState(true);
+  const [isCreateWorkflowOpen, setIsCreateWorkflowOpen] = useState(false);
+  const [isNodeDetailsOpen, setIsNodeDetailsOpen] = useState(false);
+  const [isQuickEditOpen, setIsQuickEditOpen] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isNeoHelpOpen, setIsNeoHelpOpen] = useState(false);
+  const [isNeoOverflowOpen, setIsNeoOverflowOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState('');
+  const [workflowLibraryQuery, setWorkflowLibraryQuery] = useState('');
+  const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(() => new Set());
+  const [neoActivePanel, setNeoActivePanel] = useState<CanvasWidgetKey>(
+    initialNeoLayout.activePanel,
+  );
+  const [neoPanelOpen, setNeoPanelOpen] = useState(initialNeoLayout.panelOpen);
+  const [neoFloatingPanel, setNeoFloatingPanel] = useState(initialNeoLayout.floatingPanel);
+  const [neoLaneVisibility, setNeoLaneVisibility] = useState(initialNeoLayout.laneVisibility);
+  const [neoMinimapCollapsed, setNeoMinimapCollapsed] = useState(
+    initialNeoLayout.minimapCollapsed,
+  );
+  const [neoInspectorCollapsed, setNeoInspectorCollapsed] = useState(
+    initialNeoLayout.inspectorCollapsed,
+  );
+  const [neoInsightsTab, setNeoInsightsTab] = useState<NeoInsightsTab>(
+    initialNeoLayout.insightsTab,
+  );
+  const [neoTheme, setNeoTheme] = useState<NeoStudioTheme>(initialNeoLayout.theme);
+  const [neoInspectorMode, setNeoInspectorMode] = useState<NeoInspectorMode>('workflow');
+  const [neoContextMenu, setNeoContextMenu] = useState<NeoContextMenuState>(null);
+  const [widgets, setWidgets] = useState({
+    library: true,
+    palette: true,
+    tree: true,
+    insights: true,
+  });
+  const [canvasWidgetPositions, setCanvasWidgetPositions] = useState({
+    library: { x: 320, y: 18 },
+    palette: { x: 16, y: 520 },
+    tree: { x: 1040, y: 84 },
+    insights: { x: 1040, y: 442 },
+  });
+  const [canvasWidgetPreferences, setCanvasWidgetPreferences] = useState<Record<
+    CanvasWidgetKey,
+    { width: number; dock: WidgetDockMode }
+  >>({
+    library: { width: 420, dock: 'free' },
+    palette: { width: 304, dock: 'left' },
+    tree: { width: 304, dock: 'right' },
+    insights: { width: 420, dock: 'right' },
+  });
+  const [draggingWidget, setDraggingWidget] = useState<{
+    key: CanvasWidgetKey;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
+  const [workflowHistory, setWorkflowHistory] = useState<WorkflowHistoryEntry[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(0);
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [simulationState, setSimulationState] = useState({
+    active: false,
+    stepIndex: 0,
+  });
+  const [canvasViewport, setCanvasViewport] = useState({
+    scrollLeft: 0,
+    scrollTop: 0,
+    clientWidth: 0,
+    clientHeight: 0,
+  });
+  const [isCanvasPanMode, setIsCanvasPanMode] = useState(false);
+  const [canvasPanDrag, setCanvasPanDrag] = useState<{
+    startX: number;
+    startY: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
+  const [workflowDraft, setWorkflowDraft] = useState({
+    name: '',
+    summary: '',
+    workflowType: 'SDLC' as NonNullable<Workflow['workflowType']>,
+    scope: 'CAPABILITY' as NonNullable<Workflow['scope']>,
+  });
+  const [nodeDraft, setNodeDraft] = useState<WorkflowNode | null>(null);
+  const [edgeDraft, setEdgeDraft] = useState<WorkflowEdge | null>(null);
+  const [marqueeSelection, setMarqueeSelection] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const graphStageRef = useRef<HTMLDivElement | null>(null);
+  const historyCapabilityRef = useRef<string | null>(null);
+  const isApplyingHistoryRef = useRef(false);
+
+  const selectedWorkflow = useMemo(
+    () =>
+      activeWorkflows.find(workflow => workflow.id === selectedWorkflowId) ||
+      activeWorkflows[0] ||
+      null,
+    [activeWorkflows, selectedWorkflowId],
+  );
+
+  useEffect(() => {
+    if (!selectedWorkflow && activeWorkflows[0]) {
+      setSelectedWorkflowId(activeWorkflows[0].id);
+      return;
+    }
+
+    if (!selectedWorkflowId && activeWorkflows[0]) {
+      setSelectedWorkflowId(activeWorkflows[0].id);
+      return;
+    }
+
+    if (selectedWorkflowId && !activeWorkflows.some(workflow => workflow.id === selectedWorkflowId)) {
+      setSelectedWorkflowId(activeWorkflows[0]?.id || '');
+    }
+  }, [activeWorkflows, selectedWorkflow, selectedWorkflowId]);
+
+  useEffect(() => {
+    const baselineEntry = createHistoryEntry('Workspace synced', undefined, workflows);
+
+    if (
+      historyCapabilityRef.current !== activeCapability.id ||
+      workflowHistory.length === 0
+    ) {
+      historyCapabilityRef.current = activeCapability.id;
+      setWorkflowHistory([baselineEntry]);
+      setHistoryIndex(0);
+      setLastSavedAt(baselineEntry.timestamp);
+      return;
+    }
+
+    if (isApplyingHistoryRef.current) {
+      isApplyingHistoryRef.current = false;
+    }
+  }, [activeCapability.id, historyIndex, workflowHistory, workflows]);
+
+  const nodes = selectedWorkflow ? getWorkflowNodes(selectedWorkflow) : [];
+  const edges = selectedWorkflow ? getWorkflowEdges(selectedWorkflow) : [];
+  const orderedNodeIds = selectedWorkflow ? getWorkflowNodeOrder(selectedWorkflow) : [];
+  const orderedNodes = orderedNodeIds
+    .map(nodeId => nodes.find(node => node.id === nodeId))
+    .filter((node): node is WorkflowNode => Boolean(node));
+  const visibleNodeCount = orderedNodes.filter(node => isVisibleWorkflowNode(node.type)).length;
+  const laneSummaries = WORKFLOW_GRAPH_PHASES.map(phase => ({
+    phase,
+    count: orderedNodes.filter(node => node.phase === phase).length,
+  }));
+  const selectedNode =
+    selectedWorkflow && selectedNodeId
+      ? getWorkflowNode(selectedWorkflow, selectedNodeId) || null
+      : null;
+  const selectedEdge =
+    selectedWorkflow && selectedEdgeId
+      ? edges.find(edge => edge.id === selectedEdgeId) || null
+      : null;
+  const validationState = selectedWorkflow
+    ? getNodeValidationMessages(selectedWorkflow, selectedNodeId || undefined, selectedEdgeId || undefined)
+    : { all: [], selected: [], nodeIdsWithErrors: new Set<string>() };
+  const workflowSamplePath = selectedWorkflow ? getSamplePath(selectedWorkflow) : [];
+  const selectedCanvasNodes = orderedNodes.filter(node => selectedNodeIds.includes(node.id));
+  const nodeValidationDetails = useMemo(() => {
+    const record = new Map<string, string[]>();
+    validationState.all.forEach(error => {
+      if (!error.nodeId) {
+        return;
+      }
+      const current = record.get(error.nodeId) || [];
+      current.push(error.message);
+      record.set(error.nodeId, current);
+    });
+    return record;
+  }, [validationState.all]);
+  const edgeValidationDetails = useMemo(() => {
+    const record = new Map<string, string[]>();
+    validationState.all.forEach(error => {
+      if (!error.edgeId) {
+        return;
+      }
+      const current = record.get(error.edgeId) || [];
+      current.push(error.message);
+      record.set(error.edgeId, current);
+    });
+    return record;
+  }, [validationState.all]);
+  const workflowNarrative = useMemo(() => {
+    if (!selectedWorkflow) {
+      return null;
+    }
+
+    const activePhases = laneSummaries
+      .filter(summary => summary.count > 0)
+      .map(summary => phaseLabel(summary.phase));
+    const assignedAgents = Array.from(
+      new Set(
+        orderedNodes
+          .map(node => workspace.agents.find(agent => agent.id === node.agentId)?.name)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    );
+    const approvalCount = orderedNodes.filter(
+      node => node.type === 'HUMAN_APPROVAL' || node.type === 'GOVERNANCE_GATE',
+    ).length;
+    const branchCount = orderedNodes.filter(
+      node => node.type === 'DECISION' || node.type === 'PARALLEL_SPLIT',
+    ).length;
+    const pathDescription = workflowSamplePath.map(step => step.label).join(' -> ');
+
+    return {
+      overview:
+        selectedWorkflow.summary?.trim() ||
+        `${selectedWorkflow.name} orchestrates agent-owned delivery from ${activePhases[0] || 'Analysis'} through ${activePhases[activePhases.length - 1] || 'Release'}.`,
+      execution: `This workflow currently spans ${activePhases.length || 1} SDLC phases, with ${visibleNodeCount} visible nodes, ${edges.length} hand-offs, ${approvalCount} approval or governance checkpoints, and ${branchCount} branch controls.`,
+      ownership: assignedAgents.length
+        ? `Primary agents in this flow: ${assignedAgents.join(', ')}.`
+        : 'Assign agents to nodes so ownership and hand-offs are clear to operators.',
+      path: pathDescription
+        ? `Representative execution path: ${pathDescription}.`
+        : 'Add nodes and transitions to generate a readable execution narrative.',
+    };
+  }, [edges.length, laneSummaries, orderedNodes, selectedWorkflow, visibleNodeCount, workflowSamplePath, workspace.agents]);
+
+  useEffect(() => {
+    if (!selectedNode) {
+      setNodeDraft(null);
+      setIsNodeDetailsOpen(false);
+      return;
+    }
+    setNodeDraft({
+      ...selectedNode,
+      etlConfig: selectedNode.etlConfig ? { ...selectedNode.etlConfig } : undefined,
+      eventConfig: selectedNode.eventConfig ? { ...selectedNode.eventConfig } : undefined,
+      alertConfig: selectedNode.alertConfig
+        ? {
+            ...selectedNode.alertConfig,
+            notifyRoles: selectedNode.alertConfig.notifyRoles
+              ? [...selectedNode.alertConfig.notifyRoles]
+              : undefined,
+          }
+        : undefined,
+      artifactContract: cloneArtifactContract(selectedNode.artifactContract),
+    });
+  }, [selectedNode]);
+
+  useEffect(() => {
+    if (!selectedNodeId) {
+      setSelectedNodeIds(current => (current.length ? [] : current));
+      return;
+    }
+
+    setSelectedNodeIds(current => {
+      const valid = current.filter(id => nodes.some(node => node.id === id));
+      if (valid.length === 0 || !valid.includes(selectedNodeId)) {
+        return [selectedNodeId];
+      }
+      return valid;
+    });
+  }, [nodes, selectedNodeId]);
+
+  useEffect(() => {
+    setSimulationState(current => ({
+      active: current.active && workflowSamplePath.length > 0,
+      stepIndex: Math.min(current.stepIndex, Math.max(workflowSamplePath.length - 1, 0)),
+    }));
+  }, [workflowSamplePath.length]);
+
+  useEffect(() => {
+    if (!selectedEdge) {
+      setEdgeDraft(null);
+      return;
+    }
+    setEdgeDraft({
+      ...selectedEdge,
+      artifactContract: selectedEdge.artifactContract
+        ? { ...selectedEdge.artifactContract }
+        : undefined,
+    });
+  }, [selectedEdge]);
+
+  useEffect(() => {
+    if (!isNeo) {
+      return;
+    }
+
+    if (selectedEdge) {
+      setNeoInspectorMode('edge');
+      return;
+    }
+
+    if (selectedNode) {
+      setNeoInspectorMode('node');
+      return;
+    }
+
+    setNeoInspectorMode('workflow');
+  }, [isNeo, selectedEdge, selectedNode]);
+
+  useEffect(() => {
+    if (!draggingWidget) {
+      return;
+    }
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!canvasRef.current) {
+        return;
+      }
+
+      const bounds = canvasRef.current.getBoundingClientRect();
+      const widgetWidth = canvasWidgetPreferences[draggingWidget.key].width;
+      const minX = 16;
+      const minY = 16;
+      const maxX = Math.max(bounds.width - widgetWidth - 16, minX);
+      const maxY = Math.max(bounds.height - 96, minY);
+
+      setCanvasWidgetPositions(current => ({
+        ...current,
+        [draggingWidget.key]: {
+          x: clamp(event.clientX - bounds.left - draggingWidget.offsetX, minX, maxX),
+          y: clamp(event.clientY - bounds.top - draggingWidget.offsetY, minY, maxY),
+        },
+      }));
+    };
+
+    const handleMouseUp = () => {
+      setDraggingWidget(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [canvasWidgetPreferences, draggingWidget]);
+
+  useEffect(() => {
+    const element = canvasRef.current;
+    if (!element) {
+      return;
+    }
+
+    const updateViewport = () => {
+      setCanvasViewport({
+        scrollLeft: element.scrollLeft,
+        scrollTop: element.scrollTop,
+        clientWidth: element.clientWidth,
+        clientHeight: element.clientHeight,
+      });
+    };
+
+    updateViewport();
+    element.addEventListener('scroll', updateViewport);
+    window.addEventListener('resize', updateViewport);
+    return () => {
+      element.removeEventListener('scroll', updateViewport);
+      window.removeEventListener('resize', updateViewport);
+    };
+  }, [canvasScale, selectedWorkflowId]);
+
+  useEffect(() => {
+    if (!canvasPanDrag) {
+      return;
+    }
+
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!canvasRef.current) {
+        return;
+      }
+
+      event.preventDefault();
+      canvasRef.current.scrollLeft =
+        canvasPanDrag.scrollLeft - (event.clientX - canvasPanDrag.startX);
+      canvasRef.current.scrollTop =
+        canvasPanDrag.scrollTop - (event.clientY - canvasPanDrag.startY);
+    };
+
+    const handleMouseUp = () => {
+      setCanvasPanDrag(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [canvasPanDrag]);
+
+  useEffect(() => {
+    if (!isNeo || typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(
+      NEO_LAYOUT_STORAGE_KEY,
+      JSON.stringify({
+        activePanel: neoActivePanel,
+        panelOpen: neoPanelOpen,
+        floatingPanel: neoFloatingPanel,
+        laneVisibility: neoLaneVisibility,
+        minimapCollapsed: neoMinimapCollapsed,
+        inspectorCollapsed: neoInspectorCollapsed,
+        canvasScale,
+        insightsTab: neoInsightsTab,
+        theme: neoTheme,
+      }),
+    );
+  }, [
+    canvasScale,
+    isNeo,
+    neoActivePanel,
+    neoFloatingPanel,
+    neoInsightsTab,
+    neoInspectorCollapsed,
+    neoLaneVisibility,
+    neoMinimapCollapsed,
+    neoPanelOpen,
+    neoTheme,
+  ]);
+
+  useEffect(() => {
+    if (!isNeo || typeof document === 'undefined') {
+      return;
+    }
+
+    document.body.dataset.designerTheme = neoTheme;
+    return () => {
+      delete document.body.dataset.designerTheme;
+    };
+  }, [isNeo, neoTheme]);
+
+  useEffect(() => {
+    if (!neoContextMenu) {
+      return;
+    }
+
+    const handleClose = () => setNeoContextMenu(null);
+    window.addEventListener('click', handleClose);
+    return () => {
+      window.removeEventListener('click', handleClose);
+    };
+  }, [neoContextMenu]);
+
+  const persistWorkflows = async (
+    nextWorkflows: Workflow[],
+    toastTitle: string,
+    toastDescription?: string,
+  ) => {
+    const normalizedWorkflows = cloneWorkflowSet(nextWorkflows);
+    const nextEntry = createHistoryEntry(toastTitle, toastDescription, normalizedWorkflows);
+    const currentSnapshot = workflowHistory[historyIndex]?.snapshot;
+
+    if (nextEntry.snapshot !== currentSnapshot) {
+      const baseHistory = workflowHistory.slice(0, historyIndex + 1);
+      const trimmedHistory = [...baseHistory, nextEntry].slice(-40);
+      setWorkflowHistory(trimmedHistory);
+      setHistoryIndex(trimmedHistory.length - 1);
+    }
+
+    try {
+      await setCapabilityWorkspaceContent(activeCapability.id, {
+        workflows: normalizedWorkflows,
+      });
+      setLastSavedAt(nextEntry.timestamp);
+      success(toastTitle, toastDescription);
+    } catch {
+      // Context mutation paths already emit failure toasts.
+    }
+  };
+
+  const replaceSelectedWorkflow = (
+    updater: (workflow: Workflow) => Workflow,
+    toastTitle: string,
+    toastDescription?: string,
+  ) => {
+    if (!selectedWorkflow) {
+      return;
+    }
+
+    const nextWorkflow = buildWorkflowFromGraph(
+      normalizeWorkflowGraph(updater(selectedWorkflow)),
+    );
+
+    const nextWorkflows = workflows.map(workflow =>
+      workflow.id === nextWorkflow.id ? nextWorkflow : workflow,
+    );
+
+    persistWorkflows(nextWorkflows, toastTitle, toastDescription);
+  };
+
+  const focusNodeOnCanvas = (nodeId: string) => {
+    if (!selectedWorkflow || !canvasRef.current) {
+      return;
+    }
+
+    const nextNode = getWorkflowNode(selectedWorkflow, nodeId);
+    if (!nextNode) {
+      return;
+    }
+
+    const nextNodeDimensions = getWorkflowNodeDimensions();
+    canvasRef.current.scrollTo({
+      left: Math.max(
+        nextNode.layout.x * canvasScale -
+          canvasRef.current.clientWidth / 2 +
+          (nextNodeDimensions.width * canvasScale) / 2,
+        0,
+      ),
+      top: Math.max(
+        nextNode.layout.y * canvasScale -
+          canvasRef.current.clientHeight / 2 +
+          (nextNodeDimensions.height * canvasScale) / 2,
+        0,
+      ),
+      behavior: 'smooth',
+    });
+  };
+
+  const clearCanvasSelection = () => {
+    setSelectedNodeId(null);
+    setSelectedNodeIds([]);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+  };
+
+  const selectNode = (nodeId: string, additive = false) => {
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+    if (!additive) {
+      setSelectedNodeId(nodeId);
+      setSelectedNodeIds([nodeId]);
+      return;
+    }
+
+    setSelectedNodeIds(current => {
+      if (current.includes(nodeId)) {
+        const next = current.filter(id => id !== nodeId);
+        setSelectedNodeId(next[next.length - 1] || null);
+        return next;
+      }
+      setSelectedNodeId(nodeId);
+      return [...current, nodeId];
+    });
+  };
+
+  const applyHistoryEntry = (
+    nextEntry: WorkflowHistoryEntry,
+    nextIndex: number,
+    toastTitle: string,
+  ) => {
+    void (async () => {
+      isApplyingHistoryRef.current = true;
+      setHistoryIndex(nextIndex);
+      try {
+        await setCapabilityWorkspaceContent(activeCapability.id, {
+          workflows: nextEntry.workflows,
+        });
+        setLastSavedAt(new Date().toISOString());
+        setSelectedEdgeId(null);
+        setConnectFromNodeId(null);
+        success(toastTitle, nextEntry.label);
+      } catch {
+        // Context mutation paths already emit failure toasts.
+      }
+    })();
+  };
+
+  const handleUndo = () => {
+    if (historyIndex <= 0 || !workflowHistory[historyIndex - 1]) {
+      warning('Nothing to undo', 'No earlier workflow history is available.');
+      return;
+    }
+    applyHistoryEntry(workflowHistory[historyIndex - 1], historyIndex - 1, 'Undo applied');
+  };
+
+  const handleRedo = () => {
+    if (historyIndex >= workflowHistory.length - 1 || !workflowHistory[historyIndex + 1]) {
+      warning('Nothing to redo', 'No later workflow history is available.');
+      return;
+    }
+    applyHistoryEntry(workflowHistory[historyIndex + 1], historyIndex + 1, 'Redo applied');
+  };
+
+  const handleRestoreHistoryEntry = (entry: WorkflowHistoryEntry, index: number) => {
+    applyHistoryEntry(entry, index, 'Workflow restored');
+  };
+
+  const handleAlignSelectedNodes = () => {
+    if (!selectedWorkflow || selectedCanvasNodes.length < 2) {
+      warning('Select more nodes', 'Choose at least two nodes to align them.');
+      return;
+    }
+
+    const alignedX = Math.min(...selectedCanvasNodes.map(node => node.layout.x));
+    const selectedIds = new Set(selectedCanvasNodes.map(node => node.id));
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        nodes: (workflow.nodes || []).map(node =>
+          selectedIds.has(node.id)
+            ? { ...node, layout: { ...node.layout, x: alignedX } }
+            : node,
+        ),
+      }),
+      'Nodes aligned',
+      'Selected nodes were aligned to the same vertical column.',
+    );
+  };
+
+  const handleDistributeSelectedNodes = () => {
+    if (!selectedWorkflow || selectedCanvasNodes.length < 3) {
+      warning('Need three nodes', 'Select at least three nodes to distribute them.');
+      return;
+    }
+
+    const orderedSelection = [...selectedCanvasNodes].sort((left, right) => left.layout.x - right.layout.x);
+    const first = orderedSelection[0].layout.x;
+    const last = orderedSelection[orderedSelection.length - 1].layout.x;
+    const gap = (last - first) / (orderedSelection.length - 1 || 1);
+    const selectedIds = new Map(
+      orderedSelection.map((node, index) => [node.id, first + gap * index]),
+    );
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        nodes: (workflow.nodes || []).map(node =>
+          selectedIds.has(node.id)
+            ? {
+                ...node,
+                layout: {
+                  ...node.layout,
+                  x: selectedIds.get(node.id) || node.layout.x,
+                },
+              }
+            : node,
+        ),
+      }),
+      'Nodes distributed',
+      'Selected nodes were distributed horizontally for cleaner spacing.',
+    );
+  };
+
+  const handleToggleWidgetDock = (key: CanvasWidgetKey, dock: WidgetDockMode) => {
+    setCanvasWidgetPreferences(current => ({
+      ...current,
+      [key]: {
+        ...current[key],
+        dock,
+      },
+    }));
+  };
+
+  const handleToggleWidgetWidth = (key: CanvasWidgetKey) => {
+    setCanvasWidgetPreferences(current => ({
+      ...current,
+      [key]: {
+        ...current[key],
+        width: current[key].width > 304 ? 304 : 420,
+      },
+    }));
+  };
+
+  const getCanvasWidgetStyle = (key: CanvasWidgetKey) => {
+    const preference = canvasWidgetPreferences[key];
+    const fallback = canvasWidgetPositions[key];
+    const canvasWidth = canvasRef.current?.clientWidth || 1320;
+    const left =
+      preference.dock === 'left'
+        ? 16
+        : preference.dock === 'right'
+        ? Math.max(canvasWidth - preference.width - 16, 16)
+        : fallback.x;
+
+    return {
+      left,
+      top: fallback.y,
+      width: preference.width,
+    };
+  };
+
+  const handleActivateNeoPanel = (key: CanvasWidgetKey) => {
+    if (neoActivePanel === key) {
+      setNeoPanelOpen(current => !current);
+      return;
+    }
+
+    setNeoActivePanel(key);
+    setNeoPanelOpen(true);
+    setNeoFloatingPanel(false);
+  };
+
+  const handleToggleNeoPanelFloating = () => {
+    setNeoFloatingPanel(current => !current);
+    setNeoPanelOpen(true);
+  };
+
+  const handleToggleNeoInspector = () => {
+    setNeoInspectorCollapsed(current => !current);
+  };
+
+  const handleCanvasZoom = (direction: 'in' | 'out') => {
+    setCanvasScale(current =>
+      clamp(current + (direction === 'in' ? 0.1 : -0.1), 0.65, 1.35),
+    );
+  };
+
+  const simulationNodeIds = useMemo(() => {
+    if (!simulationState.active) {
+      return new Set<string>();
+    }
+    return new Set(
+      workflowSamplePath
+        .slice(0, simulationState.stepIndex + 1)
+        .map(step => step.nodeId),
+    );
+  }, [simulationState.active, simulationState.stepIndex, workflowSamplePath]);
+
+  const simulationEdgeIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!simulationState.active || !selectedWorkflow) {
+      return ids;
+    }
+
+    for (let index = 0; index < simulationState.stepIndex; index += 1) {
+      const current = workflowSamplePath[index];
+      const next = workflowSamplePath[index + 1];
+      if (!current || !next) {
+        continue;
+      }
+      const edge = edges.find(
+        item => item.fromNodeId === current.nodeId && item.toNodeId === next.nodeId,
+      );
+      if (edge) {
+        ids.add(edge.id);
+      }
+    }
+    return ids;
+  }, [edges, selectedWorkflow, simulationState.active, simulationState.stepIndex, workflowSamplePath]);
+
+  const currentSimulationStep = simulationState.active
+    ? workflowSamplePath[simulationState.stepIndex] || null
+    : null;
+
+  const handleStartSimulation = () => {
+    if (!workflowSamplePath.length) {
+      warning('Simulation unavailable', 'Add connected nodes before running a simulation.');
+      return;
+    }
+    setSimulationState({ active: true, stepIndex: 0 });
+    const firstNodeId = workflowSamplePath[0]?.nodeId;
+    if (firstNodeId) {
+      focusNodeOnCanvas(firstNodeId);
+    }
+  };
+
+  const handleSimulationStep = (direction: 'next' | 'prev') => {
+    if (!workflowSamplePath.length) {
+      return;
+    }
+
+    setSimulationState(current => {
+      const nextIndex =
+        direction === 'next'
+          ? Math.min(current.stepIndex + 1, workflowSamplePath.length - 1)
+          : Math.max(current.stepIndex - 1, 0);
+      const nextNodeId = workflowSamplePath[nextIndex]?.nodeId;
+      if (nextNodeId) {
+        setTimeout(() => focusNodeOnCanvas(nextNodeId), 0);
+      }
+      return {
+        active: true,
+        stepIndex: nextIndex,
+      };
+    });
+  };
+
+  const handleResetSimulation = () => {
+    setSimulationState({ active: false, stepIndex: 0 });
+  };
+
+  const handleCreateWorkflow = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!workflowDraft.name.trim()) {
+      return;
+    }
+
+    const workflowId = createWorkflowId(activeCapability.id, workflowDraft.name);
+    const startNodeId = `NODE-${slugify(activeCapability.id)}-${slugify(workflowDraft.name)}-START`;
+    const endNodeId = `NODE-${slugify(activeCapability.id)}-${slugify(workflowDraft.name)}-END`;
+    const nextWorkflow = buildWorkflowFromGraph(
+      normalizeWorkflowGraph({
+        id: workflowId,
+        name: workflowDraft.name.trim(),
+        capabilityId: activeCapability.id,
+        status: 'BETA',
+        workflowType: workflowDraft.workflowType,
+        scope: workflowDraft.scope,
+        summary: workflowDraft.summary.trim() || undefined,
+        publishState: 'DRAFT',
+        schemaVersion: 2,
+        entryNodeId: startNodeId,
+        nodes: [
+          createWorkflowNode({
+            id: startNodeId,
+            name: 'Start',
+            type: 'START',
+            phase: 'ANALYSIS',
+            layout: { x: 120, y: 48 },
+          }),
+          createWorkflowNode({
+            id: endNodeId,
+            name: 'End',
+            type: 'END',
+            phase: 'RELEASE',
+            layout: { x: 520, y: 48 + 5 * 176 },
+          }),
+        ],
+        edges: [
+          createWorkflowEdge({
+            fromNodeId: startNodeId,
+            toNodeId: endNodeId,
+            label: 'Complete without delivery',
+          }),
+        ],
+        steps: [],
+      }),
+    );
+
+    persistWorkflows(
+      [...workflows, nextWorkflow],
+      'Workflow created',
+      `${nextWorkflow.name} is now available in ${activeCapability.name}.`,
+    );
+    setSelectedWorkflowId(nextWorkflow.id);
+    setSelectedNodeId(startNodeId);
+    setSelectedNodeIds([startNodeId]);
+    setSelectedEdgeId(null);
+    setIsCreateWorkflowOpen(false);
+    setWorkflowDraft({
+      name: '',
+      summary: '',
+      workflowType: 'SDLC',
+      scope: 'CAPABILITY',
+    });
+  };
+
+  const handleLoadStandardWorkflow = () => {
+    const standardWorkflow = createStandardCapabilityWorkflow(activeCapability);
+    const existingStandardIndex = workflows.findIndex(
+      workflow => workflow.id === standardWorkflow.id,
+    );
+    const nextWorkflows =
+      existingStandardIndex >= 0
+        ? workflows.map(workflow =>
+            workflow.id === standardWorkflow.id ? standardWorkflow : workflow,
+          )
+        : [...workflows, standardWorkflow];
+
+    persistWorkflows(
+      nextWorkflows,
+      'Standard workflow loaded',
+      'The standard agent workflow is now available in the new studio.',
+    );
+    setSelectedWorkflowId(standardWorkflow.id);
+    setSelectedNodeId(standardWorkflow.entryNodeId || null);
+    setSelectedNodeIds(standardWorkflow.entryNodeId ? [standardWorkflow.entryNodeId] : []);
+  };
+
+  const handleDuplicateWorkflow = (workflowToCopy: Workflow | null = selectedWorkflow) => {
+    if (!workflowToCopy) {
+      return;
+    }
+
+    const copyName = createCopyName(
+      workflowToCopy.name,
+      workflows.map(workflow => workflow.name),
+    );
+    const workflowId = (() => {
+      const baseId = createWorkflowId(activeCapability.id, copyName);
+      if (!workflows.some(workflow => workflow.id === baseId)) {
+        return baseId;
+      }
+
+      let counter = 2;
+      let candidate = `${baseId}-${counter}`;
+      while (workflows.some(workflow => workflow.id === candidate)) {
+        counter += 1;
+        candidate = `${baseId}-${counter}`;
+      }
+
+      return candidate;
+    })();
+
+    const nodeIdMap = new Map<string, string>();
+    (workflowToCopy.nodes || []).forEach(node => {
+      nodeIdMap.set(node.id, createDesignerCopyId('NODE', `${copyName}-${node.name}`));
+    });
+
+    const copiedWorkflow = buildWorkflowFromGraph(
+      normalizeWorkflowGraph({
+        ...workflowToCopy,
+        id: workflowId,
+        name: copyName,
+        status: 'BETA',
+        publishState: 'DRAFT',
+        summary: workflowToCopy.summary
+          ? `Copy of ${workflowToCopy.summary}`
+          : `Copy of ${workflowToCopy.name}`,
+        entryNodeId: nodeIdMap.get(workflowToCopy.entryNodeId || '') || workflowToCopy.entryNodeId,
+        nodes: (workflowToCopy.nodes || []).map(node => ({
+          ...node,
+          id: nodeIdMap.get(node.id) || node.id,
+          layout: {
+            x: node.layout.x + 48,
+            y: node.layout.y + 32,
+          },
+          approverRoles: node.approverRoles ? [...node.approverRoles] : undefined,
+          exitCriteria: node.exitCriteria ? [...node.exitCriteria] : undefined,
+          allowedToolIds: node.allowedToolIds ? [...node.allowedToolIds] : undefined,
+          artifactContract: cloneArtifactContract(node.artifactContract),
+          etlConfig: node.etlConfig ? { ...node.etlConfig } : undefined,
+          eventConfig: node.eventConfig ? { ...node.eventConfig } : undefined,
+          alertConfig: node.alertConfig
+            ? {
+                ...node.alertConfig,
+                notifyRoles: node.alertConfig.notifyRoles
+                  ? [...node.alertConfig.notifyRoles]
+                  : undefined,
+              }
+            : undefined,
+        })),
+        edges: (workflowToCopy.edges || []).map(edge => ({
+          ...edge,
+          id: createDesignerCopyId('EDGE', `${copyName}-${edge.label || edge.id}`),
+          fromNodeId: nodeIdMap.get(edge.fromNodeId) || edge.fromNodeId,
+          toNodeId: nodeIdMap.get(edge.toNodeId) || edge.toNodeId,
+          artifactContract: edge.artifactContract
+            ? {
+                ...edge.artifactContract,
+                requiredInputs: edge.artifactContract.requiredInputs
+                  ? [...edge.artifactContract.requiredInputs]
+                  : undefined,
+                expectedOutputs: edge.artifactContract.expectedOutputs
+                  ? [...edge.artifactContract.expectedOutputs]
+                  : undefined,
+              }
+            : undefined,
+        })),
+        steps: [],
+        handoffProtocols: [],
+      }),
+    );
+
+    persistWorkflows(
+      [...workflows, copiedWorkflow],
+      'Workflow duplicated',
+      `${workflowToCopy.name} was copied into ${copiedWorkflow.name}.`,
+    );
+    setSelectedWorkflowId(copiedWorkflow.id);
+    setSelectedNodeId(copiedWorkflow.entryNodeId || copiedWorkflow.nodes?.[0]?.id || null);
+    setSelectedNodeIds(
+      copiedWorkflow.entryNodeId || copiedWorkflow.nodes?.[0]?.id
+        ? [copiedWorkflow.entryNodeId || copiedWorkflow.nodes?.[0]?.id || '']
+        : [],
+    );
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+    cancelDragLink();
+  };
+
+  const handleArchiveWorkflow = (workflowToArchive: Workflow | null = selectedWorkflow) => {
+    if (!workflowToArchive || workflowToArchive.status === 'ARCHIVED') {
+      return;
+    }
+
+    const nextWorkflows = workflows.map(workflow =>
+      workflow.id === workflowToArchive.id
+        ? {
+            ...workflow,
+            status: 'ARCHIVED' as const,
+            archivedAt: new Date().toISOString(),
+            publishState:
+              workflow.publishState === 'PUBLISHED' ? 'VALIDATED' : workflow.publishState,
+          }
+        : workflow,
+    );
+
+    const nextActiveWorkflow = activeWorkflows.find(
+      workflow => workflow.id !== workflowToArchive.id,
+    );
+
+    persistWorkflows(
+      nextWorkflows,
+      'Workflow archived',
+      `${workflowToArchive.name} moved to the archived section.`,
+    );
+    setSelectedWorkflowId(nextActiveWorkflow?.id || '');
+    setSelectedNodeId(null);
+    setSelectedNodeIds([]);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+    cancelDragLink();
+    setSimulationState({ active: false, stepIndex: 0 });
+  };
+
+  const handleRestoreWorkflow = (workflowToRestore: Workflow) => {
+    if (workflowToRestore.status !== 'ARCHIVED') {
+      return;
+    }
+
+    const nextWorkflows = workflows.map(workflow =>
+      workflow.id === workflowToRestore.id
+        ? {
+            ...workflow,
+            status: 'BETA' as const,
+            archivedAt: undefined,
+          }
+        : workflow,
+    );
+
+    persistWorkflows(
+      nextWorkflows,
+      'Workflow restored',
+      `${workflowToRestore.name} is active again in the library.`,
+    );
+    setSelectedWorkflowId(workflowToRestore.id);
+    setSelectedNodeId(workflowToRestore.entryNodeId || workflowToRestore.nodes?.[0]?.id || null);
+    setSelectedNodeIds(
+      workflowToRestore.entryNodeId || workflowToRestore.nodes?.[0]?.id
+        ? [workflowToRestore.entryNodeId || workflowToRestore.nodes?.[0]?.id || '']
+        : [],
+    );
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+    cancelDragLink();
+    setSimulationState({ active: false, stepIndex: 0 });
+  };
+
+  const handleValidateWorkflow = () => {
+    if (!selectedWorkflow) {
+      return;
+    }
+
+    const validation = validateWorkflowGraph(selectedWorkflow);
+    if (!validation.valid) {
+      warning(
+        'Validation issues found',
+        `${validation.errors.length} graph rules must be resolved before publishing.`,
+      );
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({ ...workflow, publishState: 'VALIDATED' }),
+      'Workflow validated',
+      `${selectedWorkflow.name} passed graph validation and is ready to publish.`,
+    );
+  };
+
+  const handlePublishWorkflow = () => {
+    if (!selectedWorkflow) {
+      return;
+    }
+
+    const validation = validateWorkflowGraph(selectedWorkflow);
+    if (!validation.valid) {
+      warning(
+        'Publish blocked',
+        'Resolve workflow validation issues before publishing this flow.',
+      );
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({ ...workflow, publishState: 'PUBLISHED', status: 'STABLE' }),
+      'Workflow published',
+      `${selectedWorkflow.name} is now published for enterprise execution.`,
+    );
+  };
+
+  const handleAutoLayout = () => {
+    if (!selectedWorkflow) {
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => autoLayoutWorkflowGraph(workflow),
+      'Auto-layout applied',
+      'The graph was re-aligned for readability in the new studio.',
+    );
+  };
+
+  const handleExportWorkflow = () => {
+    if (!selectedWorkflow) {
+      return;
+    }
+
+    const blob = new Blob([JSON.stringify(selectedWorkflow, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${selectedWorkflow.id.toLowerCase()}-graph.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    info('Workflow exported', `${selectedWorkflow.name} JSON was downloaded.`);
+  };
+
+  const handleStartWidgetDrag = (
+    event: React.MouseEvent<HTMLDivElement>,
+    key: CanvasWidgetKey,
+  ) => {
+    if (!canvasRef.current) {
+      return;
+    }
+
+    if ((event.target as HTMLElement).closest('button')) {
+      return;
+    }
+
+    const widgetElement = event.currentTarget.parentElement as HTMLDivElement | null;
+    if (!widgetElement) {
+      return;
+    }
+
+    const widgetBounds = widgetElement.getBoundingClientRect();
+    setCanvasWidgetPreferences(current => ({
+      ...current,
+      [key]: {
+        ...current[key],
+        dock: 'free',
+      },
+    }));
+    setDraggingWidget({
+      key,
+      offsetX: event.clientX - widgetBounds.left,
+      offsetY: event.clientY - widgetBounds.top,
+    });
+  };
+
+  const handleCanvasDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!selectedWorkflow || !canvasRef.current) {
+      return;
+    }
+
+    event.preventDefault();
+    const moveNodeId = event.dataTransfer.getData('application/singularity-node-move');
+    const nodeTemplate = event.dataTransfer.getData('application/singularity-node-template');
+    const nextCoordinates = getDropCoordinates(event, canvasRef.current, canvasScale);
+    const laneAlignedLayout = getLaneAlignedLayout(
+      nextCoordinates.x,
+      nextCoordinates.y,
+      snapToGrid,
+    );
+
+    if (moveNodeId) {
+      replaceSelectedWorkflow(
+        workflow => ({
+          ...workflow,
+          nodes: (workflow.nodes || []).map(node =>
+            node.id === moveNodeId
+              ? {
+                  ...node,
+                  phase: laneAlignedLayout.phase,
+                  layout: {
+                    x: laneAlignedLayout.x,
+                    y: laneAlignedLayout.y,
+                  },
+                }
+              : node,
+          ),
+        }),
+        'Node repositioned',
+        `The node moved into the ${phaseLabel(laneAlignedLayout.phase)} lane.`,
+      );
+      return;
+    }
+
+    if (!nodeTemplate) {
+      return;
+    }
+
+    const parsedTemplate = JSON.parse(nodeTemplate) as {
+      type: WorkflowNodeType;
+      phase: Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'>;
+      label?: string;
+      action?: string;
+    };
+    const nextNodeLayout = getLaneAlignedLayout(
+      nextCoordinates.x,
+      nextCoordinates.y,
+      snapToGrid,
+      parsedTemplate.phase,
+    );
+
+    const nextNode = createWorkflowNode({
+      name:
+        parsedTemplate.label ||
+        NODE_TYPE_OPTIONS.find(option => option.type === parsedTemplate.type)?.label ||
+        'New Node',
+      type: parsedTemplate.type,
+      phase: nextNodeLayout.phase,
+      layout: {
+        x: nextNodeLayout.x,
+        y: nextNodeLayout.y,
+      },
+      agentId:
+        parsedTemplate.type === 'START' || parsedTemplate.type === 'END'
+          ? undefined
+          : workspace.agents[0]?.id,
+      action:
+        parsedTemplate.action ||
+        (parsedTemplate.type === 'DECISION'
+          ? 'Evaluate criteria and choose the correct downstream path.'
+          : parsedTemplate.type === 'PARALLEL_SPLIT'
+          ? 'Create multiple downstream tracks.'
+          : parsedTemplate.type === 'PARALLEL_JOIN'
+          ? 'Wait for parallel tracks and consolidate the outputs.'
+          : parsedTemplate.type === 'GOVERNANCE_GATE'
+          ? 'Check governance controls and evidence before continuing.'
+          : parsedTemplate.type === 'HUMAN_APPROVAL'
+          ? 'Pause for a human to review and approve or unblock.'
+          : parsedTemplate.type === 'EVENT'
+          ? 'Emit a workflow event for downstream automation, evidence, or observability.'
+          : parsedTemplate.type === 'ALERT'
+          ? 'Raise an alert with severity and routing so operators can respond quickly.'
+          : parsedTemplate.type === 'RELEASE'
+          ? 'Complete release work and attach evidence.'
+          : isLegacyEtlNodeType(parsedTemplate.type)
+          ? 'Legacy ETL step imported from an older workflow.'
+          : 'Complete the assigned work and prepare the next hand-off.'),
+      eventConfig:
+        parsedTemplate.type === 'EVENT'
+          ? {
+              eventName: 'workflow.event',
+              eventSource: activeCapability.name,
+              trigger: 'ON_SUCCESS',
+            }
+          : undefined,
+      alertConfig:
+        parsedTemplate.type === 'ALERT'
+          ? {
+              severity: 'WARNING',
+              channel: 'ops-console',
+              requiresAcknowledgement: true,
+            }
+          : undefined,
+    });
+
+    replaceSelectedWorkflow(
+      workflow => {
+        const nextWorkflow = {
+          ...workflow,
+          nodes: [...(workflow.nodes || []), nextNode],
+        };
+
+        if (!connectFromNodeId) {
+          return nextWorkflow;
+        }
+
+        return {
+          ...nextWorkflow,
+          edges: [
+            ...(nextWorkflow.edges || []),
+            createWorkflowEdge({
+              fromNodeId: connectFromNodeId,
+              toNodeId: nextNode.id,
+              label: 'New hand-off',
+              conditionType: 'DEFAULT',
+            }),
+          ],
+        };
+      },
+      'Node added',
+      connectFromNodeId
+        ? 'A new node and hand-off were created.'
+        : 'A new node was added to the workflow.',
+    );
+    setSelectedNodeId(nextNode.id);
+    setSelectedNodeIds([nextNode.id]);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+  };
+
+  const handleConnectNodes = (targetNodeId: string) => {
+    if (!selectedWorkflow || !connectFromNodeId || connectFromNodeId === targetNodeId) {
+      return;
+    }
+
+    const duplicateEdge = edges.some(
+      edge => edge.fromNodeId === connectFromNodeId && edge.toNodeId === targetNodeId,
+    );
+    if (duplicateEdge) {
+      warning('Connection already exists', 'This node path is already defined.');
+      setConnectFromNodeId(null);
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        edges: [
+          ...(workflow.edges || []),
+          createWorkflowEdge({
+            fromNodeId: connectFromNodeId,
+            toNodeId: targetNodeId,
+            label: 'Hand-off',
+            conditionType: 'DEFAULT',
+          }),
+        ],
+      }),
+      'Nodes connected',
+      'A new hand-off was created.',
+    );
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+  };
+
+  const cancelDragLink = () => {
+    setDragLinkFromNodeId(null);
+    setDragLinkPosition(null);
+  };
+
+  const handleStartDragLink = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    nodeId: string,
+  ) => {
+    if (!canvasRef.current) {
+      return;
+    }
+
+    event.stopPropagation();
+    const nextPoint = getCanvasPointFromMouse(
+      event.clientX,
+      event.clientY,
+      canvasRef.current,
+      canvasScale,
+    );
+    setDragLinkFromNodeId(nodeId);
+    setDragLinkPosition(nextPoint);
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+  };
+
+  const handleCompleteDragLink = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    targetNodeId: string,
+  ) => {
+    event.stopPropagation();
+    if (!selectedWorkflow || !dragLinkFromNodeId || dragLinkFromNodeId === targetNodeId) {
+      cancelDragLink();
+      return;
+    }
+
+    const duplicateEdge = edges.some(
+      edge => edge.fromNodeId === dragLinkFromNodeId && edge.toNodeId === targetNodeId,
+    );
+    if (duplicateEdge) {
+      warning('Connection already exists', 'This node path is already defined.');
+      cancelDragLink();
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        edges: [
+          ...(workflow.edges || []),
+          createWorkflowEdge({
+            fromNodeId: dragLinkFromNodeId,
+            toNodeId: targetNodeId,
+            label: 'Hand-off',
+            conditionType: 'DEFAULT',
+          }),
+        ],
+      }),
+      'Nodes connected',
+      'A new hand-off was created.',
+    );
+    setSelectedEdgeId(null);
+    cancelDragLink();
+  };
+
+  const handleApplyNodeDraft = () => {
+    if (!selectedWorkflow || !selectedNode || !nodeDraft) {
+      return;
+    }
+
+    const laneAlignedLayout = getLaneAlignedLayout(
+      nodeDraft.layout.x,
+      nodeDraft.layout.y,
+      snapToGrid,
+      nodeDraft.phase,
+    );
+    const nextNodeDraft = {
+      ...nodeDraft,
+      phase: laneAlignedLayout.phase,
+      layout: {
+        x: laneAlignedLayout.x,
+        y: laneAlignedLayout.y,
+      },
+    };
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        nodes: (workflow.nodes || []).map(node =>
+          node.id === selectedNode.id ? nextNodeDraft : node,
+        ),
+      }),
+      'Node updated',
+      `${nextNodeDraft.name} was updated in the workflow.`,
+    );
+  };
+
+  const handleApplyEdgeDraft = () => {
+    if (!selectedWorkflow || !selectedEdge || !edgeDraft) {
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        edges: (workflow.edges || []).map(edge =>
+          edge.id === selectedEdge.id ? edgeDraft : edge,
+        ),
+      }),
+      'Transition updated',
+      'The hand-off rule and branch metadata were saved.',
+    );
+  };
+
+  const handleDeleteSelectedNode = () => {
+    if (!selectedWorkflow || !selectedNode) {
+      return;
+    }
+
+    if (selectedNode.type === 'START') {
+      warning('Start node locked', 'The START node cannot be removed from the workflow.');
+      return;
+    }
+
+    const nodeToDelete = selectedNode;
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        nodes: (workflow.nodes || []).filter(node => node.id !== nodeToDelete.id),
+        edges: (workflow.edges || []).filter(
+          edge => edge.fromNodeId !== nodeToDelete.id && edge.toNodeId !== nodeToDelete.id,
+        ),
+      }),
+      'Node removed',
+      `${nodeToDelete.name} and its transitions were removed from the graph.`,
+    );
+    setCollapsedNodeIds(current => {
+      const next = new Set(current);
+      next.delete(nodeToDelete.id);
+      return next;
+    });
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+    setIsNodeDetailsOpen(false);
+    setSelectedNodeIds([]);
+  };
+
+  const handleDeleteSelectedEdge = () => {
+    if (!selectedWorkflow || !selectedEdge) {
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        edges: (workflow.edges || []).filter(edge => edge.id !== selectedEdge.id),
+      }),
+      'Transition removed',
+      'The selected hand-off was removed.',
+    );
+    setSelectedEdgeId(null);
+  };
+
+  const handleDuplicateNode = (nodeToCopy: WorkflowNode | null = selectedNode) => {
+    if (!selectedWorkflow || !nodeToCopy) {
+      return;
+    }
+
+    const copyName = createCopyName(
+      nodeToCopy.name,
+      nodes.map(node => node.name),
+    );
+    const duplicatedNode = createWorkflowNode({
+      ...nodeToCopy,
+      id: createDesignerCopyId('NODE', `${selectedWorkflow.id}-${copyName}`),
+      name: copyName,
+      layout: {
+        x: nodeToCopy.layout.x + 48,
+        y: nodeToCopy.layout.y,
+      },
+      approverRoles: nodeToCopy.approverRoles ? [...nodeToCopy.approverRoles] : undefined,
+      exitCriteria: nodeToCopy.exitCriteria ? [...nodeToCopy.exitCriteria] : undefined,
+      allowedToolIds: nodeToCopy.allowedToolIds ? [...nodeToCopy.allowedToolIds] : undefined,
+      artifactContract: cloneArtifactContract(nodeToCopy.artifactContract),
+      etlConfig: nodeToCopy.etlConfig ? { ...nodeToCopy.etlConfig } : undefined,
+      eventConfig: nodeToCopy.eventConfig ? { ...nodeToCopy.eventConfig } : undefined,
+      alertConfig: nodeToCopy.alertConfig
+        ? {
+            ...nodeToCopy.alertConfig,
+            notifyRoles: nodeToCopy.alertConfig.notifyRoles
+              ? [...nodeToCopy.alertConfig.notifyRoles]
+              : undefined,
+          }
+        : undefined,
+    });
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        nodes: [...(workflow.nodes || []), duplicatedNode],
+      }),
+      'Node duplicated',
+      `${nodeToCopy.name} was duplicated as ${duplicatedNode.name}.`,
+    );
+    setSelectedNodeId(duplicatedNode.id);
+    setSelectedNodeIds([duplicatedNode.id]);
+    setSelectedEdgeId(null);
+    setIsQuickEditOpen(false);
+  };
+
+  const openQuickEdit = (nodeId: string) => {
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+    setIsQuickEditOpen(true);
+  };
+
+  const openNodeDetailsModal = (nodeId: string) => {
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeId(null);
+    setConnectFromNodeId(null);
+    setIsNodeDetailsOpen(true);
+  };
+
+  const handleToggleNodeMinimized = (nodeId: string) => {
+    setCollapsedNodeIds(current => {
+      const next = new Set(current);
+      if (next.has(nodeId)) {
+        next.delete(nodeId);
+      } else {
+        next.add(nodeId);
+      }
+      return next;
+    });
+  };
+
+  const handleDeleteNodeFromCanvas = (node: WorkflowNode) => {
+    if (!selectedWorkflow) {
+      return;
+    }
+
+    if (node.type === 'START') {
+      warning('Start node locked', 'The START node cannot be removed from the workflow.');
+      return;
+    }
+
+    replaceSelectedWorkflow(
+      workflow => ({
+        ...workflow,
+        nodes: (workflow.nodes || []).filter(item => item.id !== node.id),
+        edges: (workflow.edges || []).filter(
+          edge => edge.fromNodeId !== node.id && edge.toNodeId !== node.id,
+        ),
+      }),
+      'Node removed',
+      `${node.name} and its transitions were removed from the graph.`,
+    );
+    setCollapsedNodeIds(current => {
+      const next = new Set(current);
+      next.delete(node.id);
+      return next;
+    });
+    if (selectedNodeId === node.id) {
+      setSelectedNodeId(null);
+      setSelectedNodeIds([]);
+      setSelectedEdgeId(null);
+      setConnectFromNodeId(null);
+      setIsNodeDetailsOpen(false);
+    }
+  };
+
+  const renderNodeEditorFields = (surface: 'inspector' | 'modal') => {
+    if (!nodeDraft) {
+      return null;
+    }
+
+    return (
+      <div className="grid gap-4">
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Name</span>
+          <input
+            value={nodeDraft.name}
+            onChange={event =>
+              setNodeDraft(current =>
+                current ? { ...current, name: event.target.value } : current,
+              )
+            }
+            className="enterprise-input"
+          />
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Node Type</span>
+          <select
+            value={nodeDraft.type}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      type: event.target.value as WorkflowNodeType,
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input"
+          >
+            {NODE_TYPE_OPTIONS.map(option => (
+              <option key={option.type} value={option.type}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Phase Lane</span>
+          <select
+            value={nodeDraft.phase}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      phase: event.target.value as WorkItemPhase,
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input"
+          >
+            {WORKFLOW_GRAPH_PHASES.map(phase => (
+              <option key={phase} value={phase}>
+                {phaseLabel(phase)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Assigned Agent</span>
+          <select
+            value={nodeDraft.agentId || ''}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      agentId: event.target.value || undefined,
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input"
+          >
+            <option value="">Control node</option>
+            {workspace.agents.map(agent => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Action</span>
+          <input
+            value={nodeDraft.action || ''}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      action: event.target.value,
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input"
+          />
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Description</span>
+          <textarea
+            rows={4}
+            value={nodeDraft.description || ''}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      description: event.target.value,
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input min-h-[7rem]"
+          />
+        </label>
+
+        {nodeDraft.type === 'EVENT' ? (
+          <>
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Event Name</span>
+              <input
+                value={nodeDraft.eventConfig?.eventName || ''}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          eventConfig: {
+                            ...(current.eventConfig || {}),
+                            eventName: event.target.value,
+                          },
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input"
+              />
+            </label>
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Event Source</span>
+              <input
+                value={nodeDraft.eventConfig?.eventSource || ''}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          eventConfig: {
+                            ...(current.eventConfig || {}),
+                            eventSource: event.target.value,
+                          },
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input"
+              />
+            </label>
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Emit Trigger</span>
+              <select
+                value={nodeDraft.eventConfig?.trigger || 'ON_SUCCESS'}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          eventConfig: {
+                            ...(current.eventConfig || {}),
+                            trigger: event.target.value as 'ON_ENTER' | 'ON_SUCCESS' | 'ON_FAILURE',
+                          },
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input"
+              >
+                <option value="ON_ENTER">On enter</option>
+                <option value="ON_SUCCESS">On success</option>
+                <option value="ON_FAILURE">On failure</option>
+              </select>
+            </label>
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Payload Template</span>
+              <textarea
+                rows={4}
+                value={nodeDraft.eventConfig?.payloadTemplate || ''}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          eventConfig: {
+                            ...(current.eventConfig || {}),
+                            payloadTemplate: event.target.value,
+                          },
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input min-h-[7rem]"
+              />
+            </label>
+          </>
+        ) : null}
+
+        {nodeDraft.type === 'ALERT' ? (
+          <>
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Alert Severity</span>
+              <select
+                value={nodeDraft.alertConfig?.severity || 'WARNING'}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          alertConfig: {
+                            ...(current.alertConfig || {}),
+                            severity: event.target.value as 'INFO' | 'WARNING' | 'CRITICAL',
+                          },
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input"
+              >
+                <option value="INFO">Info</option>
+                <option value="WARNING">Warning</option>
+                <option value="CRITICAL">Critical</option>
+              </select>
+            </label>
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Alert Channel</span>
+              <input
+                value={nodeDraft.alertConfig?.channel || ''}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          alertConfig: {
+                            ...(current.alertConfig || {}),
+                            channel: event.target.value,
+                          },
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input"
+              />
+            </label>
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Notify Roles</span>
+              <input
+                value={(nodeDraft.alertConfig?.notifyRoles || []).join(', ')}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          alertConfig: {
+                            ...(current.alertConfig || {}),
+                            notifyRoles: event.target.value
+                              .split(',')
+                              .map(value => value.trim())
+                              .filter(Boolean),
+                          },
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input"
+              />
+            </label>
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Alert Message</span>
+              <textarea
+                rows={4}
+                value={nodeDraft.alertConfig?.messageTemplate || ''}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          alertConfig: {
+                            ...(current.alertConfig || {}),
+                            messageTemplate: event.target.value,
+                          },
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input min-h-[7rem]"
+              />
+            </label>
+          </>
+        ) : null}
+
+        {isLegacyEtlNodeType(nodeDraft.type) ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900">
+            This node came from a legacy ETL-style workflow. It still renders here for compatibility, but this new studio is optimized for agent workflows.
+          </div>
+        ) : null}
+
+        <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+          <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+            Standard Artifacts
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-secondary">
+            Define the standard input and output documents this SDLC step expects and produces.
+          </p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Primary Input Reference</span>
+            <input
+              value={nodeDraft.inputArtifactId || ''}
+              onChange={event =>
+                setNodeDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        inputArtifactId: event.target.value || undefined,
+                      }
+                    : current,
+                )
+              }
+              className="enterprise-input"
+            />
+          </label>
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Primary Output Reference</span>
+            <input
+              value={nodeDraft.outputArtifactId || ''}
+              onChange={event =>
+                setNodeDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        outputArtifactId: event.target.value || undefined,
+                      }
+                    : current,
+                )
+              }
+              className="enterprise-input"
+            />
+          </label>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Standard Input Documents</span>
+            <textarea
+              rows={5}
+              value={(nodeDraft.artifactContract?.requiredInputs || []).join('\n')}
+              onChange={event =>
+                setNodeDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        artifactContract: {
+                          ...(current.artifactContract || {}),
+                          requiredInputs: splitArtifactLines(event.target.value),
+                          expectedOutputs: current.artifactContract?.expectedOutputs || [],
+                          notes: current.artifactContract?.notes,
+                        },
+                      }
+                    : current,
+                )
+              }
+              className="enterprise-input min-h-[8rem]"
+            />
+          </label>
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Standard Output Documents</span>
+            <textarea
+              rows={5}
+              value={(nodeDraft.artifactContract?.expectedOutputs || []).join('\n')}
+              onChange={event =>
+                setNodeDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        artifactContract: {
+                          ...(current.artifactContract || {}),
+                          requiredInputs: current.artifactContract?.requiredInputs || [],
+                          expectedOutputs: splitArtifactLines(event.target.value),
+                          notes: current.artifactContract?.notes,
+                        },
+                      }
+                    : current,
+                )
+              }
+              className="enterprise-input min-h-[8rem]"
+            />
+          </label>
+        </div>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Artifact Guidance</span>
+          <textarea
+            rows={4}
+            value={nodeDraft.artifactContract?.notes || ''}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      artifactContract: {
+                        ...(current.artifactContract || {}),
+                        requiredInputs: current.artifactContract?.requiredInputs || [],
+                        expectedOutputs: current.artifactContract?.expectedOutputs || [],
+                        notes: event.target.value || undefined,
+                      },
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input min-h-[7rem]"
+          />
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Exit Criteria</span>
+          <textarea
+            rows={4}
+            value={(nodeDraft.exitCriteria || []).join('\n')}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      exitCriteria: event.target.value
+                        .split('\n')
+                        .map(value => value.trim())
+                        .filter(Boolean),
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input min-h-[7rem]"
+          />
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Approver Roles</span>
+          <input
+            value={(nodeDraft.approverRoles || []).join(', ')}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      approverRoles: event.target.value
+                        .split(',')
+                        .map(value => value.trim())
+                        .filter(Boolean),
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input"
+          />
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Allowed Tools</span>
+          <select
+            multiple
+            value={nodeDraft.allowedToolIds || []}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      allowedToolIds: Array.from(event.target.selectedOptions).map(
+                        option => (option as HTMLOptionElement).value as ToolAdapterId,
+                      ),
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input min-h-[9rem]"
+          >
+            {TOOL_OPTIONS.map(toolId => (
+              <option key={toolId} value={toolId}>
+                {toolId}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Preferred Workspace Path</span>
+          <input
+            value={nodeDraft.preferredWorkspacePath || ''}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      preferredWorkspacePath: event.target.value || undefined,
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input"
+          />
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Execution Notes</span>
+          <textarea
+            rows={4}
+            value={nodeDraft.executionNotes || ''}
+            onChange={event =>
+              setNodeDraft(current =>
+                current
+                  ? {
+                      ...current,
+                      executionNotes: event.target.value,
+                    }
+                  : current,
+              )
+            }
+            className="enterprise-input min-h-[7rem]"
+          />
+        </label>
+        <div className={cn('flex flex-wrap gap-3', surface === 'modal' && 'justify-end')}>
+          {surface === 'modal' ? (
+            <button
+              type="button"
+              onClick={() => setIsNodeDetailsOpen(false)}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              Close
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={handleApplyNodeDraft}
+            className="enterprise-button enterprise-button-primary"
+          >
+            Save node
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const commandActions = (() => {
+    const nodeActions = orderedNodes.slice(0, 12).map(node => ({
+      id: `node-${node.id}`,
+      label: `Focus node: ${node.name}`,
+      subtitle: phaseLabel(node.phase),
+      run: () => {
+        selectNode(node.id);
+        focusNodeOnCanvas(node.id);
+      },
+    }));
+
+    const workflowActions = activeWorkflows.slice(0, 8).map(workflow => ({
+      id: `workflow-${workflow.id}`,
+      label: `Open workflow: ${workflow.name}`,
+      subtitle: workflow.summary || workflow.workflowType || 'Workflow',
+      run: () => {
+        setSelectedWorkflowId(workflow.id);
+        clearCanvasSelection();
+      },
+    }));
+
+    const studioActions = [
+      {
+        id: 'new-workflow',
+        label: 'Create new workflow',
+        subtitle: 'Open the workflow creation modal',
+        run: () => setIsCreateWorkflowOpen(true),
+      },
+      {
+        id: 'undo',
+        label: 'Undo last change',
+        subtitle: 'Restore the previous workflow revision',
+        run: handleUndo,
+      },
+      {
+        id: 'redo',
+        label: 'Redo last change',
+        subtitle: 'Re-apply the next workflow revision',
+        run: handleRedo,
+      },
+      {
+        id: 'validate',
+        label: 'Validate workflow',
+        subtitle: 'Run graph validation checks',
+        run: handleValidateWorkflow,
+      },
+      {
+        id: 'publish',
+        label: 'Publish workflow',
+        subtitle: 'Publish the selected workflow for execution',
+        run: handlePublishWorkflow,
+      },
+      ...(selectedWorkflow
+        ? [
+            {
+              id: 'archive-selected',
+              label: 'Archive selected workflow',
+              subtitle: 'Move the current workflow into the archived section',
+              run: () => handleArchiveWorkflow(selectedWorkflow),
+            },
+          ]
+        : []),
+      {
+        id: 'auto-layout',
+        label: 'Auto-layout canvas',
+        subtitle: 'Reorganize nodes for readability',
+        run: handleAutoLayout,
+      },
+      {
+        id: 'align',
+        label: 'Align selected nodes',
+        subtitle: 'Align the current multi-selection',
+        run: handleAlignSelectedNodes,
+      },
+      {
+        id: 'distribute',
+        label: 'Distribute selected nodes',
+        subtitle: 'Evenly spread the selected nodes',
+        run: handleDistributeSelectedNodes,
+      },
+      {
+        id: 'simulation',
+        label: simulationState.active ? 'Reset simulation' : 'Start simulation',
+        subtitle: simulationState.active
+          ? 'Clear the current simulation highlight'
+          : 'Preview a sample execution path',
+        run: simulationState.active ? handleResetSimulation : handleStartSimulation,
+      },
+    ];
+
+    return [...studioActions, ...workflowActions, ...nodeActions];
+  })();
+
+  const filteredCommandActions = commandActions.filter(action =>
+    `${action.label} ${action.subtitle}`.toLowerCase().includes(commandQuery.trim().toLowerCase()),
+  );
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTypingTarget =
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA' ||
+        target?.tagName === 'SELECT' ||
+        target?.isContentEditable;
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setIsCommandPaletteOpen(true);
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      }
+
+      if (isTypingTarget) {
+        return;
+      }
+
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault();
+        if (selectedEdgeId) {
+          handleDeleteSelectedEdge();
+        } else if (selectedNodeId) {
+          handleDeleteSelectedNode();
+        }
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        setIsCommandPaletteOpen(false);
+        setCommandQuery('');
+        setIsNeoOverflowOpen(false);
+        setIsNeoHelpOpen(false);
+        setNeoContextMenu(null);
+        setConnectFromNodeId(null);
+        setIsCanvasPanMode(false);
+        setCanvasPanDrag(null);
+        cancelDragLink();
+        return;
+      }
+
+      if (event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        setCanvasScale(1);
+        return;
+      }
+
+      if (event.key.toLowerCase() === 'l' && isNeo) {
+        event.preventDefault();
+        setNeoLaneVisibility(current => !current);
+        return;
+      }
+
+      if (event.key.toLowerCase() === 'h' && isNeo) {
+        event.preventDefault();
+        setIsCanvasPanMode(current => !current);
+        setCanvasPanDrag(null);
+        return;
+      }
+
+      if (event.key === '?' && isNeo) {
+        event.preventDefault();
+        setIsNeoHelpOpen(current => !current);
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key === '=') {
+        event.preventDefault();
+        handleCanvasZoom('in');
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key === '-') {
+        event.preventDefault();
+        handleCanvasZoom('out');
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd' && selectedNode) {
+        event.preventDefault();
+        handleDuplicateNode(selectedNode);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [commandActions, isNeo, selectedEdgeId, selectedNode, selectedNodeId]);
+
+  const publishState = selectedWorkflow ? getWorkflowPublishState(selectedWorkflow) : 'DRAFT';
+  const nodeDimensions = getWorkflowNodeDimensions();
+  const nodeCoordinates = orderedNodes.map(node => ({
+    x: node.layout.x,
+    y: node.layout.y,
+  }));
+  const graphWidth = nodeCoordinates.length
+    ? Math.max(...nodeCoordinates.map(point => point.x)) + nodeDimensions.width + 120
+    : 1200;
+  const graphHeight = nodeCoordinates.length
+    ? Math.max(...nodeCoordinates.map(point => point.y)) + nodeDimensions.height + 120
+    : 920;
+  const minimapScale = Math.min(0.14, 180 / Math.max(graphWidth, graphHeight));
+  const dragLinkFromNode =
+    selectedWorkflow && dragLinkFromNodeId
+      ? getWorkflowNode(selectedWorkflow, dragLinkFromNodeId)
+      : null;
+  const dragLinkStart = dragLinkFromNode
+    ? {
+        x: dragLinkFromNode.layout.x + nodeDimensions.width,
+        y: dragLinkFromNode.layout.y + nodeDimensions.height / 2,
+      }
+    : null;
+  const minimapViewport = {
+    left: (canvasViewport.scrollLeft / Math.max(canvasScale, 0.01)) * minimapScale,
+    top: (canvasViewport.scrollTop / Math.max(canvasScale, 0.01)) * minimapScale,
+    width:
+      (canvasViewport.clientWidth / Math.max(canvasScale, 0.01)) * minimapScale,
+    height:
+      (canvasViewport.clientHeight / Math.max(canvasScale, 0.01)) * minimapScale,
+  };
+
+  useEffect(() => {
+    if (!marqueeSelection) {
+      return;
+    }
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!graphStageRef.current) {
+        return;
+      }
+
+      const bounds = graphStageRef.current.getBoundingClientRect();
+      setMarqueeSelection(current =>
+        current
+          ? {
+              ...current,
+              currentX: clamp((event.clientX - bounds.left) / canvasScale, 0, graphWidth),
+              currentY: clamp((event.clientY - bounds.top) / canvasScale, 0, graphHeight),
+            }
+          : current,
+      );
+    };
+
+    const handleMouseUp = () => {
+      setMarqueeSelection(current => {
+        if (!current) {
+          return current;
+        }
+
+        const left = Math.min(current.startX, current.currentX);
+        const right = Math.max(current.startX, current.currentX);
+        const top = Math.min(current.startY, current.currentY);
+        const bottom = Math.max(current.startY, current.currentY);
+
+        const selectedIds = orderedNodes
+          .filter(node => {
+            const nodeLeft = node.layout.x;
+            const nodeRight = node.layout.x + nodeDimensions.width;
+            const nodeTop = node.layout.y;
+            const nodeBottom = node.layout.y + nodeDimensions.height;
+            return !(
+              nodeRight < left ||
+              nodeLeft > right ||
+              nodeBottom < top ||
+              nodeTop > bottom
+            );
+          })
+          .map(node => node.id);
+
+        if (selectedIds.length) {
+          setSelectedNodeIds(selectedIds);
+          setSelectedNodeId(selectedIds[selectedIds.length - 1] || null);
+          setSelectedEdgeId(null);
+          setConnectFromNodeId(null);
+        } else {
+          clearCanvasSelection();
+        }
+
+        return null;
+      });
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [canvasScale, graphHeight, graphWidth, marqueeSelection, nodeDimensions.height, nodeDimensions.width, orderedNodes]);
+  const recentHistoryEntries = [...workflowHistory]
+    .map((entry, index) => ({ entry, index }))
+    .reverse()
+    .slice(0, 5)
+    .map(({ entry, index }) => ({
+      entry,
+      actualIndex: workflowHistory.length - 1 - index,
+    }));
+  const filteredLibraryWorkflows = activeWorkflows.filter(workflow =>
+    `${workflow.name} ${workflow.summary || ''}`
+      .toLowerCase()
+      .includes(workflowLibraryQuery.trim().toLowerCase()),
+  );
+  const neoWidgetMeta: Array<{
+    key: CanvasWidgetKey;
+    label: string;
+    accentClassName: string;
+    Icon: typeof WorkflowIcon;
+  }> = [
+    {
+      key: 'library',
+      label: 'Workflow Library',
+      Icon: WorkflowIcon,
+      accentClassName: 'text-sky-300',
+    },
+    {
+      key: 'palette',
+      label: 'Agent Step Kit',
+      Icon: Wrench,
+      accentClassName: 'text-emerald-300',
+    },
+    {
+      key: 'tree',
+      label: 'Workflow Tree',
+      Icon: PanelLeft,
+      accentClassName: 'text-violet-300',
+    },
+    {
+      key: 'insights',
+      label: 'Workflow Insights',
+      Icon: ShieldCheck,
+      accentClassName: 'text-amber-300',
+    },
+  ];
+  const activeNeoPanelMeta =
+    neoWidgetMeta.find(item => item.key === neoActivePanel) || neoWidgetMeta[0];
+  const renderNeoInsightsContent = () => (
+    <div className="space-y-4">
+      <div className="grid grid-cols-4 gap-2">
+        {([
+          ['overview', 'Overview'],
+          ['validation', 'Validation'],
+          ['history', 'History'],
+          ['simulation', 'Simulation'],
+        ] as Array<[NeoInsightsTab, string]>).map(([tab, label]) => (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => setNeoInsightsTab(tab)}
+            className={cn(
+              'workflow-neo-segment',
+              neoInsightsTab === tab && 'workflow-neo-segment-active',
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div className="designer-palette-chip">
+          <WorkflowIcon size={13} />
+          {visibleNodeCount} nodes
+        </div>
+        <div className="designer-palette-chip">
+          <Route size={13} />
+          {edges.length} hand-offs
+        </div>
+        <div className="designer-palette-chip">
+          <CheckCircle2 size={13} />
+          {validationState.all.length ? `${validationState.all.length} issues` : 'Graph valid'}
+        </div>
+        <div className="designer-palette-chip">
+          <Undo2 size={13} />
+          {workflowHistory.length} revisions
+        </div>
+      </div>
+
+      {neoInsightsTab === 'overview' ? (
+        <section className="designer-palette-section">
+          <div className="designer-palette-section-header">
+            <div className="flex items-center gap-2">
+              <WorkflowIcon size={14} className="text-sky-300" />
+              <p className="designer-palette-section-title">Workflow overview</p>
+            </div>
+            <StatusBadge tone={PUBLISH_STATE_TONE[publishState]}>{publishState}</StatusBadge>
+          </div>
+          <div className="space-y-3 text-sm leading-relaxed text-slate-300">
+            <p>{workflowNarrative?.overview}</p>
+            <p className="text-slate-400">{workflowNarrative?.execution}</p>
+            <p className="text-slate-400">{workflowNarrative?.ownership}</p>
+            <p className="text-slate-400">{workflowNarrative?.path}</p>
+          </div>
+        </section>
+      ) : null}
+
+      {neoInsightsTab === 'validation' ? (
+        <section className="designer-palette-section">
+          <div className="designer-palette-section-header">
+            <div className="flex items-center gap-2">
+              <ScanLine size={14} className="text-amber-300" />
+              <p className="designer-palette-section-title">Validation</p>
+            </div>
+            <button
+              type="button"
+              onClick={handleValidateWorkflow}
+              className="designer-widget-action"
+            >
+              Run checks
+            </button>
+          </div>
+          <div className="space-y-2">
+            {validationState.all.length ? (
+              validationState.all.slice(0, 8).map(error => (
+                <div
+                  key={error.id}
+                  className="rounded-2xl border border-red-400/30 bg-red-500/10 px-3 py-3 text-xs leading-relaxed text-red-100"
+                >
+                  {error.message}
+                </div>
+              ))
+            ) : (
+              <p className="text-xs leading-relaxed text-slate-400">
+                START, END, branching, join, and governance checks are all passing.
+              </p>
+            )}
+          </div>
+        </section>
+      ) : null}
+
+      {neoInsightsTab === 'history' ? (
+        <section className="designer-palette-section">
+          <div className="designer-palette-section-header">
+            <div className="flex items-center gap-2">
+              <Undo2 size={14} className="text-violet-300" />
+              <p className="designer-palette-section-title">History</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={handleUndo} className="designer-widget-action">
+                Undo
+              </button>
+              <button type="button" onClick={handleRedo} className="designer-widget-action">
+                Redo
+              </button>
+            </div>
+          </div>
+          <div className="space-y-2">
+            {recentHistoryEntries.map(({ entry, actualIndex }) => (
+              <button
+                key={entry.id}
+                type="button"
+                onClick={() => handleRestoreHistoryEntry(entry, actualIndex)}
+                className={cn(
+                  'w-full rounded-2xl border px-3 py-3 text-left transition',
+                  actualIndex === historyIndex
+                    ? 'border-sky-400/40 bg-sky-500/15'
+                    : 'border-slate-800 bg-slate-950/70 hover:bg-slate-900',
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-semibold text-white">{entry.label}</p>
+                    <p className="mt-1 text-[0.6875rem] leading-relaxed text-slate-400">
+                      {entry.description || 'Workflow state snapshot'}
+                    </p>
+                  </div>
+                  <span className="text-[0.625rem] font-bold uppercase tracking-[0.16em] text-slate-500">
+                    {new Date(entry.timestamp).toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {neoInsightsTab === 'simulation' ? (
+        <section className="designer-palette-section">
+          <div className="designer-palette-section-header">
+            <div className="flex items-center gap-2">
+              <Play size={14} className="text-emerald-300" />
+              <p className="designer-palette-section-title">Simulation</p>
+            </div>
+            <button
+              type="button"
+              onClick={simulationState.active ? handleResetSimulation : handleStartSimulation}
+              className="designer-widget-action"
+            >
+              {simulationState.active ? 'Reset' : 'Start'}
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => handleSimulationStep('prev')}
+              disabled={!simulationState.active || simulationState.stepIndex === 0}
+              className="designer-widget-action disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSimulationStep('next')}
+              disabled={
+                !simulationState.active ||
+                simulationState.stepIndex >= workflowSamplePath.length - 1
+              }
+              className="designer-widget-action disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Next
+            </button>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {workflowSamplePath.length ? (
+              workflowSamplePath.map((step, index) => (
+                <div
+                  key={`${step.label}-${index}`}
+                  className={cn(
+                    'rounded-2xl border px-3 py-2 text-[0.6875rem] font-semibold',
+                    simulationState.active && simulationState.stepIndex === index
+                      ? 'border-sky-400/50 bg-sky-500/15 text-sky-50'
+                      : simulationState.active && simulationState.stepIndex > index
+                      ? 'border-emerald-400/50 bg-emerald-500/15 text-emerald-50'
+                      : 'border-slate-800 bg-slate-950/70 text-slate-300',
+                  )}
+                >
+                  {step.label}
+                </div>
+              ))
+            ) : (
+              <p className="text-xs leading-relaxed text-slate-400">
+                Add connected nodes and hand-offs to preview a representative execution path.
+              </p>
+            )}
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
+
+  const renderNeoPrimaryPanelContent = () => {
+    if (neoActivePanel === 'library') {
+      return (
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setIsCreateWorkflowOpen(true)}
+                className="enterprise-button enterprise-button-primary"
+              >
+                <Plus size={14} />
+                New
+              </button>
+              <button
+                type="button"
+                onClick={handleLoadStandardWorkflow}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                <Sparkles size={14} />
+                Standard
+              </button>
+            </div>
+            <input
+              value={workflowLibraryQuery}
+              onChange={event => setWorkflowLibraryQuery(event.target.value)}
+              placeholder="Search workflows"
+              className="enterprise-input"
+            />
+          </div>
+          <div className="space-y-2">
+            {filteredLibraryWorkflows.map(workflow => (
+              <div
+                key={workflow.id}
+                className={cn(
+                  'workflow-neo-list-row',
+                  selectedWorkflow?.id === workflow.id && 'workflow-neo-list-row-active',
+                )}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedWorkflowId(workflow.id);
+                    clearCanvasSelection();
+                    setNeoInspectorMode('workflow');
+                  }}
+                  className="min-w-0 flex-1 text-left"
+                >
+                  <p className="truncate text-sm font-semibold text-white">{workflow.name}</p>
+                  <p className="mt-1 truncate text-[0.6875rem] text-slate-400">
+                    {workflow.summary || workflow.workflowType || 'Workflow'}
+                  </p>
+                </button>
+                <div className="flex items-center gap-2">
+                  <StatusBadge tone={PUBLISH_STATE_TONE[getWorkflowPublishState(workflow)]}>
+                    {getWorkflowPublishState(workflow)}
+                  </StatusBadge>
+                  <button
+                    type="button"
+                    onClick={() => handleDuplicateWorkflow(workflow)}
+                    className="designer-widget-icon-action"
+                    title="Duplicate workflow"
+                  >
+                    <Copy size={14} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          {archivedWorkflows.length ? (
+            <div className="designer-palette-section">
+              <div className="designer-palette-section-header">
+                <p className="designer-palette-section-title">Archived</p>
+                <StatusBadge tone="neutral">{archivedWorkflows.length}</StatusBadge>
+              </div>
+              <div className="space-y-2">
+                {archivedWorkflows.slice(0, 4).map(workflow => (
+                  <div key={workflow.id} className="workflow-neo-list-row">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-white">{workflow.name}</p>
+                      <p className="mt-1 text-[0.6875rem] text-slate-400">Archived workflow</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleRestoreWorkflow(workflow)}
+                      className="designer-widget-action"
+                    >
+                      Restore
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+
+    if (neoActivePanel === 'palette') {
+      return (
+        <div className="space-y-3">
+          <button
+            type="button"
+            onClick={() => {
+              if (connectFromNodeId) {
+                setConnectFromNodeId(null);
+              } else if (selectedNodeId) {
+                setConnectFromNodeId(selectedNodeId);
+              }
+            }}
+            className={cn(
+              'designer-widget-action',
+              connectFromNodeId && 'border-emerald-400/40 bg-emerald-500/15 text-white',
+            )}
+          >
+            <Route size={14} />
+            {connectFromNodeId ? 'Cancel hand-off' : 'Hand-off mode'}
+          </button>
+          <div className="max-h-[calc(100vh-18rem)] space-y-3 overflow-y-auto pr-1">
+            {PALETTE_GROUPS.map(group => (
+              <div
+                key={group.title}
+                className="rounded-2xl border border-slate-800 bg-slate-900/60 px-3 py-3"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-500">
+                      {group.title}
+                    </p>
+                    <p className="mt-1 text-[0.6875rem] leading-relaxed text-slate-400">
+                      {group.description}
+                    </p>
+                  </div>
+                  <StatusBadge tone="neutral">{phaseLabel(group.phase)}</StatusBadge>
+                </div>
+                <div className="mt-3 grid gap-2">
+                  {group.items.map(item => {
+                    const Icon = getNodeIcon(item.type);
+                    return (
+                      <button
+                        key={`${item.type}-${item.label}`}
+                        type="button"
+                        draggable
+                        title={`Drag ${item.label} to canvas`}
+                        onDragStart={event => {
+                          event.dataTransfer.setData(
+                            'application/singularity-node-template',
+                            JSON.stringify({
+                              type: item.type,
+                              phase: item.defaultPhase,
+                              label: item.label,
+                              action: item.action,
+                            }),
+                          );
+                        }}
+                        className="group flex items-center gap-3 rounded-2xl border border-slate-800 bg-slate-950/75 px-3 py-3 text-left transition hover:border-sky-500/30 hover:bg-slate-900"
+                      >
+                        <span
+                          className={cn(
+                            'flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition',
+                            NODE_TYPE_TONE[item.type],
+                          )}
+                        >
+                          <Icon size={16} />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-semibold text-white">
+                            {item.label}
+                          </span>
+                          <span className="mt-1 block text-[0.6875rem] leading-relaxed text-slate-400">
+                            {NODE_TYPE_OPTIONS.find(option => option.type === item.type)?.description}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (neoActivePanel === 'tree') {
+      return (
+        <div className="max-h-[calc(100vh-18rem)] space-y-3 overflow-y-auto pr-1">
+          {laneSummaries.map(({ phase, count }) => (
+            <div key={phase} className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-500">
+                  {phaseLabel(phase)}
+                </p>
+                <span className="rounded-full border border-slate-800 bg-slate-950/80 px-2 py-1 text-[0.625rem] font-bold text-slate-400">
+                  {count}
+                </span>
+              </div>
+              {orderedNodes
+                .filter(node => node.phase === phase)
+                .map(node => (
+                  <div
+                    key={node.id}
+                    className={cn(
+                      'workflow-neo-list-row',
+                      selectedNodeId === node.id && 'workflow-neo-list-row-active',
+                    )}
+                  >
+                    <button
+                      type="button"
+                      onClick={event => {
+                        selectNode(node.id, event.shiftKey);
+                        focusNodeOnCanvas(node.id);
+                      }}
+                      onDoubleClick={() => {
+                        focusNodeOnCanvas(node.id);
+                        openQuickEdit(node.id);
+                      }}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <span className="truncate text-sm font-medium text-white">{node.name}</span>
+                    </button>
+                    {(nodeValidationDetails.get(node.id) || []).length ? (
+                      <span
+                        className="rounded-full border border-red-400/50 bg-red-500/15 px-2 py-1 text-[0.625rem] font-bold text-red-50"
+                        title={nodeValidationDetails.get(node.id)?.[0]}
+                      >
+                        {(nodeValidationDetails.get(node.id) || []).length}
+                      </span>
+                    ) : null}
+                  </div>
+                ))}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    return <div className="max-h-[calc(100vh-18rem)] overflow-y-auto pr-1">{renderNeoInsightsContent()}</div>;
+  };
+
+  const renderWorkflowLibraryContent = (surface: 'card' | 'widget') => (
+    <>
+      <div className={cn('flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between', surface === 'widget' && 'xl:flex-col xl:justify-start')}>
+        <div>
+          <p className="page-context">Workflow Library</p>
+          <p className={cn('text-sm leading-relaxed text-secondary', surface === 'widget' && 'mt-1 text-[0.75rem]')}>
+            {isNeo
+              ? 'Create, switch, archive, and restore workflows without leaving the canvas.'
+              : 'Keep reusable workflow variants above the canvas and switch between them without covering the graph.'}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setIsCreateWorkflowOpen(true)}
+            className="enterprise-button enterprise-button-secondary"
+          >
+            <Plus size={14} />
+            New workflow
+          </button>
+          <button
+            type="button"
+            onClick={() => handleLoadStandardWorkflow()}
+            className="enterprise-button enterprise-button-brand-muted"
+          >
+            <Sparkles size={14} />
+            Standard
+          </button>
+          {selectedWorkflow ? (
+            <>
+              <button
+                type="button"
+                onClick={() => handleDuplicateWorkflow()}
+                className="enterprise-button enterprise-button-brand-muted"
+              >
+                <Copy size={14} />
+                Copy selected
+              </button>
+              <button
+                type="button"
+                onClick={() => handleArchiveWorkflow()}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                <Archive size={14} />
+                Archive selected
+              </button>
+            </>
+          ) : null}
+        </div>
+      </div>
+      <div className={cn('mt-4 flex gap-3 overflow-x-auto pb-1', surface === 'widget' && 'max-h-[14rem] flex-col overflow-y-auto overflow-x-hidden pr-1')}>
+        {activeWorkflows.map(workflow => (
+          <div
+            key={workflow.id}
+            className={cn(
+              'rounded-2xl border px-4 py-3 transition',
+              surface === 'widget' ? 'min-w-0' : 'min-w-[17rem]',
+              selectedWorkflow?.id === workflow.id
+                ? 'border-primary/25 bg-primary/6 shadow-[0_10px_26px_rgba(0,132,61,0.08)]'
+                : 'border-outline-variant/60 bg-surface-container-low hover:border-outline hover:bg-white',
+            )}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedWorkflowId(workflow.id);
+                  setSelectedNodeId(null);
+                  setSelectedNodeIds([]);
+                  setSelectedEdgeId(null);
+                  setConnectFromNodeId(null);
+                  cancelDragLink();
+                  setSimulationState({ active: false, stepIndex: 0 });
+                }}
+                className="min-w-0 flex-1 text-left"
+              >
+                <p className="truncate text-sm font-semibold text-on-surface">{workflow.name}</p>
+                <p className="mt-1 text-[0.6875rem] text-secondary">
+                  {workflow.workflowType || 'Custom'} · {workflow.steps.length} projected steps
+                </p>
+                <p className="mt-2 text-[0.6875rem] leading-relaxed text-outline">
+                  {workflow.summary || 'No summary yet. Add a description to explain the delivery intent.'}
+                </p>
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  title={`Duplicate ${workflow.name}`}
+                  onClick={() => handleDuplicateWorkflow(workflow)}
+                  className="rounded-xl border border-outline-variant/60 bg-white p-2 text-secondary transition hover:bg-surface-container-low hover:text-on-surface"
+                >
+                  <Copy size={14} />
+                </button>
+                <button
+                  type="button"
+                  title={`Archive ${workflow.name}`}
+                  onClick={() => handleArchiveWorkflow(workflow)}
+                  className="rounded-xl border border-amber-200 bg-white p-2 text-amber-700 transition hover:bg-amber-50"
+                >
+                  <Archive size={14} />
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+      {archivedWorkflows.length ? (
+        <div className="mt-4 rounded-2xl border border-outline-variant/60 bg-surface-container-low px-4 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="page-context">Archived Workflows</p>
+              <p className="text-sm leading-relaxed text-secondary">
+                Archived workflows stay preserved here and can be restored at any time.
+              </p>
+            </div>
+            <StatusBadge tone="neutral">{archivedWorkflows.length} archived</StatusBadge>
+          </div>
+          <div className="mt-4 grid gap-3 xl:grid-cols-2">
+            {archivedWorkflows.map(workflow => (
+              <div
+                key={workflow.id}
+                className="rounded-2xl border border-outline-variant/60 bg-white px-4 py-4"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold text-on-surface">
+                      {workflow.name}
+                    </p>
+                    <p className="mt-1 text-[0.6875rem] text-secondary">
+                      {workflow.workflowType || 'Custom'} · archived
+                      {workflow.archivedAt
+                        ? ` ${new Date(workflow.archivedAt).toLocaleDateString()}`
+                        : ''}
+                    </p>
+                    <p className="mt-2 text-[0.6875rem] leading-relaxed text-outline">
+                      {workflow.summary || 'No summary yet. Add a description to explain the delivery intent.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleRestoreWorkflow(workflow)}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    <ArchiveRestore size={14} />
+                    Restore
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+
+  const renderNeoQuickEditFields = () => {
+    if (!nodeDraft) {
+      return null;
+    }
+
+    return (
+      <div className="grid gap-4">
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Name</span>
+          <input
+            value={nodeDraft.name}
+            onChange={event =>
+              setNodeDraft(current => (current ? { ...current, name: event.target.value } : current))
+            }
+            className="enterprise-input"
+          />
+        </label>
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Phase</span>
+            <select
+              value={nodeDraft.phase}
+              onChange={event =>
+                setNodeDraft(current =>
+                  current ? { ...current, phase: event.target.value as WorkItemPhase } : current,
+                )
+              }
+              className="enterprise-input"
+            >
+              {WORKFLOW_GRAPH_PHASES.map(phase => (
+                <option key={phase} value={phase}>
+                  {phaseLabel(phase)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Agent</span>
+            <select
+              value={nodeDraft.agentId || ''}
+              onChange={event =>
+                setNodeDraft(current =>
+                  current ? { ...current, agentId: event.target.value || undefined } : current,
+                )
+              }
+              className="enterprise-input"
+            >
+              <option value="">Control node</option>
+              {workspace.agents.map(agent => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Action</span>
+          <input
+            value={nodeDraft.action || ''}
+            onChange={event =>
+              setNodeDraft(current => (current ? { ...current, action: event.target.value } : current))
+            }
+            className="enterprise-input"
+          />
+        </label>
+        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+          <span>Description</span>
+          <textarea
+            rows={4}
+            value={nodeDraft.description || ''}
+            onChange={event =>
+              setNodeDraft(current =>
+                current ? { ...current, description: event.target.value } : current,
+              )
+            }
+            className="enterprise-input min-h-[6rem]"
+          />
+        </label>
+      </div>
+    );
+  };
+
+  const renderNeoInspectorContent = () => {
+    const mode = neoInspectorMode;
+
+    return (
+      <div className="workflow-neo-inspector-panel">
+        <div className="workflow-neo-inspector-header">
+          <div>
+            <p className="designer-widget-kicker">Inspector</p>
+            <p className="mt-2 text-sm font-semibold text-white">
+              {mode === 'node'
+                ? selectedNode?.name || 'Node'
+                : mode === 'edge'
+                ? selectedEdge?.label || 'Transition'
+                : selectedWorkflow?.name || 'Workflow'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleToggleNeoInspector}
+              className="designer-widget-icon-action"
+              title="Minimize inspector"
+            >
+              <Minimize2 size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setNeoInspectorMode('workflow')}
+              className={cn(
+                'workflow-neo-segment',
+                mode === 'workflow' && 'workflow-neo-segment-active',
+              )}
+            >
+              Workflow
+            </button>
+            {selectedNode ? (
+              <button
+                type="button"
+                onClick={() => setNeoInspectorMode('node')}
+                className={cn(
+                  'workflow-neo-segment',
+                  mode === 'node' && 'workflow-neo-segment-active',
+                )}
+              >
+                Node
+              </button>
+            ) : null}
+            {selectedEdge ? (
+              <button
+                type="button"
+                onClick={() => setNeoInspectorMode('edge')}
+                className={cn(
+                  'workflow-neo-segment',
+                  mode === 'edge' && 'workflow-neo-segment-active',
+                )}
+              >
+                Edge
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="workflow-neo-inspector-body">
+          {mode === 'workflow' ? (
+            <div className="space-y-4">
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div className="designer-palette-metric">
+                  <span className="designer-palette-metric-label">Type</span>
+                  <span className="designer-palette-metric-value">
+                    {selectedWorkflow?.workflowType || 'Custom'}
+                  </span>
+                </div>
+                <div className="designer-palette-metric">
+                  <span className="designer-palette-metric-label">Scope</span>
+                  <span className="designer-palette-metric-value">
+                    {selectedWorkflow?.scope || 'CAPABILITY'}
+                  </span>
+                </div>
+                <div className="designer-palette-metric">
+                  <span className="designer-palette-metric-label">Nodes</span>
+                  <span className="designer-palette-metric-value">{visibleNodeCount}</span>
+                </div>
+                <div className="designer-palette-metric">
+                  <span className="designer-palette-metric-label">Hand-offs</span>
+                  <span className="designer-palette-metric-value">{edges.length}</span>
+                </div>
+              </div>
+              <div className="designer-palette-section">
+                <div className="designer-palette-section-header">
+                  <p className="designer-palette-section-title">Summary</p>
+                  <StatusBadge tone={PUBLISH_STATE_TONE[publishState]}>{publishState}</StatusBadge>
+                </div>
+                <p className="text-sm leading-relaxed text-slate-300">
+                  {selectedWorkflow?.summary ||
+                    'Use the library, node kit, and canvas to shape a workflow for execution.'}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCreateWorkflowOpen(true)}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  <Plus size={14} />
+                  New
+                </button>
+                {selectedWorkflow ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => handleDuplicateWorkflow()}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      <Copy size={14} />
+                      Duplicate
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleArchiveWorkflow()}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      <Archive size={14} />
+                      Archive
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          {mode === 'node' && selectedNode && nodeDraft ? (
+            <div className="space-y-4">
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div className="designer-palette-metric">
+                  <span className="designer-palette-metric-label">Inputs</span>
+                  <span className="designer-palette-metric-value">
+                    {getNodeArtifactInputs(nodeDraft).length}
+                  </span>
+                </div>
+                <div className="designer-palette-metric">
+                  <span className="designer-palette-metric-label">Outputs</span>
+                  <span className="designer-palette-metric-value">
+                    {getNodeArtifactOutputs(nodeDraft).length}
+                  </span>
+                </div>
+              </div>
+              {nodeDraft.artifactContract?.notes ? (
+                <div className="designer-palette-section">
+                  <div className="designer-palette-section-header">
+                    <p className="designer-palette-section-title">Artifact Guidance</p>
+                  </div>
+                  <p className="text-sm leading-relaxed text-slate-300">
+                    {nodeDraft.artifactContract.notes}
+                  </p>
+                </div>
+              ) : null}
+              {renderNeoQuickEditFields()}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleApplyNodeDraft}
+                  className="enterprise-button enterprise-button-primary"
+                >
+                  Save Quick Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsNodeDetailsOpen(true)}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  <Wrench size={14} />
+                  Advanced Config
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {mode === 'edge' && selectedEdge && edgeDraft ? (
+            <div className="space-y-4">
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Label</span>
+                <input
+                  value={edgeDraft.label || ''}
+                  onChange={event =>
+                    setEdgeDraft(current =>
+                      current ? { ...current, label: event.target.value } : current,
+                    )
+                  }
+                  className="enterprise-input"
+                />
+              </label>
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Condition</span>
+                <select
+                  value={edgeDraft.conditionType}
+                  onChange={event =>
+                    setEdgeDraft(current =>
+                      current
+                        ? {
+                            ...current,
+                            conditionType: event.target.value as WorkflowEdge['conditionType'],
+                          }
+                        : current,
+                    )
+                  }
+                  className="enterprise-input"
+                >
+                  {EDGE_CONDITION_OPTIONS.map(option => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Branch Key</span>
+                <input
+                  value={edgeDraft.branchKey || ''}
+                  onChange={event =>
+                    setEdgeDraft(current =>
+                      current ? { ...current, branchKey: event.target.value || undefined } : current,
+                    )
+                  }
+                  className="enterprise-input"
+                />
+              </label>
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Handoff Protocol</span>
+                <input
+                  value={edgeDraft.handoffProtocolId || ''}
+                  onChange={event =>
+                    setEdgeDraft(current =>
+                      current
+                        ? { ...current, handoffProtocolId: event.target.value || undefined }
+                        : current,
+                    )
+                  }
+                  className="enterprise-input"
+                />
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleApplyEdgeDraft}
+                  className="enterprise-button enterprise-button-primary"
+                >
+                  Save Edge
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteSelectedEdge}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  Delete Edge
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  };
+  const neoCanvasMargins = {
+    left: isNeo ? (neoPanelOpen && !neoFloatingPanel ? '25rem' : '5.5rem') : undefined,
+    right: isNeo ? (neoInspectorCollapsed ? '4.75rem' : '22.5rem') : undefined,
+    top: isNeo ? '8.5rem' : undefined,
+    bottom: isNeo ? '2.5rem' : undefined,
+  };
+
+  return (
+    <div className={cn('space-y-4', isNeo && 'h-full space-y-0')}>
+      {!isNeo ? (
+      <div className="section-card section-card-brand">
+        <div className="section-card-header">
+          <div>
+            <p className="page-context">New Designer</p>
+            <h1 className="page-title">Workflow Studio</h1>
+            <p className="page-subtitle">
+              A new agent-workflow designer with floating in-canvas widgets, a cleaner
+              orchestration canvas, and a dedicated inspector. The existing designer at
+              `/designer` remains unchanged.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone="brand">Experimental</StatusBadge>
+            <StatusBadge tone={PUBLISH_STATE_TONE[publishState]}>{publishState}</StatusBadge>
+          </div>
+        </div>
+      </div>
+      ) : null}
+
+      {!selectedWorkflow && !isNeo ? (
+        <SectionCard
+          title="No workflow graph yet"
+          description={
+            archivedWorkflows.length
+              ? 'All workflows are archived. Restore one from the archive or create a new graph workflow.'
+              : 'Start with the standard workflow template or create a new graph workflow in the new studio.'
+          }
+          icon={WorkflowIcon}
+        >
+          <EmptyState
+            title={archivedWorkflows.length ? 'No active workflows' : 'Build the first workflow'}
+            description={
+              archivedWorkflows.length
+                ? 'Archived workflows are preserved below. Restore one to bring it back into the active library.'
+                : 'Create a graph-based agent workflow with hand-offs, approvals, and runtime controls.'
+            }
+            icon={WorkflowIcon}
+            action={
+              <div className="flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleLoadStandardWorkflow}
+                  className="enterprise-button enterprise-button-primary"
+                >
+                  <Sparkles size={16} />
+                  Load Standard SDLC
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsCreateWorkflowOpen(true)}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  <Plus size={16} />
+                  Create Workflow
+                </button>
+              </div>
+            }
+          />
+          {archivedWorkflows.length ? (
+            <div className="mt-6 rounded-[1.3rem] border border-outline-variant/60 bg-surface-container-low px-5 py-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="page-context">Archived Workflows</p>
+                  <p className="text-sm leading-relaxed text-secondary">
+                    Archived workflows stay available for restore and reference. Nothing is deleted permanently.
+                  </p>
+                </div>
+                <StatusBadge tone="neutral">{archivedWorkflows.length} archived</StatusBadge>
+              </div>
+              <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                {archivedWorkflows.map(workflow => (
+                  <div
+                    key={workflow.id}
+                    className="rounded-2xl border border-outline-variant/60 bg-white px-4 py-4"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-semibold text-on-surface">
+                          {workflow.name}
+                        </p>
+                        <p className="mt-1 text-[0.6875rem] text-secondary">
+                          {workflow.workflowType || 'Custom'} · archived
+                          {workflow.archivedAt
+                            ? ` ${new Date(workflow.archivedAt).toLocaleDateString()}`
+                            : ''}
+                        </p>
+                        <p className="mt-2 text-[0.6875rem] leading-relaxed text-outline">
+                          {workflow.summary || 'No summary yet. Add a description to explain the delivery intent.'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleRestoreWorkflow(workflow)}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        <ArchiveRestore size={14} />
+                        Restore
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </SectionCard>
+      ) : (
+        <div
+          className={cn(
+            'workflow-lab-shell',
+            isNeo && 'workflow-lab-shell-neo',
+            isNeo && (neoTheme === 'light' ? 'workflow-theme-light' : 'workflow-theme-dark'),
+          )}
+        >
+          {!isNeo ? (
+          <div className="workflow-lab-topbar">
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusBadge tone="brand">{selectedWorkflow.workflowType || 'Custom'}</StatusBadge>
+                <StatusBadge tone="neutral">{selectedWorkflow.scope || 'CAPABILITY'}</StatusBadge>
+                {validationState.all.length > 0 ? (
+                  <StatusBadge tone="warning">
+                    {validationState.all.length} validation issue{validationState.all.length > 1 ? 's' : ''}
+                  </StatusBadge>
+                ) : (
+                  <StatusBadge tone="success">Graph valid</StatusBadge>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-xs text-secondary">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-outline-variant/60 bg-white px-2.5 py-1">
+                  <Route size={14} />
+                  {getWorkflowEdges(selectedWorkflow).length} hand-offs
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-outline-variant/60 bg-white px-2.5 py-1">
+                  <WorkflowIcon size={14} />
+                  {visibleNodeCount} visible nodes
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-outline-variant/60 bg-white px-2.5 py-1">
+                  <ShieldCheck size={14} />
+                  Agent-first studio
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-outline-variant/60 bg-white px-2.5 py-1">
+                  <Undo2 size={14} />
+                  {historyIndex + 1}/{Math.max(workflowHistory.length, 1)} history
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-outline-variant/60 bg-white px-2.5 py-1">
+                  {lastSavedAt
+                    ? `Auto-saved ${new Date(lastSavedAt).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}`
+                    : 'Auto-save ready'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="workflow-lab-toolbar">
+                <button
+                  type="button"
+                  onClick={handleUndo}
+                  className="workflow-lab-toolbar-button"
+                >
+                  <Undo2 size={16} />
+                  Undo
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRedo}
+                  className="workflow-lab-toolbar-button"
+                >
+                  <Redo2 size={16} />
+                  Redo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsCommandPaletteOpen(true)}
+                  className="workflow-lab-toolbar-button"
+                >
+                  <Search size={16} />
+                  Search
+                </button>
+                <button
+                  type="button"
+                  onClick={handleValidateWorkflow}
+                  className="workflow-lab-toolbar-button"
+                >
+                  <ScanLine size={16} />
+                  Validate
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAutoLayout}
+                  className="workflow-lab-toolbar-button"
+                >
+                  <LayoutTemplate size={16} />
+                  Auto-layout
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCanvasScale(1)}
+                  className="workflow-lab-toolbar-button"
+                >
+                  <Route size={16} />
+                  Fit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSnapToGrid(current => !current)}
+                  className={cn(
+                    'workflow-lab-toolbar-button',
+                    snapToGrid && 'bg-primary/8 text-primary',
+                  )}
+                >
+                  Snap {snapToGrid ? 'On' : 'Off'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAlignSelectedNodes}
+                  className="workflow-lab-toolbar-button"
+                >
+                  Align
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDistributeSelectedNodes}
+                  className="workflow-lab-toolbar-button"
+                >
+                  Distribute
+                </button>
+                <button
+                  type="button"
+                  onClick={simulationState.active ? handleResetSimulation : handleStartSimulation}
+                  className={cn(
+                    'workflow-lab-toolbar-button',
+                    simulationState.active && 'bg-sky-100 text-sky-700',
+                  )}
+                >
+                  {simulationState.active ? 'Reset Sim' : 'Simulate'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLoadStandardWorkflow}
+                  className="workflow-lab-toolbar-button"
+                >
+                  <Sparkles size={16} />
+                  Standard
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportWorkflow}
+                  className="workflow-lab-toolbar-button"
+                >
+                  <Download size={16} />
+                  Export
+                </button>
+              </div>
+              {selectedNode ? (
+                <button
+                  type="button"
+                  onClick={() => setIsNodeDetailsOpen(true)}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  <Wrench size={16} />
+                  Edit selected
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={handlePublishWorkflow}
+                className="enterprise-button enterprise-button-primary"
+              >
+                <Play size={16} />
+                Publish
+              </button>
+              <button
+                type="button"
+                onClick={() => handleArchiveWorkflow()}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                <Archive size={16} />
+                Archive
+              </button>
+            </div>
+          </div>
+          ) : null}
+
+          <div className={cn(!isNeo && 'grid gap-0 xl:grid-cols-[minmax(0,1fr),24rem]')}>
+            <main className={cn('min-w-0 bg-surface-container-low/50', !isNeo && 'border-b border-outline-variant/60 xl:border-b-0 xl:border-r')}>
+              <div className={cn(!isNeo ? 'px-5 py-5' : 'h-full p-0')}>
+                {!isNeo ? (
+                <div className="mb-4 rounded-[1.4rem] border border-outline-variant/60 bg-white px-4 py-4 shadow-[0_12px_30px_rgba(12,23,39,0.05)]">
+                  {renderWorkflowLibraryContent('card')}
+                </div>
+                ) : null}
+
+                <div
+                  ref={canvasRef}
+                  className={cn(
+                    'workflow-canvas-shell relative',
+                    isNeo
+                      ? 'workflow-canvas-shell-neo h-[calc(100vh-2rem)] min-h-[100vh]'
+                      : 'h-[calc(100vh-25rem)] min-h-[46rem]',
+                    isNeo && isCanvasPanMode && 'workflow-canvas-pan-mode',
+                    canvasPanDrag && 'workflow-canvas-panning',
+                  )}
+                  onClick={event => {
+                    if (event.target === event.currentTarget) {
+                      clearCanvasSelection();
+                    }
+                  }}
+                  onDragOver={event => event.preventDefault()}
+                  onDrop={handleCanvasDrop}
+                  onMouseMove={event => {
+                    if (!dragLinkFromNodeId || !canvasRef.current) {
+                      return;
+                    }
+                    setDragLinkPosition(
+                      getCanvasPointFromMouse(
+                        event.clientX,
+                        event.clientY,
+                        canvasRef.current,
+                        canvasScale,
+                      ),
+                    );
+                  }}
+                  onMouseUp={() => {
+                    if (dragLinkFromNodeId) {
+                      cancelDragLink();
+                    }
+                  }}
+                >
+                  {isNeo ? (
+                    <>
+                      <div className="workflow-neo-commandbar">
+                        <div className="workflow-neo-commandbar-title">
+                          <button
+                            type="button"
+                            onClick={() => navigate('/')}
+                            className="workflow-lab-toolbar-button shrink-0"
+                            title="Back to workspace"
+                          >
+                            <ArrowLeft size={16} />
+                            <span className="hidden xl:inline">Workspace</span>
+                          </button>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-white">
+                              {selectedWorkflow?.name || 'Create a new workflow graph'}
+                            </p>
+                            <div className="flex min-w-0 flex-wrap items-center gap-2 text-[0.6875rem] text-slate-400">
+                              <StatusBadge tone={selectedWorkflow ? PUBLISH_STATE_TONE[publishState] : 'neutral'}>
+                                {selectedWorkflow ? publishState : 'No workflow selected'}
+                              </StatusBadge>
+                              <span className="whitespace-nowrap">
+                                {lastSavedAt
+                                  ? `Saved ${new Date(lastSavedAt).toLocaleTimeString([], {
+                                      hour: '2-digit',
+                                      minute: '2-digit',
+                                    })}`
+                                  : 'Auto-save ready'}
+                              </span>
+                              <span className="whitespace-nowrap">{visibleNodeCount} nodes</span>
+                              <span className="whitespace-nowrap">{edges.length} links</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="workflow-neo-commandbar-actions">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setNeoTheme(current => (current === 'dark' ? 'light' : 'dark'))
+                            }
+                            className="workflow-lab-toolbar-button"
+                            title={
+                              neoTheme === 'dark'
+                                ? 'Switch to light mode'
+                                : 'Switch to dark mode'
+                            }
+                          >
+                            {neoTheme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsCommandPaletteOpen(true)}
+                            className="workflow-lab-toolbar-button"
+                            title="Command palette"
+                          >
+                            <Search size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCanvasZoom('out')}
+                            className="workflow-lab-toolbar-button"
+                            title="Zoom out"
+                          >
+                            <ZoomOut size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCanvasScale(1)}
+                            className="workflow-lab-toolbar-button"
+                            title="Fit canvas"
+                          >
+                            {Math.round(canvasScale * 100)}%
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCanvasZoom('in')}
+                            className="workflow-lab-toolbar-button"
+                            title="Zoom in"
+                          >
+                            <ZoomIn size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleValidateWorkflow}
+                            className="workflow-lab-toolbar-button"
+                            title="Validate workflow"
+                          >
+                            <ScanLine size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleAutoLayout}
+                            className="workflow-lab-toolbar-button"
+                            title="Auto-layout"
+                          >
+                            <LayoutTemplate size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setNeoLaneVisibility(current => !current)}
+                            className={cn(
+                              'workflow-lab-toolbar-button',
+                              neoLaneVisibility && 'bg-primary/8 text-primary',
+                            )}
+                            title="Toggle phase lanes"
+                          >
+                            {neoLaneVisibility ? <Eye size={16} /> : <EyeOff size={16} />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handlePublishWorkflow}
+                            className="workflow-lab-toolbar-button"
+                            title="Publish workflow"
+                          >
+                            <Play size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsNeoHelpOpen(true)}
+                            className="workflow-lab-toolbar-button"
+                            title="Shortcuts"
+                          >
+                            <Keyboard size={16} />
+                          </button>
+                          <div className="relative">
+                            <button
+                              type="button"
+                              onClick={() => setIsNeoOverflowOpen(current => !current)}
+                              className="workflow-lab-toolbar-button"
+                              title="More actions"
+                            >
+                              <MoreHorizontal size={16} />
+                            </button>
+                            {isNeoOverflowOpen ? (
+                              <div className="workflow-neo-overflow-menu">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleDuplicateWorkflow();
+                                    setIsNeoOverflowOpen(false);
+                                  }}
+                                  className="workflow-neo-menu-item"
+                                >
+                                  <Copy size={14} />
+                                  Duplicate workflow
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSnapToGrid(current => !current);
+                                    setIsNeoOverflowOpen(false);
+                                  }}
+                                  className="workflow-neo-menu-item"
+                                >
+                                  <Route size={14} />
+                                  Snap {snapToGrid ? 'Off' : 'On'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    simulationState.active
+                                      ? handleResetSimulation()
+                                      : handleStartSimulation();
+                                    setIsNeoOverflowOpen(false);
+                                  }}
+                                  className="workflow-neo-menu-item"
+                                >
+                                  <Play size={14} />
+                                  {simulationState.active ? 'Reset simulation' : 'Start simulation'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setNeoFloatingPanel(current => !current);
+                                    setIsNeoOverflowOpen(false);
+                                  }}
+                                  className="workflow-neo-menu-item"
+                                >
+                                  <PanelLeft size={14} />
+                                  {neoFloatingPanel ? 'Dock tool panel' : 'Float tool panel'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleArchiveWorkflow();
+                                    setIsNeoOverflowOpen(false);
+                                  }}
+                                  className="workflow-neo-menu-item"
+                                >
+                                  <Archive size={14} />
+                                  Archive workflow
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleExportWorkflow();
+                                    setIsNeoOverflowOpen(false);
+                                  }}
+                                  className="workflow-neo-menu-item"
+                                >
+                                  <Download size={14} />
+                                  Export JSON
+                                </button>
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="workflow-neo-pan-control">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsCanvasPanMode(current => !current);
+                            setCanvasPanDrag(null);
+                          }}
+                          className={cn(
+                            'workflow-neo-pan-button',
+                            isCanvasPanMode && 'workflow-neo-pan-button-active',
+                          )}
+                          title="Toggle hand tool to drag the canvas"
+                          aria-pressed={isCanvasPanMode}
+                        >
+                          <Hand size={16} />
+                          <span>Pan</span>
+                          <kbd>H</kbd>
+                        </button>
+                        {isCanvasPanMode ? (
+                          <span className="workflow-neo-pan-hint">Drag empty canvas</span>
+                        ) : null}
+                      </div>
+
+                      <div className="workflow-neo-side-dock">
+                        <div className="workflow-neo-icon-dock">
+                          {neoWidgetMeta.map(({ key, label, Icon, accentClassName }) => (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => handleActivateNeoPanel(key)}
+                              className={cn(
+                                'workflow-neo-icon-button',
+                                neoActivePanel === key && neoPanelOpen && 'workflow-neo-icon-button-active',
+                              )}
+                              title={label}
+                            >
+                              <Icon size={16} className={accentClassName} />
+                            </button>
+                          ))}
+                        </div>
+                        {neoPanelOpen && !neoFloatingPanel ? (
+                          <div
+                            className="workflow-neo-primary-panel"
+                            style={{ width: canvasWidgetPreferences[neoActivePanel].width }}
+                          >
+                            <div className="workflow-neo-panel-header">
+                              <div className="flex items-center gap-2">
+                                <activeNeoPanelMeta.Icon
+                                  size={15}
+                                  className={activeNeoPanelMeta.accentClassName}
+                                />
+                                <p className="text-sm font-semibold text-white">
+                                  {activeNeoPanelMeta.label}
+                                </p>
+                              </div>
+                              <div className="designer-widget-icon-toolbar">
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleWidgetWidth(neoActivePanel)}
+                                  className="designer-widget-icon-action"
+                                  title="Resize panel"
+                                >
+                                  <UnfoldVertical size={14} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleToggleNeoPanelFloating}
+                                  className="designer-widget-icon-action"
+                                  title="Float panel"
+                                >
+                                  <UnfoldVertical size={14} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setNeoPanelOpen(false)}
+                                  className="designer-widget-icon-action"
+                                  title="Collapse panel"
+                                >
+                                  <Minimize2 size={14} />
+                                </button>
+                              </div>
+                            </div>
+                            <div className="workflow-neo-panel-body">
+                              {renderNeoPrimaryPanelContent()}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      {neoPanelOpen && neoFloatingPanel ? (
+                        <div
+                          className="absolute z-20 pointer-events-auto"
+                          style={getCanvasWidgetStyle(neoActivePanel)}
+                        >
+                          <div className="workflow-floating-widget workflow-floating-widget-lg workflow-floating-widget-dragging">
+                            <div
+                              className="workflow-floating-widget-header workflow-floating-widget-handle"
+                              onMouseDown={event => handleStartWidgetDrag(event, neoActivePanel)}
+                            >
+                              <div className="flex items-center gap-2">
+                                <activeNeoPanelMeta.Icon
+                                  size={15}
+                                  className={activeNeoPanelMeta.accentClassName}
+                                />
+                                <p className="text-sm font-semibold text-white">
+                                  {activeNeoPanelMeta.label}
+                                </p>
+                              </div>
+                              <div className="designer-widget-icon-toolbar">
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleWidgetDock(neoActivePanel, 'left')}
+                                  className="designer-widget-icon-action"
+                                  title="Snap left"
+                                >
+                                  <PanelLeft size={14} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleWidgetDock(neoActivePanel, 'right')}
+                                  className="designer-widget-icon-action"
+                                  title="Snap right"
+                                >
+                                  <PanelLeft size={14} className="rotate-180" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleWidgetWidth(neoActivePanel)}
+                                  className="designer-widget-icon-action"
+                                  title="Resize panel"
+                                >
+                                  <UnfoldVertical size={14} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleToggleNeoPanelFloating}
+                                  className="designer-widget-icon-action"
+                                  title="Dock panel"
+                                >
+                                  <PanelLeft size={14} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setNeoPanelOpen(false)}
+                                  className="designer-widget-icon-action"
+                                  title="Close panel"
+                                >
+                                  <Minimize2 size={14} />
+                                </button>
+                              </div>
+                            </div>
+                            <div className="workflow-floating-widget-body">
+                              {renderNeoPrimaryPanelContent()}
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {neoInspectorCollapsed ? (
+                        <div className="workflow-neo-inspector-trigger-shell">
+                          <button
+                            type="button"
+                            onClick={handleToggleNeoInspector}
+                            className="workflow-neo-inspector-trigger"
+                            title="Open inspector"
+                          >
+                            <Wrench size={15} />
+                            <span>
+                              Inspect{' '}
+                              {neoInspectorMode === 'node'
+                                ? 'Node'
+                                : neoInspectorMode === 'edge'
+                                ? 'Edge'
+                                : 'Workflow'}
+                            </span>
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="workflow-neo-inspector-shell">
+                          {renderNeoInspectorContent()}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="pointer-events-none absolute left-4 top-4 z-10 flex items-center gap-2">
+                      <div className="rounded-full border border-slate-700 bg-slate-950/90 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-300">
+                        Workflow Studio
+                      </div>
+                      <div className="rounded-full border border-slate-700 bg-slate-950/90 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-400">
+                        New Designer
+                      </div>
+                    </div>
+                  )}
+                  <div
+                    ref={graphStageRef}
+                    className={cn(
+                      'relative min-h-[72rem] min-w-[96rem] origin-top-left',
+                      isNeo && isCanvasPanMode && 'workflow-canvas-pan-stage',
+                    )}
+                    style={{
+                      transform: `scale(${canvasScale})`,
+                      transformOrigin: 'top left',
+                      marginLeft: neoCanvasMargins.left,
+                      marginRight: neoCanvasMargins.right,
+                      marginTop: neoCanvasMargins.top,
+                      marginBottom: neoCanvasMargins.bottom,
+                    }}
+                    onClick={event => {
+                      if (event.target === event.currentTarget) {
+                        clearCanvasSelection();
+                      }
+                    }}
+                    onMouseDown={event => {
+                      const target = event.target as Element;
+                      const targetTagName = target.tagName.toLowerCase();
+                      const isCanvasSurface =
+                        event.target === event.currentTarget || targetTagName === 'svg';
+
+                      if (
+                        isNeo &&
+                        isCanvasPanMode &&
+                        canvasRef.current &&
+                        event.button === 0 &&
+                        isCanvasSurface
+                      ) {
+                        event.preventDefault();
+                        setCanvasPanDrag({
+                          startX: event.clientX,
+                          startY: event.clientY,
+                          scrollLeft: canvasRef.current.scrollLeft,
+                          scrollTop: canvasRef.current.scrollTop,
+                        });
+                        return;
+                      }
+
+                      if (!isNeo || event.button !== 0 || event.target !== event.currentTarget) {
+                        return;
+                      }
+
+                      const bounds = event.currentTarget.getBoundingClientRect();
+                      const startX = clamp((event.clientX - bounds.left) / canvasScale, 0, graphWidth);
+                      const startY = clamp((event.clientY - bounds.top) / canvasScale, 0, graphHeight);
+                      setMarqueeSelection({
+                        startX,
+                        startY,
+                        currentX: startX,
+                        currentY: startY,
+                      });
+                    }}
+                    >
+                    {!selectedWorkflow && isNeo ? (
+                      <div className="workflow-neo-empty-state">
+                        <div className="workflow-neo-empty-panel">
+                          <p className="page-context">Neo Canvas</p>
+                          <p className="mt-3 text-2xl font-bold text-white">
+                            Start a workflow without leaving the canvas
+                          </p>
+                          <p className="mt-3 text-sm leading-relaxed text-slate-300">
+                            Create a brand-new workflow or load the standard SDLC template, then use the studio panels to model nodes, hand-offs, events, alerts, and approvals.
+                          </p>
+                          <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+                            <button
+                              type="button"
+                              onClick={() => setIsCreateWorkflowOpen(true)}
+                              className="enterprise-button enterprise-button-primary"
+                            >
+                              <Plus size={16} />
+                              Create workflow
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleLoadStandardWorkflow}
+                              className="enterprise-button enterprise-button-secondary"
+                            >
+                              <Sparkles size={16} />
+                              Load Standard SDLC
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                    <div className="pointer-events-none absolute inset-0 z-0">
+                      {laneSummaries.map(({ phase, count }, index) => {
+                        if (isNeo && !neoLaneVisibility) {
+                          return null;
+                        }
+                        const laneTop = WORKFLOW_LANE_TOP + index * WORKFLOW_LANE_HEIGHT;
+                        return (
+                          <div
+                            key={phase}
+                            className="absolute left-0 right-0"
+                            style={{
+                              top: `${laneTop}px`,
+                              height: `${WORKFLOW_LANE_HEIGHT - 12}px`,
+                            }}
+                          >
+                            <div className="absolute inset-x-0 top-0 h-px bg-slate-800/50" />
+                            <div className="absolute inset-x-0 bottom-3 h-px border-b border-dashed border-slate-800/40" />
+                            <div className={cn(
+                              'absolute left-6 top-5 rounded-xl border bg-slate-950/78 px-3 py-2',
+                              isNeo ? 'w-28 border-slate-800/70' : 'w-36 border-slate-800/80',
+                            )}>
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-400">
+                                  {phaseLabel(phase)}
+                                </p>
+                                <span className="rounded-full border border-slate-700/70 bg-slate-900/70 px-2 py-0.5 text-[0.5625rem] font-bold text-slate-300">
+                                  {count}
+                                </span>
+                              </div>
+                            </div>
+                            <div
+                              className={cn(
+                                'absolute inset-y-5 right-8 rounded-[1.5rem] border',
+                                isNeo
+                                  ? 'left-32 border-slate-900/65 bg-[linear-gradient(180deg,rgba(15,23,42,0.18),rgba(15,23,42,0.08))]'
+                                  : 'left-[12.25rem] border-slate-900/90 bg-[linear-gradient(180deg,rgba(15,23,42,0.36),rgba(15,23,42,0.16))]',
+                              )}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <svg className="absolute inset-0 h-full w-full overflow-visible">
+                      {edges.map(edge => {
+                        const fromNode = getWorkflowNode(selectedWorkflow, edge.fromNodeId);
+                        const toNode = getWorkflowNode(selectedWorkflow, edge.toNodeId);
+                        if (!fromNode || !toNode) {
+                          return null;
+                        }
+
+                        const isSelected = selectedEdgeId === edge.id;
+                        const edgeErrors = edgeValidationDetails.get(edge.id) || [];
+                        const isSimulated = simulationEdgeIds.has(edge.id);
+                        const midX =
+                          (fromNode.layout.x + toNode.layout.x + nodeDimensions.width) / 2;
+                        const midY =
+                          (fromNode.layout.y + toNode.layout.y) / 2 +
+                          nodeDimensions.height / 2;
+
+                        return (
+                          <g
+                            key={edge.id}
+                            className="cursor-pointer"
+                            onClick={event => {
+                              event.stopPropagation();
+                              setSelectedEdgeId(edge.id);
+                              setSelectedNodeId(null);
+                              setSelectedNodeIds([]);
+                              setConnectFromNodeId(null);
+                            }}
+                            onContextMenu={event => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setSelectedEdgeId(edge.id);
+                              setSelectedNodeId(null);
+                              setSelectedNodeIds([]);
+                              setNeoInspectorMode('edge');
+                              setNeoContextMenu({
+                                x: event.clientX,
+                                y: event.clientY,
+                                type: 'edge',
+                                targetId: edge.id,
+                              });
+                            }}
+                          >
+                            <path
+                              d={getEdgePath(fromNode, toNode)}
+                              fill="none"
+                              stroke={isSelected ? '#38bdf8' : isSimulated ? '#22c55e' : '#64748b'}
+                              strokeWidth={isSelected ? 3 : isSimulated ? 3 : 2}
+                              strokeDasharray={edge.conditionType === 'PARALLEL' ? '8 7' : undefined}
+                            />
+                            <circle
+                              cx={fromNode.layout.x + nodeDimensions.width}
+                              cy={fromNode.layout.y + nodeDimensions.height / 2}
+                              r="4"
+                              fill={isSelected ? '#38bdf8' : '#64748b'}
+                            />
+                            <circle
+                              cx={toNode.layout.x}
+                              cy={toNode.layout.y + nodeDimensions.height / 2}
+                              r="4"
+                              fill={isSelected ? '#38bdf8' : '#64748b'}
+                            />
+                            <foreignObject x={midX - 96} y={midY - 18} width={192} height={40}>
+                              <div
+                                className={cn(
+                                  'inline-flex w-full items-center justify-center rounded-full border px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] shadow-sm backdrop-blur',
+                                  isSelected
+                                    ? 'border-sky-400/60 bg-sky-500/20 text-sky-100'
+                                    : edgeErrors.length
+                                    ? 'border-red-400/60 bg-red-500/15 text-red-50'
+                                    : isSimulated
+                                    ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-50'
+                                    : 'border-slate-600 bg-slate-900/90 text-slate-200',
+                                )}
+                                title={edgeErrors[0]}
+                              >
+                                {edge.label || edge.conditionType}
+                              </div>
+                            </foreignObject>
+                            {edgeErrors.length ? (
+                              <foreignObject x={midX - 36} y={midY + 18} width={72} height={24}>
+                                <div className="inline-flex w-full items-center justify-center rounded-full border border-red-400/60 bg-red-500/15 px-2 py-1 text-[0.625rem] font-bold text-red-50">
+                                  {edgeErrors.length} issue{edgeErrors.length > 1 ? 's' : ''}
+                                </div>
+                              </foreignObject>
+                            ) : null}
+                          </g>
+                        );
+                      })}
+
+                      {dragLinkStart && dragLinkPosition ? (
+                        <path
+                          d={`M ${dragLinkStart.x} ${dragLinkStart.y} C ${dragLinkStart.x + 70} ${dragLinkStart.y}, ${dragLinkPosition.x - 70} ${dragLinkPosition.y}, ${dragLinkPosition.x} ${dragLinkPosition.y}`}
+                          fill="none"
+                          stroke="#38bdf8"
+                          strokeWidth={3}
+                          strokeDasharray="8 6"
+                        />
+                      ) : null}
+                    </svg>
+
+                    {orderedNodes.map(node => {
+                      const Icon = getNodeIcon(node.type);
+                      const isSelected = selectedNodeId === node.id;
+                      const isMultiSelected = selectedNodeIds.includes(node.id);
+                      const isCollapsed = collapsedNodeIds.has(node.id);
+                      const isConnectTarget =
+                        Boolean(connectFromNodeId) && connectFromNodeId !== node.id;
+                      const isPortTarget =
+                        Boolean(dragLinkFromNodeId) && dragLinkFromNodeId !== node.id;
+                      const nodeErrors = nodeValidationDetails.get(node.id) || [];
+                      const isSimulated = simulationNodeIds.has(node.id);
+                      const isSimulationCurrent = currentSimulationStep?.nodeId === node.id;
+                      const nodeInputArtifacts = getNodeArtifactInputs(node);
+                      const nodeOutputArtifacts = getNodeArtifactOutputs(node);
+
+                      return (
+                        <div
+                          key={node.id}
+                          draggable
+                          onDragStart={event => {
+                            event.dataTransfer.setData(
+                              'application/singularity-node-move',
+                              node.id,
+                            );
+                          }}
+                          onClick={event => {
+                            if (connectFromNodeId && connectFromNodeId !== node.id) {
+                              handleConnectNodes(node.id);
+                              return;
+                            }
+                            selectNode(node.id, event.shiftKey);
+                          }}
+                          onContextMenu={event => {
+                            event.preventDefault();
+                            selectNode(node.id, event.shiftKey);
+                            setNeoInspectorMode('node');
+                            setNeoContextMenu({
+                              x: event.clientX,
+                              y: event.clientY,
+                              type: 'node',
+                              targetId: node.id,
+                            });
+                          }}
+                          onKeyDown={event => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              selectNode(node.id, event.shiftKey);
+                            }
+                          }}
+                          onDoubleClick={() => openQuickEdit(node.id)}
+                          role="button"
+                          tabIndex={0}
+                          className={cn(
+                            'workflow-node-card',
+                            isSelected && 'border-sky-400 ring-2 ring-sky-300/60',
+                            !isSelected && isMultiSelected && 'border-primary/40 ring-2 ring-primary/20',
+                            isConnectTarget && 'border-emerald-300 ring-2 ring-emerald-200/80',
+                            isSimulated && 'ring-2 ring-emerald-300/60',
+                            isSimulationCurrent && 'border-emerald-400 shadow-[0_0_0_3px_rgba(34,197,94,0.2)]',
+                            validationState.nodeIdsWithErrors.has(node.id) &&
+                              'border-red-300 ring-2 ring-red-200/60',
+                          )}
+                          style={{
+                            left: node.layout.x,
+                            top: node.layout.y,
+                            minHeight: isCollapsed ? 76 : nodeDimensions.height,
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onMouseUp={event => handleCompleteDragLink(event, node.id)}
+                            onClick={event => event.stopPropagation()}
+                            className={cn(
+                              'workflow-node-port workflow-node-port-input',
+                              isPortTarget && 'workflow-node-port-target',
+                            )}
+                            title={`Connect into ${node.name}`}
+                          />
+                          <button
+                            type="button"
+                            onMouseDown={event => handleStartDragLink(event, node.id)}
+                            onClick={event => event.stopPropagation()}
+                            className={cn(
+                              'workflow-node-port workflow-node-port-output',
+                              dragLinkFromNodeId === node.id && 'workflow-node-port-active',
+                            )}
+                            title={`Start hand-off from ${node.name}`}
+                          />
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span
+                                className={cn(
+                                  'inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border',
+                                  NODE_TYPE_TONE[node.type],
+                                )}
+                              >
+                                <Icon size={16} />
+                              </span>
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-semibold text-on-surface">
+                                  {node.name}
+                                </p>
+                                <p className="text-[0.6875rem] text-secondary">
+                                  {phaseLabel(node.phase)}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              {nodeErrors.length ? (
+                                <span
+                                  className="rounded-full border border-red-200 bg-red-50 px-2 py-1 text-[0.625rem] font-bold text-red-700"
+                                  title={nodeErrors[0]}
+                                >
+                                  {nodeErrors.length}
+                                </span>
+                              ) : null}
+                              <button
+                                type="button"
+                                onClick={event => {
+                                  event.stopPropagation();
+                                  handleToggleNodeMinimized(node.id);
+                                }}
+                                className="rounded-lg border border-outline-variant/40 p-1.5 text-secondary transition hover:bg-surface-container-low hover:text-on-surface"
+                                title={isCollapsed ? `Expand ${node.name}` : `Minimize ${node.name}`}
+                              >
+                                {isCollapsed ? <Maximize2 size={13} /> : <Minimize2 size={13} />}
+                              </button>
+                              {node.type !== 'START' ? (
+                                <button
+                                  type="button"
+                                  onClick={event => {
+                                    event.stopPropagation();
+                                    handleDeleteNodeFromCanvas(node);
+                                  }}
+                                  className="rounded-lg border border-red-200 p-1.5 text-red-700 transition hover:bg-red-50"
+                                  title={`Delete ${node.name}`}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <StatusBadge tone={isVisibleWorkflowNode(node.type) ? 'brand' : 'neutral'}>
+                              {getNodeTypeLabel(node.type)}
+                            </StatusBadge>
+                            {node.agentId ? (
+                              <span className="truncate text-[0.6875rem] font-medium text-outline">
+                                {workspace.agents.find(agent => agent.id === node.agentId)?.name || node.agentId}
+                              </span>
+                            ) : isLegacyEtlNodeType(node.type) ? (
+                              <span className="truncate text-[0.6875rem] font-medium text-outline">
+                                Legacy ETL node
+                              </span>
+                            ) : null}
+                          </div>
+
+                          {!isCollapsed ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {node.agentId ? (
+                                <span className="rounded-full border border-outline-variant/50 bg-surface-container-low px-2 py-1 text-[0.625rem] font-semibold text-secondary">
+                                  {workspace.agents.find(agent => agent.id === node.agentId)?.name || 'Assigned'}
+                                </span>
+                              ) : null}
+                              {nodeInputArtifacts.length ? (
+                                <span className="rounded-full border border-outline-variant/50 bg-surface-container-low px-2 py-1 text-[0.625rem] font-semibold text-secondary">
+                                  In: {getArtifactPreview(nodeInputArtifacts)}
+                                  {nodeInputArtifacts.length > 2 ? ` +${nodeInputArtifacts.length - 2}` : ''}
+                                </span>
+                              ) : null}
+                              {nodeOutputArtifacts.length ? (
+                                <span className="rounded-full border border-outline-variant/50 bg-surface-container-low px-2 py-1 text-[0.625rem] font-semibold text-secondary">
+                                  Out: {getArtifactPreview(nodeOutputArtifacts)}
+                                  {nodeOutputArtifacts.length > 2 ? ` +${nodeOutputArtifacts.length - 2}` : ''}
+                                </span>
+                              ) : null}
+                              {(node.approverRoles || []).length ? (
+                                <span className="rounded-full border border-fuchsia-200 bg-fuchsia-50 px-2 py-1 text-[0.625rem] font-semibold text-fuchsia-700">
+                                  {(node.approverRoles || []).length} approver role{(node.approverRoles || []).length > 1 ? 's' : ''}
+                                </span>
+                              ) : null}
+                              {node.eventConfig?.eventName ? (
+                                <span className="rounded-full border border-cyan-200 bg-cyan-50 px-2 py-1 text-[0.625rem] font-semibold text-cyan-700">
+                                  Event: {node.eventConfig.eventName}
+                                </span>
+                              ) : null}
+                              {node.alertConfig?.severity ? (
+                                <span className="rounded-full border border-red-200 bg-red-50 px-2 py-1 text-[0.625rem] font-semibold text-red-700">
+                                  Alert: {node.alertConfig.severity}
+                                </span>
+                              ) : null}
+                            </div>
+                          ) : null}
+
+                          {!isCollapsed ? (
+                            <>
+                              <p className="line-clamp-2 text-xs leading-relaxed text-secondary">
+                                {node.action || node.description || 'No node guidance yet.'}
+                              </p>
+                              {node.artifactContract?.notes ? (
+                                <p className="line-clamp-2 text-[0.6875rem] leading-relaxed text-outline">
+                                  {node.artifactContract.notes}
+                                </p>
+                              ) : null}
+
+                              <div className="mt-auto flex items-center justify-between gap-2">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  {nodeInputArtifacts.length ? (
+                                    <span className="workflow-node-meta-pill">In</span>
+                                  ) : null}
+                                  {nodeOutputArtifacts.length ? (
+                                    <span className="workflow-node-meta-pill workflow-node-meta-pill-out">
+                                      Out
+                                    </span>
+                                  ) : null}
+                                  {(node.approverRoles || []).length ? (
+                                    <span className="workflow-node-meta-pill workflow-node-meta-pill-approval">
+                                      Approve
+                                    </span>
+                                  ) : null}
+                                  {node.eventConfig?.eventName ? (
+                                    <span className="workflow-node-meta-pill workflow-node-meta-pill-event">
+                                      Event
+                                    </span>
+                                  ) : null}
+                                  {node.alertConfig?.severity ? (
+                                    <span className="workflow-node-meta-pill workflow-node-meta-pill-alert">
+                                      Alert
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="flex items-center gap-2 text-[0.6875rem] text-outline">
+                                  <span className="h-2.5 w-2.5 rounded-full bg-sky-400" />
+                                  <span className="h-2.5 w-2.5 rounded-full bg-primary" />
+                                </div>
+                              </div>
+                            </>
+                          ) : (
+                            <div className="mt-auto flex items-center justify-between gap-2 text-[0.6875rem] text-outline">
+                              <span>Minimized</span>
+                              <span className="inline-flex items-center gap-1">
+                                <span className="h-2.5 w-2.5 rounded-full bg-sky-400" />
+                                <span className="h-2.5 w-2.5 rounded-full bg-primary" />
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {marqueeSelection ? (
+                      <div
+                        className="workflow-neo-marquee"
+                        style={{
+                          left: Math.min(marqueeSelection.startX, marqueeSelection.currentX),
+                          top: Math.min(marqueeSelection.startY, marqueeSelection.currentY),
+                          width: Math.abs(marqueeSelection.currentX - marqueeSelection.startX),
+                          height: Math.abs(marqueeSelection.currentY - marqueeSelection.startY),
+                        }}
+                      />
+                    ) : null}
+                  </div>
+
+                  <div className="workflow-minimap">
+                    <div className="mb-2 flex items-center justify-between gap-4">
+                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-slate-400">
+                        Minimap
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <p className="text-[0.625rem] font-bold uppercase tracking-[0.16em] text-slate-500">
+                          {Math.round(canvasScale * 100)}%
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setNeoMinimapCollapsed(current => !current)}
+                          className="designer-widget-icon-action"
+                          title={neoMinimapCollapsed ? 'Expand minimap' : 'Collapse minimap'}
+                        >
+                          {neoMinimapCollapsed ? <Maximize2 size={13} /> : <Minimize2 size={13} />}
+                        </button>
+                      </div>
+                    </div>
+                    {!neoMinimapCollapsed ? (
+                      <div
+                        className="relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80"
+                        style={{
+                          width: Math.max(graphWidth * minimapScale, 120),
+                          height: Math.max(graphHeight * minimapScale, 88),
+                        }}
+                      >
+                        {orderedNodes.map(node => (
+                          <div
+                            key={`mini-${node.id}`}
+                            className={cn(
+                              'absolute rounded-sm border',
+                              selectedNodeId === node.id
+                                ? 'border-sky-300 bg-sky-400/60'
+                                : 'border-slate-500 bg-slate-300/30',
+                            )}
+                            style={{
+                              left: node.layout.x * minimapScale,
+                              top: node.layout.y * minimapScale,
+                              width: nodeDimensions.width * minimapScale,
+                              height: Math.max(nodeDimensions.height * minimapScale, 6),
+                            }}
+                          />
+                        ))}
+                        <div
+                          className="pointer-events-none absolute rounded-md border border-sky-300/80 bg-sky-400/15"
+                          style={{
+                            left: minimapViewport.left,
+                            top: minimapViewport.top,
+                            width: Math.max(minimapViewport.width, 18),
+                            height: Math.max(minimapViewport.height, 14),
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+
+                {!isNeo ? (
+                <div className="mt-4 rounded-[1.4rem] border border-outline-variant/60 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(12,23,39,0.05)]">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <p className="page-context">Workflow Description</p>
+                      <p className="text-base font-semibold text-on-surface">
+                        Textual narrative for {selectedWorkflow.name}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <StatusBadge tone="neutral">{visibleNodeCount} nodes</StatusBadge>
+                      <StatusBadge tone="neutral">{edges.length} hand-offs</StatusBadge>
+                      <StatusBadge tone="neutral">{laneSummaries.filter(item => item.count > 0).length} active phases</StatusBadge>
+                    </div>
+                  </div>
+                  <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                    <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4">
+                      <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                        Overview
+                      </p>
+                      <p className="mt-2 text-sm leading-relaxed text-on-surface">
+                        {workflowNarrative?.overview}
+                      </p>
+                      <p className="mt-3 text-sm leading-relaxed text-secondary">
+                        {workflowNarrative?.execution}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4">
+                      <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                        Ownership and path
+                      </p>
+                      <p className="mt-2 text-sm leading-relaxed text-on-surface">
+                        {workflowNarrative?.ownership}
+                      </p>
+                      <p className="mt-3 text-sm leading-relaxed text-secondary">
+                        {workflowNarrative?.path}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                ) : null}
+
+                {!isNeo ? (
+                <div className="workflow-utility-grid">
+                  <div className="section-card">
+                    <div className="flex items-center gap-2">
+                      <WorkflowIcon size={16} className="text-primary" />
+                      <p className="text-sm font-semibold text-on-surface">Execution Preview</p>
+                    </div>
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={simulationState.active ? handleResetSimulation : handleStartSimulation}
+                        className={cn(
+                          'enterprise-button',
+                          simulationState.active
+                            ? 'enterprise-button-brand-muted'
+                            : 'enterprise-button-secondary',
+                        )}
+                      >
+                        {simulationState.active ? 'Reset Simulation' : 'Start Simulation'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSimulationStep('prev')}
+                        disabled={!simulationState.active || simulationState.stepIndex === 0}
+                        className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Previous
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSimulationStep('next')}
+                        disabled={
+                          !simulationState.active ||
+                          simulationState.stepIndex >= workflowSamplePath.length - 1
+                        }
+                        className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Next
+                      </button>
+                    </div>
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      {workflowSamplePath.length ? (
+                        workflowSamplePath.map((step, index) => (
+                          <React.Fragment key={`${step.label}-${index}`}>
+                            <div
+                              className={cn(
+                                'rounded-2xl border px-3 py-2 shadow-sm',
+                                simulationState.active && simulationState.stepIndex === index
+                                  ? 'border-sky-300 bg-sky-50'
+                                  : simulationState.active && simulationState.stepIndex > index
+                                  ? 'border-emerald-200 bg-emerald-50'
+                                  : 'border-outline-variant/60 bg-surface-container-low',
+                              )}
+                            >
+                              <p className="text-xs font-semibold text-on-surface">{step.label}</p>
+                              {step.note ? (
+                                <p className="mt-1 text-[0.6875rem] text-secondary">{step.note}</p>
+                              ) : null}
+                            </div>
+                            {index < workflowSamplePath.length - 1 ? (
+                              <ArrowRight size={14} className="text-outline" />
+                            ) : null}
+                          </React.Fragment>
+                        ))
+                      ) : (
+                        <p className="text-sm text-secondary">
+                          Add nodes and hand-offs to preview a sample execution path.
+                        </p>
+                      )}
+                    </div>
+                    {currentSimulationStep ? (
+                      <div className="mt-4 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3">
+                        <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-sky-700">
+                          Simulation Focus
+                        </p>
+                        <p className="mt-2 text-sm font-semibold text-on-surface">
+                          {currentSimulationStep.label}
+                        </p>
+                        {currentSimulationStep.note ? (
+                          <p className="mt-1 text-sm text-secondary">{currentSimulationStep.note}</p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="section-card">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 size={16} className="text-primary" />
+                      <p className="text-sm font-semibold text-on-surface">Validation</p>
+                    </div>
+                    <div className="mt-4 space-y-2">
+                      {validationState.all.length ? (
+                        validationState.all.map(error => (
+                          <div
+                            key={error.id}
+                            className="rounded-2xl border border-red-200 bg-red-50 px-3 py-3 text-xs leading-relaxed text-red-800"
+                          >
+                            {error.message}
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-sm text-secondary">
+                          START, END, branching, join, and governance checks are all passing.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="section-card">
+                    <div className="flex items-center gap-2">
+                      <Undo2 size={16} className="text-primary" />
+                      <p className="text-sm font-semibold text-on-surface">History & Restore</p>
+                    </div>
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleUndo}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        Undo
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleRedo}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        Redo
+                      </button>
+                    </div>
+                    <div className="mt-4 space-y-2">
+                      {[...workflowHistory]
+                        .map((entry, index) => ({ entry, index }))
+                        .reverse()
+                        .slice(0, 6)
+                        .map(({ entry, index }) => {
+                          const actualIndex = workflowHistory.length - 1 - index;
+                          return (
+                            <button
+                              key={entry.id}
+                              type="button"
+                              onClick={() => handleRestoreHistoryEntry(entry, actualIndex)}
+                              className={cn(
+                                'flex w-full items-start justify-between gap-3 rounded-2xl border px-3 py-3 text-left transition',
+                                actualIndex === historyIndex
+                                  ? 'border-primary/20 bg-primary/6'
+                                  : 'border-outline-variant/50 bg-surface-container-low hover:bg-white',
+                              )}
+                            >
+                              <span className="min-w-0 flex-1">
+                                <span className="block text-sm font-semibold text-on-surface">
+                                  {entry.label}
+                                </span>
+                                <span className="mt-1 block text-[0.6875rem] leading-relaxed text-secondary">
+                                  {entry.description || 'Workflow state snapshot'}
+                                </span>
+                              </span>
+                              <span className="text-[0.6875rem] font-semibold text-outline">
+                                {new Date(entry.timestamp).toLocaleTimeString([], {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </span>
+                            </button>
+                          );
+                        })}
+                    </div>
+                  </div>
+
+                  <div className="section-card">
+                    <div className="flex items-center gap-2">
+                      <ShieldCheck size={16} className="text-primary" />
+                      <p className="text-sm font-semibold text-on-surface">Workflow Metadata</p>
+                    </div>
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">
+                        <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                          Type
+                        </p>
+                        <p className="mt-2 text-sm font-semibold text-on-surface">
+                          {selectedWorkflow.workflowType || 'Custom'}
+                        </p>
+                      </div>
+                      <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">
+                        <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                          Scope
+                        </p>
+                        <p className="mt-2 text-sm font-semibold text-on-surface">
+                          {selectedWorkflow.scope || 'CAPABILITY'}
+                        </p>
+                      </div>
+                      <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">
+                        <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                          Selected Nodes
+                        </p>
+                        <p className="mt-2 text-sm font-semibold text-on-surface">
+                          {selectedNodeIds.length || 0}
+                        </p>
+                      </div>
+                      <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">
+                        <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                          Auto-save
+                        </p>
+                        <p className="mt-2 text-sm font-semibold text-on-surface">
+                          {lastSavedAt
+                            ? new Date(lastSavedAt).toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })
+                            : 'Pending'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                ) : null}
+              </div>
+            </main>
+
+          </div>
+        </div>
+      )}
+
+      {neoContextMenu ? (
+        <div
+          className="workflow-neo-context-menu"
+          style={{ left: neoContextMenu.x, top: neoContextMenu.y }}
+        >
+          {neoContextMenu.type === 'node' ? (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  openQuickEdit(neoContextMenu.targetId);
+                  setNeoContextMenu(null);
+                }}
+                className="workflow-neo-menu-item"
+              >
+                <Wrench size={14} />
+                Quick edit
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  openNodeDetailsModal(neoContextMenu.targetId);
+                  setNeoContextMenu(null);
+                }}
+                className="workflow-neo-menu-item"
+              >
+                <Wrench size={14} />
+                Advanced config
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const targetNode = selectedWorkflow
+                    ? getWorkflowNode(selectedWorkflow, neoContextMenu.targetId)
+                    : null;
+                  handleDuplicateNode(targetNode || null);
+                  setNeoContextMenu(null);
+                }}
+                className="workflow-neo-menu-item"
+              >
+                <Copy size={14} />
+                Duplicate node
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const targetNode = selectedWorkflow
+                    ? getWorkflowNode(selectedWorkflow, neoContextMenu.targetId)
+                    : null;
+                  if (targetNode) {
+                    handleDeleteNodeFromCanvas(targetNode);
+                  }
+                  setNeoContextMenu(null);
+                }}
+                className="workflow-neo-menu-item"
+              >
+                <Trash2 size={14} />
+                Delete node
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setNeoInspectorMode('edge');
+                  setNeoContextMenu(null);
+                }}
+                className="workflow-neo-menu-item"
+              >
+                <Route size={14} />
+                Inspect edge
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  handleDeleteSelectedEdge();
+                  setNeoContextMenu(null);
+                }}
+                className="workflow-neo-menu-item"
+              >
+                <Trash2 size={14} />
+                Delete edge
+              </button>
+            </>
+          )}
+        </div>
+      ) : null}
+
+      {isCommandPaletteOpen ? (
+        <div className="fixed inset-0 z-[92] flex items-start justify-center overflow-y-auto bg-slate-950/35 px-4 py-24 backdrop-blur-sm">
+          <div className="w-full max-w-3xl">
+            <ModalShell
+              eyebrow="Studio Search"
+              title="Command Palette"
+              description="Search workflows, nodes, and studio actions. Keyboard shortcut: Ctrl/Cmd + K."
+              actions={
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCommandPaletteOpen(false);
+                    setCommandQuery('');
+                  }}
+                  className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface"
+                >
+                  <X size={18} />
+                </button>
+              }
+            >
+              <div className="grid gap-4">
+                <input
+                  autoFocus
+                  value={commandQuery}
+                  onChange={event => setCommandQuery(event.target.value)}
+                  placeholder="Search actions, workflows, or nodes"
+                  className="enterprise-input"
+                />
+                <div className="max-h-[26rem] space-y-2 overflow-y-auto">
+                  {filteredCommandActions.length ? (
+                    filteredCommandActions.map(action => (
+                      <button
+                        key={action.id}
+                        type="button"
+                        onClick={() => {
+                          action.run();
+                          setIsCommandPaletteOpen(false);
+                          setCommandQuery('');
+                        }}
+                        className="flex w-full items-start justify-between gap-3 rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3 text-left transition hover:border-outline hover:bg-white"
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-semibold text-on-surface">
+                            {action.label}
+                          </span>
+                          <span className="mt-1 block text-[0.6875rem] leading-relaxed text-secondary">
+                            {action.subtitle}
+                          </span>
+                        </span>
+                        <ArrowRight size={16} className="shrink-0 text-outline" />
+                      </button>
+                    ))
+                  ) : (
+                    <div className="rounded-2xl border border-dashed border-outline-variant/60 bg-surface-container-low px-4 py-8 text-center text-sm text-secondary">
+                      No commands or workflow items matched that search.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </ModalShell>
+          </div>
+        </div>
+      ) : null}
+
+      {isNeoHelpOpen ? (
+        <div className="fixed inset-0 z-[93] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-20 backdrop-blur-sm">
+          <div className="w-full max-w-2xl">
+            <ModalShell
+              eyebrow="Workflow Designer Neo"
+              title="Keyboard Shortcuts"
+              description="Desktop shortcuts for technical builders working directly on the Neo canvas."
+              actions={
+                <button
+                  type="button"
+                  onClick={() => setIsNeoHelpOpen(false)}
+                  className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface"
+                >
+                  <X size={18} />
+                </button>
+              }
+            >
+              <div className="grid gap-3">
+                {[
+                  ['Cmd/Ctrl + K', 'Open command palette'],
+                  ['Cmd/Ctrl + Z', 'Undo'],
+                  ['Cmd/Ctrl + Shift + Z', 'Redo'],
+                  ['Cmd/Ctrl + D', 'Duplicate selected node'],
+                  ['Delete / Backspace', 'Delete selected node or edge'],
+                  ['F', 'Fit canvas'],
+                  ['Cmd/Ctrl + =', 'Zoom in'],
+                  ['Cmd/Ctrl + -', 'Zoom out'],
+                  ['L', 'Toggle phase lanes'],
+                  ['H', 'Toggle hand tool / pan canvas'],
+                  ['?', 'Open shortcuts'],
+                ].map(([shortcut, description]) => (
+                  <div
+                    key={shortcut}
+                    className="workflow-neo-shortcut-row"
+                  >
+                    <span className="workflow-neo-shortcut-key">{shortcut}</span>
+                    <span className="text-sm text-secondary">{description}</span>
+                  </div>
+                ))}
+              </div>
+            </ModalShell>
+          </div>
+        </div>
+      ) : null}
+
+      {isQuickEditOpen && selectedNode && nodeDraft ? (
+        <div className="fixed inset-0 z-[94] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-20 backdrop-blur-sm">
+          <div className="w-full max-w-2xl">
+            <ModalShell
+              eyebrow="Quick Edit"
+              title={nodeDraft.name || 'Workflow node'}
+              description="Update the core identity and execution details without leaving the canvas."
+              actions={
+                <button
+                  type="button"
+                  onClick={() => setIsQuickEditOpen(false)}
+                  className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface"
+                >
+                  <X size={18} />
+                </button>
+              }
+            >
+              <div className="grid gap-5">
+                {renderNeoQuickEditFields()}
+                <div className="flex flex-wrap justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsQuickEditOpen(false);
+                      setIsNodeDetailsOpen(true);
+                    }}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    Advanced Config
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleApplyNodeDraft();
+                      setIsQuickEditOpen(false);
+                    }}
+                    className="enterprise-button enterprise-button-primary"
+                  >
+                    Save Quick Edit
+                  </button>
+                </div>
+              </div>
+            </ModalShell>
+          </div>
+        </div>
+      ) : null}
+
+      {isNodeDetailsOpen && selectedNode && nodeDraft ? (
+        <div className="fixed inset-0 z-[95] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-20 backdrop-blur-sm">
+          <div className="w-full max-w-4xl">
+            <ModalShell
+              eyebrow="Advanced Node Details"
+              title={nodeDraft.name || 'Workflow node'}
+              description="Edit runtime, artifact, approval, and execution details in the full advanced configuration sheet."
+              actions={
+                <button
+                  type="button"
+                  onClick={() => setIsNodeDetailsOpen(false)}
+                  className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface"
+                >
+                  <X size={18} />
+                </button>
+              }
+            >
+              <div className="grid gap-5">
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">
+                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      Phase
+                    </p>
+                    <p className="mt-2 text-sm font-semibold text-on-surface">
+                      {phaseLabel(nodeDraft.phase)}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">
+                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      Type
+                    </p>
+                    <p className="mt-2 text-sm font-semibold text-on-surface">
+                      {getNodeTypeLabel(nodeDraft.type)}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">
+                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      Assigned
+                    </p>
+                    <p className="mt-2 text-sm font-semibold text-on-surface">
+                      {workspace.agents.find(agent => agent.id === nodeDraft.agentId)?.name || 'Control node'}
+                    </p>
+                  </div>
+                </div>
+                {renderNodeEditorFields('modal')}
+              </div>
+            </ModalShell>
+          </div>
+        </div>
+      ) : null}
+
+      {isCreateWorkflowOpen ? (
+        <div className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-20 backdrop-blur-sm">
+          <div className="w-full max-w-3xl">
+            <ModalShell
+              eyebrow="New Workflow Graph"
+              title="Create a graph-first workflow"
+              description="Start from an empty workflow with START and END nodes, then drag agent steps, decisions, approvals, and releases into the canvas."
+              actions={
+                <button
+                  type="button"
+                  onClick={() => setIsCreateWorkflowOpen(false)}
+                  className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface"
+                >
+                  <X size={18} />
+                </button>
+              }
+            >
+              <form className="grid gap-5" onSubmit={handleCreateWorkflow}>
+                <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                  <span>Workflow Name</span>
+                  <input
+                    required
+                    value={workflowDraft.name}
+                    onChange={event =>
+                      setWorkflowDraft(current => ({ ...current, name: event.target.value }))
+                    }
+                    className="enterprise-input"
+                  />
+                </label>
+                <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                  <span>Summary</span>
+                  <textarea
+                    rows={4}
+                    value={workflowDraft.summary}
+                    onChange={event =>
+                      setWorkflowDraft(current => ({ ...current, summary: event.target.value }))
+                    }
+                    className="enterprise-input min-h-[7rem]"
+                  />
+                </label>
+                <div className="grid gap-5 md:grid-cols-2">
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Workflow Type</span>
+                    <select
+                      value={workflowDraft.workflowType}
+                      onChange={event =>
+                        setWorkflowDraft(current => ({
+                          ...current,
+                          workflowType: event.target.value as NonNullable<Workflow['workflowType']>,
+                        }))
+                      }
+                      className="enterprise-input"
+                    >
+                      <option value="SDLC">SDLC</option>
+                      <option value="Operational">Operational</option>
+                      <option value="Governance">Governance</option>
+                      <option value="Custom">Custom</option>
+                    </select>
+                  </label>
+                  <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                    <span>Scope</span>
+                    <select
+                      value={workflowDraft.scope}
+                      onChange={event =>
+                        setWorkflowDraft(current => ({
+                          ...current,
+                          scope: event.target.value as NonNullable<Workflow['scope']>,
+                        }))
+                      }
+                      className="enterprise-input"
+                    >
+                      <option value="CAPABILITY">Capability Local</option>
+                      <option value="GLOBAL">Global</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="flex flex-wrap justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsCreateWorkflowOpen(false)}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="enterprise-button enterprise-button-primary">
+                    <Plus size={16} />
+                    Create Graph Workflow
+                  </button>
+                </div>
+              </form>
+            </ModalShell>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}

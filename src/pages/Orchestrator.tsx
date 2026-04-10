@@ -3,23 +3,27 @@ import { motion } from 'motion/react';
 import {
   AlertCircle,
   ArrowRight,
-  CheckCircle2,
   Clock3,
+  ExternalLink,
   LayoutGrid,
   List,
   LoaderCircle,
   Play,
   Plus,
   RefreshCw,
+  Search,
   ShieldCheck,
   Square,
   Workflow as WorkflowIcon,
-  Wrench,
+  X,
 } from 'lucide-react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import ArtifactPreview from '../components/ArtifactPreview';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
+import { compactMarkdownPreview } from '../lib/markdown';
+import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import {
   approveCapabilityWorkflowRun,
   cancelCapabilityWorkflowRun,
@@ -45,18 +49,8 @@ import type {
   Workflow,
   WorkflowRun,
   WorkflowRunDetail,
-  WorkflowRunStep,
 } from '../types';
-import {
-  BoardColumn,
-  DrawerShell,
-  EmptyState,
-  ModalShell,
-  PageHeader,
-  StatTile,
-  StatusBadge,
-  Toolbar,
-} from '../components/EnterpriseUI';
+import { BoardColumn, EmptyState, StatusBadge } from '../components/EnterpriseUI';
 
 const PHASE_META: Record<WorkItemPhase, { label: string; accent: string }> = {
   BACKLOG: { label: 'Backlog', accent: 'bg-slate-100 text-slate-700' },
@@ -101,6 +95,25 @@ const ACTIVE_RUN_STATUSES: WorkflowRun['status'][] = [
   'WAITING_CONFLICT',
 ];
 
+type OrchestratorView = 'board' | 'list';
+type DetailTab = 'overview' | 'control' | 'progress' | 'outputs';
+type WorkItemStatusFilter = 'ALL' | WorkItem['status'];
+type WorkItemPriorityFilter = 'ALL' | WorkItem['priority'];
+
+const STORAGE_KEYS = {
+  view: 'singularity.orchestrator.view',
+  detailTab: 'singularity.orchestrator.detailTab',
+  selected: 'singularity.orchestrator.selected',
+  search: 'singularity.orchestrator.search',
+  workflow: 'singularity.orchestrator.workflow',
+  status: 'singularity.orchestrator.status',
+  priority: 'singularity.orchestrator.priority',
+} as const;
+
+const readSessionValue = <T extends string>(key: string, fallback: T): T => {
+  return readViewPreference(key, fallback, { storage: 'session' });
+};
+
 const formatTimestamp = (value?: string) => {
   if (!value) {
     return 'Not yet';
@@ -119,8 +132,41 @@ const formatTimestamp = (value?: string) => {
   });
 };
 
-const summarizeJson = (value: unknown) =>
-  typeof value === 'string' ? value : JSON.stringify(value || {}, null, 2);
+const formatRelativeTime = (value?: string) => {
+  if (!value) {
+    return 'Unknown';
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+
+  const diff = Date.now() - parsed.getTime();
+  const minutes = Math.max(1, Math.floor(diff / (1000 * 60)));
+
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+};
+
+const getPriorityTone = (priority: WorkItem['priority']) => {
+  if (priority === 'High') {
+    return 'danger' as const;
+  }
+  if (priority === 'Med') {
+    return 'warning' as const;
+  }
+  return 'neutral' as const;
+};
 
 const getCurrentWorkflowStep = (
   workflow: Workflow | null,
@@ -132,9 +178,7 @@ const getCurrentWorkflowStep = (
   }
 
   if (runDetail?.run.currentStepId) {
-    return (
-      workflow.steps.find(step => step.id === runDetail.run.currentStepId) || null
-    );
+    return workflow.steps.find(step => step.id === runDetail.run.currentStepId) || null;
   }
 
   if (workItem?.currentStepId) {
@@ -147,8 +191,7 @@ const getCurrentWorkflowStep = (
 
   if (lastCompletedRunStep) {
     return (
-      workflow.steps.find(step => step.id === lastCompletedRunStep.workflowStepId) ||
-      null
+      workflow.steps.find(step => step.id === lastCompletedRunStep.workflowStepId) || null
     );
   }
 
@@ -201,33 +244,94 @@ const getAttentionLabel = ({
   return 'Action required';
 };
 
-const DetailPill = ({
-  accent,
-  children,
+const getAttentionCallToAction = ({
+  blocker,
+  pendingRequest,
+  wait,
 }: {
-  accent: string;
-  children: React.ReactNode;
-}) => (
-  <span
-    className={cn(
-      'inline-flex rounded-full px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em]',
-      accent,
-    )}
-  >
-    {children}
-  </span>
-);
+  blocker?: WorkItem['blocker'];
+  pendingRequest?: WorkItem['pendingRequest'];
+  wait?: RunWait | null;
+}) => {
+  if (wait?.type === 'APPROVAL' || pendingRequest?.type === 'APPROVAL') {
+    return 'Review approval';
+  }
+
+  if (wait?.type === 'INPUT' || pendingRequest?.type === 'INPUT') {
+    return 'Provide input';
+  }
+
+  if (
+    blocker?.type === 'HUMAN_INPUT' ||
+    wait?.type === 'CONFLICT_RESOLUTION' ||
+    pendingRequest?.type === 'CONFLICT_RESOLUTION'
+  ) {
+    return 'Resolve now';
+  }
+
+  return 'Open controls';
+};
+
+const getWorkItemAttentionTimestamp = (item: WorkItem) =>
+  item.blocker?.timestamp || item.pendingRequest?.timestamp || item.history.slice(-1)[0]?.timestamp;
+
+const getRunEventTone = (event: RunEvent) => {
+  if (event.level === 'ERROR' || event.type === 'STEP_FAILED' || event.type === 'TOOL_FAILED') {
+    return 'danger' as const;
+  }
+
+  if (event.type === 'STEP_WAITING') {
+    return 'warning' as const;
+  }
+
+  if (event.type === 'STEP_COMPLETED' || event.type === 'TOOL_COMPLETED') {
+    return 'success' as const;
+  }
+
+  if (event.type === 'STEP_PROGRESS' || event.type === 'TOOL_STARTED') {
+    return 'info' as const;
+  }
+
+  return getStatusTone(event.level);
+};
+
+const getRunEventLabel = (event: RunEvent) => {
+  const stage =
+    typeof event.details?.stage === 'string' ? event.details.stage : event.type;
+  return formatEnumLabel(stage);
+};
 
 const Orchestrator = () => {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { activeCapability, getCapabilityWorkspace, refreshCapabilityBundle } =
     useCapability();
   const { success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
 
-  const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(null);
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [view, setView] = useState<'board' | 'list'>('board');
+  const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(() => {
+    const stored = readSessionValue(STORAGE_KEYS.selected, '');
+    return stored || null;
+  });
+  const [isCreateSheetOpen, setIsCreateSheetOpen] = useState(false);
+  const [view, setView] = useState<OrchestratorView>(() =>
+    readSessionValue(STORAGE_KEYS.view, 'board'),
+  );
+  const [detailTab, setDetailTab] = useState<DetailTab>(() =>
+    readSessionValue(STORAGE_KEYS.detailTab, 'overview'),
+  );
+  const [searchQuery, setSearchQuery] = useState<string>(() =>
+    readSessionValue(STORAGE_KEYS.search, ''),
+  );
+  const [workflowFilter, setWorkflowFilter] = useState<string>(() =>
+    readSessionValue(STORAGE_KEYS.workflow, 'ALL'),
+  );
+  const [statusFilter, setStatusFilter] = useState<WorkItemStatusFilter>(() =>
+    readSessionValue(STORAGE_KEYS.status, 'ALL') as WorkItemStatusFilter,
+  );
+  const [priorityFilter, setPriorityFilter] = useState<WorkItemPriorityFilter>(() =>
+    readSessionValue(STORAGE_KEYS.priority, 'ALL') as WorkItemPriorityFilter,
+  );
   const [draggedWorkItemId, setDraggedWorkItemId] = useState<string | null>(null);
   const [dragOverPhase, setDragOverPhase] = useState<WorkItemPhase | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
@@ -255,6 +359,18 @@ const Orchestrator = () => {
     [workspace.agents],
   );
   const workItems = workspace.workItems;
+
+  const loadRuntime = useCallback(async () => {
+    try {
+      const status = await fetchRuntimeStatus();
+      setRuntimeStatus(status);
+      setRuntimeError('');
+    } catch (error) {
+      setRuntimeError(
+        error instanceof Error ? error.message : 'Unable to load runtime configuration.',
+      );
+    }
+  }, []);
 
   const loadSelectedRunData = useCallback(
     async (workItemId: string) => {
@@ -288,40 +404,51 @@ const Orchestrator = () => {
     [activeCapability.id, loadSelectedRunData, refreshCapabilityBundle],
   );
 
+  const selectWorkItem = useCallback(
+    (workItemId: string, options?: { focusBoard?: boolean; openControl?: boolean }) => {
+      setSelectedWorkItemId(workItemId);
+      setActionError('');
+      setResolutionNote('');
+      if (options?.openControl) {
+        setDetailTab('control');
+      }
+      if (options?.focusBoard) {
+        setView('board');
+        window.setTimeout(() => {
+          const element = document.getElementById(`orchestrator-item-${workItemId}`);
+          element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 80);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     void refreshCapabilityBundle(activeCapability.id);
-  }, [activeCapability.id, refreshCapabilityBundle]);
+    void loadRuntime();
+  }, [activeCapability.id, loadRuntime, refreshCapabilityBundle]);
 
   useEffect(() => {
-    let isMounted = true;
-
-    fetchRuntimeStatus()
-      .then(status => {
-        if (!isMounted) {
-          return;
-        }
-        setRuntimeStatus(status);
-        setRuntimeError('');
-      })
-      .catch(error => {
-        if (!isMounted) {
-          return;
-        }
-        setRuntimeError(
-          error instanceof Error ? error.message : 'Unable to load runtime configuration.',
-        );
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+    if (
+      draftWorkItem.workflowId &&
+      workspace.workflows.some(workflow => workflow.id === draftWorkItem.workflowId)
+    ) {
+      return;
+    }
+    setDraftWorkItem(current => ({
+      ...current,
+      workflowId: workspace.workflows[0]?.id || '',
+    }));
+  }, [draftWorkItem.workflowId, workspace.workflows]);
 
   useEffect(() => {
     if (!selectedWorkItemId || workItems.some(item => item.id === selectedWorkItemId)) {
       return;
     }
     setSelectedWorkItemId(null);
+    setSelectedRunDetail(null);
+    setSelectedRunEvents([]);
+    setSelectedRunHistory([]);
   }, [selectedWorkItemId, workItems]);
 
   useEffect(() => {
@@ -341,11 +468,77 @@ const Orchestrator = () => {
   }, [loadSelectedRunData, selectedWorkItemId]);
 
   useEffect(() => {
+    const selectedRunStreamId =
+      selectedRunDetail?.run.id || selectedRunHistory[0]?.id || null;
+    if (!selectedRunStreamId) {
+      return;
+    }
+
+    let isMounted = true;
+    const eventSource = new EventSource(
+      `/api/capabilities/${encodeURIComponent(activeCapability.id)}/runs/${encodeURIComponent(selectedRunStreamId)}/stream`,
+    );
+
+    const syncRunHistory = (nextRun: WorkflowRun) => {
+      setSelectedRunHistory(current => {
+        const existingIndex = current.findIndex(run => run.id === nextRun.id);
+        if (existingIndex === -1) {
+          return [nextRun, ...current];
+        }
+        return current.map(run => (run.id === nextRun.id ? nextRun : run));
+      });
+    };
+
+    eventSource.addEventListener('snapshot', event => {
+      if (!isMounted) {
+        return;
+      }
+      const payload = JSON.parse((event as MessageEvent).data) as {
+        detail: WorkflowRunDetail;
+        events: RunEvent[];
+      };
+      setSelectedRunDetail(payload.detail);
+      setSelectedRunEvents(payload.events);
+      syncRunHistory(payload.detail.run);
+    });
+
+    eventSource.addEventListener('heartbeat', event => {
+      if (!isMounted) {
+        return;
+      }
+      const payload = JSON.parse((event as MessageEvent).data) as {
+        detail: WorkflowRunDetail;
+      };
+      setSelectedRunDetail(payload.detail);
+      syncRunHistory(payload.detail.run);
+    });
+
+    eventSource.addEventListener('event', event => {
+      if (!isMounted) {
+        return;
+      }
+      const payload = JSON.parse((event as MessageEvent).data) as RunEvent;
+      setSelectedRunEvents(current =>
+        current.some(item => item.id === payload.id) ? current : [...current, payload],
+      );
+    });
+
+    eventSource.onerror = () => {
+      eventSource.close();
+    };
+
+    return () => {
+      isMounted = false;
+      eventSource.close();
+    };
+  }, [activeCapability.id, selectedRunDetail?.run.id, selectedRunHistory[0]?.id]);
+
+  useEffect(() => {
     const nextSearchParams = new URLSearchParams(searchParams);
     let shouldReplace = false;
 
     if (searchParams.get('new') === '1') {
-      setIsCreateModalOpen(true);
+      setIsCreateSheetOpen(true);
       nextSearchParams.delete('new');
       shouldReplace = true;
     }
@@ -375,6 +568,163 @@ const Orchestrator = () => {
     return () => window.clearInterval(timer);
   }, [refreshSelection, selectedWorkItemId, workItems]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    writeViewPreference(STORAGE_KEYS.view, view, { storage: 'session' });
+  }, [view]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    writeViewPreference(STORAGE_KEYS.detailTab, detailTab, { storage: 'session' });
+  }, [detailTab]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    writeViewPreference(STORAGE_KEYS.selected, selectedWorkItemId || '', {
+      storage: 'session',
+    });
+  }, [selectedWorkItemId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    writeViewPreference(STORAGE_KEYS.search, searchQuery, { storage: 'session' });
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    writeViewPreference(STORAGE_KEYS.workflow, workflowFilter, { storage: 'session' });
+  }, [workflowFilter]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    writeViewPreference(STORAGE_KEYS.status, statusFilter, { storage: 'session' });
+  }, [statusFilter]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    writeViewPreference(STORAGE_KEYS.priority, priorityFilter, { storage: 'session' });
+  }, [priorityFilter]);
+
+  const filteredWorkItems = useMemo(() => {
+    const normalizedQuery = searchQuery.trim().toLowerCase();
+
+    return workItems.filter(item => {
+      const workflow = workflowsById.get(item.workflowId) || null;
+      const currentStep = getCurrentWorkflowStep(workflow, null, item);
+      const agentName = item.assignedAgentId
+        ? agentsById.get(item.assignedAgentId)?.name || item.assignedAgentId
+        : '';
+
+      const matchesQuery =
+        normalizedQuery.length === 0 ||
+        item.title.toLowerCase().includes(normalizedQuery) ||
+        item.id.toLowerCase().includes(normalizedQuery) ||
+        item.description.toLowerCase().includes(normalizedQuery) ||
+        workflow?.name.toLowerCase().includes(normalizedQuery) ||
+        currentStep?.name.toLowerCase().includes(normalizedQuery) ||
+        agentName.toLowerCase().includes(normalizedQuery) ||
+        item.tags.some(tag => tag.toLowerCase().includes(normalizedQuery));
+
+      const matchesWorkflow =
+        workflowFilter === 'ALL' || item.workflowId === workflowFilter;
+      const matchesStatus = statusFilter === 'ALL' || item.status === statusFilter;
+      const matchesPriority =
+        priorityFilter === 'ALL' || item.priority === priorityFilter;
+
+      return matchesQuery && matchesWorkflow && matchesStatus && matchesPriority;
+    });
+  }, [
+    agentsById,
+    priorityFilter,
+    searchQuery,
+    statusFilter,
+    workflowFilter,
+    workItems,
+    workflowsById,
+  ]);
+
+  const attentionItems = useMemo(
+    () =>
+      filteredWorkItems
+        .filter(
+          item =>
+            item.blocker?.status === 'OPEN' ||
+            Boolean(item.pendingRequest) ||
+            item.status === 'BLOCKED' ||
+            item.status === 'PENDING_APPROVAL',
+        )
+        .map(item => {
+          const workflow = workflowsById.get(item.workflowId) || null;
+          const currentStep = getCurrentWorkflowStep(workflow, null, item);
+          const agentId = item.assignedAgentId || currentStep?.agentId;
+          const attentionReason =
+            getAttentionReason({
+              blocker: item.blocker,
+              pendingRequest: item.pendingRequest,
+            }) || 'This work item is paused and needs operator attention.';
+          const attentionLabel = getAttentionLabel({
+            blocker: item.blocker,
+            pendingRequest: item.pendingRequest,
+          });
+          return {
+            item,
+            workflow,
+            currentStep,
+            agentId,
+            attentionReason,
+            attentionLabel,
+            attentionTimestamp: getWorkItemAttentionTimestamp(item),
+            callToAction: getAttentionCallToAction({
+              blocker: item.blocker,
+              pendingRequest: item.pendingRequest,
+            }),
+          };
+        })
+        .sort((left, right) => {
+          const leftTime = left.attentionTimestamp
+            ? new Date(left.attentionTimestamp).getTime()
+            : 0;
+          const rightTime = right.attentionTimestamp
+            ? new Date(right.attentionTimestamp).getTime()
+            : 0;
+          return rightTime - leftTime;
+        }),
+    [filteredWorkItems, workflowsById],
+  );
+
+  const groupedItems = useMemo(
+    () =>
+      SDLC_BOARD_PHASES.map(phase => ({
+        phase,
+        items: filteredWorkItems.filter(item => item.phase === phase),
+      })),
+    [filteredWorkItems],
+  );
+
+  const stats = useMemo(
+    () => ({
+      active: workItems.filter(item => item.status === 'ACTIVE').length,
+      blocked: workItems.filter(item => item.status === 'BLOCKED').length,
+      approvals: workItems.filter(item => item.status === 'PENDING_APPROVAL').length,
+      running: workItems.filter(item => Boolean(item.activeRunId)).length,
+    }),
+    [workItems],
+  );
+
   const selectedWorkItem =
     workItems.find(item => item.id === selectedWorkItemId) || null;
   const selectedWorkflow = selectedWorkItem
@@ -386,17 +736,19 @@ const Orchestrator = () => {
     selectedWorkItem,
   );
   const selectedOpenWait = getSelectedRunWait(selectedRunDetail);
-  const selectedAgent = selectedCurrentStep?.agentId
-    ? agentsById.get(selectedCurrentStep.agentId) || null
-    : selectedWorkItem?.assignedAgentId
-    ? agentsById.get(selectedWorkItem.assignedAgentId) || null
-    : null;
+  const selectedAgentId =
+    selectedRunDetail?.run.assignedAgentId ||
+    selectedCurrentStep?.agentId ||
+    selectedWorkItem?.assignedAgentId;
+  const selectedAgent = selectedAgentId ? agentsById.get(selectedAgentId) || null : null;
   const selectedAttentionReason = selectedWorkItem
     ? getAttentionReason({
         blocker: selectedWorkItem.blocker,
         pendingRequest: selectedWorkItem.pendingRequest,
         wait: selectedOpenWait,
-      })
+      }) || (selectedWorkItem.status === 'BLOCKED'
+        ? 'This work item is blocked and needs operator action before orchestration can continue.'
+        : '')
     : '';
   const selectedAttentionLabel = selectedWorkItem
     ? getAttentionLabel({
@@ -413,7 +765,56 @@ const Orchestrator = () => {
   const selectedAttentionTimestamp =
     selectedWorkItem?.blocker?.timestamp ||
     selectedOpenWait?.createdAt ||
-    selectedWorkItem?.pendingRequest?.timestamp;
+    selectedWorkItem?.pendingRequest?.timestamp ||
+    selectedWorkItem?.history.slice(-1)[0]?.timestamp;
+  const selectedResetStep = selectedWorkflow?.steps[0] || null;
+  const selectedResetPhase = selectedResetStep?.phase || 'BACKLOG';
+  const selectedResetAgent = selectedResetStep?.agentId
+    ? agentsById.get(selectedResetStep.agentId) || null
+    : null;
+
+  const currentRun = selectedRunDetail?.run || selectedRunHistory[0] || null;
+  const currentRunIsActive = Boolean(
+    currentRun && ACTIVE_RUN_STATUSES.includes(currentRun.status),
+  );
+  const runtimeReady = Boolean(runtimeStatus?.configured) && !runtimeError;
+
+  const canStartExecution =
+    Boolean(selectedWorkItem) &&
+    !selectedWorkItem?.activeRunId &&
+    selectedWorkItem?.phase !== 'DONE' &&
+    runtimeReady;
+
+  const canRestartFromPhase =
+    Boolean(selectedWorkItem && currentRun && !selectedWorkItem.activeRunId) &&
+    selectedWorkItem?.phase !== 'DONE' &&
+    runtimeReady;
+  const canResetAndRestart = Boolean(selectedWorkItem) && runtimeReady;
+
+  const actionButtonLabel =
+    selectedOpenWait?.type === 'APPROVAL'
+      ? 'Approve and continue'
+      : selectedOpenWait?.type === 'INPUT'
+      ? 'Submit details and unblock'
+      : selectedOpenWait?.type === 'CONFLICT_RESOLUTION'
+        ? 'Resolve conflict and unblock'
+        : 'Continue';
+
+  const resolutionPlaceholder =
+    selectedOpenWait?.type === 'APPROVAL'
+      ? 'Add approval notes, release conditions, or sign-off details.'
+      : selectedOpenWait?.type === 'INPUT'
+        ? 'Provide the missing business, technical, or governance details needed to unblock this work item.'
+        : selectedOpenWait?.type === 'CONFLICT_RESOLUTION'
+          ? 'Describe the conflict resolution, final decision, and any implementation constraints.'
+          : 'Approval note, human input, restart note, or cancellation reason.';
+
+  const resolutionIsRequired =
+    selectedOpenWait?.type === 'INPUT' ||
+    selectedOpenWait?.type === 'CONFLICT_RESOLUTION';
+  const canResolveSelectedWait =
+    Boolean(selectedOpenWait) &&
+    (!resolutionIsRequired || Boolean(resolutionNote.trim()));
 
   const stepOrder = useMemo(
     () =>
@@ -448,11 +849,17 @@ const Orchestrator = () => {
       return [];
     }
 
-    return workspace.artifacts.filter(
-      artifact =>
-        artifact.runId === selectedRunDetail.run.id ||
-        (artifact.runStepId && selectedRunStepIds.has(artifact.runStepId)),
-    );
+    return workspace.artifacts
+      .filter(
+        artifact =>
+          artifact.runId === selectedRunDetail.run.id ||
+          (artifact.runStepId && selectedRunStepIds.has(artifact.runStepId)),
+      )
+      .slice()
+      .sort(
+        (left, right) =>
+          new Date(right.created).getTime() - new Date(left.created).getTime(),
+      );
   }, [selectedRunDetail, selectedRunStepIds, workspace.artifacts]);
 
   const selectedLogs = useMemo(() => {
@@ -479,51 +886,34 @@ const Orchestrator = () => {
       );
   }, [selectedRunDetail, selectedTasks, selectedWorkItem, workspace.executionLogs]);
 
-  const stats = useMemo(
-    () => ({
-      active: workItems.filter(item => item.status === 'ACTIVE').length,
-      blocked: workItems.filter(item => item.status === 'BLOCKED').length,
-      approvals: workItems.filter(item => item.status === 'PENDING_APPROVAL').length,
-      completed: workItems.filter(item => item.status === 'COMPLETED').length,
-    }),
-    [workItems],
+  const recentRunActivity = useMemo(
+    () => selectedRunEvents.slice(-8).reverse(),
+    [selectedRunEvents],
   );
 
-  const currentRun = selectedRunDetail?.run || selectedRunHistory[0] || null;
-  const currentRunIsActive = Boolean(
-    currentRun && ACTIVE_RUN_STATUSES.includes(currentRun.status),
-  );
-  const canStartExecution =
-    Boolean(selectedWorkItem) &&
-    !selectedWorkItem?.activeRunId &&
-    selectedWorkItem?.phase !== 'DONE';
+  const latestArtifact = selectedArtifacts[0] || null;
+  const latestArtifactDocument = useMemo(() => {
+    if (!latestArtifact) {
+      return '';
+    }
 
-  const canRestartFromPhase =
-    Boolean(selectedWorkItem && currentRun && !selectedWorkItem.activeRunId) &&
-    selectedWorkItem?.phase !== 'DONE';
+    if (latestArtifact.contentFormat === 'JSON' && latestArtifact.contentJson) {
+      return JSON.stringify(latestArtifact.contentJson, null, 2);
+    }
 
-  const actionButtonLabel =
-    selectedOpenWait?.type === 'APPROVAL'
-      ? 'Approve and continue'
-      : selectedOpenWait?.type === 'INPUT'
-      ? 'Submit details and unblock'
-      : selectedOpenWait?.type === 'CONFLICT_RESOLUTION'
-      ? 'Resolve conflict and unblock'
-      : 'Continue';
-  const resolutionPlaceholder =
-    selectedOpenWait?.type === 'APPROVAL'
-      ? 'Add approval notes, release conditions, or sign-off details.'
-      : selectedOpenWait?.type === 'INPUT'
-      ? 'Provide the missing business, technical, or governance details needed to unblock this work item.'
-      : selectedOpenWait?.type === 'CONFLICT_RESOLUTION'
-      ? 'Describe the conflict resolution, final decision, and any implementation constraints.'
-      : 'Approval note, human input, restart note, or cancellation reason.';
-  const resolutionIsRequired =
-    selectedOpenWait?.type === 'INPUT' ||
-    selectedOpenWait?.type === 'CONFLICT_RESOLUTION';
-  const canResolveSelectedWait =
-    Boolean(selectedOpenWait) &&
-    (!resolutionIsRequired || Boolean(resolutionNote.trim()));
+    return (
+      latestArtifact.contentText ||
+      latestArtifact.summary ||
+      latestArtifact.description ||
+      `${latestArtifact.type} · ${latestArtifact.version}`
+    );
+  }, [latestArtifact]);
+
+  const draftWorkflow = workflowsById.get(draftWorkItem.workflowId) || null;
+  const draftFirstStep = draftWorkflow?.steps[0] || null;
+  const draftFirstAgent = draftFirstStep
+    ? agentsById.get(draftFirstStep.agentId) || null
+    : null;
 
   const withAction = async (
     label: string,
@@ -552,32 +942,37 @@ const Orchestrator = () => {
       return;
     }
 
-    await withAction('create', async () => {
-      const nextItem = await createCapabilityWorkItem(activeCapability.id, {
-        title: draftWorkItem.title.trim(),
-        description: draftWorkItem.description.trim() || undefined,
-        workflowId: draftWorkItem.workflowId,
-        priority: draftWorkItem.priority,
-        tags: draftWorkItem.tags
-          .split(',')
-          .map(tag => tag.trim())
-          .filter(Boolean),
-      });
+    await withAction(
+      'create',
+      async () => {
+        const nextItem = await createCapabilityWorkItem(activeCapability.id, {
+          title: draftWorkItem.title.trim(),
+          description: draftWorkItem.description.trim() || undefined,
+          workflowId: draftWorkItem.workflowId,
+          priority: draftWorkItem.priority,
+          tags: draftWorkItem.tags
+            .split(',')
+            .map(tag => tag.trim())
+            .filter(Boolean),
+        });
 
-      await refreshSelection(nextItem.id);
-      setSelectedWorkItemId(nextItem.id);
-      setIsCreateModalOpen(false);
-      setDraftWorkItem({
-        title: '',
-        description: '',
-        workflowId: workspace.workflows[0]?.id || '',
-        priority: 'Med',
-        tags: '',
-      });
-    }, {
-      title: 'Work item created',
-      description: `${draftWorkItem.title.trim()} is now queued in ${activeCapability.name}.`,
-    });
+        await refreshSelection(nextItem.id);
+        setSelectedWorkItemId(nextItem.id);
+        setIsCreateSheetOpen(false);
+        setDetailTab('overview');
+        setDraftWorkItem({
+          title: '',
+          description: '',
+          workflowId: workspace.workflows[0]?.id || '',
+          priority: 'Med',
+          tags: '',
+        });
+      },
+      {
+        title: 'Work item created',
+        description: `${draftWorkItem.title.trim()} is now staged in ${activeCapability.name}.`,
+      },
+    );
   };
 
   const handleStartExecution = async () => {
@@ -585,13 +980,17 @@ const Orchestrator = () => {
       return;
     }
 
-    await withAction('start', async () => {
-      await startCapabilityWorkflowRun(activeCapability.id, selectedWorkItem.id);
-      await refreshSelection(selectedWorkItem.id);
-    }, {
-      title: 'Execution started',
-      description: `${selectedWorkItem.title} is now running through the workflow.`,
-    });
+    await withAction(
+      'start',
+      async () => {
+        await startCapabilityWorkflowRun(activeCapability.id, selectedWorkItem.id);
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Execution started',
+        description: `${selectedWorkItem.title} is now running through the workflow.`,
+      },
+    );
   };
 
   const handleRestartExecution = async () => {
@@ -599,15 +998,66 @@ const Orchestrator = () => {
       return;
     }
 
-    await withAction('restart', async () => {
-      await restartCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
-        restartFromPhase: selectedWorkItem.phase,
-      });
-      await refreshSelection(selectedWorkItem.id);
-    }, {
-      title: 'Execution restarted',
-      description: `${selectedWorkItem.title} restarted from ${PHASE_META[selectedWorkItem.phase].label}.`,
-    });
+    await withAction(
+      'restart',
+      async () => {
+        await restartCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+          restartFromPhase: selectedWorkItem.phase,
+        });
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Execution restarted',
+        description: `${selectedWorkItem.title} restarted from ${PHASE_META[selectedWorkItem.phase].label}.`,
+      },
+    );
+  };
+
+  const handleResetAndRestart = async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    const resetPhase = selectedResetPhase;
+    const resetPhaseLabel = PHASE_META[resetPhase].label;
+
+    await withAction(
+      'reset',
+      async () => {
+        if (currentRun && currentRunIsActive) {
+          await cancelCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+            note:
+              resolutionNote.trim() ||
+              `Run cancelled so ${selectedWorkItem.title} can be reset to ${resetPhaseLabel} and restarted.`,
+          });
+        }
+
+        if (selectedWorkItem.phase !== resetPhase) {
+          await moveCapabilityWorkItem(activeCapability.id, selectedWorkItem.id, {
+            targetPhase: resetPhase,
+            note: `Work item reset to ${resetPhaseLabel} before restart.`,
+          });
+        }
+
+        if (currentRun) {
+          await restartCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+            restartFromPhase: resetPhase,
+          });
+        } else {
+          await startCapabilityWorkflowRun(activeCapability.id, selectedWorkItem.id, {
+            restartFromPhase: resetPhase,
+          });
+        }
+
+        setResolutionNote('');
+        setDetailTab('progress');
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Progress reset and restarted',
+        description: `${selectedWorkItem.title} was reset to ${resetPhaseLabel} and relaunched from the beginning of the workflow path.`,
+      },
+    );
   };
 
   const handleResolveWait = async () => {
@@ -617,35 +1067,39 @@ const Orchestrator = () => {
 
     const resolution = resolutionNote.trim() || actionButtonLabel;
 
-    await withAction('resolve', async () => {
-      if (selectedOpenWait.type === 'APPROVAL') {
-        await approveCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
-          resolution,
-          resolvedBy: 'Capability Owner',
-        });
-      } else if (selectedOpenWait.type === 'INPUT') {
-        await provideCapabilityWorkflowRunInput(activeCapability.id, currentRun.id, {
-          resolution,
-          resolvedBy: 'Capability Owner',
-        });
-      } else {
-        await resolveCapabilityWorkflowRunConflict(activeCapability.id, currentRun.id, {
-          resolution,
-          resolvedBy: 'Capability Owner',
-        });
-      }
+    await withAction(
+      'resolve',
+      async () => {
+        if (selectedOpenWait.type === 'APPROVAL') {
+          await approveCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+            resolution,
+            resolvedBy: 'Capability Owner',
+          });
+        } else if (selectedOpenWait.type === 'INPUT') {
+          await provideCapabilityWorkflowRunInput(activeCapability.id, currentRun.id, {
+            resolution,
+            resolvedBy: 'Capability Owner',
+          });
+        } else {
+          await resolveCapabilityWorkflowRunConflict(activeCapability.id, currentRun.id, {
+            resolution,
+            resolvedBy: 'Capability Owner',
+          });
+        }
 
-      setResolutionNote('');
-      await refreshSelection(selectedWorkItem.id);
-    }, {
-      title:
-        selectedOpenWait.type === 'APPROVAL'
-          ? 'Approval submitted'
-          : selectedOpenWait.type === 'INPUT'
-          ? 'Input submitted'
-          : 'Conflict resolved',
-      description: `${selectedWorkItem.title} was updated and can continue through the workflow.`,
-    });
+        setResolutionNote('');
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title:
+          selectedOpenWait.type === 'APPROVAL'
+            ? 'Approval submitted'
+            : selectedOpenWait.type === 'INPUT'
+              ? 'Input submitted'
+              : 'Conflict resolved',
+        description: `${selectedWorkItem.title} was updated and can continue through the workflow.`,
+      },
+    );
   };
 
   const handleCancelRun = async () => {
@@ -653,16 +1107,20 @@ const Orchestrator = () => {
       return;
     }
 
-    await withAction('cancel', async () => {
-      await cancelCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
-        note: resolutionNote.trim() || 'Run cancelled from the control plane.',
-      });
-      setResolutionNote('');
-      await refreshSelection(selectedWorkItem.id);
-    }, {
-      title: 'Execution cancelled',
-      description: `${selectedWorkItem.title} was stopped from the control plane.`,
-    });
+    await withAction(
+      'cancel',
+      async () => {
+        await cancelCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+          note: resolutionNote.trim() || 'Run cancelled from the control plane.',
+        });
+        setResolutionNote('');
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Execution cancelled',
+        description: `${selectedWorkItem.title} was stopped from the control plane.`,
+      },
+    );
   };
 
   const handleMoveWorkItem = async (workItemId: string, targetPhase: WorkItemPhase) => {
@@ -671,105 +1129,279 @@ const Orchestrator = () => {
       return;
     }
 
-    await withAction(`move-${workItemId}`, async () => {
-      await moveCapabilityWorkItem(activeCapability.id, workItemId, {
-        targetPhase,
-        note: `Story moved to ${PHASE_META[targetPhase].label} from the orchestration board.`,
-      });
-      await refreshSelection(selectedWorkItemId === workItemId ? workItemId : undefined);
-    }, {
-      title: 'Work item moved',
-      description: `${item.title} moved to ${PHASE_META[targetPhase].label}.`,
+    await withAction(
+      `move-${workItemId}`,
+      async () => {
+        await moveCapabilityWorkItem(activeCapability.id, workItemId, {
+          targetPhase,
+          note: `Story moved to ${PHASE_META[targetPhase].label} from the orchestration board.`,
+        });
+        await refreshSelection(selectedWorkItemId === workItemId ? workItemId : undefined);
+      },
+      {
+        title: 'Work item moved',
+        description: `${item.title} moved to ${PHASE_META[targetPhase].label}.`,
+      },
+    );
+  };
+
+  const handleRefresh = async () => {
+    await withAction('refresh', async () => {
+      await Promise.all([refreshSelection(selectedWorkItemId), loadRuntime()]);
     });
   };
 
-  const groupedItems = useMemo(
-    () =>
-      SDLC_BOARD_PHASES.map(phase => ({
-        phase,
-        items: workItems.filter(item => item.phase === phase),
-      })),
-    [workItems],
-  );
-
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="Execution Control Plane"
-        context={activeCapability.id}
-        title={`${activeCapability.name} Orchestration`}
-        description="The backend execution worker owns workflow progression, waits, approvals, artifacts, logs, and tool execution. This screen is the enterprise control plane for launching work, staging stories intentionally, and reviewing durable run history."
-        actions={
-          <div className="flex flex-wrap items-center gap-3">
-            <Toolbar className="p-1">
-              <button
-                type="button"
-                onClick={() => setView('board')}
-                className={cn(
-                  'inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold transition-all',
-                  view === 'board' ? 'bg-primary text-white' : 'text-secondary',
-                )}
-              >
-                <LayoutGrid size={16} />
-                Board
-              </button>
-              <button
-                type="button"
-                onClick={() => setView('list')}
-                className={cn(
-                  'inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold transition-all',
-                  view === 'list' ? 'bg-primary text-white' : 'text-secondary',
-                )}
-              >
-                <List size={16} />
-                List
-              </button>
-            </Toolbar>
+    <div className="orchestrator-page-shell space-y-4">
+      <section className="orchestrator-commandbar">
+        <div className="orchestrator-commandbar-main">
+          <div className="orchestrator-commandbar-heading">
+            <div className="orchestrator-commandbar-copy">
+              <p className="form-kicker">Execution Workspace</p>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <h1 className="text-[1.75rem] font-bold tracking-tight text-on-surface">
+                  {activeCapability.name} Orchestrator
+                </h1>
+                <StatusBadge tone={runtimeReady ? 'success' : 'danger'}>
+                  {runtimeReady ? 'Runtime ready' : 'Runtime blocked'}
+                </StatusBadge>
+                <StatusBadge tone="neutral">
+                  {view === 'board' ? 'Board view' : 'List view'}
+                </StatusBadge>
+              </div>
+              <p className="mt-2 max-w-2xl text-sm leading-relaxed text-secondary">
+                Stage work, clear waits, and keep execution moving from a lighter operator board.
+                Deep telemetry stays in Run Console so this surface can stay focused on action.
+              </p>
+            </div>
 
-            <button
-              type="button"
-              onClick={() => setIsCreateModalOpen(true)}
-              className="enterprise-button enterprise-button-primary"
-            >
-              <Plus size={16} />
-              New Work Item
-            </button>
+            <div className="orchestrator-commandbar-kpis">
+              {[
+                { label: 'Active', value: stats.active, tone: 'brand' as const },
+                { label: 'Blocked', value: stats.blocked, tone: 'danger' as const },
+                { label: 'Pending Approval', value: stats.approvals, tone: 'warning' as const },
+                { label: 'Running', value: stats.running, tone: 'info' as const },
+              ].map(chip => (
+                <div key={chip.label} className="orchestrator-kpi-chip">
+                  <StatusBadge tone={chip.tone}>{chip.label}</StatusBadge>
+                  <span className="text-sm font-semibold text-on-surface">{chip.value}</span>
+                </div>
+              ))}
+            </div>
           </div>
-        }
-      />
 
-      <section className="grid gap-4 md:grid-cols-4">
-        {[
-          { label: 'Active', value: stats.active, tone: 'brand' as const },
-          { label: 'Blocked', value: stats.blocked, tone: 'danger' as const },
-          { label: 'Pending Approval', value: stats.approvals, tone: 'warning' as const },
-          { label: 'Completed', value: stats.completed, tone: 'success' as const },
-        ].map(stat => (
-          <StatTile
-            key={stat.label}
-            label={stat.label}
-            value={stat.value}
-            tone={stat.tone}
-          />
-        ))}
+          <div className="orchestrator-commandbar-controls">
+            <div className="orchestrator-toolbar-row orchestrator-toolbar-row-primary">
+              <label className="orchestrator-search-shell">
+                <Search
+                  size={16}
+                  className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-outline"
+                />
+                <input
+                  value={searchQuery}
+                  onChange={event => setSearchQuery(event.target.value)}
+                  placeholder="Search work item, workflow, step, tag, or agent"
+                  className="enterprise-input pl-11"
+                />
+              </label>
+
+              <div className="orchestrator-view-toggle" aria-label="Choose orchestrator view">
+                <button
+                  type="button"
+                  onClick={() => setView('board')}
+                  className={cn(
+                    'orchestrator-view-toggle-button',
+                    view === 'board' && 'orchestrator-view-toggle-button-active',
+                  )}
+                >
+                  <LayoutGrid size={16} />
+                  Board
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setView('list')}
+                  className={cn(
+                    'orchestrator-view-toggle-button',
+                    view === 'list' && 'orchestrator-view-toggle-button-active',
+                  )}
+                >
+                  <List size={16} />
+                  List
+                </button>
+              </div>
+            </div>
+
+            <div className="orchestrator-toolbar-row orchestrator-toolbar-row-secondary">
+              <div className="orchestrator-filter-strip">
+                <select
+                  value={workflowFilter}
+                  onChange={event => setWorkflowFilter(event.target.value)}
+                  className="field-select"
+                >
+                  <option value="ALL">All workflows</option>
+                  {workspace.workflows.map(workflow => (
+                    <option key={workflow.id} value={workflow.id}>
+                      {workflow.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={statusFilter}
+                  onChange={event =>
+                    setStatusFilter(event.target.value as WorkItemStatusFilter)
+                  }
+                  className="field-select"
+                >
+                  <option value="ALL">All statuses</option>
+                  <option value="ACTIVE">Active</option>
+                  <option value="BLOCKED">Blocked</option>
+                  <option value="PENDING_APPROVAL">Pending approval</option>
+                  <option value="COMPLETED">Completed</option>
+                </select>
+                <select
+                  value={priorityFilter}
+                  onChange={event =>
+                    setPriorityFilter(event.target.value as WorkItemPriorityFilter)
+                  }
+                  className="field-select"
+                >
+                  <option value="ALL">All priorities</option>
+                  <option value="High">High</option>
+                  <option value="Med">Med</option>
+                  <option value="Low">Low</option>
+                </select>
+              </div>
+
+              <div className="orchestrator-commandbar-actions">
+                <button
+                  type="button"
+                  onClick={() => void handleRefresh()}
+                  disabled={busyAction === 'refresh'}
+                  className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <RefreshCw
+                    size={16}
+                    className={busyAction === 'refresh' ? 'animate-spin' : ''}
+                  />
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsCreateSheetOpen(true)}
+                  className="enterprise-button enterprise-button-primary"
+                >
+                  <Plus size={16} />
+                  New Work Item
+                </button>
+              </div>
+            </div>
+
+            <div className="orchestrator-commandbar-footnote">
+              <span className="orchestrator-commandbar-footnote-copy">
+                Showing {filteredWorkItems.length} of {workItems.length} work items
+              </span>
+              <span className="orchestrator-commandbar-footnote-copy">
+                {runtimeError
+                  ? 'Runtime needs attention'
+                  : 'Run Console owns deep telemetry'}
+              </span>
+            </div>
+          </div>
+        </div>
       </section>
 
-      {runtimeError && (
-        <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700">
-          {runtimeError}
+      <section className="workspace-surface orchestrator-attention-shell">
+        <div className="orchestrator-surface-header">
+          <div>
+            <p className="form-kicker">Top Action Queue</p>
+            <h2 className="mt-1 text-lg font-bold text-on-surface">Needs Attention</h2>
+            <p className="mt-1 text-sm text-secondary">
+              Blockers, approvals, missing input, and conflict resolutions stay here so triage
+              happens before the board gets crowded with urgency.
+            </p>
+          </div>
+          <StatusBadge tone={attentionItems.length > 0 ? 'warning' : 'success'}>
+            {attentionItems.length > 0
+              ? `${attentionItems.length} items waiting`
+              : 'All clear'}
+          </StatusBadge>
         </div>
-      )}
 
-      {actionError && (
-        <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700">
-          {actionError}
-        </div>
-      )}
+        {attentionItems.length === 0 ? (
+          <div className="orchestrator-attention-empty">
+            No approvals, blockers, or missing-input requests are waiting right now.
+          </div>
+        ) : (
+          <div className="orchestrator-attention-row">
+            {attentionItems.map(attention => (
+              <button
+                key={attention.item.id}
+                type="button"
+                onClick={() =>
+                  selectWorkItem(attention.item.id, { focusBoard: true, openControl: true })
+                }
+                className={cn(
+                  'orchestrator-attention-card min-w-[18rem] text-left',
+                  selectedWorkItemId === attention.item.id &&
+                    'orchestrator-attention-card-active',
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="form-kicker">{attention.item.id}</p>
+                    <h3 className="mt-1 line-clamp-2 text-sm font-semibold text-on-surface">
+                      {attention.item.title}
+                    </h3>
+                  </div>
+                  <StatusBadge tone="warning">{attention.attentionLabel}</StatusBadge>
+                </div>
+                <div className="mt-3 space-y-2 text-sm text-secondary">
+                  <p className="line-clamp-2">{attention.attentionReason}</p>
+                  <div className="orchestrator-attention-meta">
+                    <span>{PHASE_META[attention.item.phase].label}</span>
+                    <span>
+                      {agentsById.get(attention.agentId || '')?.name ||
+                        attention.agentId ||
+                        'System'}
+                    </span>
+                    <span>{formatRelativeTime(attention.attentionTimestamp)}</span>
+                  </div>
+                </div>
+                <div className="orchestrator-attention-cta">
+                  <span>{attention.callToAction}</span>
+                  <ArrowRight size={14} />
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_420px]">
-        <section className="section-card min-h-[48rem]">
+      <div className="orchestrator-workspace-grid">
+        <section className="workspace-surface orchestrator-board-shell">
+          <div className="orchestrator-surface-header">
+            <div>
+              <p className="form-kicker">Phase Board</p>
+              <h2 className="mt-1 text-lg font-bold text-on-surface">
+                {view === 'board' ? 'Execution lanes' : 'Operational list'}
+              </h2>
+              <p className="mt-1 text-sm text-secondary">
+                {view === 'board'
+                  ? 'Scan movement across SDLC phases from left to right and keep the control rail focused on a single item.'
+                  : 'Use the operational table for tighter triage without leaving the orchestration surface.'}
+              </p>
+            </div>
+            <div className="orchestrator-board-meta">
+              {workspace.workflows.slice(0, 3).map(workflow => (
+                <span key={workflow.id}>
+                  <StatusBadge tone="neutral">{workflow.name}</StatusBadge>
+                </span>
+              ))}
+            </div>
+          </div>
+
           {view === 'board' ? (
-            <div className="grid gap-4 xl:grid-cols-4 2xl:grid-cols-8">
+            <div className="orchestrator-board-grid">
               {groupedItems.map(({ phase, items }) => (
                 <BoardColumn
                   key={phase}
@@ -781,7 +1413,7 @@ const Orchestrator = () => {
                     </StatusBadge>
                   }
                   active={dragOverPhase === phase}
-                  className="transition-all"
+                  className="orchestrator-phase-column transition-all"
                 >
                   <div
                     onDragOver={event => {
@@ -801,74 +1433,90 @@ const Orchestrator = () => {
                         void handleMoveWorkItem(droppedId, phase);
                       }
                     }}
-                    className="space-y-3"
+                    className="orchestrator-phase-body"
                   >
                     {items.map(item => {
                       const workflow = workflowsById.get(item.workflowId) || null;
                       const currentStep = getCurrentWorkflowStep(workflow, null, item);
-                      const agentName = item.assignedAgentId
-                        ? agentsById.get(item.assignedAgentId)?.name
-                        : undefined;
+                      const agentId = item.assignedAgentId || currentStep?.agentId;
+                      const attentionLabel =
+                        item.blocker?.status === 'OPEN' || item.pendingRequest
+                          ? getAttentionLabel({
+                              blocker: item.blocker,
+                              pendingRequest: item.pendingRequest,
+                            })
+                          : '';
+                      const attentionReason = getAttentionReason({
+                        blocker: item.blocker,
+                        pendingRequest: item.pendingRequest,
+                      });
 
                       return (
                         <motion.button
                           key={item.id}
+                          id={`orchestrator-item-${item.id}`}
                           layout
                           draggable
                           onDragStart={event => {
                             setDraggedWorkItemId(item.id);
-                            event.dataTransfer.setData('text/plain', item.id);
+                            if ('dataTransfer' in event && event.dataTransfer) {
+                              const dataTransfer = event.dataTransfer as DataTransfer;
+                              dataTransfer.setData('text/plain', item.id);
+                            }
                           }}
                           onDragEnd={() => {
                             setDraggedWorkItemId(null);
                             setDragOverPhase(null);
                           }}
-                          onClick={() => setSelectedWorkItemId(item.id)}
+                          onClick={() => selectWorkItem(item.id)}
                           className={cn(
-                            'w-full rounded-2xl border border-outline-variant/50 bg-white p-4 text-left shadow-[0_8px_24px_rgba(12,23,39,0.04)] transition-all hover:border-primary/25',
+                            'orchestrator-board-card',
                             selectedWorkItemId === item.id &&
-                              'border-primary/30 ring-2 ring-primary/10',
+                              'orchestrator-board-card-active',
                           )}
                         >
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
+                          <div className="orchestrator-board-card-top">
+                            <div className="min-w-0">
                               <p className="form-kicker">{item.id}</p>
-                              <h3 className="mt-2 text-sm font-semibold text-on-surface">
+                              <h3 className="mt-1 line-clamp-2 text-sm font-semibold text-on-surface">
                                 {item.title}
                               </h3>
                             </div>
-                            <StatusBadge tone={getStatusTone(item.status)}>
-                              {formatEnumLabel(item.status)}
+                            <StatusBadge tone={getPriorityTone(item.priority)}>
+                              {item.priority}
                             </StatusBadge>
                           </div>
 
-                          <div className="mt-4 space-y-2">
-                            <div className="rounded-xl border border-outline-variant/35 bg-surface-container-low px-3 py-3">
+                          <div className="orchestrator-board-card-status">
+                            <StatusBadge tone={getStatusTone(item.status)}>
+                              {WORK_ITEM_STATUS_META[item.status].label}
+                            </StatusBadge>
+                            {item.activeRunId && <StatusBadge tone="brand">Running</StatusBadge>}
+                          </div>
+
+                          <div className="orchestrator-board-card-body">
+                            <div className="orchestrator-board-card-step">
                               <p className="form-kicker">Current Step</p>
                               <p className="mt-1 text-xs font-semibold text-on-surface">
                                 {currentStep?.name || 'Awaiting orchestration'}
                               </p>
                             </div>
-                            <div className="flex items-center justify-between text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-secondary">
-                              <span>{agentName || 'Unassigned'}</span>
-                              <span>{item.priority}</span>
+                            <div className="orchestrator-board-card-footer">
+                              <span className="truncate">
+                                {agentsById.get(agentId || '')?.name || agentId || 'Unassigned'}
+                              </span>
+                              <span className="truncate">
+                                {workflow?.name || 'Workflow'}
+                              </span>
                             </div>
-                            {(item.blocker?.status === 'OPEN' || item.pendingRequest) && (
-                              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-left text-[0.75rem] text-amber-800">
+                            {attentionLabel && (
+                              <div className="orchestrator-board-card-attention">
                                 <div className="flex items-center gap-2 font-bold uppercase tracking-[0.16em]">
                                   <AlertCircle size={14} />
-                                  <span>
-                                    {getAttentionLabel({
-                                      blocker: item.blocker,
-                                      pendingRequest: item.pendingRequest,
-                                    })}
-                                  </span>
+                                  <span>{attentionLabel}</span>
                                 </div>
                                 <p className="mt-1 line-clamp-2 normal-case tracking-normal font-medium">
-                                  {getAttentionReason({
-                                    blocker: item.blocker,
-                                    pendingRequest: item.pendingRequest,
-                                  })}
+                                  {attentionReason}
                                 </p>
                               </div>
                             )}
@@ -880,7 +1528,7 @@ const Orchestrator = () => {
                     {items.length === 0 && (
                       <EmptyState
                         title={`No work in ${PHASE_META[phase].label}`}
-                        description="Drop a work item here to restart or intentionally re-stage it."
+                        description="Drop a work item here to re-stage it or keep the phase clear while execution moves forward."
                         icon={WorkflowIcon}
                         className="min-h-[10rem]"
                       />
@@ -891,25 +1539,27 @@ const Orchestrator = () => {
             </div>
           ) : (
             <div className="data-table-shell">
-              <div className="data-table-header grid grid-cols-[1.5fr_0.85fr_0.95fr_0.95fr_1.1fr] gap-3">
+              <div className="data-table-header grid grid-cols-[1.6fr_0.85fr_0.9fr_0.95fr_1fr_1.05fr] gap-3">
                 <span>Work Item</span>
                 <span>Phase</span>
                 <span>Status</span>
                 <span>Priority</span>
                 <span>Current Step</span>
+                <span>Active Agent</span>
               </div>
-              {workItems.map(item => {
+              {filteredWorkItems.map(item => {
                 const workflow = workflowsById.get(item.workflowId) || null;
                 const currentStep = getCurrentWorkflowStep(workflow, null, item);
+                const agentId = item.assignedAgentId || currentStep?.agentId;
 
                 return (
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => setSelectedWorkItemId(item.id)}
+                    onClick={() => selectWorkItem(item.id)}
                     className={cn(
-                      'grid w-full grid-cols-[1.5fr_0.85fr_0.95fr_0.95fr_1.1fr] gap-3 border-t border-outline-variant/35 px-4 py-4 text-left text-sm transition-all hover:bg-surface-container-low/60',
-                      selectedWorkItemId === item.id && 'bg-primary/5',
+                      'orchestrator-list-row',
+                      selectedWorkItemId === item.id && 'orchestrator-list-row-active',
                     )}
                   >
                     <div>
@@ -922,576 +1572,784 @@ const Orchestrator = () => {
                         {formatEnumLabel(item.status)}
                       </StatusBadge>
                     </div>
-                    <span>{item.priority}</span>
+                    <div>
+                      <StatusBadge tone={getPriorityTone(item.priority)}>
+                        {item.priority}
+                      </StatusBadge>
+                    </div>
                     <span>{currentStep?.name || 'Awaiting orchestration'}</span>
+                    <span>{agentsById.get(agentId || '')?.name || agentId || 'Unassigned'}</span>
                   </button>
                 );
               })}
+              {filteredWorkItems.length === 0 && (
+                <EmptyState
+                  title="No work items match the current filters"
+                  description="Adjust the search or filters to bring items back into the operational list."
+                  icon={WorkflowIcon}
+                  className="min-h-[18rem]"
+                />
+              )}
             </div>
           )}
         </section>
 
-        <DrawerShell>
-          {!selectedWorkItem ? (
-            <EmptyState
-              title="Select a work item"
-              description="Pick a story to inspect durable run history, review tool output, resume waits, or start execution from the current SDLC stage."
-              icon={WorkflowIcon}
-              className="h-full min-h-[48rem]"
-            />
-          ) : (
-            <div className="flex h-full flex-col gap-6">
-              <div>
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
+        <aside className="orchestrator-detail-rail">
+          <div className="workspace-surface orchestrator-detail-panel">
+            {!selectedWorkItem ? (
+              <EmptyState
+                title="Select a work item"
+                description="Choose a story from the board, list, or attention queue to inspect execution state, handle waits, and review outputs."
+                icon={WorkflowIcon}
+                className="h-full min-h-[45rem]"
+              />
+            ) : (
+              <div className="flex h-full flex-col">
+                <div className="orchestrator-detail-header">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
                     <p className="form-kicker">{selectedWorkItem.id}</p>
-                    <h2 className="mt-2 text-2xl font-bold tracking-tight text-on-surface">
+                    <div className="flex flex-wrap gap-2">
+                      <StatusBadge tone={getStatusTone(selectedWorkItem.phase)}>
+                        {PHASE_META[selectedWorkItem.phase].label}
+                      </StatusBadge>
+                      <StatusBadge tone={getStatusTone(selectedWorkItem.status)}>
+                        {WORK_ITEM_STATUS_META[selectedWorkItem.status].label}
+                      </StatusBadge>
+                      {currentRun && (
+                        <StatusBadge tone={getStatusTone(currentRun.status)}>
+                          {RUN_STATUS_META[currentRun.status].label}
+                        </StatusBadge>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mt-4 min-w-0">
+                    <h2 className="text-xl font-bold tracking-tight text-on-surface">
                       {selectedWorkItem.title}
                     </h2>
                     <p className="mt-2 text-sm leading-relaxed text-secondary">
-                      {selectedWorkItem.description}
+                      {selectedWorkItem.description ||
+                        'No description was captured when this work item was staged into execution.'}
                     </p>
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    <StatusBadge tone={getStatusTone(selectedWorkItem.phase)}>
-                      {PHASE_META[selectedWorkItem.phase].label}
-                    </StatusBadge>
-                    <StatusBadge tone={getStatusTone(selectedWorkItem.status)}>
-                      {WORK_ITEM_STATUS_META[selectedWorkItem.status].label}
-                    </StatusBadge>
-                    {currentRun && (
-                      <StatusBadge tone={getStatusTone(currentRun.status)}>
-                        {RUN_STATUS_META[currentRun.status].label}
-                      </StatusBadge>
-                    )}
+
+                  <div className="orchestrator-detail-tabs">
+                    {([
+                      ['overview', 'Overview'],
+                      ['control', 'Control'],
+                      ['progress', 'Progress'],
+                      ['outputs', 'Outputs'],
+                    ] as const).map(([id, label]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setDetailTab(id)}
+                        className={cn(
+                          'workspace-tab-button',
+                          detailTab === id && 'workspace-tab-button-active',
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
                 </div>
 
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
-                    <p className="form-kicker">Current Step</p>
-                    <p className="mt-1 text-sm font-semibold text-on-surface">
-                      {selectedCurrentStep?.name || 'Awaiting orchestration'}
-                    </p>
-                  </div>
-                  <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
-                    <p className="form-kicker">Active Agent</p>
-                    <p className="mt-1 text-sm font-semibold text-on-surface">
-                      {selectedAgent?.name || 'Unassigned'}
-                    </p>
-                  </div>
-                </div>
-              </div>
-              <div className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4">
-                {selectedAttentionReason && (
-                  <div className="mb-4 rounded-3xl border border-amber-200 bg-amber-50 px-4 py-4 text-amber-900">
-                    <div className="flex items-start gap-3">
-                      <AlertCircle size={18} className="mt-0.5 shrink-0 text-amber-700" />
-                      <div className="min-w-0">
-                        <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-amber-700">
-                          {selectedAttentionLabel}
-                        </p>
-                        <p className="mt-2 text-sm font-semibold leading-relaxed">
-                          {selectedAttentionReason}
-                        </p>
-                        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-amber-800">
-                          <span>
-                            Requested by:{' '}
-                            <strong>
-                              {agentsById.get(selectedAttentionRequestedBy || '')?.name ||
-                                selectedAttentionRequestedBy ||
-                                'System'}
-                            </strong>
-                          </span>
-                          <span>
-                            Since: <strong>{formatTimestamp(selectedAttentionTimestamp)}</strong>
-                          </span>
+                <div className="orchestrator-detail-body">
+                {detailTab === 'overview' && (
+                  <div className="space-y-4">
+                    {selectedAttentionReason && (
+                      <div className="workspace-inline-alert workspace-inline-alert-warning">
+                        <AlertCircle size={18} className="mt-0.5 shrink-0" />
+                        <div className="min-w-0">
+                          <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em]">
+                            {selectedAttentionLabel}
+                          </p>
+                          <p className="mt-2 text-sm font-semibold leading-relaxed">
+                            {selectedAttentionReason}
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                            <span>
+                              Requested by:{' '}
+                              <strong>
+                                {agentsById.get(selectedAttentionRequestedBy || '')?.name ||
+                                  selectedAttentionRequestedBy ||
+                                  'System'}
+                              </strong>
+                            </span>
+                            <span>
+                              Since: <strong>{formatTimestamp(selectedAttentionTimestamp)}</strong>
+                            </span>
+                          </div>
                         </div>
+                      </div>
+                    )}
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Workflow</p>
+                        <p className="workspace-meta-value">
+                          {selectedWorkflow?.name || 'Workflow missing'}
+                        </p>
+                        <p className="mt-1 text-xs text-secondary">
+                          {selectedWorkflow?.steps.length || 0} steps staged across SDLC lanes
+                        </p>
+                      </div>
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Current Step</p>
+                        <p className="workspace-meta-value">
+                          {selectedCurrentStep?.name || 'Awaiting orchestration'}
+                        </p>
+                        <p className="mt-1 text-xs text-secondary">
+                          {selectedCurrentStep?.stepType
+                            ? formatEnumLabel(selectedCurrentStep.stepType)
+                            : 'Not assigned yet'}
+                        </p>
+                      </div>
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Active Agent</p>
+                        <p className="workspace-meta-value">
+                          {selectedAgent?.name || 'Unassigned'}
+                        </p>
+                        <p className="mt-1 text-xs text-secondary">
+                          {selectedAgent?.role || 'No agent has been activated for this step yet.'}
+                        </p>
+                      </div>
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Current Run</p>
+                        <p className="workspace-meta-value">
+                          {currentRun
+                            ? `Attempt ${currentRun.attemptNumber}`
+                            : 'No run started yet'}
+                        </p>
+                        <p className="mt-1 text-xs text-secondary">
+                          {currentRun
+                            ? `Started ${formatTimestamp(currentRun.startedAt || currentRun.createdAt)}`
+                            : 'Stage the item and start execution to create a durable run.'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="workspace-meta-card">
+                      <p className="workspace-meta-label">Tags and routing</p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {selectedWorkItem.tags.length > 0 ? (
+                          selectedWorkItem.tags.map(tag => (
+                            <span key={tag}>
+                              <StatusBadge tone="neutral">{tag}</StatusBadge>
+                            </span>
+                          ))
+                        ) : (
+                          <span className="text-sm text-secondary">
+                            No tags were attached to this work item.
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
                 )}
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void handleStartExecution()}
-                    disabled={!canStartExecution || busyAction !== null}
-                    className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {busyAction === 'start' ? <LoaderCircle size={16} className="animate-spin" /> : <Play size={16} />}
-                    {selectedRunHistory.length > 0 ? 'Start from current phase' : 'Start execution'}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => void handleResolveWait()}
-                    disabled={!canResolveSelectedWait || busyAction !== null}
-                    className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {busyAction === 'resolve' ? (
-                      <LoaderCircle size={16} className="animate-spin" />
-                    ) : (
-                      <ShieldCheck size={16} />
+                {detailTab === 'control' && (
+                  <div className="space-y-4">
+                    {!runtimeReady && (
+                      <div className="workspace-inline-alert workspace-inline-alert-warning">
+                        <AlertCircle size={18} className="mt-0.5 shrink-0" />
+                        <div>
+                          <p className="text-sm font-semibold">Runtime is not ready</p>
+                          <p className="mt-1 text-sm leading-relaxed">
+                            {runtimeError ||
+                              'Configure the Copilot runtime before starting or restarting execution.'}
+                          </p>
+                        </div>
+                      </div>
                     )}
-                    {actionButtonLabel}
-                  </button>
 
-                  <button
-                    type="button"
-                    onClick={() => void handleRestartExecution()}
-                    disabled={!canRestartFromPhase || busyAction !== null}
-                    className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {busyAction === 'restart' ? (
-                      <LoaderCircle size={16} className="animate-spin" />
-                    ) : (
-                      <RefreshCw size={16} />
+                    {actionError && (
+                      <div className="workspace-inline-alert workspace-inline-alert-danger">
+                        <AlertCircle size={18} className="mt-0.5 shrink-0" />
+                        <div>
+                          <p className="text-sm font-semibold">Action failed</p>
+                          <p className="mt-1 text-sm leading-relaxed">{actionError}</p>
+                        </div>
+                      </div>
                     )}
-                    Restart run
-                  </button>
 
-                  <button
-                    type="button"
-                    onClick={() => void handleCancelRun()}
-                    disabled={!currentRunIsActive || busyAction !== null}
-                    className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {busyAction === 'cancel' ? (
-                      <LoaderCircle size={16} className="animate-spin" />
-                    ) : (
-                      <Square size={16} />
+                    {selectedOpenWait && (
+                      <div className="workspace-inline-alert workspace-inline-alert-warning">
+                        <Clock3 size={18} className="mt-0.5 shrink-0" />
+                        <div>
+                          <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em]">
+                            Waiting for {formatEnumLabel(selectedOpenWait.type)}
+                          </p>
+                          <p className="mt-2 text-sm leading-relaxed">
+                            {selectedOpenWait.message}
+                          </p>
+                        </div>
+                      </div>
                     )}
-                    Cancel run
-                  </button>
-                </div>
 
-                <textarea
-                  value={resolutionNote}
-                  onChange={event => setResolutionNote(event.target.value)}
-                  placeholder={resolutionPlaceholder}
-                  className="field-textarea mt-3 h-24 bg-white"
-                />
+                    <div className="orchestrator-action-grid">
+                      <button
+                        type="button"
+                        onClick={() => void handleStartExecution()}
+                        disabled={!canStartExecution || busyAction !== null}
+                        className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busyAction === 'start' ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <Play size={16} />
+                        )}
+                        {selectedRunHistory.length > 0 ? 'Start from current phase' : 'Start execution'}
+                      </button>
 
-                {resolutionIsRequired && !resolutionNote.trim() && selectedOpenWait && (
-                  <p className="mt-2 text-xs font-medium text-amber-700">
-                    Add the missing details above to unblock this work item and continue execution.
-                  </p>
-                )}
+                      <button
+                        type="button"
+                        onClick={() => void handleRestartExecution()}
+                        disabled={!canRestartFromPhase || busyAction !== null}
+                        className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busyAction === 'restart' ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <RefreshCw size={16} />
+                        )}
+                        Restart run
+                      </button>
 
-                {selectedOpenWait && (
-                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                    <p className="font-bold uppercase tracking-[0.14em]">
-                      Waiting for {selectedOpenWait.type.replace('_', ' ')}
-                    </p>
-                    <p className="mt-1 leading-relaxed">{selectedOpenWait.message}</p>
+                      <button
+                        type="button"
+                        onClick={() => void handleResetAndRestart()}
+                        disabled={!canResetAndRestart || busyAction !== null}
+                        className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busyAction === 'reset' ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <RefreshCw size={16} />
+                        )}
+                        Reset progress and restart
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleResolveWait()}
+                        disabled={!canResolveSelectedWait || busyAction !== null}
+                        className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busyAction === 'resolve' ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <ShieldCheck size={16} />
+                        )}
+                        {actionButtonLabel}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleCancelRun()}
+                        disabled={!currentRunIsActive || busyAction !== null}
+                        className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busyAction === 'cancel' ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <Square size={16} />
+                        )}
+                        Cancel run
+                      </button>
+                    </div>
+
+                    <div className="workspace-meta-card">
+                      <p className="workspace-meta-label">Reset target</p>
+                      <p className="workspace-meta-value">
+                        {selectedResetStep?.name || 'Workflow start'}
+                      </p>
+                      <p className="mt-1 text-xs leading-relaxed text-secondary">
+                        Reset moves the work item back to{' '}
+                        <strong>{PHASE_META[selectedResetPhase].label}</strong>
+                        {selectedResetAgent
+                          ? ` and restarts with ${selectedResetAgent.name}.`
+                          : selectedResetStep?.agentId
+                            ? ` and restarts with ${selectedResetStep.agentId}.`
+                            : '.'}
+                      </p>
+                    </div>
+
+                    <div className="workspace-meta-card">
+                      <p className="workspace-meta-label">Resolution composer</p>
+                      <textarea
+                        value={resolutionNote}
+                        onChange={event => setResolutionNote(event.target.value)}
+                        placeholder={resolutionPlaceholder}
+                        className="field-textarea mt-3 h-28 bg-white"
+                      />
+                      {resolutionIsRequired && !resolutionNote.trim() && selectedOpenWait && (
+                        <p className="mt-2 text-xs font-medium text-amber-700">
+                          Add the missing detail above to unblock this work item and continue execution.
+                        </p>
+                      )}
+                    </div>
                   </div>
                 )}
-              </div>
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="rounded-3xl border border-outline-variant/15 bg-white p-4">
-                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                    Runtime
-                  </p>
-                  <p className="mt-2 text-sm font-bold text-on-surface">
-                    {runtimeStatus?.configured ? 'Configured' : 'Not configured'}
-                  </p>
-                  <p className="mt-1 text-xs leading-relaxed text-secondary">
-                    {runtimeStatus?.configured
-                      ? `Model runtime is ${runtimeStatus.defaultModel}.`
-                      : 'Add GITHUB_MODELS_TOKEN to enable backend execution.'}
-                  </p>
-                </div>
-                <div className="rounded-3xl border border-outline-variant/15 bg-white p-4">
-                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                    Run Summary
-                  </p>
-                  <p className="mt-2 text-sm font-bold text-on-surface">
-                    {currentRun
-                      ? `Attempt ${currentRun.attemptNumber}`
-                      : 'No run started yet'}
-                  </p>
-                  <p className="mt-1 text-xs leading-relaxed text-secondary">
-                    {currentRun
-                      ? `Started ${formatTimestamp(currentRun.startedAt || currentRun.createdAt)}`
-                      : 'Launch execution to create a durable workflow run.'}
-                  </p>
-                </div>
-              </div>
+                {detailTab === 'progress' && (
+                  <div className="space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Attempt</p>
+                        <p className="workspace-meta-value">
+                          {currentRun ? currentRun.attemptNumber : 0}
+                        </p>
+                        <p className="mt-1 text-xs text-secondary">
+                          {currentRun ? RUN_STATUS_META[currentRun.status].label : 'No active run'}
+                        </p>
+                      </div>
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Wait state</p>
+                        <p className="workspace-meta-value">
+                          {selectedOpenWait
+                            ? formatEnumLabel(selectedOpenWait.type)
+                            : 'No open waits'}
+                        </p>
+                        <p className="mt-1 text-xs text-secondary">
+                          {selectedOpenWait
+                            ? `Opened ${formatTimestamp(selectedOpenWait.createdAt)}`
+                            : 'Execution is not paused on approval, input, or conflict resolution.'}
+                        </p>
+                      </div>
+                    </div>
 
-              <div className="space-y-4 overflow-y-auto pr-1">
-                <section className="rounded-3xl border border-outline-variant/15 bg-white p-4">
-                  <div className="flex items-center gap-2">
-                    <WorkflowIcon size={16} className="text-primary" />
-                    <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
-                      Workflow Steps
-                    </h3>
-                  </div>
-                  <div className="mt-4 space-y-3">
-                    {(selectedWorkflow?.steps || []).map(step => {
-                      const runStep =
-                        selectedRunDetail?.steps.find(
-                          current => current.workflowStepId === step.id,
-                        ) || null;
+                    <div className="space-y-3">
+                      {(selectedWorkflow?.steps || []).map(step => {
+                        const runStep =
+                          selectedRunDetail?.steps.find(
+                            current => current.workflowStepId === step.id,
+                          ) || null;
 
-                      return (
-                        <div
-                          key={step.id}
-                          className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4"
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="text-sm font-bold text-on-surface">{step.name}</p>
+                        return (
+                          <div key={step.id} className="orchestrator-step-row">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="text-sm font-semibold text-on-surface">
+                                  {step.name}
+                                </p>
+                                <StatusBadge tone={getStatusTone(step.phase)}>
+                                  {PHASE_META[step.phase].label}
+                                </StatusBadge>
+                              </div>
                               <p className="mt-1 text-xs leading-relaxed text-secondary">
                                 {step.action}
                               </p>
+                              <p className="mt-2 text-xs text-secondary">
+                                {agentsById.get(step.agentId)?.name || step.agentId} ·{' '}
+                                {formatEnumLabel(step.stepType)}
+                              </p>
                             </div>
-                            <DetailPill
-                              accent={
-                                runStep?.status === 'COMPLETED'
-                                  ? 'bg-emerald-100 text-emerald-700'
-                                  : runStep?.status === 'RUNNING'
-                                  ? 'bg-primary/10 text-primary'
-                                  : runStep?.status === 'WAITING'
-                                  ? 'bg-amber-100 text-amber-700'
-                                  : runStep?.status === 'FAILED'
-                                  ? 'bg-red-100 text-red-700'
-                                  : 'bg-slate-100 text-slate-700'
-                              }
-                            >
-                              {runStep?.status || 'PENDING'}
-                            </DetailPill>
-                          </div>
-
-                          <div className="mt-3 grid gap-2 text-xs text-secondary sm:grid-cols-2">
-                            <span>Phase: {PHASE_META[step.phase].label}</span>
-                            <span>
-                              Agent: {agentsById.get(step.agentId)?.name || step.agentId}
-                            </span>
-                            <span>Type: {step.stepType.replace('_', ' ')}</span>
-                            <span>Attempts: {runStep?.attemptCount || 0}</span>
-                          </div>
-
-                          {(runStep?.outputSummary || runStep?.evidenceSummary) && (
-                            <div className="mt-3 rounded-2xl bg-white px-3 py-2 text-xs leading-relaxed text-secondary">
-                              {runStep.outputSummary || runStep.evidenceSummary}
+                            <div className="flex flex-col items-end gap-2">
+                              <StatusBadge tone={getStatusTone(runStep?.status || 'PENDING')}>
+                                {runStep?.status || 'PENDING'}
+                              </StatusBadge>
+                              <span className="text-xs text-secondary">
+                                {runStep ? `${runStep.attemptCount} attempts` : 'Not started'}
+                              </span>
                             </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </section>
-
-                <section className="rounded-3xl border border-outline-variant/15 bg-white p-4">
-                  <div className="flex items-center gap-2">
-                    <Wrench size={16} className="text-primary" />
-                    <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
-                      Tool Invocations
-                    </h3>
-                  </div>
-                  <div className="mt-4 space-y-3">
-                    {(selectedRunDetail?.toolInvocations || []).length === 0 && (
-                      <p className="text-sm text-secondary">No tool activity recorded yet.</p>
-                    )}
-                    {(selectedRunDetail?.toolInvocations || []).map(tool => (
-                      <div
-                        key={tool.id}
-                        className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-bold text-on-surface">{tool.toolId}</p>
-                            <p className="mt-1 text-xs text-secondary">
-                              {tool.resultSummary || 'Tool invocation recorded.'}
-                            </p>
                           </div>
-                          <DetailPill
-                            accent={
-                              tool.status === 'COMPLETED'
-                                ? 'bg-emerald-100 text-emerald-700'
-                                : tool.status === 'FAILED'
-                                ? 'bg-red-100 text-red-700'
-                                : tool.status === 'RUNNING'
-                                ? 'bg-primary/10 text-primary'
-                                : 'bg-slate-100 text-slate-700'
-                            }
-                          >
-                            {tool.status}
-                          </DetailPill>
-                        </div>
-                        <pre className="mt-3 overflow-x-auto rounded-2xl bg-white px-3 py-2 text-[0.6875rem] leading-relaxed text-secondary">
-                          {summarizeJson(tool.request)}
-                        </pre>
+                        );
+                      })}
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Run events</p>
+                        <p className="workspace-meta-value">{selectedRunEvents.length}</p>
                       </div>
-                    ))}
-                  </div>
-                </section>
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Tool actions</p>
+                        <p className="workspace-meta-value">
+                          {selectedRunDetail?.toolInvocations.length || 0}
+                        </p>
+                      </div>
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">History</p>
+                        <p className="workspace-meta-value">{selectedRunHistory.length} runs</p>
+                      </div>
+                    </div>
 
-                <section className="rounded-3xl border border-outline-variant/15 bg-white p-4">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 size={16} className="text-primary" />
-                    <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
-                      Artifacts and Outputs
-                    </h3>
-                  </div>
-                  <div className="mt-4 space-y-3">
-                    {selectedArtifacts.length === 0 && (
-                      <p className="text-sm text-secondary">No artifacts produced yet.</p>
-                    )}
-                    {selectedArtifacts.map(artifact => (
-                      <div
-                        key={artifact.id}
-                        className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-bold text-on-surface">{artifact.name}</p>
-                            <p className="mt-1 text-xs text-secondary">
-                              {artifact.type} · {artifact.version}
-                            </p>
-                          </div>
-                          <DetailPill accent="bg-primary/10 text-primary">
-                            {artifact.direction || 'OUTPUT'}
-                          </DetailPill>
+                    <div className="workspace-meta-card">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="workspace-meta-label">Live agent activity</p>
+                          <p className="mt-2 text-sm leading-relaxed text-secondary">
+                            Safe execution milestones from the backend worker. This shows visible
+                            orchestration progress, not private model reasoning.
+                          </p>
                         </div>
-                        {artifact.summary && (
-                          <p className="mt-3 text-xs leading-relaxed text-secondary">
-                            {artifact.summary}
+                        <StatusBadge tone="info">
+                          {recentRunActivity.length} recent updates
+                        </StatusBadge>
+                      </div>
+
+                      <div className="mt-4 space-y-3">
+                        {recentRunActivity.length === 0 ? (
+                          <div className="rounded-2xl border border-outline-variant/35 bg-white px-4 py-4 text-sm text-secondary">
+                            No live activity is recorded yet for this run.
+                          </div>
+                        ) : (
+                          recentRunActivity.map(event => (
+                            <div
+                              key={event.id}
+                              className="rounded-2xl border border-outline-variant/35 bg-white px-4 py-3"
+                            >
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-semibold text-on-surface">
+                                    {event.message}
+                                  </p>
+                                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-secondary">
+                                    <span>{formatTimestamp(event.timestamp)}</span>
+                                    {typeof event.details?.toolId === 'string' ? (
+                                      <span>Tool: {formatEnumLabel(event.details.toolId)}</span>
+                                    ) : null}
+                                    {typeof event.details?.model === 'string' ? (
+                                      <span>Model: {event.details.model}</span>
+                                    ) : null}
+                                    {typeof event.details?.retrievalCount === 'number' ? (
+                                      <span>
+                                        {event.details.retrievalCount} references
+                                      </span>
+                                    ) : null}
+                                    {typeof event.details?.waitType === 'string' ? (
+                                      <span>
+                                        Wait: {formatEnumLabel(event.details.waitType)}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                </div>
+                                <StatusBadge tone={getRunEventTone(event)}>
+                                  {getRunEventLabel(event)}
+                                </StatusBadge>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {detailTab === 'outputs' && (
+                  <div className="space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Artifacts</p>
+                        <p className="workspace-meta-value">{selectedArtifacts.length}</p>
+                        <p className="mt-1 text-xs text-secondary">Captured for the latest run</p>
+                      </div>
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Evidence tasks</p>
+                        <p className="workspace-meta-value">{selectedTasks.length}</p>
+                        <p className="mt-1 text-xs text-secondary">
+                          Workflow-managed execution tasks linked to this work item
+                        </p>
+                      </div>
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Latest activity</p>
+                        <p className="workspace-meta-value">
+                          {selectedLogs.length > 0
+                            ? formatRelativeTime(selectedLogs[selectedLogs.length - 1]?.timestamp)
+                            : 'No logs yet'}
+                        </p>
+                        <p className="mt-1 text-xs text-secondary">
+                          {selectedLogs.length > 0
+                            ? selectedLogs[selectedLogs.length - 1]?.message
+                            : 'Execution output will appear here after the run advances.'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      {selectedArtifacts.length === 0 ? (
+                        <div className="rounded-3xl border border-outline-variant/35 bg-surface-container-low px-4 py-4 text-sm text-secondary">
+                          No artifacts were recorded for the latest run yet.
+                        </div>
+                      ) : (
+                        selectedArtifacts.slice(0, 5).map(artifact => (
+                          <div key={artifact.id} className="orchestrator-step-row">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="text-sm font-semibold text-on-surface">
+                                  {artifact.name}
+                                </p>
+                                <StatusBadge tone="brand">
+                                  {artifact.direction || 'OUTPUT'}
+                                </StatusBadge>
+                              </div>
+                              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                                {compactMarkdownPreview(
+                                  artifact.summary ||
+                                    artifact.description ||
+                                    `${artifact.type} · ${artifact.version}`,
+                                  180,
+                                )}
+                              </p>
+                            </div>
+                            <span className="text-xs text-secondary">
+                              {formatTimestamp(artifact.created)}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    <div className="workspace-meta-card orchestrator-preview-panel">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="workspace-meta-label">Latest document preview</p>
+                          <p className="mt-2 text-sm font-semibold text-on-surface">
+                            {latestArtifact?.name || 'No document selected'}
+                          </p>
+                        </div>
+                        {latestArtifact ? (
+                          <StatusBadge tone="info">
+                            {latestArtifact.contentFormat || 'TEXT'}
+                          </StatusBadge>
+                        ) : null}
+                      </div>
+
+                      <div className="mt-4 rounded-2xl border border-outline-variant/35 bg-white px-5 py-4">
+                        {latestArtifactDocument ? (
+                          <ArtifactPreview
+                            format={latestArtifact?.contentFormat}
+                            content={latestArtifactDocument}
+                          />
+                        ) : (
+                          <p className="text-sm leading-relaxed text-secondary">
+                            The latest artifact does not have a previewable text body yet.
                           </p>
                         )}
                       </div>
-                    ))}
-                  </div>
-                </section>
+                    </div>
 
-                <section className="rounded-3xl border border-outline-variant/15 bg-white p-4">
-                  <div className="flex items-center gap-2">
-                    <Clock3 size={16} className="text-primary" />
-                    <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
-                      Event Timeline
-                    </h3>
-                  </div>
-                  <div className="mt-4 space-y-3">
-                    {selectedRunEvents.length === 0 && (
-                      <p className="text-sm text-secondary">No run events recorded yet.</p>
-                    )}
-                    {selectedRunEvents.map(event => (
-                      <div
-                        key={event.id}
-                        className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-bold text-on-surface">{event.message}</p>
-                            <p className="mt-1 text-xs text-secondary">
-                              {event.type} · {formatTimestamp(event.timestamp)}
-                            </p>
-                          </div>
-                          <DetailPill
-                            accent={
-                              event.level === 'ERROR'
-                                ? 'bg-red-100 text-red-700'
-                                : event.level === 'WARN'
-                                ? 'bg-amber-100 text-amber-700'
-                                : 'bg-primary/10 text-primary'
-                            }
-                          >
-                            {event.level}
-                          </DetailPill>
-                        </div>
-                        {event.details && (
-                          <pre className="mt-3 overflow-x-auto rounded-2xl bg-white px-3 py-2 text-[0.6875rem] leading-relaxed text-secondary">
-                            {summarizeJson(event.details)}
-                          </pre>
-                        )}
+                    <div className="workspace-meta-card">
+                      <p className="workspace-meta-label">Open related surfaces</p>
+                      <div className="orchestrator-link-grid">
+                        <button
+                          type="button"
+                          onClick={() => navigate('/run-console')}
+                          className="enterprise-button enterprise-button-secondary justify-between"
+                        >
+                          <span>Open Run Console</span>
+                          <ExternalLink size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => navigate('/ledger')}
+                          className="enterprise-button enterprise-button-secondary justify-between"
+                        >
+                          <span>Open Ledger</span>
+                          <ExternalLink size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => navigate('/designer')}
+                          className="enterprise-button enterprise-button-secondary justify-between"
+                        >
+                          <span>Open Workflow Designer</span>
+                          <ExternalLink size={16} />
+                        </button>
                       </div>
-                    ))}
+                    </div>
                   </div>
-                </section>
-
-                <section className="rounded-3xl border border-outline-variant/15 bg-white p-4">
-                  <div className="flex items-center gap-2">
-                    <ArrowRight size={16} className="text-primary" />
-                    <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
-                      Execution Logs
-                    </h3>
-                  </div>
-                  <div className="mt-4 space-y-3">
-                    {selectedLogs.length === 0 && (
-                      <p className="text-sm text-secondary">No logs recorded yet.</p>
-                    )}
-                    {selectedLogs.map(log => (
-                      <div
-                        key={log.id}
-                        className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-bold text-on-surface">{log.message}</p>
-                            <p className="mt-1 text-xs text-secondary">
-                              {formatTimestamp(log.timestamp)} ·{' '}
-                              {agentsById.get(log.agentId)?.name || log.agentId}
-                            </p>
-                          </div>
-                          <DetailPill
-                            accent={
-                              log.level === 'ERROR'
-                                ? 'bg-red-100 text-red-700'
-                                : log.level === 'WARN'
-                                ? 'bg-amber-100 text-amber-700'
-                                : 'bg-primary/10 text-primary'
-                            }
-                          >
-                            {log.level}
-                          </DetailPill>
-                        </div>
-                        {log.metadata && (
-                          <pre className="mt-3 overflow-x-auto rounded-2xl bg-white px-3 py-2 text-[0.6875rem] leading-relaxed text-secondary">
-                            {summarizeJson(log.metadata)}
-                          </pre>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </section>
+                )}
               </div>
-            </div>
-          )}
-        </DrawerShell>
+              </div>
+            )}
+          </div>
+        </aside>
       </div>
 
-      {isCreateModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/40 px-4 pb-8 pt-24">
-          <ModalShell
-            eyebrow="New Work Item"
-            title="Launch work into the backend SDLC engine"
-            description="Create a story, choose the workflow, and let the backend execution service own step progression, waits, artifacts, and resumable run history."
-            actions={
+      {isCreateSheetOpen && (
+        <div className="fixed inset-0 z-[90]">
+          <button
+            type="button"
+            aria-label="Close create work item sheet"
+            onClick={() => setIsCreateSheetOpen(false)}
+            className="absolute inset-0 bg-slate-950/35"
+          />
+          <motion.aside
+            initial={{ opacity: 0, x: 48 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 48 }}
+            className="orchestrator-quick-sheet"
+          >
+            <div className="orchestrator-quick-sheet-header">
+              <div>
+                <p className="form-kicker">Quick Create</p>
+                <h2 className="mt-1 text-xl font-bold text-on-surface">Stage new work</h2>
+                <p className="mt-2 text-sm leading-relaxed text-secondary">
+                  Keep creation lightweight, pick the workflow, and let the execution engine own
+                  progression, waits, and durable output.
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => setIsCreateModalOpen(false)}
-                className="enterprise-button enterprise-button-secondary"
+                onClick={() => setIsCreateSheetOpen(false)}
+                className="workspace-list-action"
               >
-                Close
+                <X size={14} />
               </button>
-            }
-          >
+            </div>
 
-            <form onSubmit={handleCreateWorkItem} className="mt-6 grid gap-5">
-              <label className="space-y-2">
-                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
-                  Work item title
-                </span>
-                <input
-                  value={draftWorkItem.title}
-                  onChange={event =>
-                    setDraftWorkItem(prev => ({ ...prev, title: event.target.value }))
-                  }
-                  placeholder="Implement expression parser"
-                  className="field-input"
+            <div className="flex-1 overflow-y-auto px-6 py-5">
+              {workspace.workflows.length === 0 ? (
+                <EmptyState
+                  title="No workflow is available"
+                  description="Create or restore a workflow before staging new work into orchestration."
+                  icon={WorkflowIcon}
+                  className="min-h-[20rem]"
                 />
-              </label>
-
-              <label className="space-y-2">
-                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
-                  Description
-                </span>
-                <textarea
-                  value={draftWorkItem.description}
-                  onChange={event =>
-                    setDraftWorkItem(prev => ({
-                      ...prev,
-                      description: event.target.value,
-                    }))
-                  }
-                  placeholder="Describe the change, acceptance criteria, and any business context."
-                  className="field-textarea h-28"
-                />
-              </label>
-
-              <div className="grid gap-5 md:grid-cols-2">
-                <label className="space-y-2">
-                  <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
-                    Workflow
-                  </span>
-                  <select
-                    value={draftWorkItem.workflowId}
-                    onChange={event =>
-                      setDraftWorkItem(prev => ({
-                        ...prev,
-                        workflowId: event.target.value,
-                      }))
-                    }
-                    className="field-select"
-                  >
-                    {workspace.workflows.map(workflow => (
-                      <option key={workflow.id} value={workflow.id}>
-                        {workflow.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="space-y-2">
-                  <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
-                    Priority
-                  </span>
-                  <select
-                    value={draftWorkItem.priority}
-                    onChange={event =>
-                      setDraftWorkItem(prev => ({
-                        ...prev,
-                        priority: event.target.value as WorkItem['priority'],
-                      }))
-                    }
-                    className="field-select"
-                  >
-                    <option value="High">High</option>
-                    <option value="Med">Med</option>
-                    <option value="Low">Low</option>
-                  </select>
-                </label>
-              </div>
-
-              <label className="space-y-2">
-                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
-                  Tags
-                </span>
-                <input
-                  value={draftWorkItem.tags}
-                  onChange={event =>
-                    setDraftWorkItem(prev => ({ ...prev, tags: event.target.value }))
-                  }
-                  placeholder="parser, math, compiler"
-                  className="field-input"
-                />
-              </label>
-
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setIsCreateModalOpen(false)}
-                  className="enterprise-button enterprise-button-secondary"
+              ) : (
+                <form
+                  id="orchestrator-create-work-item"
+                  onSubmit={handleCreateWorkItem}
+                  className="grid gap-5"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={busyAction !== null}
-                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {busyAction === 'create' ? (
-                    <LoaderCircle size={16} className="animate-spin" />
-                  ) : (
-                    <Plus size={16} />
-                  )}
-                  Create work item
-                </button>
+                  <label className="space-y-2">
+                    <span className="field-label">Work item title</span>
+                    <input
+                      value={draftWorkItem.title}
+                      onChange={event =>
+                        setDraftWorkItem(prev => ({ ...prev, title: event.target.value }))
+                      }
+                      placeholder="Implement expression parser"
+                      className="field-input"
+                    />
+                  </label>
+
+                  <label className="space-y-2">
+                    <span className="field-label">Workflow</span>
+                    <select
+                      value={draftWorkItem.workflowId}
+                      onChange={event =>
+                        setDraftWorkItem(prev => ({
+                          ...prev,
+                          workflowId: event.target.value,
+                        }))
+                      }
+                      className="field-select"
+                    >
+                      {workspace.workflows.map(workflow => (
+                        <option key={workflow.id} value={workflow.id}>
+                          {workflow.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="workspace-meta-card orchestrator-quick-sheet-summary">
+                    <p className="workspace-meta-label">Workflow launch summary</p>
+                    <p className="workspace-meta-value">
+                      {draftWorkflow?.name || 'Select a workflow'}
+                    </p>
+                    <div className="mt-3 grid gap-2 text-sm text-secondary">
+                      <p>
+                        First phase:{' '}
+                        <strong className="text-on-surface">
+                          {draftFirstStep ? PHASE_META[draftFirstStep.phase].label : 'Not defined'}
+                        </strong>
+                      </p>
+                      <p>
+                        First agent:{' '}
+                        <strong className="text-on-surface">
+                          {draftFirstAgent?.name ||
+                            (draftFirstStep ? draftFirstStep.agentId : 'Unassigned')}
+                        </strong>
+                      </p>
+                      <p>
+                        Steps:{' '}
+                        <strong className="text-on-surface">
+                          {draftWorkflow?.steps.length || 0}
+                        </strong>
+                      </p>
+                    </div>
+                  </div>
+
+                  <label className="space-y-2">
+                    <span className="field-label">Priority</span>
+                    <select
+                      value={draftWorkItem.priority}
+                      onChange={event =>
+                        setDraftWorkItem(prev => ({
+                          ...prev,
+                          priority: event.target.value as WorkItem['priority'],
+                        }))
+                      }
+                      className="field-select"
+                    >
+                      <option value="High">High</option>
+                      <option value="Med">Med</option>
+                      <option value="Low">Low</option>
+                    </select>
+                  </label>
+
+                  <label className="space-y-2">
+                    <span className="field-label">Description</span>
+                    <textarea
+                      value={draftWorkItem.description}
+                      onChange={event =>
+                        setDraftWorkItem(prev => ({
+                          ...prev,
+                          description: event.target.value,
+                        }))
+                      }
+                      placeholder="Add scope, acceptance criteria, or decision context."
+                      className="field-textarea h-28"
+                    />
+                  </label>
+
+                  <label className="space-y-2">
+                    <span className="field-label">Tags</span>
+                    <input
+                      value={draftWorkItem.tags}
+                      onChange={event =>
+                        setDraftWorkItem(prev => ({ ...prev, tags: event.target.value }))
+                      }
+                      placeholder="parser, math, compiler"
+                      className="field-input"
+                    />
+                  </label>
+                </form>
+              )}
+            </div>
+
+            {workspace.workflows.length > 0 && (
+              <div className="orchestrator-quick-sheet-footer">
+                <div className="flex items-center justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsCreateSheetOpen(false)}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    form="orchestrator-create-work-item"
+                    disabled={busyAction !== null}
+                    className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {busyAction === 'create' ? (
+                      <LoaderCircle size={16} className="animate-spin" />
+                    ) : (
+                      <Plus size={16} />
+                    )}
+                    Create work item
+                  </button>
+                </div>
               </div>
-            </form>
-          </ModalShell>
+            )}
+          </motion.aside>
         </div>
       )}
     </div>

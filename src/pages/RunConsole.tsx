@@ -2,14 +2,19 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertCircle,
+  Bot,
   Clock3,
   Database,
   DollarSign,
+  MessageSquare,
   RefreshCw,
   ShieldCheck,
   Workflow,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import MarkdownContent from '../components/MarkdownContent';
 import {
+  fetchCopilotSessionMonitor,
   fetchCapabilityWorkflowRun,
   fetchCapabilityWorkflowRunEvents,
   fetchRunConsoleSnapshot,
@@ -27,7 +32,13 @@ import {
   StatusBadge,
   Toolbar,
 } from '../components/EnterpriseUI';
-import type { RunConsoleSnapshot, RunEvent, WorkflowRun, WorkflowRunDetail } from '../types';
+import type {
+  CopilotSessionMonitorSnapshot,
+  RunConsoleSnapshot,
+  RunEvent,
+  WorkflowRun,
+  WorkflowRunDetail,
+} from '../types';
 
 const formatTimestamp = (value?: string) => {
   if (!value) {
@@ -49,9 +60,37 @@ const formatTimestamp = (value?: string) => {
 
 const formatCurrency = (value = 0) => `$${value.toFixed(4)}`;
 
+const getRunEventTone = (event: RunEvent) => {
+  if (event.level === 'ERROR' || event.type === 'STEP_FAILED' || event.type === 'TOOL_FAILED') {
+    return 'danger' as const;
+  }
+
+  if (event.type === 'STEP_WAITING') {
+    return 'warning' as const;
+  }
+
+  if (event.type === 'STEP_COMPLETED' || event.type === 'TOOL_COMPLETED') {
+    return 'success' as const;
+  }
+
+  if (event.type === 'STEP_PROGRESS' || event.type === 'TOOL_STARTED') {
+    return 'info' as const;
+  }
+
+  return getStatusTone(event.level);
+};
+
+const getRunEventLabel = (event: RunEvent) => {
+  const stage =
+    typeof event.details?.stage === 'string' ? event.details.stage : event.type;
+  return formatEnumLabel(stage);
+};
+
 const RunConsole = () => {
-  const { activeCapability } = useCapability();
+  const navigate = useNavigate();
+  const { activeCapability, setActiveChatAgent } = useCapability();
   const [snapshot, setSnapshot] = useState<RunConsoleSnapshot | null>(null);
+  const [sessionMonitor, setSessionMonitor] = useState<CopilotSessionMonitorSnapshot | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string>('');
   const [selectedRunDetail, setSelectedRunDetail] = useState<WorkflowRunDetail | null>(null);
   const [selectedRunEvents, setSelectedRunEvents] = useState<RunEvent[]>([]);
@@ -61,8 +100,12 @@ const RunConsole = () => {
   const loadSnapshot = async () => {
     setIsRefreshing(true);
     try {
-      const nextSnapshot = await fetchRunConsoleSnapshot(activeCapability.id);
+      const [nextSnapshot, nextSessionMonitor] = await Promise.all([
+        fetchRunConsoleSnapshot(activeCapability.id),
+        fetchCopilotSessionMonitor(activeCapability.id),
+      ]);
       setSnapshot(nextSnapshot);
+      setSessionMonitor(nextSessionMonitor);
       setSelectedRunId(current => current || nextSnapshot.recentRuns[0]?.id || '');
       setError('');
     } catch (nextError) {
@@ -166,6 +209,26 @@ const RunConsole = () => {
     () => snapshot?.telemetry.recentSpans.slice(0, 8) || [],
     [snapshot],
   );
+  const monitoredSessions = sessionMonitor?.sessions || [];
+  const liveTimelineEvents = useMemo(
+    () =>
+      selectedRunEvents
+        .slice()
+        .sort(
+          (left, right) =>
+            new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime(),
+        )
+        .slice(0, 12),
+    [selectedRunEvents],
+  );
+
+  const openAgentChat = (agentId?: string) => {
+    if (!agentId) {
+      return;
+    }
+    setActiveChatAgent(activeCapability.id, agentId);
+    navigate('/chat');
+  };
 
   return (
     <div className="space-y-6">
@@ -212,7 +275,7 @@ const RunConsole = () => {
         <StatTile
           label="Memory Docs"
           value={snapshot?.telemetry.memoryDocumentCount || 0}
-          helper={`${snapshot?.telemetry.policyDecisionCount || 0} policy decisions`}
+          helper={`${sessionMonitor?.summary.storedSessionCount || 0} monitored sessions`}
           icon={Database}
           tone="success"
         />
@@ -277,6 +340,115 @@ const RunConsole = () => {
                   </button>
                 ))}
               </div>
+            )}
+          </SectionCard>
+
+          <SectionCard
+            title="Copilot Session Monitor"
+            description="Live and resumable Copilot sessions for this capability, merged from the runtime session cache and durable session records."
+            icon={Bot}
+          >
+            <Toolbar>
+              <span className="text-sm text-secondary">
+                Runtime: <span className="font-bold text-on-surface">{sessionMonitor?.runtime.runtimeAccessMode || 'Unknown'}</span>
+              </span>
+              <span className="text-sm text-secondary">
+                Identity:{' '}
+                <span className="font-bold text-on-surface">
+                  {sessionMonitor?.runtime.githubIdentity?.login || 'Unresolved'}
+                </span>
+              </span>
+              <span className="text-sm text-secondary">
+                Active: <span className="font-bold text-on-surface">{sessionMonitor?.summary.activeSessionCount || 0}</span>
+              </span>
+            </Toolbar>
+
+            {sessionMonitor ? (
+              <div className="mb-4 grid gap-3 md:grid-cols-4">
+                <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                  <p className="text-[0.7rem] font-bold uppercase tracking-[0.18em] text-secondary">Stored Sessions</p>
+                  <p className="mt-2 text-2xl font-bold text-on-surface">
+                    {sessionMonitor.summary.storedSessionCount}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                  <p className="text-[0.7rem] font-bold uppercase tracking-[0.18em] text-secondary">General Chat</p>
+                  <p className="mt-2 text-2xl font-bold text-on-surface">
+                    {sessionMonitor.summary.generalChatCount}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                  <p className="text-[0.7rem] font-bold uppercase tracking-[0.18em] text-secondary">Work Item</p>
+                  <p className="mt-2 text-2xl font-bold text-on-surface">
+                    {sessionMonitor.summary.workItemCount}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                  <p className="text-[0.7rem] font-bold uppercase tracking-[0.18em] text-secondary">Tracked Tokens</p>
+                  <p className="mt-2 text-2xl font-bold text-on-surface">
+                    {sessionMonitor.summary.totalTokens.toLocaleString()}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
+            {monitoredSessions.length === 0 ? (
+              <EmptyState
+                title="No Copilot sessions recorded yet"
+                description="Open Chat or start an automated workflow run to create durable Copilot session records for this capability."
+                icon={Bot}
+              />
+            ) : (
+              <DataTable
+                header={
+                  <div className="grid grid-cols-[minmax(0,1.25fr)_10rem_8rem_8rem_8rem_8rem] gap-4">
+                    <span>Session</span>
+                    <span>Scope</span>
+                    <span>State</span>
+                    <span>Last Used</span>
+                    <span>Tokens</span>
+                    <span>Action</span>
+                  </div>
+                }
+              >
+                {monitoredSessions.map(session => (
+                  <div
+                    key={session.sessionId}
+                    className="grid grid-cols-[minmax(0,1.25fr)_10rem_8rem_8rem_8rem_8rem] gap-4 border-t border-outline-variant/35 px-4 py-3 text-sm first:border-t-0"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold text-on-surface">{session.agentName}</p>
+                      <p className="truncate text-xs text-secondary">
+                        {session.model} • {session.sessionId.slice(0, 20)}
+                      </p>
+                    </div>
+                    <div className="text-secondary">
+                      <p>{formatEnumLabel(session.scope)}</p>
+                      <p className="truncate text-xs">
+                        {session.scopeId || activeCapability.id}
+                      </p>
+                    </div>
+                    <div>
+                      <StatusBadge tone={session.live ? 'success' : 'neutral'}>
+                        {session.state}
+                      </StatusBadge>
+                    </div>
+                    <span className="text-secondary">{formatTimestamp(session.lastUsedAt)}</span>
+                    <span className="text-secondary">{session.totalTokens.toLocaleString()}</span>
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => openAgentChat(session.agentId)}
+                        disabled={!session.agentId}
+                        className="inline-flex items-center gap-2 rounded-xl border border-outline-variant/45 bg-white px-3 py-1.5 text-xs font-semibold text-on-surface transition hover:border-primary/20 hover:bg-surface-container-low disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <MessageSquare size={14} />
+                        Chat
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </DataTable>
             )}
           </SectionCard>
 
@@ -362,8 +534,12 @@ const RunConsole = () => {
                       <p className="mt-1 text-xs text-secondary">
                         {formatEnumLabel(step.phase)} • Attempts {step.attemptCount}
                       </p>
-                      {step.outputSummary ? (
-                        <p className="mt-2 text-sm text-secondary">{step.outputSummary}</p>
+                      {step.outputSummary || step.evidenceSummary ? (
+                        <div className="mt-3 rounded-2xl border border-outline-variant/30 bg-white px-4 py-3">
+                          <MarkdownContent
+                            content={step.outputSummary || step.evidenceSummary || ''}
+                          />
+                        </div>
                       ) : null}
                     </div>
                   ))}
@@ -376,17 +552,27 @@ const RunConsole = () => {
                 icon={ShieldCheck}
               >
                 <div className="space-y-3">
-                  {selectedRunEvents.slice(0, 12).map(event => (
+                  {liveTimelineEvents.map(event => (
                     <div key={event.id} className="rounded-2xl border border-outline-variant/35 px-4 py-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm font-semibold text-on-surface">{event.message}</p>
-                        <StatusBadge tone={getStatusTone(event.level)}>
-                          {event.level}
+                        <StatusBadge tone={getRunEventTone(event)}>
+                          {getRunEventLabel(event)}
                         </StatusBadge>
                       </div>
-                      <p className="mt-1 text-xs text-secondary">
-                        {event.type} • {formatTimestamp(event.timestamp)}
-                      </p>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-secondary">
+                        <span>{formatTimestamp(event.timestamp)}</span>
+                        <span>{event.level}</span>
+                        {typeof event.details?.toolId === 'string' ? (
+                          <span>Tool: {formatEnumLabel(event.details.toolId)}</span>
+                        ) : null}
+                        {typeof event.details?.model === 'string' ? (
+                          <span>Model: {event.details.model}</span>
+                        ) : null}
+                        {typeof event.details?.retrievalCount === 'number' ? (
+                          <span>{event.details.retrievalCount} references</span>
+                        ) : null}
+                      </div>
                     </div>
                   ))}
                 </div>

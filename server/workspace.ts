@@ -10,6 +10,7 @@ import {
 } from '../src/constants';
 import {
   AgentOutputRecord,
+  AgentLearningProfile,
   AgentTask,
   Capability,
   CapabilityAgent,
@@ -21,9 +22,19 @@ import {
   Workflow,
 } from '../src/types';
 
-const DEFAULT_AGENT_PROVIDER = 'GitHub Copilot API' as const;
+const DEFAULT_AGENT_PROVIDER = 'GitHub Copilot SDK' as const;
 const DEFAULT_AGENT_MODEL = COPILOT_MODEL_OPTIONS[0].id;
 const DEFAULT_AGENT_TOKEN_LIMIT = 12000;
+
+export const createDefaultAgentLearningProfile = (): AgentLearningProfile => ({
+  status: 'NOT_STARTED',
+  summary: '',
+  highlights: [],
+  contextBlock: '',
+  sourceDocumentIds: [],
+  sourceArtifactIds: [],
+  sourceCount: 0,
+});
 
 const slugify = (value: string) =>
   value
@@ -174,6 +185,8 @@ export const applyWorkspaceRuntime = (
     provider: agent.provider || DEFAULT_AGENT_PROVIDER,
     model: agent.model || DEFAULT_AGENT_MODEL,
     tokenLimit: agent.tokenLimit || DEFAULT_AGENT_TOKEN_LIMIT,
+    learningProfile: agent.learningProfile || createDefaultAgentLearningProfile(),
+    sessionSummaries: agent.sessionSummaries || [],
     usage: buildAgentUsage(capability.id, agent.id, tasks, logs),
     previousOutputs: buildPreviousOutputs(capability.id, agent.id, tasks, logs),
   }));
@@ -203,6 +216,8 @@ export const buildOwnerAgent = (capability: Capability): CapabilityAgent => {
     provider: DEFAULT_AGENT_PROVIDER,
     model: DEFAULT_AGENT_MODEL,
     tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
+    learningProfile: createDefaultAgentLearningProfile(),
+    sessionSummaries: [],
     usage: buildAgentUsage(capability.id, ownerAgentId, [], []),
     previousOutputs: [],
   };
@@ -232,6 +247,8 @@ export const buildBuiltInAgents = (capability: Capability): CapabilityAgent[] =>
       provider: DEFAULT_AGENT_PROVIDER,
       model: DEFAULT_AGENT_MODEL,
       tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
+      learningProfile: createDefaultAgentLearningProfile(),
+      sessionSummaries: [],
       usage: buildAgentUsage(capability.id, agentId, [], []),
       previousOutputs: [],
     };
@@ -337,6 +354,8 @@ export const buildSeededAgents = (
       provider: DEFAULT_AGENT_PROVIDER,
       model: DEFAULT_AGENT_MODEL,
       tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
+      learningProfile: createDefaultAgentLearningProfile(),
+      sessionSummaries: [],
       usage: buildAgentUsage(capability.id, agentId),
       previousOutputs: buildPreviousOutputs(capability.id, agentId),
     });

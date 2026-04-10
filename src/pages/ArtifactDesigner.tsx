@@ -222,14 +222,14 @@ const ArtifactDesigner = () => {
     setSelectedArtifactId(artifactId);
   };
 
-  const handleSaveTemplate = () => {
+  const handleSaveTemplate = async () => {
     if (!artifactDraft.name.trim()) {
       return;
     }
-
-    const producerAgent =
-      workspace.agents.find(agent => agent.id === artifactDraft.connectedAgentId) || workspace.agents[0];
-    const nextArtifact: Artifact = {
+    try {
+      const producerAgent =
+        workspace.agents.find(agent => agent.id === artifactDraft.connectedAgentId) || workspace.agents[0];
+      const nextArtifact: Artifact = {
       id: isCreatingNew ? createArtifactId() : selectedArtifact?.id || createArtifactId(),
       name: artifactDraft.name.trim(),
       capabilityId: activeCapability.id,
@@ -251,60 +251,64 @@ const ArtifactDesigner = () => {
       isMasterArtifact: selectedArtifact?.isMasterArtifact,
     };
 
-    const existingPersistedArtifact = workspace.artifacts.find(
-      artifact => artifact.id === selectedArtifact?.id,
-    );
-    const nextArtifacts = isCreatingNew
-      ? [...workspace.artifacts, nextArtifact]
-      : existingPersistedArtifact
-      ? workspace.artifacts.map(artifact =>
-          artifact.id === existingPersistedArtifact.id ? nextArtifact : artifact,
-        )
-      : [...workspace.artifacts, nextArtifact];
+      const existingPersistedArtifact = workspace.artifacts.find(
+        artifact => artifact.id === selectedArtifact?.id,
+      );
+      const nextArtifacts = isCreatingNew
+        ? [...workspace.artifacts, nextArtifact]
+        : existingPersistedArtifact
+        ? workspace.artifacts.map(artifact =>
+            artifact.id === existingPersistedArtifact.id ? nextArtifact : artifact,
+          )
+        : [...workspace.artifacts, nextArtifact];
 
-    const previousArtifact = isCreatingNew
-      ? null
-      : workspace.artifacts.find(artifact => artifact.id === selectedArtifact?.id) || null;
-    const previousAgentId = previousArtifact?.connectedAgentId;
-    if (previousAgentId) {
-      const previousAgent = workspace.agents.find(agent => agent.id === previousAgentId);
-      if (previousAgent) {
-        updateCapabilityAgent(activeCapability.id, previousAgentId, {
-          inputArtifacts: previousAgent.inputArtifacts.filter(
-            artifactName => artifactName !== previousArtifact?.name,
-          ),
-          outputArtifacts: previousAgent.outputArtifacts.filter(
-            artifactName => artifactName !== previousArtifact?.name,
-          ),
+      const previousArtifact = isCreatingNew
+        ? null
+        : workspace.artifacts.find(artifact => artifact.id === selectedArtifact?.id) || null;
+      const previousAgentId = previousArtifact?.connectedAgentId;
+      if (previousAgentId) {
+        const previousAgent = workspace.agents.find(agent => agent.id === previousAgentId);
+        if (previousAgent) {
+          await updateCapabilityAgent(activeCapability.id, previousAgentId, {
+            inputArtifacts: previousAgent.inputArtifacts.filter(
+              artifactName => artifactName !== previousArtifact?.name,
+            ),
+            outputArtifacts: previousAgent.outputArtifacts.filter(
+              artifactName => artifactName !== previousArtifact?.name,
+            ),
+          });
+        }
+      }
+
+      if (producerAgent) {
+        const inputArtifacts =
+          artifactDraft.direction === 'INPUT'
+            ? Array.from(new Set([...(producerAgent.inputArtifacts || []), nextArtifact.name]))
+            : producerAgent.inputArtifacts.filter(artifactName => artifactName !== nextArtifact.name);
+        const outputArtifacts =
+          artifactDraft.direction === 'OUTPUT'
+            ? Array.from(new Set([...(producerAgent.outputArtifacts || []), nextArtifact.name]))
+            : producerAgent.outputArtifacts.filter(artifactName => artifactName !== nextArtifact.name);
+
+        await updateCapabilityAgent(activeCapability.id, producerAgent.id, {
+          inputArtifacts,
+          outputArtifacts,
         });
       }
-    }
 
-    if (producerAgent) {
-      const inputArtifacts =
-        artifactDraft.direction === 'INPUT'
-          ? Array.from(new Set([...(producerAgent.inputArtifacts || []), nextArtifact.name]))
-          : producerAgent.inputArtifacts.filter(artifactName => artifactName !== nextArtifact.name);
-      const outputArtifacts =
-        artifactDraft.direction === 'OUTPUT'
-          ? Array.from(new Set([...(producerAgent.outputArtifacts || []), nextArtifact.name]))
-          : producerAgent.outputArtifacts.filter(artifactName => artifactName !== nextArtifact.name);
-
-      updateCapabilityAgent(activeCapability.id, producerAgent.id, {
-        inputArtifacts,
-        outputArtifacts,
+      await setCapabilityWorkspaceContent(activeCapability.id, {
+        artifacts: nextArtifacts,
       });
+      setIsCreatingNew(false);
+      setSelectedArtifactId(nextArtifact.id);
+      success(
+        isCreatingNew ? 'Artifact created' : 'Artifact updated',
+        `${nextArtifact.name} is now saved in the capability ledger.`,
+      );
+    } catch (error) {
+      // Context mutation paths already emit failure toasts.
+      console.warn('Artifact save failed.', error);
     }
-
-    setCapabilityWorkspaceContent(activeCapability.id, {
-      artifacts: nextArtifacts,
-    });
-    setIsCreatingNew(false);
-    setSelectedArtifactId(nextArtifact.id);
-    success(
-      isCreatingNew ? 'Artifact created' : 'Artifact updated',
-      `${nextArtifact.name} is now saved in the capability ledger.`,
-    );
   };
 
   if (!selectedArtifact && !isCreatingNew) {

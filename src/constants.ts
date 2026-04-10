@@ -18,6 +18,21 @@ export const COPILOT_MODEL_OPTIONS = [
 
 export const BUILT_IN_AGENT_TEMPLATES = [
   {
+    key: 'PLANNING',
+    name: 'Planning Agent',
+    role: 'Planning Agent',
+    objective:
+      'Gather capability and stakeholder inputs for {capabilityName}, align delivery intent across participating agents, and produce a planning report that downstream execution can trust.',
+    systemPrompt:
+      'You are the Planning Agent for {capabilityName}. Synthesize stakeholder expectations, capability context, and downstream agent inputs into a clear planning report, milestones, and execution assumptions for this capability.',
+    inputArtifacts: [
+      'Capability charter',
+      'Stakeholder input briefs',
+      'Capability operating model',
+    ],
+    outputArtifacts: ['Planning Report', 'Delivery Milestone Plan'],
+  },
+  {
     key: 'ARCHITECT',
     name: 'Architect',
     role: 'Architect',

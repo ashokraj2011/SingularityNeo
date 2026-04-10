@@ -3,6 +3,7 @@ import {
   Capability,
   ToolAdapterId,
   WorkItemPhase,
+  WorkflowArtifactContract,
   Workflow,
   WorkflowEdge,
   WorkflowHandoffProtocol,
@@ -14,6 +15,7 @@ import {
   buildWorkflowFromGraph,
   createWorkflowEdge,
   createWorkflowNode,
+  normalizeWorkflowGraph,
   WORKFLOW_GRAPH_PHASES,
 } from './workflowGraph';
 
@@ -39,6 +41,8 @@ type StandardWorkflowStepTemplate = {
   allowedToolIds: ToolAdapterId[];
   preferredWorkspacePath?: string;
   executionNotes?: string;
+  artifactContract: WorkflowArtifactContract;
+  handoffArtifactContract?: WorkflowArtifactContract;
 };
 
 export const SDLC_BOARD_PHASES: WorkItemPhase[] = [
@@ -80,7 +84,64 @@ const resolveAgentReference = (
     ? getCapabilityOwnerAgentId(capability)
     : getBuiltInAgentId(capability.id, reference);
 
+const createArtifactContract = (
+  requiredInputs: string[],
+  expectedOutputs: string[],
+  notes: string,
+): WorkflowArtifactContract => ({
+  requiredInputs,
+  expectedOutputs,
+  notes,
+});
+
 export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
+  {
+    key: 'PLANNING',
+    name: 'Planning & Stakeholder Synthesis',
+    phase: 'ANALYSIS',
+    stepType: 'DELIVERY',
+    agentRef: 'PLANNING',
+    action: 'Collect stakeholder and capability inputs, align participating agents, and publish the planning report.',
+    description:
+      'Synthesize stakeholder expectations, capability context, and delivery constraints into a planning report that the rest of the SDLC flow can execute against.',
+    handoffToAgentRef: 'BUSINESS-ANALYST',
+    handoffToPhase: 'ANALYSIS',
+    handoffLabel: 'Planning hand-off to business analysis',
+    handoffRules: [
+      'Capture stakeholder priorities, dependencies, and milestone expectations before business analysis begins.',
+      'Summarize inputs from the capability owner and participating stakeholder-facing agents in one planning packet.',
+      'Publish the planning report and milestone view so downstream agents start from a shared execution baseline.',
+    ],
+    exitCriteria: [
+      'Stakeholder inputs consolidated',
+      'Planning report published',
+      'Milestone assumptions ready for business analysis',
+    ],
+    templatePath: '/out/steps/planning-step-template.md',
+    allowedToolIds: ['workspace_list', 'workspace_read', 'workspace_search'],
+    executionNotes:
+      'Planning should gather capability metadata, stakeholder inputs, and upstream agent context without modifying source code.',
+    artifactContract: createArtifactContract(
+      [
+        'Capability Charter',
+        'Stakeholder Requirements',
+        'Capability Operating Model',
+        'Cross-Agent Input Briefs',
+      ],
+      [
+        'Planning Report',
+        'Delivery Milestone Plan',
+        'Stakeholder Alignment Summary',
+        'Planning Assumptions Log',
+      ],
+      'Planning should produce a durable synthesis of stakeholder intent, milestones, and cross-agent expectations before detailed analysis begins.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Planning Report', 'Delivery Milestone Plan', 'Planning Assumptions Log'],
+      ['Analysis Intake Packet', 'Stakeholder Priorities Register'],
+      'Package the planning baseline so business analysis starts with agreed priorities, milestones, and assumptions.',
+    ),
+  },
   {
     key: 'ANALYSIS',
     name: 'Business Analysis',
@@ -107,6 +168,28 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
     allowedToolIds: ['workspace_list', 'workspace_read', 'workspace_search'],
     executionNotes:
       'Ground the analysis in capability documentation and repository context. Do not modify source code in this step.',
+    artifactContract: createArtifactContract(
+      [
+        'Capability Charter',
+        'Stakeholder Requirements',
+        'Planning Report',
+        'Stakeholder Priorities Register',
+        'Jira Story Context',
+        'Domain Constraints Register',
+      ],
+      [
+        'Requirements Specification',
+        'Acceptance Criteria Matrix',
+        'Assumptions Log',
+        'Dependency Register',
+      ],
+      'Analysis should produce a review-ready business and scope pack that downstream design can trust.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Requirements Specification', 'Acceptance Criteria Matrix', 'Assumptions Log', 'Planning Report'],
+      ['Architecture Intake Packet', 'Open Questions for Design'],
+      'Package the refined story intent and unresolved assumptions for architecture review.',
+    ),
   },
   {
     key: 'DESIGN',
@@ -134,6 +217,26 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
     allowedToolIds: ['workspace_list', 'workspace_read', 'workspace_search', 'git_status'],
     executionNotes:
       'Use repository inspection tools to understand the existing solution shape and produce design guidance before implementation.',
+    artifactContract: createArtifactContract(
+      [
+        'Requirements Specification',
+        'Acceptance Criteria Matrix',
+        'Architecture Intake Packet',
+        'Existing Solution Context',
+      ],
+      [
+        'Solution Design Document',
+        'Architecture Decision Log',
+        'API and Integration Contract',
+        'Implementation Guardrails',
+      ],
+      'Design should translate business intent into an implementation-ready technical contract.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Solution Design Document', 'Architecture Decision Log', 'Implementation Guardrails'],
+      ['Developer Handoff Packet', 'Build Scope Breakdown'],
+      'Give development a precise build plan, contract boundaries, and design decisions.',
+    ),
   },
   {
     key: 'DEVELOPMENT',
@@ -169,6 +272,26 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
     ],
     executionNotes:
       'Implementation can modify files inside capability-approved workspaces and should run build/test validation before completing the step.',
+    artifactContract: createArtifactContract(
+      [
+        'Solution Design Document',
+        'Architecture Decision Log',
+        'Developer Handoff Packet',
+        'Acceptance Criteria Matrix',
+      ],
+      [
+        'Code Change Set',
+        'Developer Test Evidence',
+        'Implementation Notes',
+        'Build Candidate Manifest',
+      ],
+      'Development should produce both executable change evidence and a clear trace of what was implemented.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Code Change Set', 'Developer Test Evidence', 'Build Candidate Manifest'],
+      ['QA Intake Packet', 'Regression Focus Areas'],
+      'Package the build candidate, developer validation, and risk notes for QA.',
+    ),
   },
   {
     key: 'QA',
@@ -203,6 +326,26 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
     ],
     executionNotes:
       'QA should execute configured validation commands, summarize the outcome, and capture evidence for downstream governance.',
+    artifactContract: createArtifactContract(
+      [
+        'Build Candidate Manifest',
+        'Acceptance Criteria Matrix',
+        'QA Intake Packet',
+        'Implementation Notes',
+      ],
+      [
+        'Test Execution Report',
+        'Defect and Risk Log',
+        'Release Recommendation',
+        'QA Sign-off Notes',
+      ],
+      'QA should produce evidence that explains both the verification outcome and remaining risk posture.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Test Execution Report', 'Defect and Risk Log', 'Release Recommendation'],
+      ['Validation Evidence Pack', 'Governance Review Summary'],
+      'Move structured evidence and quality posture into governance review.',
+    ),
   },
   {
     key: 'GOVERNANCE',
@@ -232,6 +375,26 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
     allowedToolIds: ['workspace_read', 'workspace_search', 'run_docs'],
     executionNotes:
       'Governance validation should review evidence and produce approval-ready documentation, but it should not perform deployments.',
+    artifactContract: createArtifactContract(
+      [
+        'Validation Evidence Pack',
+        'Governance Review Summary',
+        'Defect and Risk Log',
+        'Release Recommendation',
+      ],
+      [
+        'Governance Assessment',
+        'Risk and Control Record',
+        'Policy Exception Log',
+        'Approval Brief',
+      ],
+      'Governance must distill all release evidence into an approval-ready control package.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Governance Assessment', 'Approval Brief', 'Risk and Control Record'],
+      ['Human Approval Packet', 'Release Readiness Record'],
+      'Prepare the final approval packet with the exact decision context needed by human approvers.',
+    ),
   },
   {
     key: 'APPROVAL',
@@ -260,6 +423,25 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
     allowedToolIds: [],
     executionNotes:
       'This step always pauses for explicit human approval. The backend runner must not auto-complete it.',
+    artifactContract: createArtifactContract(
+      [
+        'Human Approval Packet',
+        'Release Readiness Record',
+        'Rollback Plan',
+        'Release Window Details',
+      ],
+      [
+        'Approval Decision Record',
+        'Release Authorization',
+        'Approver Comments Log',
+      ],
+      'Human approval should capture a durable authorization record and any release conditions or comments.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Release Authorization', 'Approval Decision Record', 'Rollback Plan'],
+      ['Deployment Authorization Packet', 'Operational Readiness Notes'],
+      'Translate human approval into a deployment-ready hand-off for release execution.',
+    ),
   },
   {
     key: 'RELEASE',
@@ -287,6 +469,26 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
     allowedToolIds: ['workspace_read', 'git_status', 'run_deploy', 'run_docs'],
     executionNotes:
       'Release execution can only use capability-configured deployment/doc commands and must remain approval-gated before deployment starts.',
+    artifactContract: createArtifactContract(
+      [
+        'Deployment Authorization Packet',
+        'Release Authorization',
+        'Deployment Plan',
+        'Rollback Plan',
+      ],
+      [
+        'Deployment Summary',
+        'Production Verification Report',
+        'Release Notes',
+        'Hypercare Handoff',
+      ],
+      'Release execution should leave behind a complete operational record of what was deployed and how it verified.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Deployment Summary', 'Production Verification Report', 'Release Notes'],
+      ['Capability Closure Packet', 'Post-Release Follow-up List'],
+      'Close the workflow with a final operational and ownership hand-off back to the capability owner.',
+    ),
   },
 ];
 
@@ -320,6 +522,8 @@ export const createStandardCapabilityWorkflow = (
         agentId: resolveAgentReference(capability, template.agentRef),
         action: template.action,
         description: template.description,
+        inputArtifactId: template.artifactContract.requiredInputs?.[0],
+        outputArtifactId: template.artifactContract.expectedOutputs?.[0],
         governanceGate: template.governanceGate,
         approverRoles: template.approverRoles,
         exitCriteria: template.exitCriteria,
@@ -327,6 +531,7 @@ export const createStandardCapabilityWorkflow = (
         allowedToolIds: template.allowedToolIds,
         preferredWorkspacePath: template.preferredWorkspacePath,
         executionNotes: template.executionNotes,
+        artifactContract: template.artifactContract,
         layout: {
           x: 80 + (index + 1) * 260,
           y: 48 + WORKFLOW_GRAPH_PHASES.indexOf(template.phase as never) * 176,
@@ -396,6 +601,7 @@ export const createStandardCapabilityWorkflow = (
         handoffProtocolId: template?.handoffToAgentRef
           ? getHandoffProtocolId(capability.id, template.key)
           : undefined,
+        artifactContract: template?.handoffArtifactContract,
       }),
     );
   });
@@ -412,11 +618,93 @@ export const createStandardCapabilityWorkflow = (
     nodes,
     edges,
     summary:
-      'Standard SDLC workflow with explicit agent hand-offs, governance validation, and human approval before release.',
+      'Standard SDLC workflow with explicit agent hand-offs, standard input/output document artifacts, governance validation, and human approval before release.',
     steps: [],
     handoffProtocols,
     publishState: 'PUBLISHED',
   });
+};
+
+const mergeArtifactContract = (
+  current?: WorkflowArtifactContract,
+  standard?: WorkflowArtifactContract,
+): WorkflowArtifactContract | undefined => {
+  if (!current && !standard) {
+    return undefined;
+  }
+
+  return {
+    requiredInputs:
+      current?.requiredInputs?.length ? current.requiredInputs : standard?.requiredInputs,
+    expectedOutputs:
+      current?.expectedOutputs?.length ? current.expectedOutputs : standard?.expectedOutputs,
+    notes: current?.notes || standard?.notes,
+  };
+};
+
+export const applyStandardArtifactsToWorkflow = (
+  capability: Pick<Capability, 'id' | 'name' | 'specialAgentId'>,
+  workflow: Workflow,
+): Workflow => {
+  const standardWorkflowId = `WF-${slugify(capability.id)}-STANDARD-SDLC`;
+  const isStandardWorkflow =
+    workflow.id === standardWorkflowId || workflow.name === 'Enterprise SDLC Flow';
+
+  if (!isStandardWorkflow) {
+    return workflow;
+  }
+
+  const standardWorkflow = createStandardCapabilityWorkflow(capability);
+  const standardNodes = standardWorkflow.nodes || [];
+  const workflowNodes = workflow.nodes || [];
+  const workflowNodeNamesById = new Map(workflowNodes.map(node => [node.id, node.name]));
+  const standardNodesByName = new Map(standardNodes.map(node => [node.name, node]));
+  const standardEdgesByName = new Map(
+    (standardWorkflow.edges || []).map(edge => {
+      const fromName = standardNodes.find(node => node.id === edge.fromNodeId)?.name || edge.fromNodeId;
+      const toName = standardNodes.find(node => node.id === edge.toNodeId)?.name || edge.toNodeId;
+      return [`${fromName}::${toName}`, edge] as const;
+    }),
+  );
+
+  const nextNodes = workflowNodes.map(node => {
+    const standardNode = standardNodesByName.get(node.name);
+    if (!standardNode) {
+      return node;
+    }
+
+    return {
+      ...node,
+      inputArtifactId: node.inputArtifactId || standardNode.inputArtifactId,
+      outputArtifactId: node.outputArtifactId || standardNode.outputArtifactId,
+      artifactContract: mergeArtifactContract(node.artifactContract, standardNode.artifactContract),
+    };
+  });
+
+  const nextEdges = (workflow.edges || []).map(edge => {
+    const fromName = workflowNodeNamesById.get(edge.fromNodeId) || edge.fromNodeId;
+    const toName = workflowNodeNamesById.get(edge.toNodeId) || edge.toNodeId;
+    const standardEdge = standardEdgesByName.get(`${fromName}::${toName}`);
+    if (!standardEdge) {
+      return edge;
+    }
+
+    return {
+      ...edge,
+      artifactContract: mergeArtifactContract(edge.artifactContract, standardEdge.artifactContract),
+    };
+  });
+
+  return buildWorkflowFromGraph(
+    normalizeWorkflowGraph({
+      ...workflow,
+      nodes: nextNodes,
+      edges: nextEdges,
+      summary:
+        workflow.summary ||
+        'Standard SDLC workflow with explicit agent hand-offs, standard input/output document artifacts, governance validation, and human approval before release.',
+    }),
+  );
 };
 
 export const getDefaultCapabilityWorkflows = (

@@ -41,7 +41,10 @@ type ToolAdapter = {
 const previewText = (value: string, limit = 1600) =>
   value.replace(/\0/g, '').slice(0, limit);
 
-const normalizeDirectoryPath = (value: string) => path.resolve(value.trim());
+const normalizeDirectoryPath = (value: string) => {
+  const trimmed = value.trim();
+  return trimmed ? path.resolve(trimmed) : '';
+};
 
 const getAllowedWorkspacePaths = (capability: Capability) =>
   Array.from(
@@ -56,9 +59,12 @@ const resolveWorkspacePath = (
   preferredPath?: string,
 ) => {
   const allowed = getAllowedWorkspacePaths(capability);
-  const defaultPath =
-    capability.executionConfig.defaultWorkspacePath || allowed[0];
-  const candidate = normalizeDirectoryPath(preferredPath || defaultPath || '');
+  const configuredDefault = normalizeDirectoryPath(
+    capability.executionConfig.defaultWorkspacePath || '',
+  );
+  const defaultPath = configuredDefault || allowed[0] || '';
+  const requestedPath = normalizeDirectoryPath(preferredPath || '');
+  const candidate = requestedPath || defaultPath;
 
   if (!candidate) {
     throw new Error(
@@ -67,6 +73,9 @@ const resolveWorkspacePath = (
   }
 
   if (!allowed.includes(candidate)) {
+    if (requestedPath && allowed.length === 1) {
+      return allowed[0];
+    }
     throw new Error(
       `Workspace path ${candidate} is not approved for capability ${capability.name}.`,
     );
