@@ -4,10 +4,15 @@ import {
   Capability,
   CapabilityAgent,
   CapabilityChatMessage,
+  CapabilityDeploymentTarget,
+  CapabilityExecutionCommandTemplate,
   CapabilityWorkspace,
+  CommandTemplateValidationResult,
   CopilotSessionMonitorSnapshot,
   CompletedWorkOrderDetail,
   CompletedWorkOrderSummary,
+  ConnectorValidationResult,
+  DeploymentTargetValidationResult,
   ChatStreamEvent,
   EvalRun,
   EvalRunDetail,
@@ -21,6 +26,7 @@ import {
   Skill,
   TelemetryMetricSample,
   TelemetrySpan,
+  WorkspacePathValidationResult,
   WorkItem,
   WorkItemPhase,
   WorkflowRun,
@@ -194,6 +200,57 @@ export const fetchCapabilityBundle = async (
 ): Promise<CapabilityBundle> =>
   requestJson<CapabilityBundle>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}`,
+  );
+
+export const validateOnboardingConnectors = async (payload: {
+  githubRepositories: string[];
+  jiraBoardLink?: string;
+  confluenceLink?: string;
+}): Promise<ConnectorValidationResult> =>
+  requestJson<ConnectorValidationResult>('/api/onboarding/validate-connectors', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload),
+  });
+
+export const validateOnboardingWorkspacePath = async (payload: {
+  path: string;
+}): Promise<WorkspacePathValidationResult> =>
+  requestJson<WorkspacePathValidationResult>(
+    '/api/onboarding/validate-workspace-path',
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const validateOnboardingCommandTemplate = async (payload: {
+  template: CapabilityExecutionCommandTemplate;
+  existingTemplateIds?: string[];
+  allowedWorkspacePaths?: string[];
+}): Promise<CommandTemplateValidationResult> =>
+  requestJson<CommandTemplateValidationResult>(
+    '/api/onboarding/validate-command-template',
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const validateOnboardingDeploymentTarget = async (payload: {
+  target: CapabilityDeploymentTarget;
+  commandTemplates: CapabilityExecutionCommandTemplate[];
+  allowedWorkspacePaths?: string[];
+}): Promise<DeploymentTargetValidationResult> =>
+  requestJson<DeploymentTargetValidationResult>(
+    '/api/onboarding/validate-deployment-target',
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
   );
 
 export const fetchLedgerArtifacts = async (

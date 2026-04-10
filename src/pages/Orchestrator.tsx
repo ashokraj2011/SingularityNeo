@@ -42,6 +42,7 @@ import {
 import { SDLC_BOARD_PHASES } from '../lib/standardWorkflow';
 import { cn } from '../lib/utils';
 import type {
+  ContrarianConflictReview,
   RunEvent,
   RunWait,
   WorkItem,
@@ -300,6 +301,51 @@ const getRunEventLabel = (event: RunEvent) => {
     typeof event.details?.stage === 'string' ? event.details.stage : event.type;
   return formatEnumLabel(stage);
 };
+
+const getContrarianReview = (
+  wait?: RunWait | null,
+): ContrarianConflictReview | undefined => {
+  const review = wait?.payload?.contrarianReview;
+  return review && typeof review === 'object' ? review : undefined;
+};
+
+const getContrarianReviewTone = (review?: ContrarianConflictReview) => {
+  if (!review) {
+    return 'neutral' as const;
+  }
+
+  if (review.status === 'ERROR' || review.severity === 'CRITICAL') {
+    return 'danger' as const;
+  }
+
+  if (review.status === 'PENDING' || review.severity === 'HIGH') {
+    return 'warning' as const;
+  }
+
+  if (review.severity === 'LOW' && review.recommendation === 'CONTINUE') {
+    return 'success' as const;
+  }
+
+  return 'info' as const;
+};
+
+const isConflictAttention = (item: WorkItem) =>
+  item.blocker?.type === 'CONFLICT_RESOLUTION' ||
+  item.pendingRequest?.type === 'CONFLICT_RESOLUTION';
+
+const renderReviewList = (items: string[], emptyLabel: string) =>
+  items.length > 0 ? (
+    <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
+      {items.map((item, index) => (
+        <li key={`${item}-${index}`} className="flex gap-2">
+          <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />
+          <span>{item}</span>
+        </li>
+      ))}
+    </ul>
+  ) : (
+    <p className="mt-2 text-xs leading-relaxed text-secondary">{emptyLabel}</p>
+  );
 
 const Orchestrator = () => {
   const navigate = useNavigate();
@@ -688,6 +734,7 @@ const Orchestrator = () => {
             attentionReason,
             attentionLabel,
             attentionTimestamp: getWorkItemAttentionTimestamp(item),
+            hasConflictReview: isConflictAttention(item),
             callToAction: getAttentionCallToAction({
               blocker: item.blocker,
               pendingRequest: item.pendingRequest,
@@ -736,6 +783,14 @@ const Orchestrator = () => {
     selectedWorkItem,
   );
   const selectedOpenWait = getSelectedRunWait(selectedRunDetail);
+  const selectedContrarianReview =
+    selectedOpenWait?.type === 'CONFLICT_RESOLUTION'
+      ? getContrarianReview(selectedOpenWait)
+      : undefined;
+  const selectedContrarianReviewTone =
+    getContrarianReviewTone(selectedContrarianReview);
+  const selectedContrarianReviewIsReady =
+    selectedContrarianReview?.status === 'READY';
   const selectedAgentId =
     selectedRunDetail?.run.assignedAgentId ||
     selectedCurrentStep?.agentId ||
@@ -1353,7 +1408,14 @@ const Orchestrator = () => {
                       {attention.item.title}
                     </h3>
                   </div>
-                  <StatusBadge tone="warning">{attention.attentionLabel}</StatusBadge>
+                  <div className="flex shrink-0 flex-col items-end gap-1">
+                    <StatusBadge tone="warning">{attention.attentionLabel}</StatusBadge>
+                    {attention.hasConflictReview && (
+                      <StatusBadge tone="danger" className="tracking-[0.12em]">
+                        Contrarian pass
+                      </StatusBadge>
+                    )}
+                  </div>
                 </div>
                 <div className="mt-3 space-y-2 text-sm text-secondary">
                   <p className="line-clamp-2">{attention.attentionReason}</p>
@@ -1450,6 +1512,7 @@ const Orchestrator = () => {
                         blocker: item.blocker,
                         pendingRequest: item.pendingRequest,
                       });
+                      const hasConflictReview = isConflictAttention(item);
 
                       return (
                         <motion.button
@@ -1492,6 +1555,9 @@ const Orchestrator = () => {
                               {WORK_ITEM_STATUS_META[item.status].label}
                             </StatusBadge>
                             {item.activeRunId && <StatusBadge tone="brand">Running</StatusBadge>}
+                            {hasConflictReview && (
+                              <StatusBadge tone="danger">Contrarian pass</StatusBadge>
+                            )}
                           </div>
 
                           <div className="orchestrator-board-card-body">
@@ -1785,6 +1851,142 @@ const Orchestrator = () => {
                             {selectedOpenWait.message}
                           </p>
                         </div>
+                      </div>
+                    )}
+
+                    {selectedOpenWait?.type === 'CONFLICT_RESOLUTION' && (
+                      <div className="workspace-meta-card border-red-200/70 bg-red-50/55">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">
+                              Contrarian Review
+                            </p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              Advisory adversarial pass before continuation
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <StatusBadge tone={selectedContrarianReviewTone}>
+                              {selectedContrarianReview
+                                ? selectedContrarianReview.status === 'READY'
+                                  ? 'Review ready'
+                                  : selectedContrarianReview.status === 'PENDING'
+                                    ? 'Review pending'
+                                    : 'Review unavailable'
+                                : 'Review unavailable'}
+                            </StatusBadge>
+                            {selectedContrarianReview && (
+                              <StatusBadge tone={selectedContrarianReviewTone}>
+                                {selectedContrarianReview.severity}
+                              </StatusBadge>
+                            )}
+                          </div>
+                        </div>
+
+                        {!selectedContrarianReview && (
+                          <p className="mt-3 text-sm leading-relaxed text-secondary">
+                            No contrarian payload is attached to this wait yet. You can
+                            still resolve the conflict manually.
+                          </p>
+                        )}
+
+                        {selectedContrarianReview?.status === 'PENDING' && (
+                          <p className="mt-3 text-sm leading-relaxed text-secondary">
+                            The Contrarian Reviewer is challenging the assumptions behind
+                            this conflict wait. The operator decision remains available
+                            while the advisory pass completes.
+                          </p>
+                        )}
+
+                        {selectedContrarianReview?.status === 'ERROR' && (
+                          <div className="mt-3 rounded-2xl border border-red-200 bg-white/80 px-4 py-3">
+                            <p className="text-sm font-semibold text-red-800">
+                              Review unavailable
+                            </p>
+                            <p className="mt-1 text-sm leading-relaxed text-secondary">
+                              {selectedContrarianReview.lastError ||
+                                selectedContrarianReview.summary}
+                            </p>
+                          </div>
+                        )}
+
+                        {selectedContrarianReviewIsReady && selectedContrarianReview && (
+                          <div className="mt-4 space-y-4">
+                            <p className="text-sm leading-relaxed text-on-surface">
+                              {selectedContrarianReview.summary}
+                            </p>
+
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              <div className="rounded-2xl border border-outline-variant/25 bg-white/80 px-4 py-3">
+                                <p className="workspace-meta-label">Recommendation</p>
+                                <p className="mt-2 text-sm font-semibold text-on-surface">
+                                  {formatEnumLabel(
+                                    selectedContrarianReview.recommendation,
+                                  )}
+                                </p>
+                              </div>
+                              <div className="rounded-2xl border border-outline-variant/25 bg-white/80 px-4 py-3">
+                                <p className="workspace-meta-label">Sources</p>
+                                <p className="mt-2 text-sm font-semibold text-on-surface">
+                                  {selectedContrarianReview.sourceDocumentIds?.length || 0}{' '}
+                                  documents
+                                </p>
+                              </div>
+                            </div>
+
+                            {selectedContrarianReview.suggestedResolution && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setResolutionNote(
+                                    selectedContrarianReview.suggestedResolution || '',
+                                  )
+                                }
+                                className="enterprise-button enterprise-button-secondary"
+                              >
+                                <ShieldCheck size={16} />
+                                Use suggested resolution
+                              </button>
+                            )}
+
+                            <div className="grid gap-3 lg:grid-cols-2">
+                              <div className="rounded-2xl border border-outline-variant/25 bg-white/80 px-4 py-3">
+                                <p className="workspace-meta-label">
+                                  Challenged assumptions
+                                </p>
+                                {renderReviewList(
+                                  selectedContrarianReview.challengedAssumptions || [],
+                                  'No assumptions were challenged.',
+                                )}
+                              </div>
+                              <div className="rounded-2xl border border-outline-variant/25 bg-white/80 px-4 py-3">
+                                <p className="workspace-meta-label">Risks</p>
+                                {renderReviewList(
+                                  selectedContrarianReview.risks || [],
+                                  'No major risks were flagged.',
+                                )}
+                              </div>
+                              <div className="rounded-2xl border border-outline-variant/25 bg-white/80 px-4 py-3">
+                                <p className="workspace-meta-label">
+                                  Missing evidence
+                                </p>
+                                {renderReviewList(
+                                  selectedContrarianReview.missingEvidence || [],
+                                  'No missing evidence was identified.',
+                                )}
+                              </div>
+                              <div className="rounded-2xl border border-outline-variant/25 bg-white/80 px-4 py-3">
+                                <p className="workspace-meta-label">
+                                  Alternative paths
+                                </p>
+                                {renderReviewList(
+                                  selectedContrarianReview.alternativePaths || [],
+                                  'No alternative path was proposed.',
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
 

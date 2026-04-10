@@ -1379,92 +1379,98 @@ const getCapabilityBundleTx = async (
 
 export const initializeSeedData = async () => {
   await transaction(async client => {
-    const currentSeedIds = new Set(CAPABILITIES.map(capability => capability.id));
-    const demoCapabilityIdsToRemove = LEGACY_DEMO_CAPABILITY_IDS.filter(
-      capabilityId => !currentSeedIds.has(capabilityId),
+    const demoSeedEnabled = ['1', 'true', 'yes'].includes(
+      String(process.env.ENABLE_DEMO_SEED || '').toLowerCase(),
     );
 
-    if (demoCapabilityIdsToRemove.length > 0) {
-      await client.query('DELETE FROM capabilities WHERE id = ANY($1::text[])', [
-        demoCapabilityIdsToRemove,
-      ]);
-    }
+    if (demoSeedEnabled) {
+      const currentSeedIds = new Set(CAPABILITIES.map(capability => capability.id));
+      const demoCapabilityIdsToRemove = LEGACY_DEMO_CAPABILITY_IDS.filter(
+        capabilityId => !currentSeedIds.has(capabilityId),
+      );
 
-    const existing = await client.query<{ count: string }>(
-      'SELECT COUNT(*)::text AS count FROM capabilities',
-    );
-    const hasCapabilities = Number(existing.rows[0]?.count || '0') > 0;
-
-    if (!hasCapabilities) {
-      for (const capability of CAPABILITIES) {
-        await seedCapabilityTx(client, capability);
-      }
-    }
-
-    for (const seededCapability of CAPABILITIES) {
-      const currentCapability = await getCapabilityByIdTx(client, seededCapability.id);
-      if (!currentCapability) {
-        await seedCapabilityTx(client, seededCapability);
-        continue;
+      if (demoCapabilityIdsToRemove.length > 0) {
+        await client.query('DELETE FROM capabilities WHERE id = ANY($1::text[])', [
+          demoCapabilityIdsToRemove,
+        ]);
       }
 
-      const backfilledCapability: Capability = {
-        ...currentCapability,
-        gitRepositories:
-          currentCapability.gitRepositories.length > 0
-            ? currentCapability.gitRepositories
-            : seededCapability.gitRepositories,
-        localDirectories:
-          currentCapability.localDirectories.length > 0
-            ? currentCapability.localDirectories
-            : seededCapability.localDirectories,
-        teamNames:
-          currentCapability.teamNames.length > 0
-            ? currentCapability.teamNames
-            : seededCapability.teamNames,
-        stakeholders:
-          currentCapability.stakeholders.length > 0
-            ? currentCapability.stakeholders
-            : seededCapability.stakeholders,
-        additionalMetadata:
-          currentCapability.additionalMetadata.length > 0
-            ? currentCapability.additionalMetadata
-            : seededCapability.additionalMetadata,
-      };
-
-      await upsertCapabilityTx(client, backfilledCapability);
-
-      const workflowCountResult = await client.query<{ count: string }>(
-        `
-          SELECT COUNT(*)::text AS count
-          FROM capability_workflows
-          WHERE capability_id = $1
-        `,
-        [seededCapability.id],
+      const existing = await client.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM capabilities',
       );
+      const hasCapabilities = Number(existing.rows[0]?.count || '0') > 0;
 
-      const workflowRowsResult = await client.query<{ steps: unknown }>(
-        `
-          SELECT steps
-          FROM capability_workflows
-          WHERE capability_id = $1
-        `,
-        [seededCapability.id],
-      );
+      if (!hasCapabilities) {
+        for (const capability of CAPABILITIES) {
+          await seedCapabilityTx(client, capability);
+        }
+      }
 
-      const hasModernWorkflows = workflowRowsResult.rows.some(row =>
-        hasModernWorkflowShape(row.steps),
-      );
+      for (const seededCapability of CAPABILITIES) {
+        const currentCapability = await getCapabilityByIdTx(client, seededCapability.id);
+        if (!currentCapability) {
+          await seedCapabilityTx(client, seededCapability);
+          continue;
+        }
 
-      if (
-        Number(workflowCountResult.rows[0]?.count || '0') === 0 ||
-        !hasModernWorkflows
-      ) {
-        await replaceWorkflowsTx(
-          client,
-          seededCapability.id,
-          getDefaultCapabilityWorkflows(backfilledCapability),
+        const backfilledCapability: Capability = {
+          ...currentCapability,
+          gitRepositories:
+            currentCapability.gitRepositories.length > 0
+              ? currentCapability.gitRepositories
+              : seededCapability.gitRepositories,
+          localDirectories:
+            currentCapability.localDirectories.length > 0
+              ? currentCapability.localDirectories
+              : seededCapability.localDirectories,
+          teamNames:
+            currentCapability.teamNames.length > 0
+              ? currentCapability.teamNames
+              : seededCapability.teamNames,
+          stakeholders:
+            currentCapability.stakeholders.length > 0
+              ? currentCapability.stakeholders
+              : seededCapability.stakeholders,
+          additionalMetadata:
+            currentCapability.additionalMetadata.length > 0
+              ? currentCapability.additionalMetadata
+              : seededCapability.additionalMetadata,
+        };
+
+        await upsertCapabilityTx(client, backfilledCapability);
+
+        const workflowCountResult = await client.query<{ count: string }>(
+          `
+            SELECT COUNT(*)::text AS count
+            FROM capability_workflows
+            WHERE capability_id = $1
+          `,
+          [seededCapability.id],
         );
+
+        const workflowRowsResult = await client.query<{ steps: unknown }>(
+          `
+            SELECT steps
+            FROM capability_workflows
+            WHERE capability_id = $1
+          `,
+          [seededCapability.id],
+        );
+
+        const hasModernWorkflows = workflowRowsResult.rows.some(row =>
+          hasModernWorkflowShape(row.steps),
+        );
+
+        if (
+          Number(workflowCountResult.rows[0]?.count || '0') === 0 ||
+          !hasModernWorkflows
+        ) {
+          await replaceWorkflowsTx(
+            client,
+            seededCapability.id,
+            getDefaultCapabilityWorkflows(backfilledCapability),
+          );
+        }
       }
     }
 

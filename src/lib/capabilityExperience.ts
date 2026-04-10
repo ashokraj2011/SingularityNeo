@@ -5,6 +5,7 @@ import type {
   CapabilityWorkspace,
   WorkItem,
 } from '../types';
+import { CAPABILITIES } from '../constants';
 import type { RuntimeStatus } from './api';
 import type { EnterpriseTone } from './enterprise';
 
@@ -67,10 +68,48 @@ const hasCapabilityOwner = (capability: Capability) =>
   capability.teamNames.length > 0;
 
 const hasWorkspaceSource = (capability: Capability) =>
-  capability.gitRepositories.length > 0 ||
   capability.localDirectories.length > 0 ||
   Boolean(capability.executionConfig.defaultWorkspacePath) ||
   capability.executionConfig.allowedWorkspacePaths.length > 0;
+
+const demoModeEnabled =
+  String((import.meta as any).env?.VITE_ENABLE_DEMO_MODE || '').toLowerCase() === 'true';
+
+const seededCapabilityIds = new Set(CAPABILITIES.map(capability => capability.id));
+
+const hasConnectorSetup = (capability: Capability) =>
+  capability.gitRepositories.length > 0 ||
+  hasText(capability.jiraBoardLink) ||
+  hasText(capability.confluenceLink) ||
+  hasText(capability.documentationNotes);
+
+const hasCommandTemplates = (capability: Capability) =>
+  capability.executionConfig.commandTemplates.some(
+    template => template.id && template.label && template.command.length > 0,
+  );
+
+const hasDeploymentTargetSetup = (capability: Capability) => {
+  if (capability.executionConfig.deploymentTargets.length === 0) {
+    return false;
+  }
+
+  const commandTemplateIds = new Set(
+    capability.executionConfig.commandTemplates.map(template => template.id),
+  );
+  const approvedPaths = new Set([
+    capability.executionConfig.defaultWorkspacePath,
+    ...capability.executionConfig.allowedWorkspacePaths,
+    ...capability.localDirectories,
+  ].filter(Boolean));
+
+  return capability.executionConfig.deploymentTargets.every(
+    target =>
+      target.id &&
+      target.label &&
+      commandTemplateIds.has(target.commandTemplateId) &&
+      (!target.workspacePath || approvedPaths.has(target.workspacePath)),
+  );
+};
 
 const getLearningStatuses = (agents: CapabilityAgent[]) =>
   agents.map(agent => agent.learningProfile.status);
@@ -225,11 +264,46 @@ const buildReadinessItems = (
       path: '/capabilities/metadata',
     },
     {
+      id: 'connectors',
+      label: 'Enterprise connectors',
+      description: 'GitHub, Jira, Confluence, or documentation references are linked.',
+      status: hasConnectorSetup(capability) ? 'READY' : 'NEEDS_SETUP',
+      actionLabel: 'Add connectors',
+      path: '/capabilities/metadata',
+    },
+    {
       id: 'workspace',
-      label: 'Source workspace',
-      description: 'Repositories or approved local paths are linked for delivery work.',
+      label: 'Workspace approval',
+      description: 'Local paths are explicitly approved for agent execution.',
       status: hasWorkspaceSource(capability) ? 'READY' : 'NEEDS_SETUP',
-      actionLabel: 'Add source path',
+      actionLabel: 'Approve paths',
+      path: '/capabilities/metadata',
+    },
+    {
+      id: 'commands',
+      label: 'Command templates',
+      description: 'Build, test, docs, and deploy commands are named and constrained.',
+      status: hasCommandTemplates(capability) ? 'READY' : 'NEEDS_SETUP',
+      actionLabel: 'Configure commands',
+      path: '/capabilities/metadata',
+    },
+    {
+      id: 'deployment-targets',
+      label: 'Deployment targets',
+      description: 'Release targets reference approved commands and workspace paths.',
+      status: hasDeploymentTargetSetup(capability) ? 'READY' : 'NEEDS_SETUP',
+      actionLabel: 'Configure targets',
+      path: '/capabilities/metadata',
+    },
+    {
+      id: 'workspace-mode',
+      label: 'Workspace mode',
+      description: 'Real enterprise workspaces are separated from demo capability data.',
+      status:
+        demoModeEnabled && seededCapabilityIds.has(capability.id)
+          ? 'NEEDS_ATTENTION'
+          : 'READY',
+      actionLabel: 'Create real capability',
       path: '/capabilities/metadata',
     },
     {

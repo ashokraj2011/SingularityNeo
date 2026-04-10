@@ -103,7 +103,30 @@ const workspace = (overrides: Partial<CapabilityWorkspace> = {}): CapabilityWork
 describe('capability experience model', () => {
   it('scores a ready capability and recommends creating work', () => {
     const experience = buildCapabilityExperience({
-      capability: capability(),
+      capability: capability({
+        localDirectories: ['/workspace/payments'],
+        executionConfig: {
+          defaultWorkspacePath: '/workspace/payments',
+          allowedWorkspacePaths: ['/workspace/payments'],
+          commandTemplates: [
+            {
+              id: 'test',
+              label: 'Run tests',
+              command: ['npm', 'test'],
+              workingDirectory: '/workspace/payments',
+              requiresApproval: false,
+            },
+          ],
+          deploymentTargets: [
+            {
+              id: 'staging',
+              label: 'Staging',
+              commandTemplateId: 'test',
+              workspacePath: '/workspace/payments',
+            },
+          ],
+        },
+      }),
       workspace: workspace(),
       runtimeStatus: {
         configured: true,
@@ -115,7 +138,7 @@ describe('capability experience model', () => {
       },
     });
 
-    expect(experience.readinessScore).toBe(88);
+    expect(experience.readinessScore).toBe(92);
     expect(experience.nextAction.title).toBe('Start first work item');
     expect(experience.runtimeHealth.label).toBe('Connected');
   });

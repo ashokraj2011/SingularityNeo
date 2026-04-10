@@ -9,6 +9,8 @@ import type {
   Capability,
   CapabilityAgent,
   CapabilityChatMessage,
+  CapabilityDeploymentTarget,
+  CapabilityExecutionCommandTemplate,
   CapabilityWorkspace,
   Skill,
   WorkItem,
@@ -242,6 +244,148 @@ const normalizeDirectoryPath = (value: string) => {
   return trimmed ? path.resolve(trimmed) : '';
 };
 
+const parseUrl = (value: string) => {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+};
+
+const validateConnectorUrl = ({
+  connector,
+  value,
+}: {
+  connector: 'GITHUB' | 'JIRA' | 'CONFLUENCE';
+  value: string;
+}) => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return {
+      connector,
+      value,
+      valid: true,
+      message: `${connector.toLowerCase()} connector is optional for onboarding.`,
+    };
+  }
+
+  const parsed = parseUrl(trimmed);
+  if (!parsed || !['http:', 'https:', 'ssh:'].includes(parsed.protocol)) {
+    return {
+      connector,
+      value,
+      valid: false,
+      message: 'Use a valid http(s) or ssh URL.',
+    };
+  }
+
+  const normalizedHost = parsed.hostname.toLowerCase();
+  const connectorLooksRight =
+    connector === 'GITHUB'
+      ? /github|git|bitbucket|azure|devops|gitlab/.test(normalizedHost) ||
+        trimmed.endsWith('.git')
+      : connector === 'JIRA'
+      ? /jira|atlassian/.test(normalizedHost)
+      : /confluence|atlassian/.test(normalizedHost);
+
+  return {
+    connector,
+    value,
+    valid: connectorLooksRight,
+    message: connectorLooksRight
+      ? `${connector.toLowerCase()} link looks valid.`
+      : `This URL does not look like a ${connector.toLowerCase()} connector.`,
+  };
+};
+
+const validateCommandTemplatePayload = ({
+  template,
+  existingTemplateIds = [],
+  allowedWorkspacePaths = [],
+}: {
+  template?: Partial<CapabilityExecutionCommandTemplate>;
+  existingTemplateIds?: string[];
+  allowedWorkspacePaths?: string[];
+}) => {
+  const issues: string[] = [];
+  const templateId = String(template?.id || '').trim();
+
+  if (!templateId) {
+    issues.push('Template id is required.');
+  }
+  if (!String(template?.label || '').trim()) {
+    issues.push('Template label is required.');
+  }
+  if (!Array.isArray(template?.command) || template.command.length === 0) {
+    issues.push('Command must contain at least one token.');
+  }
+  if (
+    templateId &&
+    existingTemplateIds.filter(id => id === templateId).length > 1
+  ) {
+    issues.push(`Template id ${templateId} is duplicated.`);
+  }
+  if (
+    template?.workingDirectory &&
+    allowedWorkspacePaths.length > 0 &&
+    !allowedWorkspacePaths.includes(template.workingDirectory)
+  ) {
+    issues.push('Working directory must be one of the approved workspace paths.');
+  }
+
+  return {
+    templateId: templateId || 'unassigned',
+    valid: issues.length === 0,
+    issues,
+    message:
+      issues.length === 0
+        ? 'Command template is ready.'
+        : 'Command template needs attention.',
+  };
+};
+
+const validateDeploymentTargetPayload = ({
+  target,
+  commandTemplates = [],
+  allowedWorkspacePaths = [],
+}: {
+  target?: Partial<CapabilityDeploymentTarget>;
+  commandTemplates?: CapabilityExecutionCommandTemplate[];
+  allowedWorkspacePaths?: string[];
+}) => {
+  const issues: string[] = [];
+  const targetId = String(target?.id || '').trim();
+
+  if (!targetId) {
+    issues.push('Deployment target id is required.');
+  }
+  if (!String(target?.label || '').trim()) {
+    issues.push('Deployment target label is required.');
+  }
+  if (!target?.commandTemplateId) {
+    issues.push('A command template is required.');
+  } else if (!commandTemplates.some(template => template.id === target.commandTemplateId)) {
+    issues.push(`Command template ${target.commandTemplateId} was not found.`);
+  }
+  if (
+    target?.workspacePath &&
+    allowedWorkspacePaths.length > 0 &&
+    !allowedWorkspacePaths.includes(target.workspacePath)
+  ) {
+    issues.push('Deployment workspace path must be approved for this capability.');
+  }
+
+  return {
+    targetId: targetId || 'unassigned',
+    valid: issues.length === 0,
+    issues,
+    message:
+      issues.length === 0
+        ? 'Deployment target is ready.'
+        : 'Deployment target needs attention.',
+  };
+};
+
 const getCapabilityWorkspaceRoots = (capability: Capability) =>
   Array.from(
     new Set(
@@ -464,6 +608,103 @@ app.use((request, response, next) => {
 });
 
 app.use(express.json({ limit: '2mb' }));
+
+app.post('/api/onboarding/validate-connectors', (request, response) => {
+  const body = request.body as {
+    githubRepositories?: string[];
+    jiraBoardLink?: string;
+    confluenceLink?: string;
+  };
+  const items = [
+    ...(body.githubRepositories || []).map(value =>
+      validateConnectorUrl({ connector: 'GITHUB', value }),
+    ),
+    validateConnectorUrl({ connector: 'JIRA', value: body.jiraBoardLink || '' }),
+    validateConnectorUrl({
+      connector: 'CONFLUENCE',
+      value: body.confluenceLink || '',
+    }),
+  ].filter(item => item.value.trim() || !item.valid);
+
+  response.json({
+    valid: items.every(item => item.valid),
+    items,
+  });
+});
+
+app.post('/api/onboarding/validate-workspace-path', async (request, response) => {
+  const requestedPath = String(request.body?.path || '').trim();
+  const normalizedPath = normalizeDirectoryPath(requestedPath);
+
+  if (!normalizedPath) {
+    response.json({
+      path: requestedPath,
+      valid: false,
+      exists: false,
+      isDirectory: false,
+      readable: false,
+      message: 'Workspace path is required.',
+    });
+    return;
+  }
+
+  try {
+    const stat = await fs.promises.stat(normalizedPath);
+    const isDirectory = stat.isDirectory();
+    let readable = false;
+
+    if (isDirectory) {
+      await fs.promises.access(normalizedPath, fs.constants.R_OK);
+      readable = true;
+    }
+
+    response.json({
+      path: requestedPath,
+      normalizedPath,
+      valid: isDirectory && readable,
+      exists: true,
+      isDirectory,
+      readable,
+      message:
+        isDirectory && readable
+          ? 'Workspace path is approved for onboarding.'
+          : 'Workspace path exists but is not a readable directory.',
+    });
+  } catch (error) {
+    response.json({
+      path: requestedPath,
+      normalizedPath,
+      valid: false,
+      exists: false,
+      isDirectory: false,
+      readable: false,
+      message:
+        error instanceof Error
+          ? error.message
+          : 'Workspace path could not be validated.',
+    });
+  }
+});
+
+app.post('/api/onboarding/validate-command-template', (request, response) => {
+  response.json(
+    validateCommandTemplatePayload({
+      template: request.body?.template,
+      existingTemplateIds: request.body?.existingTemplateIds || [],
+      allowedWorkspacePaths: request.body?.allowedWorkspacePaths || [],
+    }),
+  );
+});
+
+app.post('/api/onboarding/validate-deployment-target', (request, response) => {
+  response.json(
+    validateDeploymentTargetPayload({
+      target: request.body?.target,
+      commandTemplates: request.body?.commandTemplates || [],
+      allowedWorkspacePaths: request.body?.allowedWorkspacePaths || [],
+    }),
+  );
+});
 
 app.get('/api/state', async (_request, response) => {
   try {

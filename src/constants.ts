@@ -98,6 +98,22 @@ export const BUILT_IN_AGENT_TEMPLATES = [
     inputArtifacts: ['Workflow outputs', 'Governance rules'],
     outputArtifacts: ['Validation report', 'Release decision'],
   },
+  {
+    key: 'CONTRARIAN-REVIEWER',
+    name: 'Contrarian Reviewer',
+    role: 'Contrarian Reviewer',
+    objective:
+      'Challenge blocked execution decisions for {capabilityName}, surface hidden risk, and produce adversarial review artifacts for conflict-resolution waits.',
+    systemPrompt:
+      'You are the Contrarian Reviewer for {capabilityName}. Your job is to stress-test conflict-resolution waits, challenge assumptions, identify missing evidence, and recommend the safest path forward without taking over the human operator decision.',
+    inputArtifacts: [
+      'Conflict wait context',
+      'Prior handoffs',
+      'Capability memory',
+      'Execution evidence',
+    ],
+    outputArtifacts: ['Contrarian Review', 'Risk Challenge Memo'],
+  },
 ] as const;
 
 export const CAPABILITIES: Capability[] = [

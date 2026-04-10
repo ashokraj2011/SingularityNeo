@@ -397,6 +397,8 @@ const buildSources = (
           ? 'SESSION'
           : artifact.artifactKind === 'APPROVAL_RECORD'
           ? 'LONG_TERM'
+          : artifact.artifactKind === 'CONTRARIAN_REVIEW'
+          ? 'LONG_TERM'
           : 'LONG_TERM',
       sourceId: artifact.id,
       metadata: {

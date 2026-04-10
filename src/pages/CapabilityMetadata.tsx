@@ -19,6 +19,10 @@ import {
   Workflow as WorkflowIcon,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import {
+  CommandTemplateEditor,
+  DeploymentTargetEditor,
+} from '../components/CapabilityExecutionSetup';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { cn } from '../lib/utils';
@@ -30,8 +34,6 @@ import {
 } from '../lib/api';
 import {
   Capability,
-  CapabilityDeploymentTarget,
-  CapabilityExecutionCommandTemplate,
   CapabilityMetadataEntry,
   CapabilityStakeholder,
 } from '../types';
@@ -49,22 +51,6 @@ const textToList = (value: string) =>
     .split(/\n|,/)
     .map(item => item.trim())
     .filter(Boolean);
-
-const formatJson = (value: unknown) => JSON.stringify(value, null, 2);
-
-const parseJsonArray = <T,>(value: string, fallback: T[]): T[] => {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return fallback;
-  }
-
-  try {
-    const parsed = JSON.parse(trimmed);
-    return Array.isArray(parsed) ? (parsed as T[]) : fallback;
-  } catch {
-    return fallback;
-  }
-};
 
 const defaultStakeholderRoles = [
   'Development Manager',
@@ -173,8 +159,8 @@ export default function CapabilityMetadata() {
     allowedWorkspacePaths: listToText(
       activeCapability.executionConfig.allowedWorkspacePaths,
     ),
-    commandTemplates: formatJson(activeCapability.executionConfig.commandTemplates),
-    deploymentTargets: formatJson(activeCapability.executionConfig.deploymentTargets),
+    commandTemplates: activeCapability.executionConfig.commandTemplates,
+    deploymentTargets: activeCapability.executionConfig.deploymentTargets,
     teamNames: listToText(activeCapability.teamNames),
     stakeholders: normalizeStakeholders(activeCapability.stakeholders),
     additionalMetadata:
@@ -207,12 +193,8 @@ export default function CapabilityMetadata() {
       allowedWorkspacePaths: listToText(
         activeCapability.executionConfig.allowedWorkspacePaths,
       ),
-      commandTemplates: formatJson(
-        activeCapability.executionConfig.commandTemplates,
-      ),
-      deploymentTargets: formatJson(
-        activeCapability.executionConfig.deploymentTargets,
-      ),
+      commandTemplates: activeCapability.executionConfig.commandTemplates,
+      deploymentTargets: activeCapability.executionConfig.deploymentTargets,
       teamNames: listToText(activeCapability.teamNames),
       stakeholders: normalizeStakeholders(activeCapability.stakeholders),
       additionalMetadata:
@@ -307,6 +289,19 @@ export default function CapabilityMetadata() {
       workspace.agents.length,
     ],
   );
+  const approvedWorkspacePaths = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [
+            form.defaultWorkspacePath.trim(),
+            ...textToList(form.localDirectories),
+            ...textToList(form.allowedWorkspacePaths),
+          ].filter(Boolean),
+        ),
+      ),
+    [form.allowedWorkspacePaths, form.defaultWorkspacePath, form.localDirectories],
+  );
 
   const setField = (field: keyof typeof form, value: string) => {
     setSaveError('');
@@ -332,22 +327,14 @@ export default function CapabilityMetadata() {
       executionConfig: {
         defaultWorkspacePath: form.defaultWorkspacePath.trim() || undefined,
         allowedWorkspacePaths: textToList(form.allowedWorkspacePaths),
-        commandTemplates: parseJsonArray<CapabilityExecutionCommandTemplate>(
-          form.commandTemplates,
-          activeCapability.executionConfig.commandTemplates,
-        ),
-        deploymentTargets: parseJsonArray<CapabilityDeploymentTarget>(
-          form.deploymentTargets,
-          activeCapability.executionConfig.deploymentTargets,
-        ),
+        commandTemplates: form.commandTemplates,
+        deploymentTargets: form.deploymentTargets,
       },
       teamNames: textToList(form.teamNames),
       stakeholders: filteredStakeholders,
       additionalMetadata: filteredMetadataEntries,
     }),
     [
-      activeCapability.executionConfig.commandTemplates,
-      activeCapability.executionConfig.deploymentTargets,
       filteredMetadataEntries,
       filteredStakeholders,
       form.allowedWorkspacePaths,
@@ -949,29 +936,44 @@ export default function CapabilityMetadata() {
                 />
               </label>
 
-              <label className="space-y-2 md:col-span-2">
-                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
-                  Command templates (JSON array)
-                </span>
-                <textarea
-                  value={form.commandTemplates}
-                  onChange={event => setField('commandTemplates', event.target.value)}
-                  className="field-textarea h-48 font-mono text-xs"
-                />
-              </label>
-
-              <label className="space-y-2 md:col-span-2">
-                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
-                  Deployment targets (JSON array)
-                </span>
-                <textarea
-                  value={form.deploymentTargets}
-                  onChange={event =>
-                    setField('deploymentTargets', event.target.value)
+              <div className="md:col-span-2 space-y-3">
+                <div>
+                  <p className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                    Command templates
+                  </p>
+                  <p className="mt-1 text-sm leading-relaxed text-secondary">
+                    Structured command templates replace raw JSON editing and
+                    keep agent execution constrained to approved actions.
+                  </p>
+                </div>
+                <CommandTemplateEditor
+                  templates={form.commandTemplates}
+                  allowedWorkspacePaths={approvedWorkspacePaths}
+                  onChange={commandTemplates =>
+                    setForm(prev => ({ ...prev, commandTemplates }))
                   }
-                  className="field-textarea h-40 font-mono text-xs"
                 />
-              </label>
+              </div>
+
+              <div className="md:col-span-2 space-y-3">
+                <div>
+                  <p className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                    Deployment targets
+                  </p>
+                  <p className="mt-1 text-sm leading-relaxed text-secondary">
+                    Targets reference approved command templates and remain
+                    release-approval gated during workflow execution.
+                  </p>
+                </div>
+                <DeploymentTargetEditor
+                  targets={form.deploymentTargets}
+                  commandTemplates={form.commandTemplates}
+                  allowedWorkspacePaths={approvedWorkspacePaths}
+                  onChange={deploymentTargets =>
+                    setForm(prev => ({ ...prev, deploymentTargets }))
+                  }
+                />
+              </div>
             </section>
 
             <section className="grid gap-5">

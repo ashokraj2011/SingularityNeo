@@ -5,6 +5,7 @@ import {
   Artifact,
   Capability,
   CapabilityAgent,
+  ContrarianConflictReview,
   ExecutionLog,
   MemoryReference,
   RunWait,
@@ -56,6 +57,7 @@ import {
   releaseRunLease,
   resolveRunWait,
   updateToolInvocation,
+  updateRunWaitPayload,
   updateWorkflowRun,
   updateWorkflowRunStep,
 } from './repository';
@@ -176,7 +178,7 @@ type ExecutionDecision =
       summary: string;
     }
   | {
-      action: 'pause_for_input' | 'pause_for_approval';
+      action: 'pause_for_input' | 'pause_for_approval' | 'pause_for_conflict';
       reasoning: string;
       summary?: string;
       wait: {
@@ -267,6 +269,10 @@ const buildDecisionProgressMessage = (decision: ExecutionDecision) => {
 
   if (decision.action === 'pause_for_approval') {
     return 'Prepared an approval request for this workflow step.';
+  }
+
+  if (decision.action === 'pause_for_conflict') {
+    return 'Prepared a conflict-resolution wait for adversarial review.';
   }
 
   return 'Prepared a failure outcome for this workflow step.';
@@ -396,6 +402,116 @@ const buildMarkdownArtifact = (sections: Array<[string, string | undefined]>) =>
     .filter(([, value]) => Boolean(value))
     .map(([heading, value]) => `## ${heading}\n${value}`)
     .join('\n\n');
+
+const formatMarkdownList = (items: string[]) =>
+  items.length > 0 ? items.map(item => `- ${item}`).join('\n') : 'None captured.';
+
+const normalizeString = (value: unknown) =>
+  typeof value === 'string' ? value.trim() : '';
+
+const normalizeStringArray = (value: unknown) => {
+  if (Array.isArray(value)) {
+    return value.map(item => normalizeString(item)).filter(Boolean);
+  }
+
+  const normalized = normalizeString(value);
+  return normalized ? [normalized] : [];
+};
+
+const normalizeContrarianSeverity = (
+  value: unknown,
+): ContrarianConflictReview['severity'] => {
+  const normalized = normalizeString(value).toUpperCase();
+  return normalized === 'LOW' ||
+    normalized === 'MEDIUM' ||
+    normalized === 'HIGH' ||
+    normalized === 'CRITICAL'
+    ? normalized
+    : 'MEDIUM';
+};
+
+const normalizeContrarianRecommendation = (
+  value: unknown,
+): ContrarianConflictReview['recommendation'] => {
+  const normalized = normalizeString(value).toUpperCase().replace(/\s+/g, '_');
+  return normalized === 'CONTINUE' ||
+    normalized === 'REVISE_RESOLUTION' ||
+    normalized === 'ESCALATE' ||
+    normalized === 'STOP'
+    ? normalized
+    : 'ESCALATE';
+};
+
+const findContrarianReviewerAgent = (agents: CapabilityAgent[]) =>
+  agents.find(
+    agent =>
+      agent.role === 'Contrarian Reviewer' ||
+      agent.name === 'Contrarian Reviewer' ||
+      agent.id.includes('CONTRARIAN-REVIEWER'),
+  ) ||
+  agents.find(agent => agent.isOwner) ||
+  agents[0];
+
+const createPendingContrarianReview = (
+  reviewerAgentId: string,
+): ContrarianConflictReview => ({
+  status: 'PENDING',
+  reviewerAgentId,
+  generatedAt: new Date().toISOString(),
+  severity: 'MEDIUM',
+  recommendation: 'ESCALATE',
+  summary: 'Contrarian review is being generated for this conflict wait.',
+  challengedAssumptions: [],
+  risks: [],
+  missingEvidence: [],
+  alternativePaths: [],
+  sourceArtifactIds: [],
+  sourceDocumentIds: [],
+});
+
+const createErroredContrarianReview = ({
+  reviewerAgentId,
+  error,
+}: {
+  reviewerAgentId: string;
+  error: unknown;
+}): ContrarianConflictReview => {
+  const message =
+    error instanceof Error
+      ? error.message
+      : 'Contrarian review could not be generated.';
+
+  return {
+    status: 'ERROR',
+    reviewerAgentId,
+    generatedAt: new Date().toISOString(),
+    severity: 'MEDIUM',
+    recommendation: 'ESCALATE',
+    summary:
+      'Contrarian review was unavailable. The operator can still resolve this advisory wait manually.',
+    challengedAssumptions: [],
+    risks: [],
+    missingEvidence: [],
+    alternativePaths: [],
+    sourceArtifactIds: [],
+    sourceDocumentIds: [],
+    lastError: message.slice(0, 800),
+  };
+};
+
+const formatContrarianReviewMarkdown = (review: ContrarianConflictReview) =>
+  buildMarkdownArtifact([
+    ['Status', review.status],
+    ['Severity', review.severity],
+    ['Recommendation', review.recommendation.replace(/_/g, ' ')],
+    ['Summary', review.summary],
+    ['Challenged Assumptions', formatMarkdownList(review.challengedAssumptions)],
+    ['Risks', formatMarkdownList(review.risks)],
+    ['Missing Evidence', formatMarkdownList(review.missingEvidence)],
+    ['Alternative Paths', formatMarkdownList(review.alternativePaths)],
+    ['Suggested Resolution', review.suggestedResolution],
+    ['Last Error', review.lastError],
+  ]);
 
 const getStepStatus = (step?: WorkflowStep): WorkItemStatus =>
   step?.stepType === 'HUMAN_APPROVAL' ? 'PENDING_APPROVAL' : 'ACTIVE';
@@ -586,6 +702,131 @@ const extractJsonObject = (value: string) => {
   throw new Error('Model response did not contain valid JSON.');
 };
 
+const requestContrarianConflictReview = async ({
+  capability,
+  workItem,
+  workflow,
+  step,
+  runStep,
+  wait,
+  reviewer,
+  handoffContext,
+  resolvedWaitContext,
+}: {
+  capability: Capability;
+  workItem: WorkItem;
+  workflow: Workflow;
+  step: WorkflowStep;
+  runStep: WorkflowRunStep;
+  wait: RunWait;
+  reviewer: CapabilityAgent;
+  handoffContext?: string;
+  resolvedWaitContext?: string;
+}): Promise<{
+  review: ContrarianConflictReview;
+  usage: DecisionEnvelope['usage'];
+  latencyMs: number;
+  retrievalReferences: MemoryReference[];
+}> => {
+  const startedAt = Date.now();
+  const memoryContext = await buildMemoryContext({
+    capabilityId: capability.id || workItem.capabilityId,
+    agentId: reviewer.id,
+    queryText: [
+      workItem.title,
+      workItem.description,
+      workflow.name,
+      step.name,
+      step.action,
+      wait.message,
+      handoffContext,
+      resolvedWaitContext,
+    ]
+      .filter(Boolean)
+      .join('\n'),
+    limit: 8,
+  });
+
+  const response = await invokeScopedCapabilitySession({
+    capability,
+    agent: reviewer,
+    scope: 'WORK_ITEM',
+    scopeId: workItem.id,
+    developerPrompt:
+      'You are an adversarial workflow reviewer. Return JSON only with no markdown.',
+    memoryPrompt: memoryContext.prompt || undefined,
+    prompt: [
+      `Capability: ${capability.name}`,
+      `Workflow: ${workflow.name}`,
+      `Work item: ${workItem.title}`,
+      `Work item request:\n${workItem.description || 'None'}`,
+      `Current phase: ${workItem.phase}`,
+      `Current step: ${step.name}`,
+      `Step objective: ${step.action}`,
+      `Step guidance: ${step.description || 'None'}`,
+      `Current run step attempt: ${runStep.attemptCount}`,
+      `Conflict wait message:\n${wait.message}`,
+      `Prior hand-offs:\n${handoffContext || 'None'}`,
+      `Resolved input/conflict context:\n${resolvedWaitContext || 'None'}`,
+      'Challenge the proposed continuation path. Identify unsafe assumptions, missing evidence, contradictory handoffs, policy ambiguity, downstream risks, and alternative paths. Do not resolve the conflict yourself; advise the human operator.',
+      'Return JSON with this exact shape:',
+      '{"severity":"LOW|MEDIUM|HIGH|CRITICAL","recommendation":"CONTINUE|REVISE_RESOLUTION|ESCALATE|STOP","summary":"...","challengedAssumptions":["..."],"risks":["..."],"missingEvidence":["..."],"alternativePaths":["..."],"suggestedResolution":"optional operator-ready resolution text"}',
+    ].join('\n\n'),
+  });
+
+  const parsed = extractJsonObject(response.content);
+  const sourceDocumentIds = Array.from(
+    new Set(memoryContext.results.map(result => result.document.id)),
+  );
+  const sourceArtifactIds = Array.from(
+    new Set(
+      memoryContext.results
+        .map(result => {
+          const metadataArtifactId = result.document.metadata?.artifactId;
+          if (typeof metadataArtifactId === 'string' && metadataArtifactId.trim()) {
+            return metadataArtifactId.trim();
+          }
+
+          if (
+            ['ARTIFACT', 'HANDOFF', 'HUMAN_INTERACTION'].includes(
+              result.document.sourceType,
+            ) &&
+            result.document.sourceId
+          ) {
+            return result.document.sourceId;
+          }
+
+          return undefined;
+        })
+        .filter(Boolean) as string[],
+    ),
+  );
+  const suggestedResolution = normalizeString(parsed.suggestedResolution);
+
+  return {
+    review: {
+      status: 'READY',
+      reviewerAgentId: reviewer.id,
+      generatedAt: new Date().toISOString(),
+      severity: normalizeContrarianSeverity(parsed.severity),
+      recommendation: normalizeContrarianRecommendation(parsed.recommendation),
+      summary:
+        normalizeString(parsed.summary) ||
+        'Contrarian review completed without a summary.',
+      challengedAssumptions: normalizeStringArray(parsed.challengedAssumptions),
+      risks: normalizeStringArray(parsed.risks),
+      missingEvidence: normalizeStringArray(parsed.missingEvidence),
+      alternativePaths: normalizeStringArray(parsed.alternativePaths),
+      suggestedResolution: suggestedResolution || undefined,
+      sourceArtifactIds,
+      sourceDocumentIds,
+    },
+    usage: response.usage,
+    latencyMs: Date.now() - startedAt,
+    retrievalReferences: memoryContext.results.map(result => result.reference),
+  };
+};
+
 const requestStepDecision = async ({
   capability,
   workItem,
@@ -669,8 +910,10 @@ const requestStepDecision = async ({
       '2. {"action":"complete","reasoning":"...","summary":"..."}',
       '3. {"action":"pause_for_input","reasoning":"...","wait":{"type":"INPUT","message":"..."}}',
       '4. {"action":"pause_for_approval","reasoning":"...","wait":{"type":"APPROVAL","message":"..."}}',
-      '5. {"action":"fail","reasoning":"...","summary":"..."}',
+      '5. {"action":"pause_for_conflict","reasoning":"...","wait":{"type":"CONFLICT_RESOLUTION","message":"..."}}',
+      '6. {"action":"fail","reasoning":"...","summary":"..."}',
       'Only choose tool ids from the allowed list. If no tools are allowed, either complete, pause, or fail.',
+      'Use pause_for_conflict when competing requirements, unsafe assumptions, policy disagreement, or contradictory evidence need an explicit operator decision before continuation.',
       `Story title: ${workItem.title}`,
       `Story request: ${workItem.description}`,
       'Decide the next execution action for this workflow step.',
@@ -1456,6 +1699,8 @@ const buildHumanInteractionArtifact = ({
   resolution: string;
   resolvedBy: string;
 }): Artifact => {
+  const contrarianReview =
+    wait.type === 'CONFLICT_RESOLUTION' ? wait.payload?.contrarianReview : undefined;
   const artifactKind =
     wait.type === 'APPROVAL'
       ? 'APPROVAL_RECORD'
@@ -1500,9 +1745,72 @@ const buildHumanInteractionArtifact = ({
       ['Request', wait.message],
       ['Resolved By', resolvedBy],
       ['Resolution', resolution],
+      contrarianReview
+        ? ['Contrarian Review', formatContrarianReviewMarkdown(contrarianReview)]
+        : ['Contrarian Review', undefined],
     ])}`,
     downloadable: true,
     traceId: detail.run.traceId,
+  };
+};
+
+const buildContrarianReviewArtifact = ({
+  detail,
+  step,
+  runStep,
+  wait,
+  review,
+  retrievalReferences,
+  latencyMs,
+  costUsd,
+}: {
+  detail: WorkflowRunDetail;
+  step: WorkflowStep;
+  runStep: WorkflowRunStep;
+  wait: RunWait;
+  review: ContrarianConflictReview;
+  retrievalReferences: MemoryReference[];
+  latencyMs?: number;
+  costUsd?: number;
+}): Artifact => {
+  const artifactName = `${step.name} Contrarian Review`;
+
+  return {
+    id: createArtifactId(),
+    name: artifactName,
+    capabilityId: detail.run.capabilityId,
+    type: 'Adversarial Review',
+    version: `run-${detail.run.attemptNumber}`,
+    agent: review.reviewerAgentId,
+    created: review.generatedAt,
+    direction: 'OUTPUT',
+    connectedAgentId: review.reviewerAgentId,
+    sourceWorkflowId: detail.run.workflowId,
+    runId: detail.run.id,
+    runStepId: runStep.id,
+    summary: compactMarkdownSummary(review.summary),
+    artifactKind: 'CONTRARIAN_REVIEW',
+    phase: step.phase,
+    workItemId: detail.run.workItemId,
+    sourceRunId: detail.run.id,
+    sourceRunStepId: runStep.id,
+    sourceWaitId: wait.id,
+    contentFormat: 'MARKDOWN',
+    mimeType: 'text/markdown',
+    fileName: `${toFileSlug(detail.run.workItemId)}-contrarian-review-${toFileSlug(step.name)}.md`,
+    contentText: `# ${artifactName}\n\n${buildMarkdownArtifact([
+      ['Work Item', detail.run.workItemId],
+      ['Phase', formatPhaseLabel(step.phase)],
+      ['Conflict Wait', wait.message],
+      ['Reviewer Agent', review.reviewerAgentId],
+      ['Review', formatContrarianReviewMarkdown(review)],
+    ])}`,
+    contentJson: review,
+    downloadable: true,
+    traceId: detail.run.traceId,
+    latencyMs,
+    costUsd,
+    retrievalReferences,
   };
 };
 
@@ -2014,7 +2322,19 @@ const completeRunWithWait = async ({
   waitMessage: string;
 }) => {
   const currentRunStep = getCurrentRunStep(detail);
-  const wait = await createRunWait({
+  const currentStep = getCurrentWorkflowStep(detail);
+  const projection =
+    waitType === 'CONFLICT_RESOLUTION'
+      ? await resolveProjectionContext(
+          detail.run.capabilityId,
+          detail.run.workItemId,
+          detail.run.workflowSnapshot,
+        )
+      : null;
+  const contrarianReviewer = projection
+    ? findContrarianReviewerAgent(projection.workspace.agents)
+    : undefined;
+  let wait = await createRunWait({
     capabilityId: detail.run.capabilityId,
     runId: detail.run.id,
     runStepId: currentRunStep.id,
@@ -2026,9 +2346,13 @@ const completeRunWithWait = async ({
     requestedBy: currentRunStep.agentId,
     payload: {
       stepName: currentRunStep.name,
+      contrarianReview:
+        waitType === 'CONFLICT_RESOLUTION' && contrarianReviewer
+          ? createPendingContrarianReview(contrarianReviewer.id)
+          : undefined,
     },
   });
-  await updateWorkflowRunStep({
+  const waitingRunStep = await updateWorkflowRunStep({
     ...currentRunStep,
     status: 'WAITING',
     waitId: wait.id,
@@ -2065,12 +2389,137 @@ const completeRunWithWait = async ({
       phase: detail.run.currentPhase,
     },
   });
-  const nextDetail = await getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
+  let nextDetail = await getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
   await syncWaitingProjection({
     detail: nextDetail,
     waitType,
     waitMessage,
   });
+
+  if (waitType === 'CONFLICT_RESOLUTION' && projection && contrarianReviewer) {
+    let review: ContrarianConflictReview;
+    let retrievalReferences: MemoryReference[] = [];
+    let latencyMs: number | undefined;
+    let costUsd: number | undefined;
+
+    try {
+      const handoffContext = buildWorkflowHandoffContext({
+        detail: nextDetail,
+        workItem: projection.workItem,
+        artifacts: projection.workspace.artifacts,
+      });
+      const resolvedWaitContext = buildResolvedWaitContext({
+        detail: nextDetail,
+        runStep: waitingRunStep,
+      });
+      const reviewEnvelope = await requestContrarianConflictReview({
+        capability: projection.capability,
+        workItem: projection.workItem,
+        workflow: detail.run.workflowSnapshot,
+        step: currentStep,
+        runStep: waitingRunStep,
+        wait,
+        reviewer: contrarianReviewer,
+        handoffContext,
+        resolvedWaitContext,
+      });
+
+      review = reviewEnvelope.review;
+      retrievalReferences = reviewEnvelope.retrievalReferences;
+      latencyMs = reviewEnvelope.latencyMs;
+      costUsd = reviewEnvelope.usage.estimatedCostUsd;
+      await recordUsageMetrics({
+        capabilityId: detail.run.capabilityId,
+        traceId: detail.run.traceId,
+        scopeType: 'STEP',
+        scopeId: waitingRunStep.id,
+        latencyMs: reviewEnvelope.latencyMs,
+        totalTokens: reviewEnvelope.usage.totalTokens,
+        costUsd: reviewEnvelope.usage.estimatedCostUsd,
+        tags: {
+          phase: currentStep.phase,
+          model: contrarianReviewer.model,
+          review: 'contrarian',
+        },
+      });
+    } catch (error) {
+      review = createErroredContrarianReview({
+        reviewerAgentId: contrarianReviewer.id,
+        error,
+      });
+    }
+
+    try {
+      wait = await updateRunWaitPayload({
+        capabilityId: detail.run.capabilityId,
+        waitId: wait.id,
+        payload: {
+          ...(wait.payload || {}),
+          contrarianReview: review,
+        },
+      });
+
+      if (review.status === 'READY') {
+        const reviewProjection = await resolveProjectionContext(
+          detail.run.capabilityId,
+          detail.run.workItemId,
+          detail.run.workflowSnapshot,
+        );
+        const reviewArtifact = buildContrarianReviewArtifact({
+          detail: nextDetail,
+          step: currentStep,
+          runStep: waitingRunStep,
+          wait,
+          review,
+          retrievalReferences,
+          latencyMs,
+          costUsd,
+        });
+        await replaceCapabilityWorkspaceContentRecord(detail.run.capabilityId, {
+          artifacts: replaceArtifacts(reviewProjection.workspace.artifacts, [
+            reviewArtifact,
+          ]),
+        });
+      }
+
+      await emitRunProgressEvent({
+        capabilityId: detail.run.capabilityId,
+        runId: detail.run.id,
+        workItemId: detail.run.workItemId,
+        runStepId: waitingRunStep.id,
+        traceId: detail.run.traceId,
+        spanId: waitingRunStep.spanId,
+        type:
+          review.status === 'READY'
+            ? 'CONTRARIAN_REVIEW_READY'
+            : 'CONTRARIAN_REVIEW_FAILED',
+        level:
+          review.status === 'ERROR' ||
+          review.severity === 'HIGH' ||
+          review.severity === 'CRITICAL'
+            ? 'WARN'
+            : 'INFO',
+        message:
+          review.status === 'READY'
+            ? `Contrarian review completed with ${review.severity.toLowerCase()} severity.`
+            : 'Contrarian review was unavailable; conflict can still be resolved manually.',
+        details: {
+          stage:
+            review.status === 'READY'
+              ? 'CONTRARIAN_REVIEW_READY'
+              : 'CONTRARIAN_REVIEW_FAILED',
+          waitId: wait.id,
+          reviewerAgentId: review.reviewerAgentId,
+          severity: review.severity,
+          recommendation: review.recommendation,
+        },
+      });
+      nextDetail = await getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
+    } catch (error) {
+      console.warn('Contrarian review persistence failed; leaving wait open.', error);
+    }
+  }
+
   await refreshCapabilityMemory(detail.run.capabilityId).catch(() => undefined);
   await releaseRunLease({
     capabilityId: detail.run.capabilityId,
@@ -2700,7 +3149,15 @@ const executeAutomatedStep = async (
       return nextDetail;
     }
 
-    if (decision.action === 'pause_for_input' || decision.action === 'pause_for_approval') {
+    if (
+      decision.action === 'pause_for_input' ||
+      decision.action === 'pause_for_approval' ||
+      decision.action === 'pause_for_conflict'
+    ) {
+      const waitType =
+        decision.action === 'pause_for_conflict'
+          ? 'CONFLICT_RESOLUTION'
+          : decision.wait.type;
       await finishTelemetrySpan({
         capabilityId: detail.run.capabilityId,
         spanId: stepSpan.id,
@@ -2708,13 +3165,13 @@ const executeAutomatedStep = async (
         costUsd: decisionEnvelope.usage.estimatedCostUsd,
         tokenUsage: decisionEnvelope.usage,
         attributes: {
-          waitType: decision.wait.type,
+          waitType,
           waitMessage: decision.wait.message,
         },
       });
       return completeRunWithWait({
         detail: runningDetail,
-        waitType: decision.wait.type,
+        waitType,
         waitMessage: decision.wait.message,
       });
     }

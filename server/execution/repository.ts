@@ -786,6 +786,34 @@ export const resolveRunWait = async ({
   return waitFromRow(result.rows[0]);
 };
 
+export const updateRunWaitPayload = async ({
+  capabilityId,
+  waitId,
+  payload,
+}: {
+  capabilityId: string;
+  waitId: string;
+  payload: RunWait['payload'];
+}): Promise<RunWait> => {
+  const result = await query(
+    `
+      UPDATE capability_run_waits
+      SET
+        payload = $3,
+        updated_at = NOW()
+      WHERE capability_id = $1 AND id = $2
+      RETURNING *
+    `,
+    [capabilityId, waitId, serializeJson(payload)],
+  );
+
+  if (!result.rowCount) {
+    throw new Error(`Run wait ${waitId} was not found.`);
+  }
+
+  return waitFromRow(result.rows[0]);
+};
+
 export const createToolInvocation = async (
   invocation: Omit<ToolInvocation, 'createdAt'> & { createdAt?: string },
 ): Promise<ToolInvocation> => {

@@ -44,6 +44,60 @@ export interface CapabilityExecutionConfig {
   deploymentTargets: CapabilityDeploymentTarget[];
 }
 
+export interface CapabilityOnboardingDraft {
+  name: string;
+  domain: string;
+  parentCapabilityId: string;
+  businessUnit: string;
+  ownerTeam: string;
+  description: string;
+  githubRepositories: string[];
+  jiraBoardLink: string;
+  confluenceLink: string;
+  documentationNotes: string;
+  localDirectories: string[];
+  defaultWorkspacePath: string;
+  allowedWorkspacePaths: string[];
+  commandTemplates: CapabilityExecutionCommandTemplate[];
+  deploymentTargets: CapabilityDeploymentTarget[];
+}
+
+export interface ConnectorValidationItem {
+  connector: 'GITHUB' | 'JIRA' | 'CONFLUENCE';
+  value: string;
+  valid: boolean;
+  message: string;
+}
+
+export interface ConnectorValidationResult {
+  valid: boolean;
+  items: ConnectorValidationItem[];
+}
+
+export interface WorkspacePathValidationResult {
+  path: string;
+  normalizedPath?: string;
+  valid: boolean;
+  exists: boolean;
+  isDirectory: boolean;
+  readable: boolean;
+  message: string;
+}
+
+export interface CommandTemplateValidationResult {
+  templateId: string;
+  valid: boolean;
+  issues: string[];
+  message: string;
+}
+
+export interface DeploymentTargetValidationResult {
+  targetId: string;
+  valid: boolean;
+  issues: string[];
+  message: string;
+}
+
 export interface Capability {
   id: string;
   name: string;
@@ -264,6 +318,7 @@ export type ArtifactKind =
   | 'APPROVAL_RECORD'
   | 'INPUT_NOTE'
   | 'CONFLICT_RESOLUTION'
+  | 'CONTRARIAN_REVIEW'
   | 'EXECUTION_SUMMARY';
 
 export type ArtifactContentFormat = 'TEXT' | 'MARKDOWN' | 'JSON';
@@ -603,6 +658,38 @@ export type RunWaitType = 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION';
 
 export type RunWaitStatus = 'OPEN' | 'RESOLVED' | 'CANCELLED';
 
+export type ContrarianReviewStatus = 'PENDING' | 'READY' | 'ERROR';
+
+export type ContrarianReviewSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+export type ContrarianReviewRecommendation =
+  | 'CONTINUE'
+  | 'REVISE_RESOLUTION'
+  | 'ESCALATE'
+  | 'STOP';
+
+export interface ContrarianConflictReview {
+  status: ContrarianReviewStatus;
+  reviewerAgentId: string;
+  generatedAt: string;
+  severity: ContrarianReviewSeverity;
+  recommendation: ContrarianReviewRecommendation;
+  summary: string;
+  challengedAssumptions: string[];
+  risks: string[];
+  missingEvidence: string[];
+  alternativePaths: string[];
+  suggestedResolution?: string;
+  sourceArtifactIds: string[];
+  sourceDocumentIds: string[];
+  lastError?: string;
+}
+
+export type RunWaitPayload = {
+  stepName?: string;
+  contrarianReview?: ContrarianConflictReview;
+} & Record<string, any>;
+
 export interface WorkflowRun {
   id: string;
   capabilityId: string;
@@ -721,7 +808,7 @@ export interface RunWait {
   requestedBy: string;
   resolution?: string;
   resolvedBy?: string;
-  payload?: Record<string, any>;
+  payload?: RunWaitPayload;
   createdAt: string;
   resolvedAt?: string;
 }
