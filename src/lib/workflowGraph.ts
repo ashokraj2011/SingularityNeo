@@ -1,4 +1,5 @@
 import type {
+  CapabilityLifecycle,
   WorkItemPhase,
   Workflow,
   WorkflowEdge,
@@ -11,12 +12,19 @@ import type {
   WorkflowStep,
   WorkflowStepType,
 } from '../types';
+import {
+  createDefaultCapabilityLifecycle,
+  getCapabilityGraphPhaseIds,
+  getDefaultLifecycleEndPhaseId,
+  getDefaultLifecycleStartPhaseId,
+} from './capabilityLifecycle';
+import { isReleaseWorkflowStep } from './workflowStepSemantics';
 
 export const WORKFLOW_GRAPH_SCHEMA_VERSION = 2;
 
-export const WORKFLOW_GRAPH_PHASES: Array<
-  Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'>
-> = ['ANALYSIS', 'DESIGN', 'DEVELOPMENT', 'QA', 'GOVERNANCE', 'RELEASE'];
+export const WORKFLOW_GRAPH_PHASES: WorkItemPhase[] = getCapabilityGraphPhaseIds(
+  createDefaultCapabilityLifecycle(),
+);
 
 const DEFAULT_NODE_WIDTH = 220;
 const DEFAULT_NODE_HEIGHT = 108;
@@ -26,6 +34,9 @@ const DEFAULT_LANE_TOP = 48;
 
 const createGraphId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+
+const getGraphPhases = (lifecycle?: CapabilityLifecycle | null) =>
+  getCapabilityGraphPhaseIds(lifecycle);
 
 const isObject = (value: unknown): value is Record<string, any> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -70,7 +81,7 @@ const mapStepTypeToNodeType = (step: WorkflowStep): WorkflowNodeType => {
     return 'HUMAN_APPROVAL';
   }
 
-  if (step.phase === 'RELEASE') {
+  if (isReleaseWorkflowStep(step)) {
     return 'RELEASE';
   }
 
@@ -81,8 +92,10 @@ const normalizeLayout = (
   node: Partial<WorkflowNode>,
   column: number,
   phase: WorkItemPhase,
+  lifecycle?: CapabilityLifecycle | null,
 ) => {
-  const laneIndex = Math.max(WORKFLOW_GRAPH_PHASES.indexOf(phase as never), 0);
+  const graphPhases = getGraphPhases(lifecycle);
+  const laneIndex = Math.max(graphPhases.indexOf(phase), 0);
 
   return {
     x:
@@ -99,13 +112,15 @@ const normalizeLayout = (
 const sortNodeIdsForTraversal = (
   nodes: WorkflowNode[],
   ids: string[],
+  lifecycle?: CapabilityLifecycle | null,
 ) =>
   ids
     .map(id => nodes.find(node => node.id === id))
     .filter(Boolean)
     .sort((left, right) => {
-      const laneLeft = WORKFLOW_GRAPH_PHASES.indexOf(left!.phase as never);
-      const laneRight = WORKFLOW_GRAPH_PHASES.indexOf(right!.phase as never);
+      const graphPhases = getGraphPhases(lifecycle);
+      const laneLeft = graphPhases.indexOf(left!.phase);
+      const laneRight = graphPhases.indexOf(right!.phase);
       if (laneLeft !== laneRight) {
         return laneLeft - laneRight;
       }
@@ -116,10 +131,13 @@ const sortNodeIdsForTraversal = (
     })
     .map(node => node!.id);
 
-const getLanePhase = (phase?: WorkItemPhase): Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'> =>
-  WORKFLOW_GRAPH_PHASES.includes((phase || 'ANALYSIS') as never)
-    ? (phase as Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'>)
-    : 'ANALYSIS';
+const getLanePhase = (
+  phase?: WorkItemPhase,
+  lifecycle?: CapabilityLifecycle | null,
+): WorkItemPhase => {
+  const graphPhases = getGraphPhases(lifecycle);
+  return graphPhases.includes(phase || '') ? (phase as WorkItemPhase) : graphPhases[0];
+};
 
 const getNodeRecord = (workflow: Workflow) =>
   new Map((workflow.nodes || []).map(node => [node.id, node]));
@@ -141,17 +159,21 @@ export const getOutgoingWorkflowEdges = (workflow: Workflow, nodeId?: string | n
 export const getIncomingWorkflowEdges = (workflow: Workflow, nodeId?: string | null) =>
   getWorkflowEdges(workflow).filter(edge => edge.toNodeId === nodeId);
 
-export const getWorkflowNodeOrder = (workflow: Workflow) => {
+export const getWorkflowNodeOrder = (
+  workflow: Workflow,
+  lifecycle?: CapabilityLifecycle | null,
+) => {
   const nodes = getWorkflowNodes(workflow);
   const edges = getWorkflowEdges(workflow);
   const visited = new Set<string>();
   const ordered: string[] = [];
   const entryNode = getWorkflowEntryNode(workflow);
+  const graphPhases = getGraphPhases(lifecycle);
   const fallbackIds = nodes
     .slice()
     .sort((left, right) => {
-      const laneLeft = WORKFLOW_GRAPH_PHASES.indexOf(left.phase as never);
-      const laneRight = WORKFLOW_GRAPH_PHASES.indexOf(right.phase as never);
+      const laneLeft = graphPhases.indexOf(left.phase);
+      const laneRight = graphPhases.indexOf(right.phase);
       if (laneLeft !== laneRight) {
         return laneLeft - laneRight;
       }
@@ -171,6 +193,7 @@ export const getWorkflowNodeOrder = (workflow: Workflow) => {
     const nextIds = sortNodeIdsForTraversal(
       nodes,
       edges.filter(edge => edge.fromNodeId === nodeId).map(edge => edge.toNodeId),
+      lifecycle,
     );
     nextIds.forEach(visit);
   };
@@ -185,6 +208,7 @@ const findNearestVisibleNode = (
   workflow: Workflow,
   startNodeId?: string,
   direction: 'forward' | 'backward' = 'forward',
+  lifecycle?: CapabilityLifecycle | null,
 ) => {
   if (!startNodeId) {
     return undefined;
@@ -211,13 +235,18 @@ const findNearestVisibleNode = (
       direction === 'forward'
         ? getOutgoingWorkflowEdges(workflow, currentId).map(edge => edge.toNodeId)
         : getIncomingWorkflowEdges(workflow, currentId).map(edge => edge.fromNodeId);
-    sortNodeIdsForTraversal(getWorkflowNodes(workflow), nextIds).forEach(id => queue.push(id));
+    sortNodeIdsForTraversal(getWorkflowNodes(workflow), nextIds, lifecycle).forEach(id =>
+      queue.push(id),
+    );
   }
 
   return undefined;
 };
 
-const deriveHandoffProtocols = (workflow: Workflow) => {
+const deriveHandoffProtocols = (
+  workflow: Workflow,
+  lifecycle?: CapabilityLifecycle | null,
+) => {
   const existingProtocols = new Map(
     (workflow.handoffProtocols || []).map(protocol => [
       protocol.sourceNodeId || protocol.sourceStepId,
@@ -225,14 +254,14 @@ const deriveHandoffProtocols = (workflow: Workflow) => {
     ]),
   );
 
-  return deriveWorkflowStepsFromGraph(workflow).flatMap(step => {
+  return deriveWorkflowStepsFromGraph(workflow, lifecycle).flatMap(step => {
     const outgoingEdge = getOutgoingWorkflowEdges(workflow, step.id)[0];
     if (!outgoingEdge || !outgoingEdge.handoffProtocolId) {
       return [];
     }
 
     const targetVisibleNode =
-      findNearestVisibleNode(workflow, outgoingEdge.toNodeId, 'forward') ||
+      findNearestVisibleNode(workflow, outgoingEdge.toNodeId, 'forward', lifecycle) ||
       getWorkflowNode(workflow, outgoingEdge.toNodeId);
     const existing = existingProtocols.get(step.id);
 
@@ -256,8 +285,11 @@ const deriveHandoffProtocols = (workflow: Workflow) => {
   });
 };
 
-export const deriveWorkflowStepsFromGraph = (workflow: Workflow): WorkflowStep[] => {
-  const orderedNodes = getWorkflowNodeOrder(workflow)
+export const deriveWorkflowStepsFromGraph = (
+  workflow: Workflow,
+  lifecycle?: CapabilityLifecycle | null,
+): WorkflowStep[] => {
+  const orderedNodes = getWorkflowNodeOrder(workflow, lifecycle)
     .map(nodeId => getWorkflowNode(workflow, nodeId))
     .filter((node): node is WorkflowNode => Boolean(node));
 
@@ -266,7 +298,7 @@ export const deriveWorkflowStepsFromGraph = (workflow: Workflow): WorkflowStep[]
     .map(node => {
       const firstEdge = getOutgoingWorkflowEdges(workflow, node.id)[0];
       const targetVisibleNode = firstEdge
-        ? findNearestVisibleNode(workflow, firstEdge.toNodeId, 'forward')
+        ? findNearestVisibleNode(workflow, firstEdge.toNodeId, 'forward', lifecycle)
         : undefined;
 
       return {
@@ -295,15 +327,21 @@ export const deriveWorkflowStepsFromGraph = (workflow: Workflow): WorkflowStep[]
     });
 };
 
-const createLinearGraph = (workflow: Workflow): Workflow => {
+const createLinearGraph = (
+  workflow: Workflow,
+  lifecycle?: CapabilityLifecycle | null,
+): Workflow => {
   const startNodeId = `NODE-${workflow.id}-START`;
   const endNodeId = `NODE-${workflow.id}-END`;
+  const graphPhases = getGraphPhases(lifecycle);
+  const startPhase = getDefaultLifecycleStartPhaseId(lifecycle);
+  const endPhase = getDefaultLifecycleEndPhaseId(lifecycle);
   const nodes: WorkflowNode[] = [
     {
       id: startNodeId,
       name: 'Start',
       type: 'START',
-      phase: 'ANALYSIS',
+      phase: startPhase,
       layout: { x: 80, y: DEFAULT_LANE_TOP },
       description: 'Entry point for workflow execution.',
     },
@@ -311,8 +349,13 @@ const createLinearGraph = (workflow: Workflow): Workflow => {
       id: step.id,
       name: step.name,
       type: mapStepTypeToNodeType(step),
-      phase: getLanePhase(step.phase),
-      layout: normalizeLayout(step as Partial<WorkflowNode>, index + 1, step.phase),
+      phase: getLanePhase(step.phase, lifecycle),
+      layout: normalizeLayout(
+        step as Partial<WorkflowNode>,
+        index + 1,
+        step.phase,
+        lifecycle,
+      ),
       agentId: step.agentId,
       action: step.action,
       description: step.description,
@@ -331,10 +374,12 @@ const createLinearGraph = (workflow: Workflow): Workflow => {
       id: endNodeId,
       name: 'End',
       type: 'END',
-      phase: 'RELEASE',
+      phase: endPhase,
       layout: {
         x: 80 + (workflow.steps.length + 1) * DEFAULT_COLUMN_GAP,
-        y: DEFAULT_LANE_TOP + 5 * DEFAULT_LANE_HEIGHT,
+        y:
+          DEFAULT_LANE_TOP +
+          Math.max(graphPhases.indexOf(endPhase), 0) * DEFAULT_LANE_HEIGHT,
       },
       description: 'Terminal completion node.',
     },
@@ -381,16 +426,20 @@ const createLinearGraph = (workflow: Workflow): Workflow => {
     publishState: workflow.publishState || 'PUBLISHED',
   };
 
-  return {
+  const normalized = {
     ...nextWorkflow,
-    steps: deriveWorkflowStepsFromGraph(nextWorkflow),
-    handoffProtocols: deriveHandoffProtocols(nextWorkflow),
+    steps: deriveWorkflowStepsFromGraph(nextWorkflow, lifecycle),
+    handoffProtocols: deriveHandoffProtocols(nextWorkflow, lifecycle),
   };
+  return normalized;
 };
 
-const ensureGraphDefaults = (workflow: Workflow): Workflow => {
+const ensureGraphDefaults = (
+  workflow: Workflow,
+  lifecycle?: CapabilityLifecycle | null,
+): Workflow => {
   if (!Array.isArray(workflow.nodes) || workflow.nodes.length === 0) {
-    return createLinearGraph(workflow);
+    return createLinearGraph(workflow, lifecycle);
   }
 
   const entryNodeId =
@@ -400,15 +449,15 @@ const ensureGraphDefaults = (workflow: Workflow): Workflow => {
   const order = getWorkflowNodeOrder({
     ...workflow,
     entryNodeId,
-  });
+  }, lifecycle);
   const nodesById = new Map(workflow.nodes.map(node => [node.id, node]));
   const normalizedNodes = order
     .map((nodeId, index) => {
       const node = nodesById.get(nodeId)!;
       return {
         ...node,
-        phase: getLanePhase(node.phase),
-        layout: normalizeLayout(node, index, node.phase),
+        phase: getLanePhase(node.phase, lifecycle),
+        layout: normalizeLayout(node, index, node.phase, lifecycle),
       } satisfies WorkflowNode;
     })
     .filter(Boolean);
@@ -443,22 +492,28 @@ const ensureGraphDefaults = (workflow: Workflow): Workflow => {
 
   return {
     ...nextWorkflow,
-    steps: deriveWorkflowStepsFromGraph(nextWorkflow),
-    handoffProtocols: deriveHandoffProtocols(nextWorkflow),
+    steps: deriveWorkflowStepsFromGraph(nextWorkflow, lifecycle),
+    handoffProtocols: deriveHandoffProtocols(nextWorkflow, lifecycle),
   };
 };
 
-export const normalizeWorkflowGraph = (workflow: Workflow): Workflow =>
-  ensureGraphDefaults(workflow);
+export const normalizeWorkflowGraph = (
+  workflow: Workflow,
+  lifecycle?: CapabilityLifecycle | null,
+): Workflow => ensureGraphDefaults(workflow, lifecycle);
 
-export const autoLayoutWorkflowGraph = (workflow: Workflow): Workflow => {
-  const normalizedWorkflow = normalizeWorkflowGraph(workflow);
-  const order = getWorkflowNodeOrder(normalizedWorkflow);
+export const autoLayoutWorkflowGraph = (
+  workflow: Workflow,
+  lifecycle?: CapabilityLifecycle | null,
+): Workflow => {
+  const normalizedWorkflow = normalizeWorkflowGraph(workflow, lifecycle);
+  const order = getWorkflowNodeOrder(normalizedWorkflow, lifecycle);
   const laneRowCounters = new Map<string, number>();
+  const graphPhases = getGraphPhases(lifecycle);
   const nextNodes = order.map((nodeId, index) => {
     const node = getWorkflowNode(normalizedWorkflow, nodeId)!;
     const laneKey = node.phase;
-    const laneIndex = WORKFLOW_GRAPH_PHASES.indexOf(node.phase as never);
+    const laneIndex = graphPhases.indexOf(node.phase);
     const row = laneRowCounters.get(laneKey) || 0;
     laneRowCounters.set(laneKey, row + 1);
 
@@ -474,7 +529,7 @@ export const autoLayoutWorkflowGraph = (workflow: Workflow): Workflow => {
   return normalizeWorkflowGraph({
     ...normalizedWorkflow,
     nodes: nextNodes,
-  });
+  }, lifecycle);
 };
 
 const hasGovernanceBeforeRelease = (workflow: Workflow, nodeId: string) => {
@@ -506,8 +561,11 @@ const hasGovernanceBeforeRelease = (workflow: Workflow, nodeId: string) => {
   return false;
 };
 
-export const validateWorkflowGraph = (workflow: Workflow) => {
-  const normalizedWorkflow = normalizeWorkflowGraph(workflow);
+export const validateWorkflowGraph = (
+  workflow: Workflow,
+  lifecycle?: CapabilityLifecycle | null,
+) => {
+  const normalizedWorkflow = normalizeWorkflowGraph(workflow, lifecycle);
   const errors: Array<{
     id: string;
     message: string;
@@ -650,8 +708,11 @@ export const createWorkflowBranchState = (
   visitCount: 0,
 });
 
-export const findFirstExecutableNode = (workflow: Workflow) => {
-  const normalizedWorkflow = normalizeWorkflowGraph(workflow);
+export const findFirstExecutableNode = (
+  workflow: Workflow,
+  lifecycle?: CapabilityLifecycle | null,
+) => {
+  const normalizedWorkflow = normalizeWorkflowGraph(workflow, lifecycle);
   const visited = new Set<string>();
   const queue = [normalizedWorkflow.entryNodeId];
 
@@ -679,9 +740,10 @@ export const findFirstExecutableNode = (workflow: Workflow) => {
 export const findFirstExecutableNodeForPhase = (
   workflow: Workflow,
   phase?: WorkItemPhase,
+  lifecycle?: CapabilityLifecycle | null,
 ) => {
-  const normalizedWorkflow = normalizeWorkflowGraph(workflow);
-  const orderedNodes = getWorkflowNodeOrder(normalizedWorkflow)
+  const normalizedWorkflow = normalizeWorkflowGraph(workflow, lifecycle);
+  const orderedNodes = getWorkflowNodeOrder(normalizedWorkflow, lifecycle)
     .map(nodeId => getWorkflowNode(normalizedWorkflow, nodeId))
     .filter((node): node is WorkflowNode => Boolean(node));
 
@@ -707,12 +769,15 @@ export const getDisplayStepIdForNode = (workflow: Workflow, nodeId?: string) => 
   );
 };
 
-export const buildWorkflowFromGraph = (workflow: Workflow) => {
-  const normalizedWorkflow = normalizeWorkflowGraph(workflow);
+export const buildWorkflowFromGraph = (
+  workflow: Workflow,
+  lifecycle?: CapabilityLifecycle | null,
+) => {
+  const normalizedWorkflow = normalizeWorkflowGraph(workflow, lifecycle);
   return {
     ...normalizedWorkflow,
-    steps: deriveWorkflowStepsFromGraph(normalizedWorkflow),
-    handoffProtocols: deriveHandoffProtocols(normalizedWorkflow),
+    steps: deriveWorkflowStepsFromGraph(normalizedWorkflow, lifecycle),
+    handoffProtocols: deriveHandoffProtocols(normalizedWorkflow, lifecycle),
   };
 };
 
@@ -721,11 +786,12 @@ export const getWorkflowPublishState = (workflow: Workflow): WorkflowPublishStat
 
 export const createWorkflowNode = (
   values: Partial<WorkflowNode> & Pick<WorkflowNode, 'name' | 'type' | 'phase'>,
+  lifecycle?: CapabilityLifecycle | null,
 ): WorkflowNode => ({
   id: values.id || createGraphId('NODE'),
   name: values.name,
   type: values.type,
-  phase: getLanePhase(values.phase),
+  phase: getLanePhase(values.phase, lifecycle),
   layout: values.layout || { x: 80, y: DEFAULT_LANE_TOP },
   agentId: values.agentId,
   action: values.action,
@@ -759,12 +825,15 @@ export const createWorkflowEdge = (
   branchKey: values.branchKey,
 });
 
-export const parseWorkflowGraphFromUnknown = (value: unknown): Workflow | null => {
+export const parseWorkflowGraphFromUnknown = (
+  value: unknown,
+  lifecycle?: CapabilityLifecycle | null,
+): Workflow | null => {
   if (!isObject(value)) {
     return null;
   }
 
-  return normalizeWorkflowGraph(value as Workflow);
+  return normalizeWorkflowGraph(value as Workflow, lifecycle);
 };
 
 export const getWorkflowNodeDimensions = () => ({

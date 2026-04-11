@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 test('loads the capability home workspace', async ({ page }) => {
   await page.goto('/');
 
-  await expect(page.locator('body')).toContainText(/Capability Home|Readiness|Today/i);
+  await expect(page.locator('body')).toContainText(/Capability Home|Trust|Today/i);
 });
 
 test('opens the full-screen designer route', async ({ page }) => {

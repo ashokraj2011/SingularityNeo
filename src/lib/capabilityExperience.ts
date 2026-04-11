@@ -8,7 +8,10 @@ import type {
 import { CAPABILITIES } from '../constants';
 import type { RuntimeStatus } from './api';
 import type { EnterpriseTone } from './enterprise';
-import { isWorkspacePathInsideApprovedRoot } from './executionConfig';
+import {
+  hasMeaningfulExecutionCommandTemplate,
+  isWorkspacePathInsideApprovedRoot,
+} from './executionConfig';
 
 export type CapabilityReadinessStatus =
   | 'READY'
@@ -48,6 +51,39 @@ export interface UserFacingAgentHealth {
   tone: EnterpriseTone;
 }
 
+export type CapabilityTrustLevel =
+  | 'DECLARED'
+  | 'CONNECTED'
+  | 'GROUNDED'
+  | 'OPERABLE'
+  | 'PROVEN';
+
+export type CapabilityProofStatus =
+  | 'READY'
+  | 'IN_PROGRESS'
+  | 'ACTION_NEEDED'
+  | 'LOCKED';
+
+export interface CapabilityProofMilestone {
+  id: string;
+  level: CapabilityTrustLevel;
+  label: string;
+  description: string;
+  status: CapabilityProofStatus;
+  proofSignal: string;
+  actionLabel: string;
+  path: string;
+}
+
+export interface CapabilityOutcomeContract {
+  businessOutcome?: string;
+  successMetrics: string[];
+  definitionOfDone?: string;
+  requiredEvidenceKinds: string[];
+  operatingPolicySummary?: string;
+  serviceBoundary: string[];
+}
+
 export type AdvancedToolId =
   | 'memory'
   | 'run-console'
@@ -68,6 +104,11 @@ export interface AdvancedToolDescriptor {
 export interface CapabilityExperienceModel {
   readinessItems: CapabilityReadinessItem[];
   readinessScore: number;
+  trustLevel: CapabilityTrustLevel;
+  trustLabel: string;
+  trustDescription: string;
+  proofItems: CapabilityProofMilestone[];
+  outcomeContract: CapabilityOutcomeContract;
   nextAction: CapabilityNextAction;
   runtimeHealth: UserFacingRuntimeHealth;
   ownerAgent: CapabilityAgent | null;
@@ -154,9 +195,7 @@ const hasConnectorSetup = (capability: Capability) =>
   hasText(capability.documentationNotes);
 
 const hasCommandTemplates = (capability: Capability) =>
-  capability.executionConfig.commandTemplates.some(
-    template => template.id && template.label && template.command.length > 0,
-  );
+  hasMeaningfulExecutionCommandTemplate(capability.executionConfig.commandTemplates);
 
 const hasDeploymentTargetSetup = (capability: Capability) => {
   if (capability.executionConfig.deploymentTargets.length === 0) {
@@ -296,6 +335,248 @@ export const getRuntimeHealth = (
   };
 };
 
+const getCapabilityBoundarySignals = (capability: Capability) =>
+  [
+    ...capability.applications,
+    ...capability.apis,
+    ...capability.databases,
+    ...capability.gitRepositories,
+    ...capability.localDirectories,
+  ].filter(Boolean);
+
+const buildOutcomeContract = (
+  capability: Capability,
+): CapabilityOutcomeContract => ({
+  businessOutcome: capability.businessOutcome?.trim() || undefined,
+  successMetrics: capability.successMetrics.filter(metric => metric.trim()),
+  definitionOfDone: capability.definitionOfDone?.trim() || undefined,
+  requiredEvidenceKinds: capability.requiredEvidenceKinds.filter(kind => kind.trim()),
+  operatingPolicySummary: capability.operatingPolicySummary?.trim() || undefined,
+  serviceBoundary: Array.from(new Set(getCapabilityBoundarySignals(capability))),
+});
+
+const buildProofItems = (
+  capability: Capability,
+  workspace: CapabilityWorkspace,
+  runtimeStatus?: RuntimeStatus | null,
+): CapabilityProofMilestone[] => {
+  const activeWorkflows = workspace.workflows.filter(workflow => !workflow.archivedAt);
+  const hasPublishedWorkflow = activeWorkflows.some(
+    workflow => workflow.publishState === 'PUBLISHED' || workflow.publishState === 'VALIDATED',
+  );
+  const ownerAgent = workspace.agents.find(agent => agent.isOwner) || workspace.agents[0] || null;
+  const learningStatuses = getLearningStatuses(workspace.agents);
+  const sourceCount = workspace.agents.reduce(
+    (total, agent) => total + (agent.learningProfile.sourceCount || 0),
+    0,
+  );
+  const outputCount = workspace.artifacts.filter(artifact => artifact.direction !== 'INPUT').length;
+  const completedWorkCount = workspace.workItems.filter(item => item.status === 'COMPLETED').length;
+  const outcomeContract = buildOutcomeContract(capability);
+  const hasBoundary = outcomeContract.serviceBoundary.length > 0;
+
+  const milestoneStates = [
+    {
+      level: 'DECLARED' as const,
+      label: 'Declared',
+      description: 'Business purpose, owner, and success contract are defined.',
+      ready:
+        hasText(capability.description) &&
+        (hasText(capability.domain) || hasText(capability.businessUnit)) &&
+        hasCapabilityOwner(capability) &&
+        hasText(capability.businessOutcome) &&
+        outcomeContract.successMetrics.length > 0 &&
+        hasBoundary,
+      inProgress:
+        hasText(capability.description) ||
+        hasText(capability.businessOutcome) ||
+        outcomeContract.successMetrics.length > 0,
+      proofSignal: hasText(capability.businessOutcome)
+        ? capability.businessOutcome!.trim()
+        : 'Add a business outcome, success metrics, and service boundary.',
+      actionLabel: 'Define business charter',
+      path: '/capabilities/metadata',
+    },
+    {
+      level: 'CONNECTED' as const,
+      label: 'Connected',
+      description: 'Real source systems and approved workspaces are linked to the capability.',
+      ready: hasConnectorSetup(capability) && hasWorkspaceSource(capability),
+      inProgress: hasConnectorSetup(capability) || hasWorkspaceSource(capability),
+      proofSignal:
+        hasConnectorSetup(capability) && hasWorkspaceSource(capability)
+          ? `${capability.gitRepositories.length + capability.localDirectories.length} source locations and approved paths are linked.`
+          : 'Link GitHub, Jira, Confluence, or approved local paths.',
+      actionLabel: 'Connect sources',
+      path: '/capabilities/metadata',
+    },
+    {
+      level: 'GROUNDED' as const,
+      label: 'Grounded',
+      description: 'Collaborators have learned enough capability memory to help with confidence.',
+      ready:
+        Boolean(ownerAgent) &&
+        learningStatuses.length > 0 &&
+        learningStatuses.every(status => status === 'READY') &&
+        sourceCount > 0,
+      inProgress:
+        Boolean(ownerAgent) &&
+        (learningStatuses.some(status => ['QUEUED', 'LEARNING', 'STALE'].includes(status)) ||
+          sourceCount > 0),
+      proofSignal:
+        sourceCount > 0
+          ? `${sourceCount} learned source references are grounding the team.`
+          : 'Refresh learning so the team can ground decisions in capability memory.',
+      actionLabel: 'Review team learning',
+      path: '/team',
+    },
+    {
+      level: 'OPERABLE' as const,
+      label: 'Operable',
+      description: 'Workflow, runtime, and meaningful execution commands are ready for real work.',
+      ready:
+        hasPublishedWorkflow &&
+        runtimeStatus?.configured === true &&
+        hasCommandTemplates(capability),
+      inProgress:
+        hasPublishedWorkflow ||
+        runtimeStatus?.configured === true ||
+        hasCommandTemplates(capability),
+      proofSignal:
+        hasPublishedWorkflow && runtimeStatus?.configured === true && hasCommandTemplates(capability)
+          ? 'Published workflow, connected runtime, and real execution commands are available.'
+          : 'Publish a workflow, connect the runtime, and replace generic command placeholders.',
+      actionLabel: hasPublishedWorkflow ? 'Finish execution setup' : 'Prepare execution',
+      path: hasPublishedWorkflow ? '/run-console' : '/designer',
+    },
+    {
+      level: 'PROVEN' as const,
+      label: 'Proven',
+      description: 'A real work cycle has produced evidence that this capability can deliver.',
+      ready: completedWorkCount > 0 && outputCount > 0,
+      inProgress: workspace.workItems.length > 0 || workspace.artifacts.length > 0,
+      proofSignal:
+        completedWorkCount > 0 && outputCount > 0
+          ? `${completedWorkCount} completed work item${completedWorkCount === 1 ? '' : 's'} produced ${outputCount} evidence output${outputCount === 1 ? '' : 's'}.`
+          : 'Run one real work item through to evidence so this capability is proven.',
+      actionLabel:
+        workspace.workItems.length > 0 ? 'Review delivery evidence' : 'Run real work',
+      path: workspace.workItems.length > 0 ? '/ledger' : '/orchestrator?new=1',
+    },
+  ];
+
+  let encounteredGap = false;
+
+  return milestoneStates.map(item => {
+    let status: CapabilityProofStatus;
+    if (!encounteredGap && item.ready) {
+      status = 'READY';
+    } else if (!encounteredGap) {
+      status = item.inProgress ? 'IN_PROGRESS' : 'ACTION_NEEDED';
+      encounteredGap = true;
+    } else {
+      status = 'LOCKED';
+    }
+
+    return {
+      id: item.level.toLowerCase(),
+      level: item.level,
+      label: item.label,
+      description: item.description,
+      status,
+      proofSignal: item.proofSignal,
+      actionLabel: item.actionLabel,
+      path: item.path,
+    };
+  });
+};
+
+const getTrustLevel = (proofItems: CapabilityProofMilestone[]): CapabilityTrustLevel => {
+  const highestReady = [...proofItems]
+    .reverse()
+    .find(item => item.status === 'READY');
+
+  return highestReady?.level || 'DECLARED';
+};
+
+export const getTrustLevelLabel = (level: CapabilityTrustLevel) => {
+  switch (level) {
+    case 'PROVEN':
+      return 'Proven';
+    case 'OPERABLE':
+      return 'Operable';
+    case 'GROUNDED':
+      return 'Grounded';
+    case 'CONNECTED':
+      return 'Connected';
+    default:
+      return 'Declared';
+  }
+};
+
+export const getTrustLevelTone = (level: CapabilityTrustLevel): EnterpriseTone => {
+  switch (level) {
+    case 'PROVEN':
+      return 'success';
+    case 'OPERABLE':
+    case 'GROUNDED':
+      return 'brand';
+    case 'CONNECTED':
+      return 'info';
+    default:
+      return 'warning';
+  }
+};
+
+export const getProofStatusLabel = (status: CapabilityProofStatus) => {
+  switch (status) {
+    case 'READY':
+      return 'Ready';
+    case 'IN_PROGRESS':
+      return 'In progress';
+    case 'LOCKED':
+      return 'Locked';
+    default:
+      return 'Action needed';
+  }
+};
+
+export const getProofStatusTone = (status: CapabilityProofStatus): EnterpriseTone => {
+  switch (status) {
+    case 'READY':
+      return 'success';
+    case 'IN_PROGRESS':
+      return 'info';
+    case 'LOCKED':
+      return 'neutral';
+    default:
+      return 'warning';
+  }
+};
+
+const getTrustDescription = (
+  trustLevel: CapabilityTrustLevel,
+  proofItems: CapabilityProofMilestone[],
+) => {
+  const nextGap = proofItems.find(item => item.status !== 'READY');
+  if (!nextGap) {
+    return 'This capability has crossed the full proof ladder and has evidence of real delivery.';
+  }
+
+  switch (trustLevel) {
+    case 'PROVEN':
+      return 'This capability has delivery proof and can be trusted as an operating unit.';
+    case 'OPERABLE':
+      return 'This capability can operate, but it still needs a completed work cycle to prove delivery.';
+    case 'GROUNDED':
+      return 'The team is grounded in context. Finish execution setup to make the capability operable.';
+    case 'CONNECTED':
+      return 'Sources and workspace links exist. Ground the agents before relying on outcomes.';
+    default:
+      return nextGap.proofSignal;
+  }
+};
+
 const buildReadinessItems = (
   capability: Capability,
   workspace: CapabilityWorkspace,
@@ -324,11 +605,13 @@ const buildReadinessItems = (
     {
       id: 'metadata',
       label: 'Capability profile',
-      description: 'Purpose, domain, business owner, and scope are clear.',
+      description: 'Purpose, business outcome, owner, and success metrics are clear.',
       status:
         hasText(capability.description) &&
         (hasText(capability.domain) || hasText(capability.businessUnit)) &&
-        hasCapabilityOwner(capability)
+        hasCapabilityOwner(capability) &&
+        hasText(capability.businessOutcome) &&
+        capability.successMetrics.some(metric => metric.trim())
           ? 'READY'
           : 'NEEDS_SETUP',
       actionLabel: 'Complete profile',
@@ -454,6 +737,7 @@ const getAttentionWorkItem = (workItems: WorkItem[]) =>
   null;
 
 const buildNextAction = (
+  proofItems: CapabilityProofMilestone[],
   readinessItems: CapabilityReadinessItem[],
   workspace: CapabilityWorkspace,
 ): CapabilityNextAction => {
@@ -484,7 +768,28 @@ const buildNextAction = (
     };
   }
 
-  const setupItem = readinessItems.find(item => item.status === 'NEEDS_ATTENTION') ||
+  const proofGap = proofItems.find(
+    item => item.status === 'ACTION_NEEDED' || item.status === 'IN_PROGRESS',
+  );
+
+  if (proofGap) {
+    return {
+      id: `proof-${proofGap.id}`,
+      title:
+        proofGap.status === 'IN_PROGRESS'
+          ? `${proofGap.label} is underway`
+          : proofGap.level === 'PROVEN'
+          ? 'Prove delivery with real work'
+          : `Build ${proofGap.label.toLowerCase()} trust`,
+      description: proofGap.proofSignal,
+      actionLabel: proofGap.actionLabel,
+      path: proofGap.path,
+      tone: proofGap.status === 'ACTION_NEEDED' ? 'warning' : 'brand',
+    };
+  }
+
+  const setupItem =
+    readinessItems.find(item => item.status === 'NEEDS_ATTENTION') ||
     readinessItems.find(item => item.status === 'NEEDS_SETUP') ||
     readinessItems.find(item => item.status === 'IN_PROGRESS');
 
@@ -549,11 +854,18 @@ export const buildCapabilityExperience = ({
   const readinessItems = buildReadinessItems(capability, workspace, runtimeStatus);
   const readyCount = readinessItems.filter(item => item.status === 'READY').length;
   const ownerAgent = workspace.agents.find(agent => agent.isOwner) || workspace.agents[0] || null;
+  const proofItems = buildProofItems(capability, workspace, runtimeStatus);
+  const trustLevel = getTrustLevel(proofItems);
 
   return {
     readinessItems,
     readinessScore: Math.round((readyCount / readinessItems.length) * 100),
-    nextAction: buildNextAction(readinessItems, workspace),
+    trustLevel,
+    trustLabel: getTrustLevelLabel(trustLevel),
+    trustDescription: getTrustDescription(trustLevel, proofItems),
+    proofItems,
+    outcomeContract: buildOutcomeContract(capability),
+    nextAction: buildNextAction(proofItems, readinessItems, workspace),
     runtimeHealth: getRuntimeHealth(runtimeStatus),
     ownerAgent,
     activeWorkCount: workspace.workItems.filter(item => item.status === 'ACTIVE').length,

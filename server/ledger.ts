@@ -14,6 +14,7 @@ import {
   WorkItemPhase,
   WorkItemStatus,
 } from '../src/types';
+import { getLifecyclePhaseLabel } from '../src/lib/capabilityLifecycle';
 import { query } from './db';
 import {
   getWorkflowRunDetail,
@@ -33,13 +34,6 @@ const ACTIVE_RUN_STATUSES = new Set([
 
 const sortIsoDesc = (left?: string, right?: string) =>
   String(right || '').localeCompare(String(left || ''));
-
-const toPhaseLabel = (phase: WorkItemPhase) =>
-  phase
-    .toLowerCase()
-    .split('_')
-    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
 
 const toSafeFileSlug = (value: string) =>
   value
@@ -489,7 +483,7 @@ export const getCompletedWorkOrderEvidence = async (
   const phaseGroups: PhaseEvidenceGroup[] = latestRunDetail
     ? latestRunDetail.steps.map(step => ({
         phase: step.phase,
-        label: toPhaseLabel(step.phase),
+        label: getLifecyclePhaseLabel(bundle.capability, step.phase),
         stepName: step.name,
         stepType: step.stepType,
         artifacts: artifactRecords.filter(

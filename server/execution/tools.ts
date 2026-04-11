@@ -47,6 +47,10 @@ type ToolAdapter = {
 const previewText = (value: string, limit = 1600) =>
   value.replace(/\0/g, '').slice(0, limit);
 
+const describeDeploymentTargets = (
+  targets: Capability['executionConfig']['deploymentTargets'],
+) => targets.map(target => `${target.id} -> ${target.commandTemplateId}`).join(', ');
+
 const SKIP_DIRECTORIES = new Set([
   '.git',
   '.next',
@@ -260,6 +264,50 @@ const resolveCommandTemplate = (
     throw new Error(`Command template ${templateId} is not configured correctly.`);
   }
   return template;
+};
+
+export const resolveDeploymentTarget = (
+  capability: Capability,
+  requestedTargetId?: string,
+) => {
+  const targets = capability.executionConfig.deploymentTargets || [];
+  const targetId = String(requestedTargetId || '').trim();
+
+  if (targets.length === 0) {
+    throw new Error(
+      `Capability ${capability.name} does not define any deployment targets.`,
+    );
+  }
+
+  if (!targetId) {
+    if (targets.length === 1) {
+      return targets[0];
+    }
+
+    throw new Error(
+      `run_deploy requires a deployment target id. Available deployment targets: ${describeDeploymentTargets(targets)}.`,
+    );
+  }
+
+  const exactMatch = targets.find(item => item.id === targetId);
+  if (exactMatch) {
+    return exactMatch;
+  }
+
+  const templateMatches = targets.filter(
+    item => item.commandTemplateId === targetId,
+  );
+  if (templateMatches.length === 1) {
+    return templateMatches[0];
+  }
+
+  if (targets.length === 1) {
+    return targets[0];
+  }
+
+  throw new Error(
+    `Capability ${capability.name} does not define deployment target ${targetId}. Available deployment targets: ${describeDeploymentTargets(targets)}.`,
+  );
 };
 
 const executeCommandTemplate = async (
@@ -484,19 +532,10 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         );
       }
 
-      const targetId = String(args.targetId || '').trim();
-      if (!targetId) {
-        throw new Error('run_deploy requires a deployment target id.');
-      }
-
-      const target = capability.executionConfig.deploymentTargets.find(
-        item => item.id === targetId,
+      const target = resolveDeploymentTarget(
+        capability,
+        typeof args.targetId === 'string' ? args.targetId : undefined,
       );
-      if (!target) {
-        throw new Error(
-          `Capability ${capability.name} does not define deployment target ${targetId}.`,
-        );
-      }
 
       const template = resolveCommandTemplate(capability, target.commandTemplateId);
       if (template.requiresApproval === false) {

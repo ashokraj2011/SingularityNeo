@@ -23,8 +23,11 @@ import {
   type AdvancedToolId,
   getAgentHealth,
   getBusinessWorkStatusLabel,
+  getProofStatusLabel,
+  getProofStatusTone,
   getReadinessLabel,
   getReadinessTone,
+  getTrustLevelTone,
 } from '../lib/capabilityExperience';
 import { getStatusTone } from '../lib/enterprise';
 import { fetchRuntimeStatus, type RuntimeStatus } from '../lib/api';
@@ -120,8 +123,9 @@ const Dashboard = () => {
         context={activeCapability.id}
         title={activeCapability.name}
         description={
+          activeCapability.businessOutcome ||
           activeCapability.description ||
-          'A guided workspace for readiness, active work, collaboration, and evidence.'
+          'A guided workspace for trust, active work, collaboration, and evidence.'
         }
         actions={
           <>
@@ -146,13 +150,14 @@ const Dashboard = () => {
       >
         <div className="grid max-w-5xl gap-3 md:grid-cols-3">
           <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
-            <p className="form-kicker">Readiness</p>
-            <p className="mt-2 text-3xl font-bold tracking-tight text-on-surface">
-              {experience.readinessScore}%
-            </p>
-            <p className="mt-1 text-xs leading-relaxed text-secondary">
-              {experience.readinessItems.filter(item => item.status === 'READY').length} of{' '}
-              {experience.readinessItems.length} setup checks are ready.
+            <p className="form-kicker">Capability trust</p>
+            <div className="mt-2 flex items-center gap-2">
+              <StatusBadge tone={getTrustLevelTone(experience.trustLevel)}>
+                {experience.trustLabel}
+              </StatusBadge>
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-secondary">
+              {experience.trustDescription}
             </p>
           </div>
           <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
@@ -308,12 +313,12 @@ const Dashboard = () => {
         </SectionCard>
 
         <SectionCard
-          title="Readiness checklist"
-          description="Plain-language setup health for business users."
+          title="Trust ladder"
+          description="Proof milestones that show whether this capability is real, grounded, operable, and proven."
           icon={ClipboardCheck}
         >
           <div className="space-y-3">
-            {experience.readinessItems.map(item => (
+            {experience.proofItems.map(item => (
               <button
                 key={item.id}
                 type="button"
@@ -323,12 +328,15 @@ const Dashboard = () => {
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="text-sm font-semibold text-on-surface">{item.label}</p>
-                    <StatusBadge tone={getReadinessTone(item.status)}>
-                      {getReadinessLabel(item.status)}
+                    <StatusBadge tone={getProofStatusTone(item.status)}>
+                      {getProofStatusLabel(item.status)}
                     </StatusBadge>
                   </div>
                   <p className="mt-1 text-xs leading-relaxed text-secondary">
                     {item.description}
+                  </p>
+                  <p className="mt-2 text-xs font-medium leading-relaxed text-on-surface/80">
+                    {item.proofSignal}
                   </p>
                 </div>
                 <ArrowRight size={15} className="mt-1 shrink-0 text-outline" />
@@ -445,11 +453,42 @@ const Dashboard = () => {
 
       <AdvancedDisclosure
         title="Capability foundation"
-        description="Core setup behind this capability, available when you need to inspect the operating model."
+        description="Business contract and operating model details, available when you need the deeper setup view."
         storageKey="singularity.home.foundation.open"
         badge={<StatusBadge tone="neutral">Setup details</StatusBadge>}
       >
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="rounded-3xl border border-outline-variant/40 bg-white px-5 py-5">
+            <p className="form-kicker">Business outcome</p>
+            <p className="mt-3 text-sm leading-7 text-on-surface">
+              {experience.outcomeContract.businessOutcome ||
+                'Add a business outcome so owners know what this capability is meant to achieve.'}
+            </p>
+          </div>
+          <div className="rounded-3xl border border-outline-variant/40 bg-white px-5 py-5">
+            <p className="form-kicker">Outcome contract</p>
+            <div className="mt-3 space-y-3 text-sm text-secondary">
+              <p>
+                <span className="font-semibold text-on-surface">Success metrics:</span>{' '}
+                {experience.outcomeContract.successMetrics.length > 0
+                  ? `${experience.outcomeContract.successMetrics.length} defined`
+                  : 'Not defined yet'}
+              </p>
+              <p>
+                <span className="font-semibold text-on-surface">Required evidence:</span>{' '}
+                {experience.outcomeContract.requiredEvidenceKinds.length > 0
+                  ? experience.outcomeContract.requiredEvidenceKinds.join(', ')
+                  : 'Not defined yet'}
+              </p>
+              <p>
+                <span className="font-semibold text-on-surface">Definition of done:</span>{' '}
+                {experience.outcomeContract.definitionOfDone || 'Not defined yet'}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {[
             {
               label: 'Workflow',
@@ -459,9 +498,11 @@ const Dashboard = () => {
               path: '/designer',
             },
             {
-              label: 'Applications',
-              value: activeCapability.applications.length,
-              helper: activeCapability.applications.slice(0, 2).join(', ') || 'No apps listed',
+              label: 'Service boundary',
+              value: experience.outcomeContract.serviceBoundary.length,
+              helper:
+                experience.outcomeContract.serviceBoundary.slice(0, 2).join(', ') ||
+                'No boundary signals listed',
               icon: BriefcaseBusiness,
               path: '/capabilities/metadata',
             },

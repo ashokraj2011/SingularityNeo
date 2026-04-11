@@ -1,9 +1,14 @@
 import type {
+  CapabilityLifecycle,
   FlightRecorderEvent,
   FlightRecorderEventType,
   WorkItemFlightRecorderDetail,
   WorkItemPhase,
 } from '../types';
+import {
+  getCapabilityGraphPhaseIds,
+  getLifecyclePhaseLabel,
+} from './capabilityLifecycle';
 
 export type RecorderEventCategory =
   | 'run'
@@ -42,17 +47,6 @@ export interface RecorderTimelineModel {
   phaseStations: RecorderPhaseStation[];
   categories: RecorderEventCategory[];
 }
-
-const RECORDER_PHASE_ORDER: WorkItemPhase[] = [
-  'BACKLOG',
-  'ANALYSIS',
-  'DESIGN',
-  'DEVELOPMENT',
-  'QA',
-  'GOVERNANCE',
-  'RELEASE',
-  'DONE',
-];
 
 const CATEGORY_BY_EVENT_TYPE: Record<FlightRecorderEventType, RecorderEventCategory> = {
   RUN_STARTED: 'run',
@@ -101,15 +95,9 @@ const parseTimestamp = (value: string | undefined, fallbackMs: number) => {
   return Number.isFinite(parsed) ? parsed : fallbackMs;
 };
 
-const formatPhase = (phase: WorkItemPhase) =>
-  phase
-    .toLowerCase()
-    .split('_')
-    .map(token => token.charAt(0).toUpperCase() + token.slice(1))
-    .join(' ');
-
 export const normalizeFlightRecorderTimeline = (
   detail?: WorkItemFlightRecorderDetail | null,
+  lifecycle?: CapabilityLifecycle | null,
 ): RecorderTimelineModel => {
   const sourceEvents = [...(detail?.events || [])].sort((left, right) =>
     String(left.timestamp || '').localeCompare(String(right.timestamp || '')),
@@ -154,12 +142,19 @@ export const normalizeFlightRecorderTimeline = (
     events.map(event => event.phase).filter(Boolean) as WorkItemPhase[],
   );
   const phases = [
-    ...RECORDER_PHASE_ORDER,
-    ...Array.from(eventPhaseSet).filter(phase => !RECORDER_PHASE_ORDER.includes(phase)),
+    'BACKLOG',
+    ...getCapabilityGraphPhaseIds(lifecycle),
+    'DONE',
+    ...Array.from(eventPhaseSet).filter(
+      phase =>
+        phase !== 'BACKLOG' &&
+        phase !== 'DONE' &&
+        !getCapabilityGraphPhaseIds(lifecycle).includes(phase),
+    ),
   ];
   const phaseStations = phases.map((phase, index) => ({
     phase,
-    label: formatPhase(phase),
+    label: getLifecyclePhaseLabel(lifecycle, phase),
     trackPositionPercent:
       phases.length <= 1 ? 50 : Math.round((index / (phases.length - 1)) * 100),
     eventCount: events.filter(event => event.phase === phase).length,

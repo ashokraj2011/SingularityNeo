@@ -33,6 +33,11 @@ const schemaStatements = [
       parent_capability_id TEXT REFERENCES capabilities(id) ON DELETE SET NULL,
       business_unit TEXT,
       owner_team TEXT,
+      business_outcome TEXT,
+      success_metrics TEXT[] NOT NULL DEFAULT '{}',
+      definition_of_done TEXT,
+      required_evidence_kinds TEXT[] NOT NULL DEFAULT '{}',
+      operating_policy_summary TEXT,
       confluence_link TEXT,
       jira_board_link TEXT,
       documentation_notes TEXT,
@@ -44,6 +49,7 @@ const schemaStatements = [
       team_names TEXT[] NOT NULL DEFAULT '{}',
       stakeholders JSONB NOT NULL DEFAULT '[]'::jsonb,
       additional_metadata JSONB NOT NULL DEFAULT '[]'::jsonb,
+      lifecycle JSONB NOT NULL DEFAULT '{}'::jsonb,
       execution_config JSONB NOT NULL DEFAULT '{}'::jsonb,
       status TEXT NOT NULL,
       special_agent_id TEXT,
@@ -664,7 +670,31 @@ const migrationStatements = [
   `,
   `
     ALTER TABLE capabilities
+    ADD COLUMN IF NOT EXISTS lifecycle JSONB NOT NULL DEFAULT '{}'::jsonb
+  `,
+  `
+    ALTER TABLE capabilities
     ADD COLUMN IF NOT EXISTS execution_config JSONB NOT NULL DEFAULT '{}'::jsonb
+  `,
+  `
+    ALTER TABLE capabilities
+    ADD COLUMN IF NOT EXISTS business_outcome TEXT
+  `,
+  `
+    ALTER TABLE capabilities
+    ADD COLUMN IF NOT EXISTS success_metrics TEXT[] NOT NULL DEFAULT '{}'
+  `,
+  `
+    ALTER TABLE capabilities
+    ADD COLUMN IF NOT EXISTS definition_of_done TEXT
+  `,
+  `
+    ALTER TABLE capabilities
+    ADD COLUMN IF NOT EXISTS required_evidence_kinds TEXT[] NOT NULL DEFAULT '{}'
+  `,
+  `
+    ALTER TABLE capabilities
+    ADD COLUMN IF NOT EXISTS operating_policy_summary TEXT
   `,
   `
     ALTER TABLE capability_agents

@@ -3,6 +3,7 @@ import {
   buildCapabilityExperience,
   getLearningStatusLabel,
 } from '../capabilityExperience';
+import { createDefaultCapabilityLifecycle } from '../capabilityLifecycle';
 import type {
   Capability,
   CapabilityAgent,
@@ -17,6 +18,11 @@ const capability = (overrides: Partial<Capability> = {}): Capability => ({
   domain: 'Payments',
   businessUnit: 'Digital',
   ownerTeam: 'Payments Platform',
+  businessOutcome: 'Deliver trustworthy payment processing outcomes.',
+  successMetrics: ['Payments flow completes without manual intervention.'],
+  definitionOfDone: 'Evidence exists for completed payment work.',
+  requiredEvidenceKinds: ['Requirements pack', 'Test evidence'],
+  operatingPolicySummary: 'Release actions remain approval-gated.',
   applications: ['Payments Portal'],
   apis: [],
   databases: [],
@@ -25,6 +31,7 @@ const capability = (overrides: Partial<Capability> = {}): Capability => ({
   teamNames: ['Payments Platform'],
   stakeholders: [],
   additionalMetadata: [],
+  lifecycle: createDefaultCapabilityLifecycle(),
   executionConfig: {
     allowedWorkspacePaths: [],
     commandTemplates: [],
@@ -139,7 +146,8 @@ describe('capability experience model', () => {
     });
 
     expect(experience.readinessScore).toBe(92);
-    expect(experience.nextAction.title).toBe('Start first work item');
+    expect(experience.trustLevel).toBe('OPERABLE');
+    expect(experience.nextAction.title).toBe('Prove delivery with real work');
     expect(experience.runtimeHealth.label).toBe('Connected');
   });
 
@@ -187,5 +195,39 @@ describe('capability experience model', () => {
     expect(getLearningStatusLabel('READY')).toBe('Ready to help');
     expect(getLearningStatusLabel('STALE')).toBe('Needs refresh');
     expect(getLearningStatusLabel('ERROR')).toBe('Learning failed');
+  });
+
+  it('does not treat default command placeholders as operational proof', () => {
+    const experience = buildCapabilityExperience({
+      capability: capability({
+        localDirectories: ['/workspace/payments'],
+        executionConfig: {
+          defaultWorkspacePath: '/workspace/payments',
+          allowedWorkspacePaths: ['/workspace/payments'],
+          commandTemplates: [
+            {
+              id: 'build',
+              label: 'Build',
+              description: 'Compile and package the capability workspace.',
+              command: ['npm', 'run', 'build'],
+            },
+          ],
+          deploymentTargets: [],
+        },
+      }),
+      workspace: workspace(),
+      runtimeStatus: {
+        configured: true,
+        provider: 'GitHub Copilot SDK',
+        endpoint: 'http://localhost:4321',
+        tokenSource: 'headless-cli',
+        defaultModel: 'gpt-4.1',
+        availableModels: [],
+      },
+    });
+
+    expect(experience.proofItems.find(item => item.level === 'OPERABLE')?.status).toBe(
+      'IN_PROGRESS',
+    );
   });
 });

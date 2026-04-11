@@ -23,6 +23,7 @@ import {
   CommandTemplateEditor,
   DeploymentTargetEditor,
 } from '../components/CapabilityExecutionSetup';
+import CapabilityLifecycleEditor from '../components/CapabilityLifecycleEditor';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { cn } from '../lib/utils';
@@ -32,6 +33,16 @@ import {
   updateRuntimeCredentials,
   type RuntimeStatus,
 } from '../lib/api';
+import {
+  createLifecyclePhase,
+  getLifecyclePhaseUsage,
+  moveLifecyclePhase,
+  normalizeCapabilityLifecycle,
+  remapWorkflowPhaseReferences,
+  renameLifecyclePhase,
+  retireLifecyclePhase,
+} from '../lib/capabilityLifecycle';
+import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowGraph';
 import {
   Capability,
   CapabilityMetadataEntry,
@@ -119,6 +130,7 @@ export default function CapabilityMetadata() {
     capabilities,
     getCapabilityWorkspace,
     lastSyncError,
+    setCapabilityWorkspaceContent,
     updateCapabilityMetadata,
   } = useCapability();
   const { success, error: showError } = useToast();
@@ -146,6 +158,11 @@ export default function CapabilityMetadata() {
     businessUnit: activeCapability.businessUnit || '',
     ownerTeam: activeCapability.ownerTeam || '',
     description: activeCapability.description,
+    businessOutcome: activeCapability.businessOutcome || '',
+    successMetrics: listToText(activeCapability.successMetrics),
+    definitionOfDone: activeCapability.definitionOfDone || '',
+    requiredEvidenceKinds: listToText(activeCapability.requiredEvidenceKinds),
+    operatingPolicySummary: activeCapability.operatingPolicySummary || '',
     confluenceLink: activeCapability.confluenceLink || '',
     jiraBoardLink: activeCapability.jiraBoardLink || '',
     documentationNotes: activeCapability.documentationNotes || '',
@@ -171,6 +188,19 @@ export default function CapabilityMetadata() {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeStatusError, setRuntimeStatusError] = useState('');
   const [runtimeTokenInput, setRuntimeTokenInput] = useState('');
+  const capabilityLifecycle = useMemo(
+    () => normalizeCapabilityLifecycle(activeCapability.lifecycle),
+    [activeCapability.lifecycle],
+  );
+  const [lifecycleDraft, setLifecycleDraft] = useState(capabilityLifecycle);
+  const [lifecycleDraftWorkflows, setLifecycleDraftWorkflows] = useState(
+    workspace.workflows,
+  );
+  const [pendingLifecycleDeletePhaseId, setPendingLifecycleDeletePhaseId] =
+    useState<string | null>(null);
+  const [lifecycleDeleteTargetPhaseId, setLifecycleDeleteTargetPhaseId] =
+    useState('');
+  const [isSavingLifecycle, setIsSavingLifecycle] = useState(false);
 
   useEffect(() => {
     setForm({
@@ -180,6 +210,11 @@ export default function CapabilityMetadata() {
       businessUnit: activeCapability.businessUnit || '',
       ownerTeam: activeCapability.ownerTeam || '',
       description: activeCapability.description,
+      businessOutcome: activeCapability.businessOutcome || '',
+      successMetrics: listToText(activeCapability.successMetrics),
+      definitionOfDone: activeCapability.definitionOfDone || '',
+      requiredEvidenceKinds: listToText(activeCapability.requiredEvidenceKinds),
+      operatingPolicySummary: activeCapability.operatingPolicySummary || '',
       confluenceLink: activeCapability.confluenceLink || '',
       jiraBoardLink: activeCapability.jiraBoardLink || '',
       documentationNotes: activeCapability.documentationNotes || '',
@@ -205,6 +240,13 @@ export default function CapabilityMetadata() {
     setSaveError('');
     setLastSavedAt('');
   }, [activeCapability]);
+
+  useEffect(() => {
+    setLifecycleDraft(capabilityLifecycle);
+    setLifecycleDraftWorkflows(workspace.workflows);
+    setPendingLifecycleDeletePhaseId(null);
+    setLifecycleDeleteTargetPhaseId('');
+  }, [capabilityLifecycle, workspace.workflows]);
 
   useEffect(() => {
     let isMounted = true;
@@ -239,7 +281,9 @@ export default function CapabilityMetadata() {
     form.name.trim() &&
       form.domain.trim() &&
       form.businessUnit.trim() &&
-      form.description.trim(),
+      form.description.trim() &&
+      form.businessOutcome.trim() &&
+      textToList(form.successMetrics).length > 0,
   );
 
   const filteredStakeholders = useMemo(
@@ -275,18 +319,18 @@ export default function CapabilityMetadata() {
     () => [
       { label: 'Teams', value: textToList(form.teamNames).length },
       { label: 'Stakeholders', value: filteredStakeholders.length },
+      { label: 'Success Metrics', value: textToList(form.successMetrics).length },
+      { label: 'Evidence Needs', value: textToList(form.requiredEvidenceKinds).length },
       { label: 'Git Repos', value: textToList(form.gitRepositories).length },
       { label: 'Local Dirs', value: textToList(form.localDirectories).length },
-      { label: 'Sub-Capabilities', value: subCapabilities.length },
-      { label: 'Team Agents', value: workspace.agents.length },
     ],
     [
       filteredStakeholders.length,
       form.gitRepositories,
       form.localDirectories,
+      form.requiredEvidenceKinds,
+      form.successMetrics,
       form.teamNames,
-      subCapabilities.length,
-      workspace.agents.length,
     ],
   );
   const approvedWorkspacePaths = useMemo(
@@ -308,6 +352,74 @@ export default function CapabilityMetadata() {
     setForm(prev => ({ ...prev, [field]: value }));
   };
 
+  const normalizeLifecycleWorkflows = (
+    workflowsToNormalize: typeof workspace.workflows,
+    lifecycle = capabilityLifecycle,
+  ) =>
+    workflowsToNormalize.map(workflow =>
+      buildWorkflowFromGraph(normalizeWorkflowGraph(workflow, lifecycle), lifecycle),
+    );
+
+  const lifecyclePhaseViews = useMemo(
+    () =>
+      lifecycleDraft.phases.map(phase => {
+        const usage = getLifecyclePhaseUsage(
+          {
+            workItems: workspace.workItems,
+            tasks: workspace.tasks,
+          },
+          lifecycleDraftWorkflows,
+          phase.id,
+        );
+        const referencedByWorkflow =
+          usage.workflowNodeCount + usage.workflowStepCount + usage.handoffTargetCount > 0;
+        const blockedByLiveWork =
+          usage.activeWorkItemCount > 0 || usage.pendingTaskCount > 0;
+
+        const usageSummary = [
+          usage.workflowNodeCount ? `${usage.workflowNodeCount} workflow nodes` : '',
+          usage.workflowStepCount ? `${usage.workflowStepCount} workflow steps` : '',
+          usage.handoffTargetCount ? `${usage.handoffTargetCount} hand-off targets` : '',
+        ]
+          .filter(Boolean)
+          .join(', ');
+
+        return {
+          phase,
+          usageSummary: usageSummary
+            ? `Used by ${usageSummary}.`
+            : 'Not used by saved workflows yet.',
+          canDelete: lifecycleDraft.phases.length > 1 && !blockedByLiveWork,
+          deleteHint: blockedByLiveWork
+            ? 'Move or complete live work and workflow-managed tasks in this phase before deleting it.'
+            : referencedByWorkflow
+            ? 'Deleting this phase will require remapping workflow references.'
+            : lifecycleDraft.phases.length <= 1
+            ? 'At least one visible lifecycle phase must remain.'
+            : undefined,
+        };
+      }),
+    [lifecycleDraft.phases, lifecycleDraftWorkflows, workspace.tasks, workspace.workItems],
+  );
+
+  const lifecycleSnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        lifecycle: lifecycleDraft,
+        workflows: lifecycleDraftWorkflows,
+      }),
+    [lifecycleDraft, lifecycleDraftWorkflows],
+  );
+  const activeLifecycleSnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        lifecycle: capabilityLifecycle,
+        workflows: workspace.workflows,
+      }),
+    [capabilityLifecycle, workspace.workflows],
+  );
+  const lifecycleDirty = lifecycleSnapshot !== activeLifecycleSnapshot;
+
   const formPayload = useMemo<Partial<Capability>>(
     () => ({
       name: form.name.trim(),
@@ -316,6 +428,11 @@ export default function CapabilityMetadata() {
       businessUnit: form.businessUnit.trim(),
       ownerTeam: form.ownerTeam.trim() || undefined,
       description: form.description.trim(),
+      businessOutcome: form.businessOutcome.trim() || undefined,
+      successMetrics: textToList(form.successMetrics),
+      definitionOfDone: form.definitionOfDone.trim() || undefined,
+      requiredEvidenceKinds: textToList(form.requiredEvidenceKinds),
+      operatingPolicySummary: form.operatingPolicySummary.trim() || undefined,
       confluenceLink: form.confluenceLink.trim() || undefined,
       jiraBoardLink: form.jiraBoardLink.trim() || undefined,
       documentationNotes: form.documentationNotes.trim() || undefined,
@@ -345,6 +462,7 @@ export default function CapabilityMetadata() {
       form.confluenceLink,
       form.databases,
       form.defaultWorkspacePath,
+      form.definitionOfDone,
       form.deploymentTargets,
       form.description,
       form.documentationNotes,
@@ -353,8 +471,11 @@ export default function CapabilityMetadata() {
       form.jiraBoardLink,
       form.localDirectories,
       form.name,
+      form.operatingPolicySummary,
       form.ownerTeam,
       form.parentCapabilityId,
+      form.requiredEvidenceKinds,
+      form.successMetrics,
       form.teamNames,
     ],
   );
@@ -367,6 +488,11 @@ export default function CapabilityMetadata() {
         businessUnit: activeCapability.businessUnit || '',
         ownerTeam: activeCapability.ownerTeam || undefined,
         description: activeCapability.description,
+        businessOutcome: activeCapability.businessOutcome || undefined,
+        successMetrics: activeCapability.successMetrics,
+        definitionOfDone: activeCapability.definitionOfDone || undefined,
+        requiredEvidenceKinds: activeCapability.requiredEvidenceKinds,
+        operatingPolicySummary: activeCapability.operatingPolicySummary || undefined,
         confluenceLink: activeCapability.confluenceLink || undefined,
         jiraBoardLink: activeCapability.jiraBoardLink || undefined,
         documentationNotes: activeCapability.documentationNotes || undefined,
@@ -454,6 +580,139 @@ export default function CapabilityMetadata() {
     }));
   };
 
+  const handleAddLifecyclePhase = () => {
+    const allPhaseIds = [
+      ...lifecycleDraft.phases.map(phase => phase.id),
+      ...lifecycleDraft.retiredPhases.map(phase => phase.id),
+    ];
+    setLifecycleDraft(current => ({
+      ...current,
+      phases: [
+        ...current.phases,
+        createLifecyclePhase(`Phase ${current.phases.length + 1}`, allPhaseIds),
+      ],
+    }));
+  };
+
+  const handleRenameLifecyclePhase = (phaseId: string, label: string) => {
+    setLifecycleDraft(current => renameLifecyclePhase(current, phaseId, label));
+  };
+
+  const handleMoveLifecyclePhase = (
+    phaseId: string,
+    direction: 'up' | 'down',
+  ) => {
+    setLifecycleDraft(current => moveLifecyclePhase(current, phaseId, direction));
+  };
+
+  const handleDeleteLifecyclePhase = (phaseId: string) => {
+    const usage = getLifecyclePhaseUsage(
+      {
+        workItems: workspace.workItems,
+        tasks: workspace.tasks,
+      },
+      lifecycleDraftWorkflows,
+      phaseId,
+    );
+
+    if (lifecycleDraft.phases.length <= 1) {
+      showError(
+        'Cannot remove the last phase',
+        'Keep at least one visible lifecycle phase between Backlog and Done.',
+      );
+      return;
+    }
+
+    if (usage.activeWorkItemCount > 0 || usage.pendingTaskCount > 0) {
+      showError(
+        'Phase is still active',
+        'Move or complete live work and workflow-managed tasks before deleting this lifecycle phase.',
+      );
+      return;
+    }
+
+    if (usage.workflowNodeCount + usage.workflowStepCount + usage.handoffTargetCount > 0) {
+      const fallbackPhaseId =
+        lifecycleDraft.phases.find(phase => phase.id !== phaseId)?.id || '';
+      setPendingLifecycleDeletePhaseId(phaseId);
+      setLifecycleDeleteTargetPhaseId(fallbackPhaseId);
+      return;
+    }
+
+    setLifecycleDraft(current => retireLifecyclePhase(current, phaseId));
+  };
+
+  const handleConfirmLifecycleDelete = () => {
+    if (!pendingLifecycleDeletePhaseId || !lifecycleDeleteTargetPhaseId) {
+      return;
+    }
+
+    const nextLifecycle = retireLifecyclePhase(
+      lifecycleDraft,
+      pendingLifecycleDeletePhaseId,
+    );
+    setLifecycleDraft(nextLifecycle);
+    setLifecycleDraftWorkflows(current =>
+      normalizeLifecycleWorkflows(
+        remapWorkflowPhaseReferences(
+          current,
+          pendingLifecycleDeletePhaseId,
+          lifecycleDeleteTargetPhaseId,
+        ),
+        nextLifecycle,
+      ),
+    );
+    setPendingLifecycleDeletePhaseId(null);
+    setLifecycleDeleteTargetPhaseId('');
+  };
+
+  const handleResetLifecycleDraft = () => {
+    setLifecycleDraft(capabilityLifecycle);
+    setLifecycleDraftWorkflows(workspace.workflows);
+    setPendingLifecycleDeletePhaseId(null);
+    setLifecycleDeleteTargetPhaseId('');
+  };
+
+  const handleSaveLifecycle = async () => {
+    const hasBlankLabel = lifecycleDraft.phases.some(phase => !phase.label.trim());
+    if (hasBlankLabel) {
+      showError(
+        'Lifecycle needs names',
+        'Give every lifecycle phase a visible label before saving.',
+      );
+      return;
+    }
+
+    const nextLifecycle = normalizeCapabilityLifecycle(lifecycleDraft);
+    const normalizedWorkflows = normalizeLifecycleWorkflows(
+      lifecycleDraftWorkflows,
+      nextLifecycle,
+    );
+
+    setIsSavingLifecycle(true);
+    try {
+      await setCapabilityWorkspaceContent(activeCapability.id, {
+        workflows: normalizedWorkflows,
+      });
+      await updateCapabilityMetadata(activeCapability.id, {
+        lifecycle: nextLifecycle,
+      });
+      setLastSavedAt(new Date().toISOString());
+      success(
+        'Capability lifecycle saved',
+        'Designer lanes, work board columns, and evidence labels now use the updated lifecycle.',
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to save the capability lifecycle.';
+      showError('Capability lifecycle save failed', message);
+    } finally {
+      setIsSavingLifecycle(false);
+    }
+  };
+
   const handleSave = (event: React.FormEvent) => {
     void (async () => {
       event.preventDefault();
@@ -468,7 +727,7 @@ export default function CapabilityMetadata() {
         setLastSavedAt(new Date().toISOString());
         success(
           'Capability metadata saved',
-          `${form.name.trim()} now has the latest business, execution, and stakeholder details.`,
+          `${form.name.trim()} now reflects the latest business charter and execution governance details.`,
         );
       } catch (error) {
         const message =
@@ -648,6 +907,22 @@ export default function CapabilityMetadata() {
               </div>
             ) : null}
 
+            <section className="rounded-[2rem] border border-primary/10 bg-primary/5 px-5 py-5">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <p className="form-kicker">Business definition</p>
+                  <h2 className="mt-2 text-xl font-extrabold text-primary">
+                    Define what this capability owns and how success will be judged
+                  </h2>
+                  <p className="mt-2 max-w-3xl text-sm leading-relaxed text-secondary">
+                    Keep the business contract clear first: purpose, owner, outcome, success
+                    metrics, evidence expectations, and done criteria.
+                  </p>
+                </div>
+                <StatusBadge tone="brand">Business-first</StatusBadge>
+              </div>
+            </section>
+
             <section className="grid gap-5 md:grid-cols-2">
               <div className="md:col-span-2 flex items-center gap-3">
                 <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
@@ -739,6 +1014,103 @@ export default function CapabilityMetadata() {
                   className="field-textarea h-28"
                 />
               </label>
+            </section>
+
+            <section className="grid gap-5 md:grid-cols-2">
+              <div className="md:col-span-2 flex items-center gap-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                  <ArrowRight size={24} />
+                </div>
+                <div>
+                  <h2 className="text-xl font-extrabold text-primary">
+                    Business outcome contract
+                  </h2>
+                  <p className="text-sm text-secondary">
+                    These fields make the capability legible to a business owner before any
+                    runtime or workflow detail shows up.
+                  </p>
+                </div>
+              </div>
+
+              <label className="space-y-2 md:col-span-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Business outcome
+                </span>
+                <textarea
+                  value={form.businessOutcome}
+                  onChange={event => setField('businessOutcome', event.target.value)}
+                  placeholder="Describe the business outcome this capability must create."
+                  className="field-textarea h-28"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Success metrics
+                </span>
+                <textarea
+                  value={form.successMetrics}
+                  onChange={event => setField('successMetrics', event.target.value)}
+                  placeholder={'Cycle time reduced by 30%\nRelease evidence is available for every completed work item'}
+                  className="field-textarea h-32"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Required evidence
+                </span>
+                <textarea
+                  value={form.requiredEvidenceKinds}
+                  onChange={event =>
+                    setField('requiredEvidenceKinds', event.target.value)
+                  }
+                  placeholder={'Requirements pack\nTest evidence\nRelease decision'}
+                  className="field-textarea h-32"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Definition of done
+                </span>
+                <textarea
+                  value={form.definitionOfDone}
+                  onChange={event => setField('definitionOfDone', event.target.value)}
+                  placeholder="Describe what must be true before this capability counts work as done."
+                  className="field-textarea h-28"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Operating policy summary
+                </span>
+                <textarea
+                  value={form.operatingPolicySummary}
+                  onChange={event =>
+                    setField('operatingPolicySummary', event.target.value)
+                  }
+                  placeholder="Summarize approvals, constraints, and evidence expectations in plain language."
+                  className="field-textarea h-28"
+                />
+              </label>
+            </section>
+
+            <section className="rounded-[2rem] border border-outline-variant/25 bg-surface-container-low px-5 py-5">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <p className="form-kicker">Execution & governance</p>
+                  <h2 className="mt-2 text-xl font-extrabold text-primary">
+                    Reveal the operating machinery only after the business contract is clear
+                  </h2>
+                  <p className="mt-2 max-w-3xl text-sm leading-relaxed text-secondary">
+                    Repositories, approved paths, commands, deployment targets, lifecycle, and
+                    runtime setup belong here as operating controls.
+                  </p>
+                </div>
+                <StatusBadge tone="neutral">Advanced controls</StatusBadge>
+              </div>
             </section>
 
             <section className="grid gap-5 md:grid-cols-2">
@@ -973,6 +1345,131 @@ export default function CapabilityMetadata() {
                     setForm(prev => ({ ...prev, deploymentTargets }))
                   }
                 />
+              </div>
+            </section>
+
+            <section className="grid gap-5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                    <WorkflowIcon size={24} />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-extrabold text-primary">
+                      Capability lifecycle
+                    </h2>
+                    <p className="text-sm text-secondary">
+                      Define the visible lifecycle phases that drive Designer lanes,
+                      Work board columns, and evidence phase labels for this capability.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusBadge tone="brand">
+                    {lifecycleDraft.phases.length} visible phase
+                    {lifecycleDraft.phases.length === 1 ? '' : 's'}
+                  </StatusBadge>
+                  <StatusBadge tone={lifecycleDirty ? 'warning' : 'success'}>
+                    {lifecycleDirty ? 'Unsaved lifecycle changes' : 'Lifecycle saved'}
+                  </StatusBadge>
+                </div>
+              </div>
+
+              <CapabilityLifecycleEditor
+                phases={lifecyclePhaseViews}
+                intro="Backlog and Done stay fixed. Every phase in between is capability-owned and flows through the workflow designer, orchestration board, ledger, and flight recorder."
+                onChangeLabel={handleRenameLifecyclePhase}
+                onMovePhase={handleMoveLifecyclePhase}
+                onDeletePhase={handleDeleteLifecyclePhase}
+                onAddPhase={handleAddLifecyclePhase}
+                addLabel="Add lifecycle phase"
+              />
+
+              {pendingLifecycleDeletePhaseId ? (
+                <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-5">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle size={18} className="mt-0.5 shrink-0 text-amber-700" />
+                    <div className="min-w-0 flex-1 space-y-3">
+                      <div>
+                        <p className="text-sm font-semibold text-amber-950">
+                          Remap workflow references before removing this phase
+                        </p>
+                        <p className="mt-1 text-sm leading-relaxed text-amber-900">
+                          Saved workflows still reference{' '}
+                          {lifecycleDraft.phases.find(
+                            phase => phase.id === pendingLifecycleDeletePhaseId,
+                          )?.label || pendingLifecycleDeletePhaseId}
+                          . Choose the phase that should inherit those nodes, steps, and hand-off
+                          targets.
+                        </p>
+                      </div>
+                      <label className="space-y-2">
+                        <span className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-amber-900">
+                          Remap to
+                        </span>
+                        <select
+                          value={lifecycleDeleteTargetPhaseId}
+                          onChange={event =>
+                            setLifecycleDeleteTargetPhaseId(event.target.value)
+                          }
+                          className="field-select bg-white"
+                        >
+                          {lifecycleDraft.phases
+                            .filter(phase => phase.id !== pendingLifecycleDeletePhaseId)
+                            .map(phase => (
+                              <option key={phase.id} value={phase.id}>
+                                {phase.label}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={handleConfirmLifecycleDelete}
+                          disabled={!lifecycleDeleteTargetPhaseId}
+                          className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Remap and remove phase
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPendingLifecycleDeletePhaseId(null);
+                            setLifecycleDeleteTargetPhaseId('');
+                          }}
+                          className="enterprise-button enterprise-button-secondary"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-outline-variant/15 bg-surface-container-low px-5 py-4">
+                <p className="text-sm text-secondary">
+                  Delete is blocked while active work or workflow-managed tasks still use a phase.
+                </p>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleResetLifecycleDraft}
+                    disabled={!lifecycleDirty || isSavingLifecycle}
+                    className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Reset lifecycle changes
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleSaveLifecycle()}
+                    disabled={!lifecycleDirty || isSavingLifecycle || bootStatus !== 'ready'}
+                    className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isSavingLifecycle ? 'Saving lifecycle...' : 'Save lifecycle'}
+                  </button>
+                </div>
               </div>
             </section>
 

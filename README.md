@@ -1,65 +1,282 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Singularity Neo
 
-# Run and deploy your capability workspace
+Singularity Neo is a capability-centered delivery workspace for enterprise software teams. It combines business-facing capability management with AI-assisted collaboration, workflow design, orchestration, evidence tracking, and runtime-backed execution.
 
-This contains everything you need to run your app locally.
+The current product direction is:
+- `Home` tells a business owner what matters now
+- `Work` moves delivery through a capability-owned lifecycle
+- `Team` shows who can help and whether they are ready
+- `Chat` gives capability-scoped collaboration with resumable context
+- `Evidence` shows artifacts, handoffs, and flight recorder history
+- `Designer` defines the workflow and lifecycle lanes that drive execution
 
-View your app in AI Studio: https://ai.studio/apps/3777a1e7-b438-4857-8698-bd077eee3e3d
+## What It Does
 
-## Run Locally
+Singularity Neo treats a `capability` as the operating unit of the workspace. A capability owns:
+- its business charter
+- collaborators and agents
+- approved workspaces and command templates
+- workflows and lifecycle phases
+- work items and workflow runs
+- artifacts, handoffs, and evidence
+- memory and agent learning
 
-**Prerequisites:** Node.js, PostgreSQL
+Primary surfaces:
+- `Home` (`/`) - capability trust, next action, delivery, and evidence
+- `Work` (`/orchestrator`) - orchestration board, waits, approvals, restart/reset
+- `Team` (`/team`) - collaborators, readiness, learning refresh, chat handoff
+- `Chat` (`/chat`) - capability-scoped collaboration with context inspector
+- `Evidence` (`/ledger`) - artifacts, completed work, and work-item flight recorder
+- `Designer` (`/designer`) - full-screen Workflow Designer Neo
 
+Advanced tools:
+- `Run Console` (`/run-console`)
+- `Memory Explorer` (`/memory`)
+- `Eval Center` (`/evals`)
+- `Skill Library` (`/skills`)
+- `Artifact Designer` (`/artifact-designer`)
+- `Tasks` (`/tasks`)
+- `Studio` (`/studio`)
 
-1. Install dependencies:
-   `npm install`
-2. Create `.env.local` from [.env.example](/Users/ashokraj/Documents/agentGoogle/SingularityNeo/.env.example)
-3. Choose one runtime mode in `.env.local`:
-   `Preferred:` set `COPILOT_CLI_URL` to a running headless Copilot CLI server
-   `Fallback:` set `GITHUB_MODELS_TOKEN` to a GitHub token the GitHub Copilot SDK can use
-4. Confirm local Postgres is available for the capability workspace system of record:
-   `PGHOST=127.0.0.1`
-   `PGPORT=5432`
-   `PGDATABASE=singularity`
-   `PGUSER=postgres`
-5. If your Postgres user cannot create databases automatically, create it once:
-   `createdb singularity`
-6. Run the app:
-   `npm run dev`
+## Architecture
 
-The local dev script starts both:
-- the Vite client on `http://localhost:3000`
+Frontend:
+- React 19
+- Vite
+- TypeScript
+- React Router
+- Tailwind CSS v4
+
+Backend:
+- Express
+- PostgreSQL
+- GitHub Copilot SDK
+
+Runtime model:
+- the React app talks only to the local Express API
+- the Express API is the system of record for capabilities and workspace state
+- capability data is persisted in Postgres
+- runtime-backed chat and execution use the GitHub Copilot SDK
+
+Persistence model:
+- capability records live in Postgres
+- workspace entities are capability-scoped
+- workflow runs, waits, artifacts, learning profiles, and sessions are durable
+
+## Prerequisites
+
+- Node.js 22+ recommended
+- PostgreSQL running locally or reachable from the API server
+- one Copilot runtime path configured:
+  - preferred: `COPILOT_CLI_URL`
+  - fallback: `GITHUB_MODELS_TOKEN`
+
+## Quick Start
+
+1. Install dependencies.
+
+```bash
+npm install
+```
+
+2. Create `.env.local` from `.env.example`.
+
+```bash
+cp .env.example .env.local
+```
+
+3. Set your runtime configuration in `.env.local`.
+
+Recommended enterprise path:
+
+```bash
+COPILOT_CLI_URL="http://127.0.0.1:4321"
+```
+
+Token fallback:
+
+```bash
+GITHUB_MODELS_TOKEN="github_pat_..."
+```
+
+4. Set your local Postgres connection in `.env.local`.
+
+```bash
+PGHOST="127.0.0.1"
+PGPORT="5432"
+PGDATABASE="singularity"
+PGUSER="postgres"
+PGPASSWORD=""
+PGADMIN_DATABASE="postgres"
+```
+
+5. If the database does not exist yet, create it once.
+
+```bash
+createdb singularity
+```
+
+6. Start the app.
+
+```bash
+npm run dev
+```
+
+This starts:
+- Vite on `http://localhost:3000`
 - the Express API on `http://localhost:3001`
 
-The React app only calls the local Express API.
-The Express server handles the external GitHub Copilot SDK runtime, exposes permissive `allow all` CORS headers for API access, and persists the capability workspace into local Postgres with `capabilityId` as the top-level ownership key across capabilities, agents, skills, chats, workflows, artifacts, tasks, execution logs, learning updates, and work items.
+## Useful Scripts
 
-For enterprise setups, prefer `COPILOT_CLI_URL` so the app connects to a stable headless Copilot CLI service instead of relying on the token-based HTTP fallback path.
+```bash
+npm run dev          # client + server
+npm run dev:client   # Vite only
+npm run dev:server   # Express API only
+npm run build        # production frontend build
+npm run start        # serve backend + built frontend
+npm run lint         # TypeScript check
+npm run test         # all Vitest tests
+npm run test:unit    # frontend-focused tests
+npm run test:backend # backend-focused tests
+npm run test:e2e     # Playwright browser tests
+```
+
+## Environment Variables
+
+Important variables:
+
+```bash
+COPILOT_CLI_URL=""
+GITHUB_MODELS_TOKEN=""
+PORT="3001"
+VITE_ENABLE_DEMO_MODE="false"
+ENABLE_DEMO_SEED="false"
+PGHOST="127.0.0.1"
+PGPORT="5432"
+PGDATABASE="singularity"
+PGUSER="postgres"
+PGPASSWORD=""
+PGADMIN_DATABASE="postgres"
+```
+
+Notes:
+- `COPILOT_CLI_URL` is the preferred long-term enterprise runtime path
+- `GITHUB_MODELS_TOKEN` is a fallback, not the preferred production setup
+- `VITE_ENABLE_DEMO_MODE` and `ENABLE_DEMO_SEED` should stay `false` for real workspaces
+- the Vite dev server proxies `/api` to `http://127.0.0.1:3001` unless `VITE_API_PROXY_TARGET` overrides it
+
+## Repo Structure
+
+```text
+src/
+  components/        shared UI and layout
+  context/           capability state and app boot flow
+  lib/               client helpers, lifecycle, workflow, UX models
+  pages/             Home, Work, Team, Chat, Evidence, Designer, Advanced tools
+  types.ts           shared frontend domain model
+
+server/
+  index.ts           Express bootstrap and route registration
+  repository.ts      capability and workspace persistence
+  execution/         workflow runs, waits, orchestration, worker
+  agentLearning/     learning profiles, jobs, sessions
+  memory.ts          capability memory indexing and retrieval
+  ledger.ts          evidence and artifact aggregation
+  flightRecorder.ts  work-item audit reconstruction
+  db.ts              Postgres init and schema evolution
+
+tests/
+  e2e/               Playwright flows
+```
+
+## Product Highlights
+
+- Business-first capability home with trust and proof milestones
+- Capability-owned lifecycle phases that drive workflow lanes and work board columns
+- Full-screen Workflow Designer Neo
+- Team workspace with agent learning and resumable session visibility
+- Collaboration-first chat with context inspector and stream recovery
+- Orchestrator with approvals, blockers, restart, and reset controls
+- Evidence and Flight Recorder views for artifacts and end-to-end audit history
+- Built-in contrarian reviewer support for conflict-resolution waits
 
 ## Quality Gates
 
-Use these checks before committing stabilization or UX changes:
+Run these before pushing changes:
 
-1. Type-check the full project:
-   `npm run lint`
-2. Run unit and backend smoke tests:
-   `npm run test`
-3. Run frontend-focused tests only:
-   `npm run test:unit`
-4. Run backend-focused tests only:
-   `npm run test:backend`
-5. Run browser smoke tests:
-   `npm run test:e2e`
-6. Build the production bundle:
-   `npm run build`
+```bash
+npm run lint
+npm run test
+npm run build
+git diff --check
+```
 
-Playwright uses `npm run dev` as its web server and reuses an existing local server when one is already running.
+If you are touching UI flows, also run:
 
-To serve the built app through the same API server:
+```bash
+npm run test:e2e
+```
 
-1. Build the client:
-   `npm run build`
-2. Start the server:
-   `npm run start`
+## Troubleshooting
+
+### Port 3001 is already in use
+
+Check what owns the API port:
+
+```bash
+lsof -iTCP:3001 -sTCP:LISTEN -n -P
+```
+
+If you need a clean restart:
+
+```bash
+pkill -f "server/index.ts"
+npm run dev:server
+```
+
+### App hangs on “Waiting for the authoritative capability workspace”
+
+This means the frontend is waiting for `/api/state`.
+
+Check the API directly:
+
+```bash
+curl -i http://127.0.0.1:3001/api/state
+```
+
+If it hangs:
+- confirm Postgres is reachable
+- confirm the API process is healthy
+- restart the backend cleanly
+
+### Copilot is not configured
+
+You must set one of:
+- `COPILOT_CLI_URL`
+- `GITHUB_MODELS_TOKEN`
+
+Then restart the backend.
+
+### Playwright creates test capabilities
+
+The e2e suite currently uses the configured Postgres database. If you run Playwright against your normal local database, it will create test capabilities unless you isolate it to a separate DB.
+
+Recommended:
+- use a dedicated Postgres database for e2e runs
+- or clean up test capabilities after the suite
+
+### Large bundle warning during build
+
+The production build currently warns about a large main JS chunk. This does not block the build, but it is a good candidate for future code-splitting work.
+
+## Current Defaults And Assumptions
+
+- business-owner-first UX for primary navigation
+- desktop-first design
+- Postgres as the durable system of record
+- GitHub Copilot SDK as the AI runtime path
+- demo data disabled by default
+
+## License / Internal Use
+
+This repository appears to be an active product workspace rather than a polished public package template. If you plan to publish or distribute it outside your organization, add the appropriate license, contribution guide, and security policy first.

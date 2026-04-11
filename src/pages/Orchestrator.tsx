@@ -39,7 +39,10 @@ import {
   startCapabilityWorkflowRun,
   type RuntimeStatus,
 } from '../lib/api';
-import { SDLC_BOARD_PHASES } from '../lib/standardWorkflow';
+import {
+  getCapabilityBoardPhaseIds,
+  getLifecyclePhaseLabel,
+} from '../lib/capabilityLifecycle';
 import { cn } from '../lib/utils';
 import type {
   ContrarianConflictReview,
@@ -54,16 +57,16 @@ import type {
 import { BoardColumn, EmptyState, StatusBadge } from '../components/EnterpriseUI';
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
-const PHASE_META: Record<WorkItemPhase, { label: string; accent: string }> = {
-  BACKLOG: { label: 'Backlog', accent: 'bg-slate-100 text-slate-700' },
-  ANALYSIS: { label: 'Analysis', accent: 'bg-sky-100 text-sky-700' },
-  DESIGN: { label: 'Design', accent: 'bg-indigo-100 text-indigo-700' },
-  DEVELOPMENT: { label: 'Development', accent: 'bg-primary/10 text-primary' },
-  QA: { label: 'QA', accent: 'bg-emerald-100 text-emerald-700' },
-  GOVERNANCE: { label: 'Governance', accent: 'bg-amber-100 text-amber-700' },
-  RELEASE: { label: 'Release', accent: 'bg-fuchsia-100 text-fuchsia-700' },
-  DONE: { label: 'Done', accent: 'bg-surface-container-high text-secondary' },
-};
+const PHASE_ACCENTS = [
+  'bg-sky-100 text-sky-700',
+  'bg-indigo-100 text-indigo-700',
+  'bg-primary/10 text-primary',
+  'bg-emerald-100 text-emerald-700',
+  'bg-amber-100 text-amber-700',
+  'bg-fuchsia-100 text-fuchsia-700',
+  'bg-cyan-100 text-cyan-700',
+  'bg-orange-100 text-orange-700',
+] as const;
 
 const RUN_STATUS_META: Record<
   WorkflowRun['status'],
@@ -356,6 +359,39 @@ const Orchestrator = () => {
     useCapability();
   const { success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
+  const lifecycleBoardPhases = useMemo(
+    () => getCapabilityBoardPhaseIds(activeCapability),
+    [activeCapability],
+  );
+  const phaseMeta = useMemo(() => {
+    const visiblePhaseIds = lifecycleBoardPhases.filter(
+      phase => phase !== 'BACKLOG' && phase !== 'DONE',
+    );
+    const meta = new Map<WorkItemPhase, { label: string; accent: string }>();
+    meta.set('BACKLOG', {
+      label: getLifecyclePhaseLabel(activeCapability, 'BACKLOG'),
+      accent: 'bg-slate-100 text-slate-700',
+    });
+    meta.set('DONE', {
+      label: getLifecyclePhaseLabel(activeCapability, 'DONE'),
+      accent: 'bg-surface-container-high text-secondary',
+    });
+    visiblePhaseIds.forEach((phase, index) => {
+      meta.set(phase, {
+        label: getLifecyclePhaseLabel(activeCapability, phase),
+        accent: PHASE_ACCENTS[index % PHASE_ACCENTS.length],
+      });
+    });
+    return meta;
+  }, [activeCapability, lifecycleBoardPhases]);
+  const getPhaseMeta = useCallback(
+    (phase?: WorkItemPhase) =>
+      phaseMeta.get(phase || '') || {
+        label: getLifecyclePhaseLabel(activeCapability, phase),
+        accent: 'bg-surface-container-high text-secondary',
+      },
+    [activeCapability, phaseMeta],
+  );
 
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(() => {
     const stored = readSessionValue(STORAGE_KEYS.selected, '');
@@ -757,11 +793,11 @@ const Orchestrator = () => {
 
   const groupedItems = useMemo(
     () =>
-      SDLC_BOARD_PHASES.map(phase => ({
+      lifecycleBoardPhases.map(phase => ({
         phase,
         items: filteredWorkItems.filter(item => item.phase === phase),
       })),
-    [filteredWorkItems],
+    [filteredWorkItems, lifecycleBoardPhases],
   );
 
   const stats = useMemo(
@@ -1065,7 +1101,7 @@ const Orchestrator = () => {
       },
       {
         title: 'Execution restarted',
-        description: `${selectedWorkItem.title} restarted from ${PHASE_META[selectedWorkItem.phase].label}.`,
+        description: `${selectedWorkItem.title} restarted from ${getPhaseMeta(selectedWorkItem.phase).label}.`,
       },
     );
   };
@@ -1076,7 +1112,7 @@ const Orchestrator = () => {
     }
 
     const resetPhase = selectedResetPhase;
-    const resetPhaseLabel = PHASE_META[resetPhase].label;
+    const resetPhaseLabel = getPhaseMeta(resetPhase).label;
 
     await withAction(
       'reset',
@@ -1191,13 +1227,13 @@ const Orchestrator = () => {
       async () => {
         await moveCapabilityWorkItem(activeCapability.id, workItemId, {
           targetPhase,
-          note: `Story moved to ${PHASE_META[targetPhase].label} from the orchestration board.`,
+          note: `Story moved to ${getPhaseMeta(targetPhase).label} from the orchestration board.`,
         });
         await refreshSelection(selectedWorkItemId === workItemId ? workItemId : undefined);
       },
       {
         title: 'Work item moved',
-        description: `${item.title} moved to ${PHASE_META[targetPhase].label}.`,
+        description: `${item.title} moved to ${getPhaseMeta(targetPhase).label}.`,
       },
     );
   };
@@ -1459,7 +1495,7 @@ const Orchestrator = () => {
                 <div className="mt-3 space-y-2 text-sm text-secondary">
                   <p className="line-clamp-2">{attention.attentionReason}</p>
                   <div className="orchestrator-attention-meta">
-                    <span>{PHASE_META[attention.item.phase].label}</span>
+                    <span>{getPhaseMeta(attention.item.phase).label}</span>
                     <span>
                       {agentsById.get(attention.agentId || '')?.name ||
                         attention.agentId ||
@@ -1506,11 +1542,11 @@ const Orchestrator = () => {
               {groupedItems.map(({ phase, items }) => (
                 <BoardColumn
                   key={phase}
-                  title={PHASE_META[phase].label}
+                  title={getPhaseMeta(phase).label}
                   count={items.length}
                   badge={
                     <StatusBadge tone={getStatusTone(phase)}>
-                      {PHASE_META[phase].label}
+                      {getPhaseMeta(phase).label}
                     </StatusBadge>
                   }
                   active={dragOverPhase === phase}
@@ -1632,7 +1668,7 @@ const Orchestrator = () => {
 
                     {items.length === 0 && (
                       <EmptyState
-                        title={`No work in ${PHASE_META[phase].label}`}
+                        title={`No work in ${getPhaseMeta(phase).label}`}
                         description="Drop a work item here to re-stage it or keep the phase clear while execution moves forward."
                         icon={WorkflowIcon}
                         className="min-h-[10rem]"
@@ -1671,7 +1707,7 @@ const Orchestrator = () => {
                       <p className="font-semibold text-on-surface">{item.title}</p>
                       <p className="mt-1 text-xs text-secondary">{item.id}</p>
                     </div>
-                    <span>{PHASE_META[item.phase].label}</span>
+                    <span>{getPhaseMeta(item.phase).label}</span>
                     <div>
                       <StatusBadge tone={getStatusTone(item.status)}>
                         {formatEnumLabel(item.status)}
@@ -1715,7 +1751,7 @@ const Orchestrator = () => {
                     <p className="form-kicker">{selectedWorkItem.id}</p>
                     <div className="flex flex-wrap gap-2">
                       <StatusBadge tone={getStatusTone(selectedWorkItem.phase)}>
-                        {PHASE_META[selectedWorkItem.phase].label}
+                        {getPhaseMeta(selectedWorkItem.phase).label}
                       </StatusBadge>
                       <StatusBadge tone={getStatusTone(selectedWorkItem.status)}>
                         {WORK_ITEM_STATUS_META[selectedWorkItem.status].label}
@@ -2108,7 +2144,7 @@ const Orchestrator = () => {
                       </p>
                       <p className="mt-1 text-xs leading-relaxed text-secondary">
                         Reset moves the work item back to{' '}
-                        <strong>{PHASE_META[selectedResetPhase].label}</strong>
+                        <strong>{getPhaseMeta(selectedResetPhase).label}</strong>
                         {selectedResetAgent
                           ? ` and restarts with ${selectedResetAgent.name}.`
                           : selectedResetStep?.agentId
@@ -2176,7 +2212,7 @@ const Orchestrator = () => {
                                   {step.name}
                                 </p>
                                 <StatusBadge tone={getStatusTone(step.phase)}>
-                                  {PHASE_META[step.phase].label}
+                                  {getPhaseMeta(step.phase).label}
                                 </StatusBadge>
                               </div>
                               <p className="mt-1 text-xs leading-relaxed text-secondary">
@@ -2508,7 +2544,7 @@ const Orchestrator = () => {
                       <p>
                         First phase:{' '}
                         <strong className="text-on-surface">
-                          {draftFirstStep ? PHASE_META[draftFirstStep.phase].label : 'Not defined'}
+                          {draftFirstStep ? getPhaseMeta(draftFirstStep.phase).label : 'Not defined'}
                         </strong>
                       </p>
                       <p>

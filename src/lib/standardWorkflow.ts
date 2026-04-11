@@ -1,5 +1,12 @@
 import { BUILT_IN_AGENT_TEMPLATES } from '../constants';
 import {
+  createDefaultCapabilityLifecycle,
+  getCapabilityBoardPhaseIds,
+  getCapabilityGraphPhaseIds,
+  getDefaultLifecycleEndPhaseId,
+  getDefaultLifecycleStartPhaseId,
+} from './capabilityLifecycle';
+import {
   Capability,
   ToolAdapterId,
   WorkItemPhase,
@@ -16,7 +23,6 @@ import {
   createWorkflowEdge,
   createWorkflowNode,
   normalizeWorkflowGraph,
-  WORKFLOW_GRAPH_PHASES,
 } from './workflowGraph';
 
 type BuiltInAgentKey = (typeof BUILT_IN_AGENT_TEMPLATES)[number]['key'];
@@ -45,16 +51,12 @@ type StandardWorkflowStepTemplate = {
   handoffArtifactContract?: WorkflowArtifactContract;
 };
 
-export const SDLC_BOARD_PHASES: WorkItemPhase[] = [
-  'BACKLOG',
-  'ANALYSIS',
-  'DESIGN',
-  'DEVELOPMENT',
-  'QA',
-  'GOVERNANCE',
-  'RELEASE',
-  'DONE',
-];
+const STANDARD_LIFECYCLE = createDefaultCapabilityLifecycle();
+const STANDARD_VISIBLE_PHASE_IDS = getCapabilityGraphPhaseIds(STANDARD_LIFECYCLE);
+
+export const SDLC_BOARD_PHASES: WorkItemPhase[] = getCapabilityBoardPhaseIds(
+  STANDARD_LIFECYCLE,
+);
 
 const slugify = (value: string) =>
   value
@@ -493,8 +495,22 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
 ];
 
 export const createStandardCapabilityWorkflow = (
-  capability: Pick<Capability, 'id' | 'name' | 'specialAgentId'>,
+  capability: Pick<Capability, 'id' | 'name' | 'specialAgentId' | 'lifecycle'>,
 ): Workflow => {
+  const visiblePhaseIds = getCapabilityGraphPhaseIds(capability.lifecycle);
+  const resolveTemplatePhase = (phaseId: WorkItemPhase) => {
+    if (visiblePhaseIds.includes(phaseId)) {
+      return phaseId;
+    }
+    const standardIndex = STANDARD_VISIBLE_PHASE_IDS.indexOf(phaseId);
+    if (standardIndex >= 0 && visiblePhaseIds[standardIndex]) {
+      return visiblePhaseIds[standardIndex];
+    }
+    if (phaseId === 'RELEASE') {
+      return getDefaultLifecycleEndPhaseId(capability.lifecycle);
+    }
+    return visiblePhaseIds[Math.min(Math.max(standardIndex, 0), visiblePhaseIds.length - 1)];
+  };
   const startNodeId = `NODE-${slugify(capability.id)}-START`;
   const endNodeId = `NODE-${slugify(capability.id)}-END`;
   const nodes: WorkflowNode[] = [
@@ -502,10 +518,10 @@ export const createStandardCapabilityWorkflow = (
       id: startNodeId,
       name: 'Start',
       type: 'START',
-      phase: 'ANALYSIS',
+      phase: getDefaultLifecycleStartPhaseId(capability.lifecycle),
       description: 'Entry point for the standard SDLC flow.',
       layout: { x: 80, y: 48 },
-    }),
+    }, capability.lifecycle),
     ...STANDARD_SDLC_STEP_TEMPLATES.map((template, index) =>
       createWorkflowNode({
         id: `STEP-${slugify(capability.id)}-${index + 1}`,
@@ -518,7 +534,7 @@ export const createStandardCapabilityWorkflow = (
             : template.phase === 'RELEASE'
             ? 'RELEASE'
             : 'DELIVERY',
-        phase: template.phase,
+        phase: resolveTemplatePhase(template.phase),
         agentId: resolveAgentReference(capability, template.agentRef),
         action: template.action,
         description: template.description,
@@ -534,18 +550,37 @@ export const createStandardCapabilityWorkflow = (
         artifactContract: template.artifactContract,
         layout: {
           x: 80 + (index + 1) * 260,
-          y: 48 + WORKFLOW_GRAPH_PHASES.indexOf(template.phase as never) * 176,
+          y:
+            48 +
+            Math.max(
+              getCapabilityGraphPhaseIds(capability.lifecycle).indexOf(
+                resolveTemplatePhase(template.phase),
+              ),
+              0,
+            ) *
+              176,
         },
-      }),
+      }, capability.lifecycle),
     ),
     createWorkflowNode({
       id: endNodeId,
       name: 'End',
       type: 'END',
-      phase: 'RELEASE',
+      phase: getDefaultLifecycleEndPhaseId(capability.lifecycle),
       description: 'Terminal completion node for the workflow.',
-      layout: { x: 80 + (STANDARD_SDLC_STEP_TEMPLATES.length + 1) * 260, y: 48 + 5 * 176 },
-    }),
+      layout: {
+        x: 80 + (STANDARD_SDLC_STEP_TEMPLATES.length + 1) * 260,
+        y:
+          48 +
+          Math.max(
+            getCapabilityGraphPhaseIds(capability.lifecycle).indexOf(
+              getDefaultLifecycleEndPhaseId(capability.lifecycle),
+            ),
+            0,
+          ) *
+            176,
+      },
+    }, capability.lifecycle),
   ];
 
   const handoffProtocols: WorkflowHandoffProtocol[] = STANDARD_SDLC_STEP_TEMPLATES.flatMap(
@@ -566,7 +601,9 @@ export const createStandardCapabilityWorkflow = (
           sourceStepId: sourceStep.id,
           sourceNodeId: sourceStep.id,
           targetAgentId: resolveAgentReference(capability, template.handoffToAgentRef),
-          targetPhase: template.handoffToPhase,
+          targetPhase: template.handoffToPhase
+            ? resolveTemplatePhase(template.handoffToPhase)
+            : undefined,
           description: `Protocol for ${template.name.toLowerCase()} hand-off within ${capability.name}.`,
           rules:
             template.handoffRules?.length ? template.handoffRules : template.exitCriteria,
@@ -622,7 +659,7 @@ export const createStandardCapabilityWorkflow = (
     steps: [],
     handoffProtocols,
     publishState: 'PUBLISHED',
-  });
+  }, capability.lifecycle);
 };
 
 const mergeArtifactContract = (
@@ -643,7 +680,7 @@ const mergeArtifactContract = (
 };
 
 export const applyStandardArtifactsToWorkflow = (
-  capability: Pick<Capability, 'id' | 'name' | 'specialAgentId'>,
+  capability: Pick<Capability, 'id' | 'name' | 'specialAgentId' | 'lifecycle'>,
   workflow: Workflow,
 ): Workflow => {
   const standardWorkflowId = `WF-${slugify(capability.id)}-STANDARD-SDLC`;
@@ -703,10 +740,11 @@ export const applyStandardArtifactsToWorkflow = (
       summary:
         workflow.summary ||
         'Standard SDLC workflow with explicit agent hand-offs, standard input/output document artifacts, governance validation, and human approval before release.',
-    }),
+    }, capability.lifecycle),
+    capability.lifecycle,
   );
 };
 
 export const getDefaultCapabilityWorkflows = (
-  capability: Pick<Capability, 'id' | 'name' | 'specialAgentId'>,
+  capability: Pick<Capability, 'id' | 'name' | 'specialAgentId' | 'lifecycle'>,
 ): Workflow[] => [createStandardCapabilityWorkflow(capability)];

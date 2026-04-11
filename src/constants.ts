@@ -1,5 +1,6 @@
 import { Blueprint, WorkPackage, AgentTask, Artifact, Capability, Skill, Workflow, ExecutionLog, LearningUpdate, WorkItem } from './types';
 import { getDefaultExecutionConfig } from './lib/executionConfig';
+import { createDefaultCapabilityLifecycle } from './lib/capabilityLifecycle';
 
 export const SKILL_LIBRARY: Skill[] = [
   { id: 'SKL-001', name: 'Log Analysis', description: 'Analyze system logs for patterns and anomalies.', category: 'Analysis', version: '1.2.0' },
@@ -122,6 +123,11 @@ export const CAPABILITIES: Capability[] = [
     name: 'Calculator',
     description: 'This is used to calculate numbers',
     domain: 'Utilities',
+    businessOutcome: 'Provide fast, trusted arithmetic outcomes for simple user requests.',
+    successMetrics: ['Common calculator requests return the expected numeric result.'],
+    definitionOfDone: 'The capability can accept a work item, produce evidence, and complete a release-safe execution path.',
+    requiredEvidenceKinds: ['Requirements pack', 'Test evidence', 'Release decision'],
+    operatingPolicySummary: 'Execution stays inside approved workspaces and release-affecting actions remain approval-gated.',
     applications: [],
     apis: [],
     databases: [],
@@ -130,6 +136,7 @@ export const CAPABILITIES: Capability[] = [
     teamNames: [],
     stakeholders: [],
     additionalMetadata: [],
+    lifecycle: createDefaultCapabilityLifecycle(),
     executionConfig: getDefaultExecutionConfig({ localDirectories: [] }),
     status: 'STABLE',
     specialAgentId: 'AGENT-CALCULATOR-OWNER',

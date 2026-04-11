@@ -5,6 +5,7 @@ import type {
   EvalRunDetail,
   EvalSuite,
 } from '../src/types';
+import { isTestingWorkflowStep } from '../src/lib/workflowStepSemantics';
 import { getCapabilityBundle } from './repository';
 import { buildMemoryContext, refreshCapabilityMemory } from './memory';
 import { query } from './db';
@@ -476,12 +477,13 @@ export const runEvalSuite = async (
       const handoffSteps = bundle.workspace.workflows.flatMap(workflow =>
         workflow.steps.filter(step => step.handoffToAgentId || step.handoffToPhase),
       );
+      const workflowsWithTestingCoverage = bundle.workspace.workflows.filter(workflow =>
+        workflow.steps.some(step => isTestingWorkflowStep(step)),
+      );
       const passed =
         approvalSteps.length > 0 &&
         handoffSteps.length > 0 &&
-        bundle.workspace.workflows.some(workflow =>
-          workflow.steps.some(step => step.phase === 'QA'),
-        );
+        workflowsWithTestingCoverage.length > 0;
       status = passed ? 'PASSED' : 'FAILED';
       score = passed ? 100 : 35;
       summary = passed
@@ -490,9 +492,7 @@ export const runEvalSuite = async (
       details = {
         approvalSteps: approvalSteps.length,
         handoffSteps: handoffSteps.length,
-        qaWorkflowCount: bundle.workspace.workflows.filter(workflow =>
-          workflow.steps.some(step => step.phase === 'QA'),
-        ).length,
+        qaWorkflowCount: workflowsWithTestingCoverage.length,
       };
     }
 

@@ -16,6 +16,7 @@ import type {
   WorkItem,
   WorkItemPhase,
 } from '../src/types';
+import { normalizeCapabilityLifecycle } from '../src/lib/capabilityLifecycle';
 import { initializeDatabase } from './db';
 import {
   addCapabilityAgentRecord,
@@ -115,6 +116,12 @@ const app = express();
 const port = Number(process.env.PORT || '3001');
 const execFileAsync = promisify(execFile);
 
+const runDeferredStartupTasks = async () => {
+  startExecutionWorker();
+  startAgentLearningWorker();
+  wakeAgentLearningWorker();
+};
+
 const slugify = (value: string) =>
   value
     .trim()
@@ -138,6 +145,11 @@ const ensureCapabilityCreatePayload = (
     id: capability.id?.trim() || createRuntimeId('CAP'),
     domain: capability.domain || '',
     description: capability.description,
+    businessOutcome: capability.businessOutcome || '',
+    successMetrics: capability.successMetrics || [],
+    definitionOfDone: capability.definitionOfDone || '',
+    requiredEvidenceKinds: capability.requiredEvidenceKinds || [],
+    operatingPolicySummary: capability.operatingPolicySummary || '',
     applications: capability.applications || [],
     apis: capability.apis || [],
     databases: capability.databases || [],
@@ -146,6 +158,7 @@ const ensureCapabilityCreatePayload = (
     teamNames: capability.teamNames || [],
     stakeholders: capability.stakeholders || [],
     additionalMetadata: capability.additionalMetadata || [],
+    lifecycle: normalizeCapabilityLifecycle(capability.lifecycle),
     skillLibrary: capability.skillLibrary || [],
     status: capability.status || 'PENDING',
     executionConfig: capability.executionConfig || {
@@ -1784,28 +1797,14 @@ if (fs.existsSync(distDir)) {
 const startServer = async () => {
   await initializeDatabase();
   await initializeSeedData();
-  const state = await fetchAppState();
-  await Promise.all(
-    state.capabilities.map(capability =>
-      refreshCapabilityMemory(capability.id, {
-        requeueAgents: true,
-        requestReason: 'startup-memory-refresh',
-      }).catch(() => undefined),
-    ),
-  );
-  await Promise.all(
-    state.capabilities.map(capability =>
-      listEvalSuites(capability.id).catch(() => undefined),
-    ),
-  );
-  await ensureAgentLearningBackfill().catch(() => undefined);
-  startExecutionWorker();
-  startAgentLearningWorker();
-  wakeAgentLearningWorker();
-
   const server = app.listen(port);
   server.on('listening', () => {
     console.log(`Singularity Neo API listening on http://localhost:${port}`);
+    setTimeout(() => {
+      void runDeferredStartupTasks().catch(error => {
+        console.error('Deferred startup initialization failed.', error);
+      });
+    }, 2500);
   });
   server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') {

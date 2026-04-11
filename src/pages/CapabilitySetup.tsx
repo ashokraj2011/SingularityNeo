@@ -22,6 +22,7 @@ import {
 import { StatusBadge } from '../components/EnterpriseUI';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
+import { createDefaultCapabilityLifecycle } from '../lib/capabilityLifecycle';
 import {
   getDefaultExecutionConfig,
   isWorkspacePathInsideApprovedRoot,
@@ -83,6 +84,11 @@ const createDraft = (): CapabilityOnboardingDraft => ({
   businessUnit: '',
   ownerTeam: '',
   description: '',
+  businessOutcome: '',
+  successMetrics: [],
+  definitionOfDone: '',
+  requiredEvidenceKinds: [],
+  operatingPolicySummary: '',
   githubRepositories: [],
   jiraBoardLink: '',
   confluenceLink: '',
@@ -175,7 +181,9 @@ export default function CapabilitySetup() {
     draft.name.trim() &&
       draft.domain.trim() &&
       draft.businessUnit.trim() &&
-      draft.description.trim(),
+      draft.description.trim() &&
+      draft.businessOutcome.trim() &&
+      draft.successMetrics.length > 0,
   );
   const connectorShapeReady =
     draft.githubRepositories.every(isOptionalConnectorUrl) &&
@@ -348,6 +356,11 @@ export default function CapabilitySetup() {
       businessUnit: draft.businessUnit.trim(),
       ownerTeam: draft.ownerTeam.trim() || undefined,
       description: draft.description.trim(),
+      businessOutcome: draft.businessOutcome.trim() || undefined,
+      successMetrics: uniqueList(draft.successMetrics),
+      definitionOfDone: draft.definitionOfDone.trim() || undefined,
+      requiredEvidenceKinds: uniqueList(draft.requiredEvidenceKinds),
+      operatingPolicySummary: draft.operatingPolicySummary.trim() || undefined,
       confluenceLink: draft.confluenceLink.trim() || undefined,
       jiraBoardLink: draft.jiraBoardLink.trim() || undefined,
       documentationNotes: draft.documentationNotes.trim() || undefined,
@@ -359,6 +372,7 @@ export default function CapabilitySetup() {
       teamNames: [],
       stakeholders: [],
       additionalMetadata: [],
+      lifecycle: createDefaultCapabilityLifecycle(),
       executionConfig: {
         defaultWorkspacePath: draft.defaultWorkspacePath.trim() || undefined,
         allowedWorkspacePaths: approvedWorkspacePaths,
@@ -576,6 +590,63 @@ export default function CapabilitySetup() {
                     }
                     placeholder="Describe the business scope, systems, and outcome this capability owns."
                     className="field-textarea h-32"
+                  />
+                </label>
+                <label className="space-y-2 md:col-span-2">
+                  <span className="form-kicker">Business outcome</span>
+                  <textarea
+                    value={draft.businessOutcome}
+                    onChange={event =>
+                      updateDraft({ businessOutcome: event.target.value })
+                    }
+                    placeholder="Explain the business result this capability must reliably produce."
+                    className="field-textarea h-28"
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="form-kicker">Success metrics</span>
+                  <textarea
+                    value={listToText(draft.successMetrics)}
+                    onChange={event =>
+                      updateDraft({ successMetrics: textToList(event.target.value) })
+                    }
+                    placeholder={'Cycle time reduced by 30%\nEvery completed work item produces evidence'}
+                    className="field-textarea h-32"
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="form-kicker">Required evidence</span>
+                  <textarea
+                    value={listToText(draft.requiredEvidenceKinds)}
+                    onChange={event =>
+                      updateDraft({
+                        requiredEvidenceKinds: textToList(event.target.value),
+                      })
+                    }
+                    placeholder={'Requirements pack\nTest evidence\nRelease decision'}
+                    className="field-textarea h-32"
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="form-kicker">Definition of done</span>
+                  <textarea
+                    value={draft.definitionOfDone}
+                    onChange={event =>
+                      updateDraft({ definitionOfDone: event.target.value })
+                    }
+                    placeholder="Describe what must be true before this capability can call work done."
+                    className="field-textarea h-28"
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="form-kicker">Operating policy summary</span>
+                  <textarea
+                    value={draft.operatingPolicySummary}
+                    onChange={event =>
+                      updateDraft({ operatingPolicySummary: event.target.value })
+                    }
+                    placeholder="Summarize approvals, workspace constraints, and release expectations."
+                    className="field-textarea h-28"
                   />
                 </label>
               </div>
@@ -819,6 +890,9 @@ export default function CapabilitySetup() {
                       ['Capability', draft.name || 'Unnamed'],
                       ['Domain', draft.domain || 'Missing'],
                       ['Owner team', draft.ownerTeam || 'Not set'],
+                      ['Business outcome', draft.businessOutcome || 'Missing'],
+                      ['Success metrics', String(draft.successMetrics.length)],
+                      ['Required evidence', String(draft.requiredEvidenceKinds.length)],
                       ['Git repos', String(draft.githubRepositories.length)],
                       ['Approved paths', String(approvedWorkspacePaths.length)],
                       ['Command templates', String(draft.commandTemplates.length)],

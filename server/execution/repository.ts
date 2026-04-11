@@ -15,13 +15,11 @@ import { query, transaction } from '../db';
 import { publishRunEvent } from '../eventBus';
 import { createSpanId, createTraceId } from '../telemetry';
 import {
-  buildWorkflowFromGraph,
   findFirstExecutableNode,
   findFirstExecutableNodeForPhase,
   getDisplayStepIdForNode,
   getWorkflowNodeOrder,
   getWorkflowNodes,
-  normalizeWorkflowGraph,
 } from '../../src/lib/workflowGraph';
 
 const asIso = (value: unknown) =>
@@ -60,17 +58,13 @@ const runFromRow = (row: Record<string, any>): WorkflowRun => ({
   workflowId: row.workflow_id,
   status: row.status,
   attemptNumber: Number(row.attempt_number || 1),
-  workflowSnapshot: buildWorkflowFromGraph(
-    normalizeWorkflowGraph(
-      asJson<Workflow>(row.workflow_snapshot, {
-        id: row.workflow_id,
-        capabilityId: row.capability_id,
-        name: 'Workflow',
-        steps: [],
-        status: 'STABLE',
-      }),
-    ),
-  ),
+  workflowSnapshot: asJson<Workflow>(row.workflow_snapshot, {
+    id: row.workflow_id,
+    capabilityId: row.capability_id,
+    name: 'Workflow',
+    steps: [],
+    status: 'STABLE',
+  }),
   currentNodeId: row.current_node_id || undefined,
   currentStepId: row.current_step_id || undefined,
   currentPhase: row.current_phase || undefined,
@@ -359,7 +353,7 @@ export const createWorkflowRun = async ({
   restartFromPhase?: WorkItemPhase;
 }): Promise<WorkflowRunDetail> =>
   transaction(async client => {
-    const normalizedWorkflow = buildWorkflowFromGraph(normalizeWorkflowGraph(workflow));
+    const normalizedWorkflow = workflow;
     const activeRunResult = await client.query(
       `
         SELECT id
@@ -590,7 +584,7 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
         run.capabilityId,
         run.id,
         run.status,
-        JSON.stringify(buildWorkflowFromGraph(normalizeWorkflowGraph(run.workflowSnapshot))),
+        JSON.stringify(run.workflowSnapshot),
         run.currentNodeId || null,
         run.currentStepId || null,
         run.currentPhase || null,

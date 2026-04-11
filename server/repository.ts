@@ -9,6 +9,9 @@ import {
   WORK_ITEMS,
 } from '../src/constants';
 import {
+  normalizeCapabilityLifecycle,
+} from '../src/lib/capabilityLifecycle';
+import {
   AgentTask,
   Capability,
   CapabilityAgent,
@@ -68,6 +71,11 @@ const capabilityFromRow = (row: Record<string, any>, skills: Skill[]): Capabilit
   parentCapabilityId: row.parent_capability_id || undefined,
   businessUnit: row.business_unit || undefined,
   ownerTeam: row.owner_team || undefined,
+  businessOutcome: row.business_outcome || undefined,
+  successMetrics: asStringArray(row.success_metrics),
+  definitionOfDone: row.definition_of_done || undefined,
+  requiredEvidenceKinds: asStringArray(row.required_evidence_kinds),
+  operatingPolicySummary: row.operating_policy_summary || undefined,
   confluenceLink: row.confluence_link || undefined,
   jiraBoardLink: row.jira_board_link || undefined,
   documentationNotes: row.documentation_notes || undefined,
@@ -79,6 +87,7 @@ const capabilityFromRow = (row: Record<string, any>, skills: Skill[]): Capabilit
   teamNames: asStringArray(row.team_names),
   stakeholders: asJsonArray<CapabilityStakeholder>(row.stakeholders),
   additionalMetadata: asJsonArray<CapabilityMetadataEntry>(row.additional_metadata),
+  lifecycle: normalizeCapabilityLifecycle(row.lifecycle || undefined),
   executionConfig: normalizeExecutionConfig(
     { localDirectories: asStringArray(row.local_directories) },
     row.execution_config || undefined,
@@ -138,7 +147,10 @@ const messageFromRow = (row: Record<string, any>): CapabilityChatMessage => ({
   agentName: row.agent_name || undefined,
 });
 
-const workflowFromRow = (row: Record<string, any>): Workflow =>
+const workflowFromRow = (
+  row: Record<string, any>,
+  capability: Pick<Capability, 'lifecycle'>,
+): Workflow =>
   buildWorkflowFromGraph(
     normalizeWorkflowGraph({
       id: row.id,
@@ -154,7 +166,8 @@ const workflowFromRow = (row: Record<string, any>): Workflow =>
       scope: row.scope || 'CAPABILITY',
       summary: row.summary || undefined,
       publishState: row.publish_state || undefined,
-    }),
+    }, capability.lifecycle),
+    capability.lifecycle,
   );
 
 const artifactFromRow = (row: Record<string, any>) => ({
@@ -280,6 +293,9 @@ const workspaceCreatedAt = (row: Record<string, any> | undefined) =>
 const mergeCapability = (current: Capability, updates: Partial<Capability>): Capability => ({
   ...current,
   ...updates,
+  successMetrics: updates.successMetrics ?? current.successMetrics,
+  requiredEvidenceKinds:
+    updates.requiredEvidenceKinds ?? current.requiredEvidenceKinds,
   applications: updates.applications ?? current.applications,
   apis: updates.apis ?? current.apis,
   databases: updates.databases ?? current.databases,
@@ -288,6 +304,7 @@ const mergeCapability = (current: Capability, updates: Partial<Capability>): Cap
   teamNames: updates.teamNames ?? current.teamNames,
   stakeholders: updates.stakeholders ?? current.stakeholders,
   additionalMetadata: updates.additionalMetadata ?? current.additionalMetadata,
+  lifecycle: normalizeCapabilityLifecycle(updates.lifecycle ?? current.lifecycle),
   executionConfig:
     updates.executionConfig ??
     normalizeExecutionConfig(current, current.executionConfig),
@@ -305,6 +322,11 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         parent_capability_id,
         business_unit,
         owner_team,
+        business_outcome,
+        success_metrics,
+        definition_of_done,
+        required_evidence_kinds,
+        operating_policy_summary,
         confluence_link,
         jira_board_link,
         documentation_notes,
@@ -316,13 +338,14 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         team_names,
         stakeholders,
         additional_metadata,
+        lifecycle,
         execution_config,
         status,
         special_agent_id,
         updated_at
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,${withUpdatedTimestamp}
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,${withUpdatedTimestamp}
       )
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
@@ -331,6 +354,11 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         parent_capability_id = EXCLUDED.parent_capability_id,
         business_unit = EXCLUDED.business_unit,
         owner_team = EXCLUDED.owner_team,
+        business_outcome = EXCLUDED.business_outcome,
+        success_metrics = EXCLUDED.success_metrics,
+        definition_of_done = EXCLUDED.definition_of_done,
+        required_evidence_kinds = EXCLUDED.required_evidence_kinds,
+        operating_policy_summary = EXCLUDED.operating_policy_summary,
         confluence_link = EXCLUDED.confluence_link,
         jira_board_link = EXCLUDED.jira_board_link,
         documentation_notes = EXCLUDED.documentation_notes,
@@ -342,6 +370,7 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         team_names = EXCLUDED.team_names,
         stakeholders = EXCLUDED.stakeholders,
         additional_metadata = EXCLUDED.additional_metadata,
+        lifecycle = EXCLUDED.lifecycle,
         execution_config = EXCLUDED.execution_config,
         status = EXCLUDED.status,
         special_agent_id = EXCLUDED.special_agent_id,
@@ -355,6 +384,11 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
       capability.parentCapabilityId || null,
       capability.businessUnit || null,
       capability.ownerTeam || null,
+      capability.businessOutcome || null,
+      capability.successMetrics,
+      capability.definitionOfDone || null,
+      capability.requiredEvidenceKinds,
+      capability.operatingPolicySummary || null,
       capability.confluenceLink || null,
       capability.jiraBoardLink || null,
       capability.documentationNotes || null,
@@ -366,6 +400,7 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
       capability.teamNames,
       JSON.stringify(capability.stakeholders),
       JSON.stringify(capability.additionalMetadata),
+      JSON.stringify(normalizeCapabilityLifecycle(capability.lifecycle)),
       JSON.stringify(normalizeExecutionConfig(capability, capability.executionConfig)),
       capability.status,
       capability.specialAgentId || null,
@@ -589,11 +624,16 @@ const replaceWorkflowsTx = async (
   client: PoolClient,
   capabilityId: string,
   workflows: Workflow[],
+  capability?: Pick<Capability, 'lifecycle'>,
 ) => {
   await client.query('DELETE FROM capability_workflows WHERE capability_id = $1', [capabilityId]);
 
   for (const workflow of workflows) {
-    const normalizedWorkflow = buildWorkflowFromGraph(normalizeWorkflowGraph(workflow));
+    const lifecycle = capability?.lifecycle;
+    const normalizedWorkflow = buildWorkflowFromGraph(
+      normalizeWorkflowGraph(workflow, lifecycle),
+      lifecycle,
+    );
     await client.query(
       `
         INSERT INTO capability_workflows (
@@ -1203,7 +1243,7 @@ const seedCapabilityTx = async (client: PoolClient, capability: Capability) => {
   await replaceSkillsTx(client, capability.id, capability.skillLibrary);
   await replaceAgentsTx(client, capability.id, buildSeededAgents(capability, ownerAgent));
   await replaceMessagesTx(client, capability.id, [buildWelcomeMessage(capability, ownerAgent)]);
-  await replaceWorkflowsTx(client, capability.id, defaultWorkflows);
+  await replaceWorkflowsTx(client, capability.id, defaultWorkflows, capability);
   await replaceArtifactsTx(
     client,
     capability.id,
@@ -1352,7 +1392,7 @@ const getCapabilityWorkspaceTx = async (
   return materializeWorkspace(capability, {
     capabilityId: capability.id,
     agents: applyWorkspaceRuntime(capability, agents, tasks, executionLogs),
-    workflows: workflowResult.rows.map(workflowFromRow),
+    workflows: workflowResult.rows.map(row => workflowFromRow(row, capability)),
     artifacts: artifactResult.rows.map(artifactFromRow),
     tasks,
     executionLogs,
@@ -1469,6 +1509,7 @@ export const initializeSeedData = async () => {
             client,
             seededCapability.id,
             getDefaultCapabilityWorkflows(backfilledCapability),
+            backfilledCapability,
           );
         }
       }
@@ -1499,9 +1540,11 @@ export const fetchAppState = async (): Promise<AppState> => {
   const capabilitiesResult = await query<{ id: string }>(
     'SELECT id FROM capabilities ORDER BY created_at ASC, id ASC',
   );
-  const bundles = await Promise.all(
-    capabilitiesResult.rows.map(row => getCapabilityBundle(row.id as string)),
-  );
+  const bundles: CapabilityBundle[] = [];
+
+  for (const row of capabilitiesResult.rows) {
+    bundles.push(await getCapabilityBundle(row.id as string));
+  }
 
   return {
     capabilities: bundles.map(bundle => bundle.capability),
@@ -1527,6 +1570,7 @@ export const createCapabilityRecord = async (
       client,
       capability.id,
       getDefaultCapabilityWorkflows(capability),
+      capability,
     );
     await replaceArtifactsTx(client, capability.id, []);
     await replaceTasksTx(client, capability.id, []);
@@ -1728,7 +1772,7 @@ export const replaceCapabilityWorkspaceContentRecord = async (
     const currentWorkspace = await getCapabilityWorkspaceTx(client, capability);
 
     if (updates.workflows) {
-      await replaceWorkflowsTx(client, capabilityId, updates.workflows);
+      await replaceWorkflowsTx(client, capabilityId, updates.workflows, capability);
     }
     if (updates.artifacts) {
       await replaceArtifactsTx(client, capabilityId, updates.artifacts);

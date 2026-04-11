@@ -37,6 +37,7 @@ import {
   updateCapabilityRecord,
   type AppState,
 } from '../lib/api';
+import { createDefaultCapabilityLifecycle } from '../lib/capabilityLifecycle';
 import { getDefaultCapabilityWorkflows } from '../lib/standardWorkflow';
 import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowGraph';
 import { useToast } from './ToastContext';
@@ -104,6 +105,11 @@ const EMPTY_CAPABILITY: Capability = {
   domain: '',
   businessUnit: '',
   description: '',
+  businessOutcome: '',
+  successMetrics: [],
+  definitionOfDone: '',
+  requiredEvidenceKinds: [],
+  operatingPolicySummary: '',
   applications: [],
   apis: [],
   databases: [],
@@ -112,6 +118,7 @@ const EMPTY_CAPABILITY: Capability = {
   teamNames: [],
   stakeholders: [],
   additionalMetadata: [],
+  lifecycle: createDefaultCapabilityLifecycle(),
   executionConfig: {
     defaultWorkspacePath: undefined,
     allowedWorkspacePaths: [],

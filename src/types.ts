@@ -51,6 +51,11 @@ export interface CapabilityOnboardingDraft {
   businessUnit: string;
   ownerTeam: string;
   description: string;
+  businessOutcome: string;
+  successMetrics: string[];
+  definitionOfDone: string;
+  requiredEvidenceKinds: string[];
+  operatingPolicySummary: string;
   githubRepositories: string[];
   jiraBoardLink: string;
   confluenceLink: string;
@@ -98,6 +103,27 @@ export interface DeploymentTargetValidationResult {
   message: string;
 }
 
+export type WorkflowPhaseId = string;
+
+export type SystemPhaseId = 'BACKLOG' | 'DONE';
+
+export interface CapabilityLifecyclePhase {
+  id: WorkflowPhaseId;
+  label: string;
+  description?: string;
+}
+
+export interface RetiredCapabilityLifecyclePhase
+  extends CapabilityLifecyclePhase {
+  retiredAt: string;
+}
+
+export interface CapabilityLifecycle {
+  version: number;
+  phases: CapabilityLifecyclePhase[];
+  retiredPhases: RetiredCapabilityLifecyclePhase[];
+}
+
 export interface Capability {
   id: string;
   name: string;
@@ -106,6 +132,11 @@ export interface Capability {
   parentCapabilityId?: string;
   businessUnit?: string;
   ownerTeam?: string;
+  businessOutcome?: string;
+  successMetrics: string[];
+  definitionOfDone?: string;
+  requiredEvidenceKinds: string[];
+  operatingPolicySummary?: string;
   confluenceLink?: string;
   jiraBoardLink?: string;
   documentationNotes?: string;
@@ -117,6 +148,7 @@ export interface Capability {
   teamNames: string[];
   stakeholders: CapabilityStakeholder[];
   additionalMetadata: CapabilityMetadataEntry[];
+  lifecycle: CapabilityLifecycle;
   executionConfig: CapabilityExecutionConfig;
   status: Status;
   specialAgentId?: string;
@@ -369,15 +401,7 @@ export interface Artifact {
   retrievalReferences?: MemoryReference[];
 }
 
-export type WorkItemPhase =
-  | 'BACKLOG'
-  | 'ANALYSIS'
-  | 'DESIGN'
-  | 'DEVELOPMENT'
-  | 'QA'
-  | 'GOVERNANCE'
-  | 'RELEASE'
-  | 'DONE';
+export type WorkItemPhase = WorkflowPhaseId;
 
 export type WorkflowStepType = 'DELIVERY' | 'GOVERNANCE_GATE' | 'HUMAN_APPROVAL';
 

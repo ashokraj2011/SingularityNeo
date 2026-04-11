@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   ArrowRight,
@@ -12,19 +12,17 @@ import {
   FolderArchive,
   GitMerge,
   MessageSquareQuote,
-  Pause,
-  Play,
   Radio,
   RefreshCw,
   ShieldCheck,
   TerminalSquare,
-  Zap,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import ArtifactPreview from '../components/ArtifactPreview';
 import { useCapability } from '../context/CapabilityContext';
 import { EnterpriseTone, getStatusTone } from '../lib/enterprise';
 import { compactMarkdownPreview } from '../lib/markdown';
+import { getLifecyclePhaseLabel } from '../lib/capabilityLifecycle';
 import {
   fetchArtifactContent,
   fetchCapabilityFlightRecorder,
@@ -39,7 +37,6 @@ import {
 import { cn } from '../lib/utils';
 import { getBusinessEvidenceLabel } from '../lib/capabilityExperience';
 import {
-  findNearestRecorderEvent,
   formatElapsedTime,
   normalizeFlightRecorderTimeline,
   type RecorderEventCategory,
@@ -47,6 +44,7 @@ import {
 import type {
   ArtifactContentResponse,
   ArtifactKind,
+  Capability,
   CapabilityFlightRecorderSnapshot,
   CompletedWorkOrderDetail,
   CompletedWorkOrderSummary,
@@ -111,14 +109,10 @@ const formatTimestamp = (value?: string) => {
   });
 };
 
-const formatPhase = (phase?: WorkItemPhase) =>
-  phase
-    ? phase
-        .toLowerCase()
-        .split('_')
-        .map(token => token.charAt(0).toUpperCase() + token.slice(1))
-        .join(' ')
-    : 'Unscoped';
+const formatPhase = (
+  capability: Pick<Capability, 'lifecycle'>,
+  phase?: WorkItemPhase,
+) => (phase ? getLifecyclePhaseLabel(capability, phase) : 'Unscoped');
 
 const summarizeKind = (kind?: ArtifactKind) => getBusinessEvidenceLabel(kind);
 
@@ -297,25 +291,9 @@ const Ledger = () => {
     'ALL' | RecorderEventCategory
   >('ALL');
   const [selectedRecorderEventId, setSelectedRecorderEventId] = useState('');
-  const [playbackPosition, setPlaybackPosition] = useState(0);
-  const [isPlaybackRunning, setIsPlaybackRunning] = useState(false);
-  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [error, setError] = useState('');
-  const autoPlayedWorkItemsRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) {
-      return;
-    }
-
-    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const updatePreference = () => setPrefersReducedMotion(mediaQuery.matches);
-    updatePreference();
-    mediaQuery.addEventListener('change', updatePreference);
-    return () => mediaQuery.removeEventListener('change', updatePreference);
-  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -586,8 +564,8 @@ const Ledger = () => {
     [flightRecorder, selectedWorkItemId],
   );
   const recorderTimeline = useMemo(
-    () => normalizeFlightRecorderTimeline(selectedRecorderDetail),
-    [selectedRecorderDetail],
+    () => normalizeFlightRecorderTimeline(selectedRecorderDetail, activeCapability.lifecycle),
+    [activeCapability.lifecycle, selectedRecorderDetail],
   );
   const visibleRecorderEvents = useMemo(
     () =>
@@ -600,60 +578,29 @@ const Ledger = () => {
   );
   const selectedTimelineEvent = useMemo(
     () =>
-      recorderTimeline.events.find(event => event.id === selectedRecorderEventId) ||
-      findNearestRecorderEvent(recorderTimeline.events, playbackPosition),
-    [playbackPosition, recorderTimeline.events, selectedRecorderEventId],
+      visibleRecorderEvents.find(event => event.id === selectedRecorderEventId) ||
+      visibleRecorderEvents[visibleRecorderEvents.length - 1] ||
+      recorderTimeline.events[recorderTimeline.events.length - 1] ||
+      null,
+    [recorderTimeline.events, selectedRecorderEventId, visibleRecorderEvents],
   );
 
   useEffect(() => {
-    const workItemId = selectedRecorderDetail?.workItem.id;
-    const firstEvent = recorderTimeline.events[0];
-
     setRecorderCategoryFilter('ALL');
-    setSelectedRecorderEventId(firstEvent?.id || '');
-    setPlaybackPosition(firstEvent?.trackPositionPercent || 0);
-
-    if (
-      workItemId &&
-      recorderTimeline.events.length > 1 &&
-      !prefersReducedMotion &&
-      !autoPlayedWorkItemsRef.current.has(workItemId)
-    ) {
-      autoPlayedWorkItemsRef.current.add(workItemId);
-      setIsPlaybackRunning(true);
-    } else {
-      setIsPlaybackRunning(false);
-    }
-  }, [
-    prefersReducedMotion,
-    recorderTimeline.events,
-    selectedRecorderDetail?.workItem.id,
-  ]);
+    setSelectedRecorderEventId(recorderTimeline.events[recorderTimeline.events.length - 1]?.id || '');
+  }, [recorderTimeline.events, selectedRecorderDetail?.workItem.id]);
 
   useEffect(() => {
-    if (!isPlaybackRunning || prefersReducedMotion || recorderTimeline.events.length <= 1) {
+    const activeIds = new Set(visibleRecorderEvents.map(event => event.id));
+    if (selectedRecorderEventId && activeIds.has(selectedRecorderEventId)) {
       return;
     }
-
-    const interval = window.setInterval(() => {
-      setPlaybackPosition(current => {
-        const next = Math.min(100, current + 1.4);
-        if (next >= 100) {
-          setIsPlaybackRunning(false);
-        }
-        return next;
-      });
-    }, 120);
-
-    return () => window.clearInterval(interval);
-  }, [isPlaybackRunning, prefersReducedMotion, recorderTimeline.events.length]);
-
-  useEffect(() => {
-    const nearest = findNearestRecorderEvent(recorderTimeline.events, playbackPosition);
-    if (nearest && nearest.id !== selectedRecorderEventId) {
-      setSelectedRecorderEventId(nearest.id);
-    }
-  }, [playbackPosition, recorderTimeline.events, selectedRecorderEventId]);
+    setSelectedRecorderEventId(
+      visibleRecorderEvents[visibleRecorderEvents.length - 1]?.id ||
+        recorderTimeline.events[recorderTimeline.events.length - 1]?.id ||
+        '',
+    );
+  }, [recorderTimeline.events, selectedRecorderEventId, visibleRecorderEvents]);
 
   const renderArtifactList = () => (
     <div className="space-y-3">
@@ -683,7 +630,7 @@ const Ledger = () => {
               </StatusBadge>
             </div>
             <div className="mt-3 flex flex-wrap gap-2 text-[0.6875rem] text-secondary">
-              <span>{formatPhase(record.artifact.phase)}</span>
+              <span>{formatPhase(activeCapability, record.artifact.phase)}</span>
               {record.runAttempt && <span>Attempt {record.runAttempt}</span>}
               {record.sourceAgentName && <span>{record.sourceAgentName}</span>}
             </div>
@@ -759,16 +706,11 @@ const Ledger = () => {
   const renderFlightRecorderWorkItemRail = () => (
     <div className="rounded-[2rem] border border-outline-variant/15 bg-white p-4 shadow-sm">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex items-center gap-3">
-          <div className="rounded-2xl bg-primary/10 p-3 text-primary">
-            <Radio size={18} />
-          </div>
-          <div>
-            <p className="form-kicker">Work Item Signal</p>
-            <h2 className="text-lg font-extrabold tracking-tight text-primary">
-              Select a replay record
-            </h2>
-          </div>
+        <div>
+          <p className="form-kicker">Work items</p>
+          <h2 className="text-base font-extrabold tracking-tight text-primary">
+            Pick a release record
+          </h2>
         </div>
         <input
           value={recorderSearchQuery}
@@ -778,10 +720,9 @@ const Ledger = () => {
         />
       </div>
 
-      <div className="mt-4 flex gap-3 overflow-x-auto pb-2">
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {filteredRecorderWorkItems.map(record => {
           const timeline = normalizeFlightRecorderTimeline(record);
-          const finalTimelineEvent = timeline.events[timeline.events.length - 1];
           const latestEvent = record.events[record.events.length - 1];
           const latestPhase = latestEvent?.phase || record.workItem.phase;
           const isSelected = record.workItem.id === selectedWorkItemId;
@@ -792,7 +733,7 @@ const Ledger = () => {
               type="button"
               onClick={() => setSelectedWorkItemId(record.workItem.id)}
               className={cn(
-                'min-w-[17rem] max-w-[19rem] flex-1 overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all',
+                'overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all',
                 isSelected
                   ? 'border-primary/40 bg-primary/5 shadow-[0_14px_34px_rgba(0,132,61,0.12)]'
                   : 'border-outline-variant/50 bg-white hover:border-primary/20 hover:bg-surface-container-low',
@@ -812,28 +753,17 @@ const Ledger = () => {
                 </StatusBadge>
               </div>
               <div className="mt-3 flex flex-wrap gap-2 text-[0.6875rem] font-semibold text-secondary">
-                <span>{formatPhase(latestPhase)}</span>
+                <span>{formatPhase(activeCapability, latestPhase)}</span>
                 <span>{timeline.durationLabel}</span>
                 <span>{record.humanGates.length} gates</span>
                 <span>{record.artifacts.length + record.handoffArtifacts.length} evidence</span>
-              </div>
-              <div className="mt-3 h-1 overflow-hidden rounded-full bg-surface-container-high">
-                <div
-                  className="h-full rounded-full bg-primary"
-                  style={{
-                    width: `${Math.min(
-                      100,
-                      Math.max(8, finalTimelineEvent?.trackPositionPercent || 8),
-                    )}%`,
-                  }}
-                />
               </div>
             </button>
           );
         })}
 
         {filteredRecorderWorkItems.length === 0 && (
-          <div className="min-w-full">
+          <div className="md:col-span-2 xl:col-span-3">
             <EmptyState
               title="No work item flight records"
               description="Start workflow execution to generate a replayable audit trail."
@@ -846,7 +776,7 @@ const Ledger = () => {
     </div>
   );
 
-  const renderControlTowerRecorder = () => {
+  const renderFlightRecorderGraph = () => {
     if (!flightRecorder) {
       return (
         <EmptyState
@@ -867,76 +797,44 @@ const Ledger = () => {
 
     return (
       <div className="space-y-6">
-        <div className="flight-recorder-tower">
-          <div className="flight-recorder-radar-sweep" />
-          <div className="relative z-10 flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+        <div className="rounded-[2rem] border border-outline-variant/15 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <StatusBadge tone={getVerdictTone(selectedRecorderDetail.verdict)}>
                   {selectedRecorderDetail.verdict}
                 </StatusBadge>
                 {selectedRecorderDetail.latestRun && (
-                  <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em] text-emerald-100">
+                  <span className="rounded-full border border-outline-variant/25 bg-surface-container-low px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em] text-secondary">
                     Attempt {selectedRecorderDetail.latestRun.attemptNumber}
                   </span>
                 )}
               </div>
-              <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-white">
-                Control Tower Replay
+              <h2 className="mt-3 text-2xl font-extrabold tracking-tight text-primary">
+                Release path graph
               </h2>
-              <p className="mt-2 max-w-3xl text-sm leading-relaxed text-emerald-50/75">
-                {selectedRecorderDetail.workItem.title} moved through{' '}
-                {recorderTimeline.events.length} audit checkpoints over{' '}
-                {recorderTimeline.durationLabel}.
+              <p className="mt-2 max-w-3xl text-sm leading-relaxed text-secondary">
+                A simple map of how {selectedRecorderDetail.workItem.title} moved through the
+                workflow, with the latest signal selected by default.
               </p>
             </div>
-            <div className="grid grid-cols-2 gap-3 text-right text-xs text-emerald-50/70">
-              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                <p className="font-bold uppercase tracking-[0.16em]">Elapsed</p>
-                <p className="mt-2 text-xl font-extrabold text-white">
-                  {formatElapsedTime(
-                    selectedTimelineEvent?.elapsedMs || recorderTimeline.durationMs,
-                  )}
+            <div className="grid grid-cols-2 gap-3 text-right text-xs text-secondary">
+              <div className="rounded-2xl bg-surface-container-low px-4 py-3">
+                <p className="font-bold uppercase tracking-[0.16em]">Duration</p>
+                <p className="mt-2 text-xl font-extrabold text-primary">
+                  {recorderTimeline.durationLabel}
                 </p>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                <p className="font-bold uppercase tracking-[0.16em]">Checkpoints</p>
-                <p className="mt-2 text-xl font-extrabold text-white">
+              <div className="rounded-2xl bg-surface-container-low px-4 py-3">
+                <p className="font-bold uppercase tracking-[0.16em]">Signals</p>
+                <p className="mt-2 text-xl font-extrabold text-primary">
                   {recorderTimeline.events.length}
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="relative z-10 mt-6 flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setIsPlaybackRunning(current => !current)}
-              disabled={prefersReducedMotion || recorderTimeline.events.length <= 1}
-              className="inline-flex items-center gap-2 rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-sm font-bold text-white transition-all hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              {isPlaybackRunning ? <Pause size={16} /> : <Play size={16} />}
-              {isPlaybackRunning ? 'Pause replay' : 'Play replay'}
-            </button>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              step={0.5}
-              value={playbackPosition}
-              onChange={event => {
-                setIsPlaybackRunning(false);
-                setPlaybackPosition(Number(event.target.value));
-              }}
-              className="flight-recorder-scrubber min-w-[14rem] flex-1"
-              aria-label="Scrub Flight Recorder timeline"
-            />
-            <span className="rounded-full border border-white/10 bg-white/10 px-3 py-2 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-emerald-50/75">
-              {prefersReducedMotion ? 'Reduced motion' : 'Auto replay armed'}
-            </span>
-          </div>
-
-          <div className="relative z-10 mt-5 flex flex-wrap gap-2">
+          <div className="mt-5 flex flex-wrap gap-2">
             {(['ALL', ...recorderTimeline.categories] as Array<'ALL' | RecorderEventCategory>).map(
               category => (
                 <button
@@ -946,93 +844,72 @@ const Ledger = () => {
                   className={cn(
                     'rounded-full border px-3 py-1.5 text-[0.6875rem] font-bold uppercase tracking-[0.14em] transition-all',
                     recorderCategoryFilter === category
-                      ? 'border-emerald-300 bg-emerald-300 text-slate-950'
-                      : 'border-white/10 bg-white/5 text-emerald-50/75 hover:bg-white/10',
+                      ? 'border-primary bg-primary text-white'
+                      : 'border-outline-variant/25 bg-surface-container-low text-secondary hover:bg-surface-container-high',
                   )}
                 >
-                  {category === 'ALL' ? (
-                    'All Signals'
-                  ) : (
-                    <>
-                      <StatusBadge tone={getRecorderCategoryTone(category)}>
-                        {RECORDER_CATEGORY_LABELS[category]}
-                      </StatusBadge>
-                    </>
-                  )}
+                  {category === 'ALL' ? 'All signals' : RECORDER_CATEGORY_LABELS[category]}
                 </button>
               ),
             )}
           </div>
 
-          <div className="flight-recorder-runway">
-            <div className="flight-recorder-route" />
-            <div
-              className="flight-recorder-route-progress"
-              style={{ width: `${playbackPosition}%` }}
-            />
+          <div className="flight-recorder-simple-graph mt-6">
+            <div className="flight-recorder-simple-line" />
             {recorderTimeline.phaseStations.map(station => (
-              <div
-                key={station.phase}
-                className="flight-recorder-phase-station"
-                style={{ left: `${station.trackPositionPercent}%` }}
-              >
-                <span className="flight-recorder-phase-dot" />
-                <span className="flight-recorder-phase-label">{station.label}</span>
-                {station.eventCount > 0 && (
-                  <span className="flight-recorder-phase-count">{station.eventCount}</span>
-                )}
-              </div>
-            ))}
-            {visibleRecorderEvents.map(signal => (
               <button
-                key={signal.id}
+                key={station.phase}
                 type="button"
                 onClick={() => {
-                  setIsPlaybackRunning(false);
-                  setPlaybackPosition(signal.trackPositionPercent);
-                  setSelectedRecorderEventId(signal.id);
+                  const phaseEvents = visibleRecorderEvents.filter(
+                    event => event.phase === station.phase,
+                  );
+                  const targetEvent =
+                    phaseEvents[phaseEvents.length - 1] ||
+                    recorderTimeline.events.find(event => event.phase === station.phase);
+                  if (targetEvent) {
+                    setSelectedRecorderEventId(targetEvent.id);
+                  }
                 }}
                 className={cn(
-                  'flight-recorder-checkpoint',
-                  `flight-recorder-checkpoint-${signal.category}`,
-                  signal.id === selectedTimelineEvent?.id && 'flight-recorder-checkpoint-active',
+                  'flight-recorder-simple-phase',
+                  station.phase === selectedTimelineEvent?.phase &&
+                    'flight-recorder-simple-phase-active',
                 )}
-                style={{
-                  left: `${signal.trackPositionPercent}%`,
-                  top: `${42 + signal.laneOffset * 13}%`,
-                }}
-                title={signal.event.title}
               >
-                <span />
+                <span
+                  className={cn(
+                    'flight-recorder-simple-dot',
+                    station.eventCount > 0 && 'flight-recorder-simple-dot-complete',
+                    station.phase === selectedTimelineEvent?.phase &&
+                      'flight-recorder-simple-dot-active',
+                  )}
+                />
+                <span className="flight-recorder-simple-label">{station.label}</span>
+                <span className="flight-recorder-simple-count">{station.eventCount} signals</span>
               </button>
             ))}
-            <div
-              className="flight-recorder-capsule"
-              style={{ left: `${playbackPosition}%` }}
-            >
-              <Zap size={18} />
-            </div>
 
             {recorderTimeline.events.length === 0 && (
-              <div className="absolute inset-x-8 top-1/2 -translate-y-1/2 rounded-3xl border border-dashed border-white/15 bg-white/5 px-6 py-10 text-center text-sm text-emerald-50/70">
-                No replay checkpoints are available for this work item yet.
+              <div className="col-span-full rounded-3xl border border-dashed border-outline-variant/25 bg-surface-container-low px-6 py-10 text-center text-sm text-secondary">
+                No audit signals are available for this work item yet.
               </div>
             )}
           </div>
 
-          <div className="relative z-10 mt-6 grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(20rem,0.7fr)]">
-            <div className="rounded-3xl border border-white/10 bg-white/10 p-5 text-white">
-              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-emerald-100/70">
-                Active checkpoint
+          <div className="mt-6 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(22rem,0.9fr)]">
+            <div className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-5">
+              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                Selected signal
               </p>
-              <h3 className="mt-3 text-xl font-extrabold">
-                {selectedTimelineEvent?.event.title || 'Awaiting signal'}
+              <h3 className="mt-3 text-xl font-extrabold text-primary">
+                {selectedTimelineEvent?.event.title || 'No signal selected'}
               </h3>
-              <p className="mt-2 text-sm leading-relaxed text-emerald-50/75">
+              <p className="mt-2 text-sm leading-relaxed text-secondary">
                 {selectedTimelineEvent?.event.description ||
-                  'Move the scrubber or select a checkpoint to inspect the audit signal.'}
+                  'Choose a phase or signal from the list to inspect the audit trail.'}
               </p>
-              <div className="mt-4 flex flex-wrap gap-2 text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-emerald-50/70">
+              <div className="mt-4 flex flex-wrap gap-2 text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-secondary">
                 <span>{selectedTimelineEvent?.elapsedLabel || '0s'}</span>
                 <span>
                   {selectedTimelineEvent
@@ -1043,36 +920,54 @@ const Ledger = () => {
                 <span>{formatTimelineDate(selectedTimelineEvent?.event.timestamp)}</span>
               </div>
             </div>
-            <div className="rounded-3xl border border-white/10 bg-slate-950/55 p-5 text-emerald-50">
-              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-emerald-100/70">
-                Jump channels
+            <div className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-5">
+              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                Signal list
               </p>
-              <div className="mt-4 grid grid-cols-2 gap-2">
-                {(['gate', 'policy', 'handoff', 'verdict'] as RecorderEventCategory[]).map(
-                  category => {
-                    const target = recorderTimeline.events.find(
-                      signal => signal.category === category,
-                    );
-                    return (
-                      <button
-                        key={category}
-                        type="button"
-                        disabled={!target}
-                        onClick={() => {
-                          if (!target) {
-                            return;
-                          }
-                          setIsPlaybackRunning(false);
-                          setRecorderCategoryFilter(category);
-                          setSelectedRecorderEventId(target.id);
-                          setPlaybackPosition(target.trackPositionPercent);
-                        }}
-                        className="rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-left text-xs font-bold uppercase tracking-[0.14em] text-emerald-50/80 transition-all hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-35"
-                      >
-                        {RECORDER_CATEGORY_LABELS[category]}
-                      </button>
-                    );
-                  },
+              <div className="mt-4 space-y-2">
+                {visibleRecorderEvents.map((signal, index) => (
+                  <button
+                    key={signal.id}
+                    type="button"
+                    onClick={() => setSelectedRecorderEventId(signal.id)}
+                    className={cn(
+                      'w-full rounded-2xl border px-4 py-3 text-left transition-all',
+                      signal.id === selectedTimelineEvent?.id
+                        ? 'border-primary/35 bg-primary/5'
+                        : 'border-outline-variant/20 bg-white hover:bg-surface-container-high',
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="rounded-full bg-surface-container-high px-2 py-1 text-[0.625rem] font-bold uppercase tracking-[0.12em] text-outline">
+                            {index + 1}
+                          </span>
+                          <StatusBadge tone={getRecorderCategoryTone(signal.category)}>
+                            {RECORDER_CATEGORY_LABELS[signal.category]}
+                          </StatusBadge>
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.12em] text-outline">
+                            {formatPhase(activeCapability, signal.phase)}
+                          </span>
+                        </div>
+                        <p className="mt-2 text-sm font-bold text-on-surface">
+                          {signal.event.title}
+                        </p>
+                        <p className="mt-1 text-xs leading-relaxed text-secondary">
+                          {compactMarkdownPreview(signal.event.description || '', 140)}
+                        </p>
+                      </div>
+                      <div className="text-right text-[0.6875rem] font-semibold text-secondary">
+                        <p>{signal.elapsedLabel}</p>
+                        <p className="mt-1">{formatTimelineDate(signal.event.timestamp)}</p>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+                {visibleRecorderEvents.length === 0 && (
+                  <p className="rounded-2xl bg-white px-4 py-4 text-sm text-secondary">
+                    No signals match the current filter.
+                  </p>
                 )}
               </div>
             </div>
@@ -1633,7 +1528,7 @@ const Ledger = () => {
                     <option value="ALL">All phases</option>
                     {artifactPhaseOptions.map(option => (
                       <option key={option} value={option}>
-                        {formatPhase(option as WorkItemPhase)}
+                        {formatPhase(activeCapability, option as WorkItemPhase)}
                       </option>
                     ))}
                   </select>
@@ -1703,7 +1598,7 @@ const Ledger = () => {
                       </span>
                       {selectedArtifact.artifact.phase && (
                         <span className="rounded-full bg-surface-container-high px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em] text-secondary">
-                          {formatPhase(selectedArtifact.artifact.phase)}
+                          {formatPhase(activeCapability, selectedArtifact.artifact.phase)}
                         </span>
                       )}
                     </div>
@@ -1797,7 +1692,7 @@ const Ledger = () => {
           {tab === 'flight-recorder' && !isLoading && (
             <div className="space-y-6">
               {renderFlightRecorderWorkItemRail()}
-              {renderControlTowerRecorder()}
+              {renderFlightRecorderGraph()}
               {renderRecorderAuditSections()}
             </div>
           )}

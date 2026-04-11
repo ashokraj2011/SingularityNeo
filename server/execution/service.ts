@@ -30,6 +30,11 @@ import {
 } from '../../src/types';
 import { syncWorkflowManagedTasksForWorkItem } from '../../src/lib/workflowTaskAutomation';
 import {
+  getCapabilityBoardPhaseIds,
+  getLifecyclePhaseLabel,
+} from '../../src/lib/capabilityLifecycle';
+import { isTestingWorkflowStep } from '../../src/lib/workflowStepSemantics';
+import {
   findFirstExecutableNode,
   findFirstExecutableNodeForPhase,
   getDisplayStepIdForNode,
@@ -40,7 +45,6 @@ import {
   getWorkflowNodes,
   isWorkflowControlNode,
   isVisibleWorkflowNode,
-  normalizeWorkflowGraph,
 } from '../../src/lib/workflowGraph';
 import { invokeScopedCapabilitySession } from '../githubModels';
 import { buildMemoryContext, refreshCapabilityMemory } from '../memory';
@@ -372,13 +376,6 @@ const toFileSlug = (value: string) =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 80) || 'artifact';
-
-const formatPhaseLabel = (phase: WorkItemPhase) =>
-  phase
-    .toLowerCase()
-    .split('_')
-    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
 
 const buildMarkdownArtifact = (sections: Array<[string, string | undefined]>) =>
   sections
@@ -915,7 +912,7 @@ const requestStepDecision = async ({
 };
 
 const getNormalizedWorkflowSnapshot = (detail: WorkflowRunDetail) =>
-  normalizeWorkflowGraph(detail.run.workflowSnapshot);
+  detail.run.workflowSnapshot;
 
 const getRunBranchState = (detail: WorkflowRunDetail): WorkflowRunBranchState => ({
   pendingNodeIds: detail.run.branchState?.pendingNodeIds || [],
@@ -1581,7 +1578,7 @@ const buildArtifactFromStepCompletion = ({
   name: `${step.name} Output`,
   capabilityId: detail.run.capabilityId,
   type:
-    step.phase === 'QA'
+    isTestingWorkflowStep(step)
       ? 'Test Evidence'
       : step.stepType === 'GOVERNANCE_GATE'
       ? 'Governance Evidence'
@@ -1606,7 +1603,7 @@ const buildArtifactFromStepCompletion = ({
   fileName: `${toFileSlug(detail.run.workItemId)}-${toFileSlug(step.name)}-output.md`,
   contentText: `# ${step.name} Output\n\n${buildMarkdownArtifact([
     ['Work Item', `${detail.run.workItemId}`],
-    ['Phase', formatPhaseLabel(step.phase)],
+    ['Phase', getLifecyclePhaseLabel(undefined, step.phase)],
     ['Agent', step.agentId],
     ['Summary', summary],
   ])}`,
@@ -1657,8 +1654,8 @@ const buildHandoffArtifact = ({
   fileName: `${toFileSlug(detail.run.workItemId)}-${toFileSlug(step.name)}-handoff.md`,
   contentText: `# ${step.name} to ${nextStep.name} Handoff\n\n${buildMarkdownArtifact([
     ['Work Item', detail.run.workItemId],
-    ['Source Phase', formatPhaseLabel(step.phase)],
-    ['Target Phase', formatPhaseLabel(nextStep.phase)],
+    ['Source Phase', getLifecyclePhaseLabel(undefined, step.phase)],
+    ['Target Phase', getLifecyclePhaseLabel(undefined, nextStep.phase)],
     ['Source Agent', step.agentId],
     ['Target Agent', nextStep.agentId],
     ['Carry Forward Summary', summary],
@@ -1723,7 +1720,7 @@ const buildHumanInteractionArtifact = ({
     fileName: `${toFileSlug(detail.run.workItemId)}-${toFileSlug(wait.type)}-${toFileSlug(step.name)}.md`,
     contentText: `# ${artifactName}\n\n${buildMarkdownArtifact([
       ['Work Item', detail.run.workItemId],
-      ['Phase', formatPhaseLabel(step.phase)],
+      ['Phase', getLifecyclePhaseLabel(undefined, step.phase)],
       ['Requested By', wait.requestedBy],
       ['Request', wait.message],
       ['Resolved By', resolvedBy],
@@ -1783,7 +1780,7 @@ const buildContrarianReviewArtifact = ({
     fileName: `${toFileSlug(detail.run.workItemId)}-contrarian-review-${toFileSlug(step.name)}.md`,
     contentText: `# ${artifactName}\n\n${buildMarkdownArtifact([
       ['Work Item', detail.run.workItemId],
-      ['Phase', formatPhaseLabel(step.phase)],
+      ['Phase', getLifecyclePhaseLabel(undefined, step.phase)],
       ['Conflict Wait', wait.message],
       ['Reviewer Agent', review.reviewerAgentId],
       ['Review', formatContrarianReviewMarkdown(review)],
@@ -1893,6 +1890,11 @@ export const moveWorkItemToPhaseControl = async ({
   }
 
   const projection = await resolveProjectionContext(capabilityId, workItemId);
+  if (!getCapabilityBoardPhaseIds(projection.capability).includes(targetPhase)) {
+    throw new Error(
+      `Phase ${targetPhase} is not part of ${projection.capability.name}'s lifecycle.`,
+    );
+  }
   const targetNode =
     targetPhase === 'BACKLOG' || targetPhase === 'DONE'
       ? undefined
@@ -1964,6 +1966,14 @@ export const startWorkflowExecution = async ({
   restartFromPhase?: WorkItemPhase;
 }) => {
   const projection = await resolveProjectionContext(capabilityId, workItemId);
+  if (
+    restartFromPhase &&
+    !getCapabilityBoardPhaseIds(projection.capability).includes(restartFromPhase)
+  ) {
+    throw new Error(
+      `Phase ${restartFromPhase} is not part of ${projection.capability.name}'s lifecycle.`,
+    );
+  }
   const detail = await (await import('./repository')).createWorkflowRun({
     capabilityId,
     workItem: projection.workItem,

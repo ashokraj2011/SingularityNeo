@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   ArchiveRestore,
@@ -49,10 +49,25 @@ import {
   SectionCard,
   StatusBadge,
 } from '../components/EnterpriseUI';
+import CapabilityLifecycleEditor from '../components/CapabilityLifecycleEditor';
 import {
   applyStandardArtifactsToWorkflow,
   createStandardCapabilityWorkflow,
 } from '../lib/standardWorkflow';
+import {
+  createDefaultCapabilityLifecycle,
+  createLifecyclePhase,
+  getCapabilityGraphPhaseIds,
+  getDefaultLifecycleEndPhaseId,
+  getDefaultLifecycleStartPhaseId,
+  getLifecyclePhaseLabel,
+  getLifecyclePhaseUsage,
+  moveLifecyclePhase,
+  normalizeCapabilityLifecycle,
+  remapWorkflowPhaseReferences,
+  renameLifecyclePhase,
+  retireLifecyclePhase,
+} from '../lib/capabilityLifecycle';
 import {
   autoLayoutWorkflowGraph,
   buildWorkflowFromGraph,
@@ -68,7 +83,6 @@ import {
   isVisibleWorkflowNode,
   normalizeWorkflowGraph,
   validateWorkflowGraph,
-  WORKFLOW_GRAPH_PHASES,
 } from '../lib/workflowGraph';
 import { cn } from '../lib/utils';
 import type {
@@ -311,8 +325,14 @@ const getNodeIcon = (type: WorkflowNodeType) => {
   }
 };
 
-const getSamplePath = (workflow: Workflow) => {
-  const normalized = buildWorkflowFromGraph(normalizeWorkflowGraph(workflow));
+const getSamplePath = (
+  workflow: Workflow,
+  lifecycle = createDefaultCapabilityLifecycle(),
+) => {
+  const normalized = buildWorkflowFromGraph(
+    normalizeWorkflowGraph(workflow, lifecycle),
+    lifecycle,
+  );
   const path: Array<{ nodeId: string; label: string; note?: string }> = [];
   const visited = new Set<string>();
   let currentNode = getWorkflowNode(normalized, normalized.entryNodeId);
@@ -360,8 +380,9 @@ const getNodeValidationMessages = (
   workflow: Workflow,
   selectedNodeId?: string,
   selectedEdgeId?: string,
+  lifecycle = createDefaultCapabilityLifecycle(),
 ) => {
-  const validation = validateWorkflowGraph(workflow);
+  const validation = validateWorkflowGraph(workflow, lifecycle);
   return {
     all: validation.errors,
     selected:
@@ -522,8 +543,13 @@ const readNeoStudioLayout = (): NeoStudioLayout => {
   }
 };
 
-const cloneWorkflowSet = (items: Workflow[]) =>
-  items.map(workflow => buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)));
+const cloneWorkflowSet = (
+  items: Workflow[],
+  lifecycle = createDefaultCapabilityLifecycle(),
+) =>
+  items.map(workflow =>
+    buildWorkflowFromGraph(normalizeWorkflowGraph(workflow, lifecycle), lifecycle),
+  );
 
 const serializeWorkflowSet = (items: Workflow[]) => JSON.stringify(items);
 
@@ -531,8 +557,9 @@ const createHistoryEntry = (
   label: string,
   description: string | undefined,
   workflows: Workflow[],
+  lifecycle = createDefaultCapabilityLifecycle(),
 ): WorkflowHistoryEntry => {
-  const normalizedWorkflows = cloneWorkflowSet(workflows);
+  const normalizedWorkflows = cloneWorkflowSet(workflows, lifecycle);
   return {
     id: `HISTORY-${Date.now().toString(36).toUpperCase()}-${Math.random()
       .toString(36)
@@ -553,34 +580,34 @@ const WORKFLOW_LANE_TOP = 48;
 const WORKFLOW_LANE_HEIGHT = 176;
 const WORKFLOW_LANE_X_OFFSET = 32;
 const WORKFLOW_LANE_LABEL_WIDTH = 168;
-const WORKFLOW_LANE_PHASES = WORKFLOW_GRAPH_PHASES;
 
-const getLaneIndex = (phase: WorkItemPhase) =>
-  Math.max(WORKFLOW_LANE_PHASES.indexOf(phase as never), 0);
+const getLaneIndex = (phase: WorkItemPhase, lanePhases: WorkItemPhase[]) =>
+  Math.max(lanePhases.indexOf(phase), 0);
 
-const getLanePhaseFromY = (y: number): Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'> => {
+const getLanePhaseFromY = (y: number, lanePhases: WorkItemPhase[]): WorkItemPhase => {
   const rawIndex = Math.round((y - WORKFLOW_LANE_TOP) / WORKFLOW_LANE_HEIGHT);
-  const laneIndex = clamp(rawIndex, 0, WORKFLOW_LANE_PHASES.length - 1);
-  return WORKFLOW_LANE_PHASES[laneIndex];
+  const laneIndex = clamp(rawIndex, 0, lanePhases.length - 1);
+  return lanePhases[laneIndex];
 };
 
-const getLaneY = (phase: WorkItemPhase) =>
-  WORKFLOW_LANE_TOP + getLaneIndex(phase) * WORKFLOW_LANE_HEIGHT;
+const getLaneY = (phase: WorkItemPhase, lanePhases: WorkItemPhase[]) =>
+  WORKFLOW_LANE_TOP + getLaneIndex(phase, lanePhases) * WORKFLOW_LANE_HEIGHT;
 
 const getLaneAlignedLayout = (
   x: number,
   y: number,
   snapEnabled: boolean,
+  lanePhases: WorkItemPhase[],
   phase?: WorkItemPhase,
 ) => {
-  const resolvedPhase = phase && WORKFLOW_LANE_PHASES.includes(phase as never)
-    ? (phase as Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'>)
-    : getLanePhaseFromY(y);
+  const resolvedPhase = phase && lanePhases.includes(phase)
+    ? phase
+    : getLanePhaseFromY(y, lanePhases);
 
   return {
     phase: resolvedPhase,
     x: snapToGridValue(Math.max(x, WORKFLOW_LANE_X_OFFSET), snapEnabled),
-    y: getLaneY(resolvedPhase),
+    y: getLaneY(resolvedPhase, lanePhases),
   };
 };
 
@@ -590,18 +617,92 @@ export default function WorkflowStudio({
   const navigate = useNavigate();
   const isNeo = variant === 'neo';
   const initialNeoLayout = useMemo(() => readNeoStudioLayout(), []);
-  const { activeCapability, getCapabilityWorkspace, setCapabilityWorkspaceContent } =
-    useCapability();
+  const {
+    activeCapability,
+    getCapabilityWorkspace,
+    setCapabilityWorkspaceContent,
+    updateCapabilityMetadata,
+  } = useCapability();
   const { success, info, warning } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
+  const capabilityLifecycle = useMemo(
+    () => normalizeCapabilityLifecycle(activeCapability.lifecycle),
+    [activeCapability.lifecycle],
+  );
+  const lifecyclePhaseIds = useMemo(
+    () => getCapabilityGraphPhaseIds(capabilityLifecycle),
+    [capabilityLifecycle],
+  );
+  const phaseLabel = useCallback(
+    (phase?: string | null) => getLifecyclePhaseLabel(activeCapability, phase),
+    [activeCapability],
+  );
+  const resolveLifecycleTemplatePhase = useCallback(
+    (phase: WorkItemPhase): WorkItemPhase => {
+      const fallbackPhase =
+        lifecyclePhaseIds[0] || getDefaultLifecycleStartPhaseId(capabilityLifecycle);
+      if (lifecyclePhaseIds.includes(phase)) {
+        return phase;
+      }
+
+      const firstPhase = lifecyclePhaseIds[0] || fallbackPhase;
+      const secondPhase = lifecyclePhaseIds[1] || firstPhase;
+      const middlePhase =
+        lifecyclePhaseIds[Math.floor(Math.max(lifecyclePhaseIds.length - 1, 0) / 2)] ||
+        firstPhase;
+      const penultimatePhase =
+        lifecyclePhaseIds[Math.max(lifecyclePhaseIds.length - 2, 0)] ||
+        lifecyclePhaseIds[lifecyclePhaseIds.length - 1] ||
+        firstPhase;
+      const lastPhase =
+        lifecyclePhaseIds[lifecyclePhaseIds.length - 1] || firstPhase;
+
+      switch (phase) {
+        case 'ANALYSIS':
+          return firstPhase;
+        case 'DESIGN':
+          return secondPhase;
+        case 'DEVELOPMENT':
+          return middlePhase;
+        case 'QA':
+        case 'GOVERNANCE':
+          return penultimatePhase;
+        case 'RELEASE':
+          return lastPhase;
+        default:
+          return fallbackPhase;
+      }
+    },
+    [capabilityLifecycle, lifecyclePhaseIds],
+  );
+  const paletteGroups = useMemo(
+    () =>
+      PALETTE_GROUPS.map(group => ({
+        ...group,
+        phase: resolveLifecycleTemplatePhase(group.phase),
+        items: group.items.map(item => ({
+          ...item,
+          defaultPhase: resolveLifecycleTemplatePhase(item.defaultPhase),
+        })),
+      })),
+    [resolveLifecycleTemplatePhase],
+  );
+  const normalizeWorkflowForCapability = useCallback(
+    (workflow: Workflow) =>
+      buildWorkflowFromGraph(
+        normalizeWorkflowGraph(workflow, capabilityLifecycle),
+        capabilityLifecycle,
+      ),
+    [capabilityLifecycle],
+  );
   const workflows = useMemo(
     () =>
       workspace.workflows.map(workflow =>
-        buildWorkflowFromGraph(
-          normalizeWorkflowGraph(applyStandardArtifactsToWorkflow(activeCapability, workflow)),
+        normalizeWorkflowForCapability(
+          applyStandardArtifactsToWorkflow(activeCapability, workflow),
         ),
       ),
-    [activeCapability, workspace.workflows],
+    [activeCapability, normalizeWorkflowForCapability, workspace.workflows],
   );
   const activeWorkflows = useMemo(
     () => workflows.filter(workflow => workflow.status !== 'ARCHIVED'),
@@ -626,6 +727,7 @@ export default function WorkflowStudio({
   const [canvasScale, setCanvasScale] = useState(initialNeoLayout.canvasScale);
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [isCreateWorkflowOpen, setIsCreateWorkflowOpen] = useState(false);
+  const [isLifecycleManagerOpen, setIsLifecycleManagerOpen] = useState(false);
   const [isNodeDetailsOpen, setIsNodeDetailsOpen] = useState(false);
   const [isQuickEditOpen, setIsQuickEditOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
@@ -704,6 +806,23 @@ export default function WorkflowStudio({
     workflowType: 'SDLC' as NonNullable<Workflow['workflowType']>,
     scope: 'CAPABILITY' as NonNullable<Workflow['scope']>,
   });
+  const [lifecycleDraft, setLifecycleDraft] = useState(capabilityLifecycle);
+  const [lifecycleDraftWorkflows, setLifecycleDraftWorkflows] = useState(workflows);
+  const [pendingLifecycleDeletePhaseId, setPendingLifecycleDeletePhaseId] = useState<string | null>(
+    null,
+  );
+  const [lifecycleDeleteTargetPhaseId, setLifecycleDeleteTargetPhaseId] = useState('');
+  const [isSavingLifecycle, setIsSavingLifecycle] = useState(false);
+
+  useEffect(() => {
+    if (isLifecycleManagerOpen) {
+      return;
+    }
+    setLifecycleDraft(capabilityLifecycle);
+    setLifecycleDraftWorkflows(workflows);
+    setPendingLifecycleDeletePhaseId(null);
+    setLifecycleDeleteTargetPhaseId('');
+  }, [capabilityLifecycle, isLifecycleManagerOpen, workflows]);
   const [nodeDraft, setNodeDraft] = useState<WorkflowNode | null>(null);
   const [edgeDraft, setEdgeDraft] = useState<WorkflowEdge | null>(null);
   const [marqueeSelection, setMarqueeSelection] = useState<{
@@ -742,7 +861,12 @@ export default function WorkflowStudio({
   }, [activeWorkflows, selectedWorkflow, selectedWorkflowId]);
 
   useEffect(() => {
-    const baselineEntry = createHistoryEntry('Workspace synced', undefined, workflows);
+    const baselineEntry = createHistoryEntry(
+      'Workspace synced',
+      undefined,
+      workflows,
+      capabilityLifecycle,
+    );
 
     if (
       historyCapabilityRef.current !== activeCapability.id ||
@@ -758,16 +882,18 @@ export default function WorkflowStudio({
     if (isApplyingHistoryRef.current) {
       isApplyingHistoryRef.current = false;
     }
-  }, [activeCapability.id, historyIndex, workflowHistory, workflows]);
+  }, [activeCapability.id, capabilityLifecycle, historyIndex, workflowHistory, workflows]);
 
   const nodes = selectedWorkflow ? getWorkflowNodes(selectedWorkflow) : [];
   const edges = selectedWorkflow ? getWorkflowEdges(selectedWorkflow) : [];
-  const orderedNodeIds = selectedWorkflow ? getWorkflowNodeOrder(selectedWorkflow) : [];
+  const orderedNodeIds = selectedWorkflow
+    ? getWorkflowNodeOrder(selectedWorkflow, capabilityLifecycle)
+    : [];
   const orderedNodes = orderedNodeIds
     .map(nodeId => nodes.find(node => node.id === nodeId))
     .filter((node): node is WorkflowNode => Boolean(node));
   const visibleNodeCount = orderedNodes.filter(node => isVisibleWorkflowNode(node.type)).length;
-  const laneSummaries = WORKFLOW_GRAPH_PHASES.map(phase => ({
+  const laneSummaries = lifecyclePhaseIds.map(phase => ({
     phase,
     count: orderedNodes.filter(node => node.phase === phase).length,
   }));
@@ -780,9 +906,16 @@ export default function WorkflowStudio({
       ? edges.find(edge => edge.id === selectedEdgeId) || null
       : null;
   const validationState = selectedWorkflow
-    ? getNodeValidationMessages(selectedWorkflow, selectedNodeId || undefined, selectedEdgeId || undefined)
+    ? getNodeValidationMessages(
+        selectedWorkflow,
+        selectedNodeId || undefined,
+        selectedEdgeId || undefined,
+        capabilityLifecycle,
+      )
     : { all: [], selected: [], nodeIdsWithErrors: new Set<string>() };
-  const workflowSamplePath = selectedWorkflow ? getSamplePath(selectedWorkflow) : [];
+  const workflowSamplePath = selectedWorkflow
+    ? getSamplePath(selectedWorkflow, capabilityLifecycle)
+    : [];
   const selectedCanvasNodes = orderedNodes.filter(node => selectedNodeIds.includes(node.id));
   const nodeValidationDetails = useMemo(() => {
     const record = new Map<string, string[]>();
@@ -1078,8 +1211,13 @@ export default function WorkflowStudio({
     toastTitle: string,
     toastDescription?: string,
   ) => {
-    const normalizedWorkflows = cloneWorkflowSet(nextWorkflows);
-    const nextEntry = createHistoryEntry(toastTitle, toastDescription, normalizedWorkflows);
+    const normalizedWorkflows = cloneWorkflowSet(nextWorkflows, capabilityLifecycle);
+    const nextEntry = createHistoryEntry(
+      toastTitle,
+      toastDescription,
+      normalizedWorkflows,
+      capabilityLifecycle,
+    );
     const currentSnapshot = workflowHistory[historyIndex]?.snapshot;
 
     if (nextEntry.snapshot !== currentSnapshot) {
@@ -1100,6 +1238,186 @@ export default function WorkflowStudio({
     }
   };
 
+  const lifecyclePhaseViews = useMemo(
+    () =>
+      lifecycleDraft.phases.map(phase => {
+        const usage = getLifecyclePhaseUsage(
+          {
+            workItems: workspace.workItems,
+            tasks: workspace.tasks,
+          },
+          lifecycleDraftWorkflows,
+          phase.id,
+        );
+        const referencedByWorkflow =
+          usage.workflowNodeCount + usage.workflowStepCount + usage.handoffTargetCount > 0;
+        const blockedByLiveWork =
+          usage.activeWorkItemCount > 0 || usage.pendingTaskCount > 0;
+
+        const usageSummaryParts = [
+          usage.workflowNodeCount > 0
+            ? `${usage.workflowNodeCount} workflow nodes`
+            : '',
+          usage.workflowStepCount > 0
+            ? `${usage.workflowStepCount} workflow steps`
+            : '',
+          usage.handoffTargetCount > 0
+            ? `${usage.handoffTargetCount} hand-off targets`
+            : '',
+        ].filter(Boolean);
+
+        return {
+          phase,
+          usageSummary: usageSummaryParts.length
+            ? `Used by ${usageSummaryParts.join(', ')}.`
+            : 'Not used by any saved workflow nodes yet.',
+          canDelete:
+            lifecycleDraft.phases.length > 1 && !blockedByLiveWork,
+          deleteHint:
+            blockedByLiveWork
+              ? 'Move or complete live work and workflow-managed tasks in this phase before deleting it.'
+              : referencedByWorkflow
+              ? 'Deleting this phase will require remapping workflow references.'
+              : lifecycleDraft.phases.length <= 1
+              ? 'At least one lifecycle phase must remain.'
+              : undefined,
+        };
+      }),
+    [lifecycleDraft.phases, lifecycleDraftWorkflows, workspace.tasks, workspace.workItems],
+  );
+
+  const openLifecycleManager = () => {
+    setLifecycleDraft(capabilityLifecycle);
+    setLifecycleDraftWorkflows(workflows);
+    setPendingLifecycleDeletePhaseId(null);
+    setLifecycleDeleteTargetPhaseId('');
+    setIsLifecycleManagerOpen(true);
+  };
+
+  const handleAddLifecyclePhase = () => {
+    const allPhaseIds = [
+      ...lifecycleDraft.phases.map(phase => phase.id),
+      ...lifecycleDraft.retiredPhases.map(phase => phase.id),
+    ];
+    setLifecycleDraft(current => ({
+      ...current,
+      phases: [
+        ...current.phases,
+        createLifecyclePhase(`Phase ${current.phases.length + 1}`, allPhaseIds),
+      ],
+    }));
+  };
+
+  const handleRenameLifecyclePhase = (phaseId: string, label: string) => {
+    setLifecycleDraft(current => renameLifecyclePhase(current, phaseId, label));
+  };
+
+  const handleMoveLifecyclePhase = (
+    phaseId: string,
+    direction: 'up' | 'down',
+  ) => {
+    setLifecycleDraft(current => moveLifecyclePhase(current, phaseId, direction));
+  };
+
+  const handleDeleteLifecyclePhase = (phaseId: string) => {
+    const usage = getLifecyclePhaseUsage(
+      {
+        workItems: workspace.workItems,
+        tasks: workspace.tasks,
+      },
+      lifecycleDraftWorkflows,
+      phaseId,
+    );
+
+    if (lifecycleDraft.phases.length <= 1) {
+      warning(
+        'Cannot remove the last phase',
+        'Keep at least one visible lifecycle phase between Backlog and Done.',
+      );
+      return;
+    }
+
+    if (usage.activeWorkItemCount > 0 || usage.pendingTaskCount > 0) {
+      warning(
+        'Phase is still active',
+        'Move or complete live work and workflow-managed tasks before deleting this lifecycle phase.',
+      );
+      return;
+    }
+
+    if (usage.workflowNodeCount + usage.workflowStepCount + usage.handoffTargetCount > 0) {
+      const fallbackPhaseId =
+        lifecycleDraft.phases.find(phase => phase.id !== phaseId)?.id || '';
+      setPendingLifecycleDeletePhaseId(phaseId);
+      setLifecycleDeleteTargetPhaseId(fallbackPhaseId);
+      return;
+    }
+
+    setLifecycleDraft(current => retireLifecyclePhase(current, phaseId));
+  };
+
+  const handleConfirmLifecycleDelete = () => {
+    if (!pendingLifecycleDeletePhaseId || !lifecycleDeleteTargetPhaseId) {
+      return;
+    }
+
+    const nextLifecycle = retireLifecyclePhase(
+      lifecycleDraft,
+      pendingLifecycleDeletePhaseId,
+    );
+    setLifecycleDraft(nextLifecycle);
+    setLifecycleDraftWorkflows(current =>
+      cloneWorkflowSet(
+        remapWorkflowPhaseReferences(
+          current,
+          pendingLifecycleDeletePhaseId,
+          lifecycleDeleteTargetPhaseId,
+        ),
+        nextLifecycle,
+      ),
+    );
+    setPendingLifecycleDeletePhaseId(null);
+    setLifecycleDeleteTargetPhaseId('');
+  };
+
+  const handleSaveLifecycle = async () => {
+    const hasBlankLabel = lifecycleDraft.phases.some(
+      phase => !phase.label.trim(),
+    );
+    if (hasBlankLabel) {
+      warning('Lifecycle needs names', 'Give every lifecycle phase a visible label before saving.');
+      return;
+    }
+
+    const nextLifecycle = normalizeCapabilityLifecycle(lifecycleDraft);
+    const normalizedWorkflows = cloneWorkflowSet(
+      lifecycleDraftWorkflows,
+      nextLifecycle,
+    );
+
+    setIsSavingLifecycle(true);
+    try {
+      await setCapabilityWorkspaceContent(activeCapability.id, {
+        workflows: normalizedWorkflows,
+      });
+      await updateCapabilityMetadata(activeCapability.id, {
+        lifecycle: nextLifecycle,
+      });
+      setLastSavedAt(new Date().toISOString());
+      setIsLifecycleManagerOpen(false);
+      setPendingLifecycleDeletePhaseId(null);
+      setLifecycleDeleteTargetPhaseId('');
+      success(
+        'Lifecycle saved',
+        'Designer lanes, workflow phase selectors, and downstream work views now use the updated lifecycle.',
+      );
+    } catch {
+      // Context mutation paths already emit failure toasts.
+    } finally {
+      setIsSavingLifecycle(false);
+    }
+  };
+
   const replaceSelectedWorkflow = (
     updater: (workflow: Workflow) => Workflow,
     toastTitle: string,
@@ -1109,9 +1427,7 @@ export default function WorkflowStudio({
       return;
     }
 
-    const nextWorkflow = buildWorkflowFromGraph(
-      normalizeWorkflowGraph(updater(selectedWorkflow)),
-    );
+    const nextWorkflow = normalizeWorkflowForCapability(updater(selectedWorkflow));
 
     const nextWorkflows = workflows.map(workflow =>
       workflow.id === nextWorkflow.id ? nextWorkflow : workflow,
@@ -1420,8 +1736,7 @@ export default function WorkflowStudio({
     const workflowId = createWorkflowId(activeCapability.id, workflowDraft.name);
     const startNodeId = `NODE-${slugify(activeCapability.id)}-${slugify(workflowDraft.name)}-START`;
     const endNodeId = `NODE-${slugify(activeCapability.id)}-${slugify(workflowDraft.name)}-END`;
-    const nextWorkflow = buildWorkflowFromGraph(
-      normalizeWorkflowGraph({
+    const nextWorkflow = normalizeWorkflowForCapability({
         id: workflowId,
         name: workflowDraft.name.trim(),
         capabilityId: activeCapability.id,
@@ -1437,16 +1752,27 @@ export default function WorkflowStudio({
             id: startNodeId,
             name: 'Start',
             type: 'START',
-            phase: 'ANALYSIS',
+            phase: getDefaultLifecycleStartPhaseId(capabilityLifecycle),
             layout: { x: 120, y: 48 },
-          }),
+          }, capabilityLifecycle),
           createWorkflowNode({
             id: endNodeId,
             name: 'End',
             type: 'END',
-            phase: 'RELEASE',
-            layout: { x: 520, y: 48 + 5 * 176 },
-          }),
+            phase: getDefaultLifecycleEndPhaseId(capabilityLifecycle),
+            layout: {
+              x: 520,
+              y:
+                48 +
+                Math.max(
+                  lifecyclePhaseIds.indexOf(
+                    getDefaultLifecycleEndPhaseId(capabilityLifecycle),
+                  ),
+                  0,
+                ) *
+                  176,
+            },
+          }, capabilityLifecycle),
         ],
         edges: [
           createWorkflowEdge({
@@ -1456,8 +1782,7 @@ export default function WorkflowStudio({
           }),
         ],
         steps: [],
-      }),
-    );
+      });
 
     persistWorkflows(
       [...workflows, nextWorkflow],
@@ -1529,8 +1854,7 @@ export default function WorkflowStudio({
       nodeIdMap.set(node.id, createDesignerCopyId('NODE', `${copyName}-${node.name}`));
     });
 
-    const copiedWorkflow = buildWorkflowFromGraph(
-      normalizeWorkflowGraph({
+    const copiedWorkflow = normalizeWorkflowForCapability({
         ...workflowToCopy,
         id: workflowId,
         name: copyName,
@@ -1581,8 +1905,7 @@ export default function WorkflowStudio({
         })),
         steps: [],
         handoffProtocols: [],
-      }),
-    );
+      });
 
     persistWorkflows(
       [...workflows, copiedWorkflow],
@@ -1674,7 +1997,7 @@ export default function WorkflowStudio({
       return;
     }
 
-    const validation = validateWorkflowGraph(selectedWorkflow);
+    const validation = validateWorkflowGraph(selectedWorkflow, capabilityLifecycle);
     if (!validation.valid) {
       warning(
         'Validation issues found',
@@ -1695,7 +2018,7 @@ export default function WorkflowStudio({
       return;
     }
 
-    const validation = validateWorkflowGraph(selectedWorkflow);
+    const validation = validateWorkflowGraph(selectedWorkflow, capabilityLifecycle);
     if (!validation.valid) {
       warning(
         'Publish blocked',
@@ -1717,7 +2040,7 @@ export default function WorkflowStudio({
     }
 
     replaceSelectedWorkflow(
-      workflow => autoLayoutWorkflowGraph(workflow),
+      workflow => autoLayoutWorkflowGraph(workflow, capabilityLifecycle),
       'Auto-layout applied',
       'The graph was re-aligned for readability in the new studio.',
     );
@@ -1785,6 +2108,7 @@ export default function WorkflowStudio({
       nextCoordinates.x,
       nextCoordinates.y,
       snapToGrid,
+      lifecyclePhaseIds,
     );
 
     if (moveNodeId) {
@@ -1824,6 +2148,7 @@ export default function WorkflowStudio({
       nextCoordinates.x,
       nextCoordinates.y,
       snapToGrid,
+      lifecyclePhaseIds,
       parsedTemplate.phase,
     );
 
@@ -1879,7 +2204,7 @@ export default function WorkflowStudio({
               requiresAcknowledgement: true,
             }
           : undefined,
-    });
+    }, capabilityLifecycle);
 
     replaceSelectedWorkflow(
       workflow => {
@@ -2025,6 +2350,7 @@ export default function WorkflowStudio({
       nodeDraft.layout.x,
       nodeDraft.layout.y,
       snapToGrid,
+      lifecyclePhaseIds,
       nodeDraft.phase,
     );
     const nextNodeDraft = {
@@ -2146,7 +2472,7 @@ export default function WorkflowStudio({
               : undefined,
           }
         : undefined,
-    });
+    }, capabilityLifecycle);
 
     replaceSelectedWorkflow(
       workflow => ({
@@ -2281,7 +2607,7 @@ export default function WorkflowStudio({
             }
             className="enterprise-input"
           >
-            {WORKFLOW_GRAPH_PHASES.map(phase => (
+            {lifecyclePhaseIds.map(phase => (
               <option key={phase} value={phase}>
                 {phaseLabel(phase)}
               </option>
@@ -3446,7 +3772,7 @@ export default function WorkflowStudio({
             {connectFromNodeId ? 'Cancel hand-off' : 'Hand-off mode'}
           </button>
           <div className="max-h-[calc(100vh-18rem)] space-y-3 overflow-y-auto pr-1">
-            {PALETTE_GROUPS.map(group => (
+            {paletteGroups.map(group => (
               <div
                 key={group.title}
                 className="rounded-2xl border border-slate-800 bg-slate-900/60 px-3 py-3"
@@ -3751,7 +4077,7 @@ export default function WorkflowStudio({
               }
               className="enterprise-input"
             >
-              {WORKFLOW_GRAPH_PHASES.map(phase => (
+              {lifecyclePhaseIds.map(phase => (
                 <option key={phase} value={phase}>
                   {phaseLabel(phase)}
                 </option>
@@ -4276,6 +4602,14 @@ export default function WorkflowStudio({
                 </button>
                 <button
                   type="button"
+                  onClick={openLifecycleManager}
+                  className="workflow-lab-toolbar-button"
+                >
+                  <Split size={16} />
+                  Lifecycle
+                </button>
+                <button
+                  type="button"
                   onClick={() => setCanvasScale(1)}
                   className="workflow-lab-toolbar-button"
                 >
@@ -4507,6 +4841,14 @@ export default function WorkflowStudio({
                           </button>
                           <button
                             type="button"
+                            onClick={openLifecycleManager}
+                            className="workflow-lab-toolbar-button"
+                            title="Edit capability lifecycle"
+                          >
+                            <Split size={16} />
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => setNeoLaneVisibility(current => !current)}
                             className={cn(
                               'workflow-lab-toolbar-button',
@@ -4564,6 +4906,17 @@ export default function WorkflowStudio({
                                 >
                                   <Route size={14} />
                                   Snap {snapToGrid ? 'Off' : 'On'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    openLifecycleManager();
+                                    setIsNeoOverflowOpen(false);
+                                  }}
+                                  className="workflow-neo-menu-item"
+                                >
+                                  <Split size={14} />
+                                  Edit lifecycle
                                 </button>
                                 <button
                                   type="button"
@@ -5773,6 +6126,130 @@ export default function WorkflowStudio({
                       No commands or workflow items matched that search.
                     </div>
                   )}
+                </div>
+              </div>
+            </ModalShell>
+          </div>
+        </div>
+      ) : null}
+
+      {isLifecycleManagerOpen ? (
+        <div className="fixed inset-0 z-[93] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-20 backdrop-blur-sm">
+          <div className="w-full max-w-4xl">
+            <ModalShell
+              eyebrow="Capability Lifecycle"
+              title="Manage workflow lanes"
+              description="These visible phases define the Designer lanes, Work board columns, and Evidence labels for this capability."
+              actions={
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsLifecycleManagerOpen(false);
+                    setPendingLifecycleDeletePhaseId(null);
+                    setLifecycleDeleteTargetPhaseId('');
+                  }}
+                  className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface"
+                >
+                  <X size={18} />
+                </button>
+              }
+            >
+              <div className="grid gap-5">
+                <CapabilityLifecycleEditor
+                  phases={lifecyclePhaseViews}
+                  intro="Backlog and Done stay fixed. Everything in between is capability-owned and flows through Designer, Work, Ledger, and Flight Recorder."
+                  onChangeLabel={handleRenameLifecyclePhase}
+                  onMovePhase={handleMoveLifecyclePhase}
+                  onDeletePhase={handleDeleteLifecyclePhase}
+                  onAddPhase={handleAddLifecyclePhase}
+                  addLabel="Add lifecycle phase"
+                />
+
+                {pendingLifecycleDeletePhaseId ? (
+                  <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-5">
+                    <div className="flex items-start gap-3">
+                      <AlertTriangle size={18} className="mt-0.5 shrink-0 text-amber-700" />
+                      <div className="min-w-0 flex-1 space-y-3">
+                        <div>
+                          <p className="text-sm font-semibold text-amber-950">
+                            Remap workflow references before removing this phase
+                          </p>
+                          <p className="mt-1 text-sm leading-relaxed text-amber-900">
+                            Saved workflows still reference{' '}
+                            {phaseLabel(pendingLifecycleDeletePhaseId)}. Choose the phase that should
+                            inherit those workflow nodes, steps, and hand-off targets.
+                          </p>
+                        </div>
+                        <label className="space-y-2">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-amber-900">
+                            Remap to
+                          </span>
+                          <select
+                            value={lifecycleDeleteTargetPhaseId}
+                            onChange={event =>
+                              setLifecycleDeleteTargetPhaseId(event.target.value)
+                            }
+                            className="enterprise-input bg-white"
+                          >
+                            {lifecycleDraft.phases
+                              .filter(phase => phase.id !== pendingLifecycleDeletePhaseId)
+                              .map(phase => (
+                                <option key={phase.id} value={phase.id}>
+                                  {phase.label}
+                                </option>
+                              ))}
+                          </select>
+                        </label>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={handleConfirmLifecycleDelete}
+                            disabled={!lifecycleDeleteTargetPhaseId}
+                            className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Remap and remove phase
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPendingLifecycleDeletePhaseId(null);
+                              setLifecycleDeleteTargetPhaseId('');
+                            }}
+                            className="enterprise-button enterprise-button-secondary"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-outline-variant/50 pt-5">
+                  <p className="text-sm text-secondary">
+                    Delete is blocked while live work or workflow-managed tasks still occupy a phase.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsLifecycleManagerOpen(false);
+                        setPendingLifecycleDeletePhaseId(null);
+                        setLifecycleDeleteTargetPhaseId('');
+                      }}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveLifecycle()}
+                      disabled={isSavingLifecycle}
+                      className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isSavingLifecycle ? 'Saving lifecycle...' : 'Save lifecycle'}
+                    </button>
+                  </div>
                 </div>
               </div>
             </ModalShell>

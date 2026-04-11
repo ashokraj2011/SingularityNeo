@@ -1,4 +1,8 @@
 import { AgentTask, Artifact, WorkItem, Workflow, WorkflowStep } from '../types';
+import {
+  isImplementationWorkflowStep,
+  isTestingWorkflowStep,
+} from './workflowStepSemantics';
 
 const createManagedTaskId = (workItemId: string, stepId: string) =>
   `TASK-${workItemId}-${stepId}`;
@@ -24,12 +28,7 @@ const mapArtifactTypeToLinkType = (artifactType: string) => {
 };
 
 const getTaskType = (step: WorkflowStep): NonNullable<AgentTask['taskType']> => {
-  const stepText = `${step.name} ${step.action} ${step.description || ''}`.toLowerCase();
-
-  if (
-    step.phase === 'QA' ||
-    /test|qa|quality|regression|verification/.test(stepText)
-  ) {
+  if (isTestingWorkflowStep(step)) {
     return 'TEST';
   }
   if (step.stepType === 'HUMAN_APPROVAL') {
@@ -47,7 +46,7 @@ const buildTaskTitle = (workItem: WorkItem, step: WorkflowStep) => {
   if (taskType === 'TEST') {
     return `${workItem.title} · Test Coverage & QA Evidence`;
   }
-  if (step.phase === 'DEVELOPMENT') {
+  if (isImplementationWorkflowStep(step)) {
     return `${workItem.title} · Implementation & Unit Tests`;
   }
   if (taskType === 'APPROVAL') {
@@ -73,7 +72,7 @@ const buildTaskPrompt = (workItem: WorkItem, step: WorkflowStep) => {
     lines.push(`Step guidance: ${step.description}`);
   }
 
-  if (step.phase === 'DEVELOPMENT') {
+  if (isImplementationWorkflowStep(step)) {
     lines.push(
       'Implementation must include the required code changes plus unit or integration tests before the story can move forward.',
     );
@@ -99,7 +98,7 @@ const buildTaskExecutionNotes = (workItem: WorkItem, step: WorkflowStep) => {
     return `Workflow-managed testing task for ${workItem.title}. The SDLC flow automatically provisions QA coverage, test execution evidence, and release-quality feedback without requiring a separate manual task.`;
   }
 
-  if (step.phase === 'DEVELOPMENT') {
+  if (isImplementationWorkflowStep(step)) {
     return `Workflow-managed development task for ${workItem.title}. The implementation phase is responsible for code changes plus developer test coverage before hand-off to QA.`;
   }
 

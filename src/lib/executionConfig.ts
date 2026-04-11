@@ -32,6 +32,9 @@ const cloneCommandTemplate = (
   command: [...template.command],
 });
 
+const commandsMatch = (left: string[], right: string[]) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
 export const normalizeWorkspacePathForComparison = (value?: string | null) =>
   String(value || '')
     .trim()
@@ -52,6 +55,35 @@ export const isWorkspacePathInsideApprovedRoot = (
     return Boolean(root) && (candidate === root || candidate.startsWith(`${root}/`));
   });
 };
+
+export const isDefaultExecutionCommandTemplatePlaceholder = (
+  template: CapabilityExecutionCommandTemplate,
+) => {
+  const matchingDefault = DEFAULT_COMMAND_TEMPLATES.find(
+    defaultTemplate => defaultTemplate.id === template.id,
+  );
+
+  if (!matchingDefault) {
+    return false;
+  }
+
+  return (
+    template.label === matchingDefault.label &&
+    (template.description || '') === (matchingDefault.description || '') &&
+    commandsMatch(template.command, matchingDefault.command) &&
+    !template.workingDirectory &&
+    template.requiresApproval !== true
+  );
+};
+
+export const hasMeaningfulExecutionCommandTemplate = (
+  templates: CapabilityExecutionCommandTemplate[],
+) =>
+  templates.some(
+    template =>
+      Boolean(template.id && template.label && template.command.length > 0) &&
+      !isDefaultExecutionCommandTemplatePlaceholder(template),
+  );
 
 export const getDefaultExecutionConfig = (
   capability?: Pick<Capability, 'localDirectories'>,
