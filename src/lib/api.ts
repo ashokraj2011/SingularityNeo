@@ -539,6 +539,20 @@ export const approveCapabilityWorkflowRun = async (
     },
   );
 
+export const requestCapabilityWorkflowRunChanges = async (
+  capabilityId: string,
+  runId: string,
+  payload: { resolution: string; resolvedBy: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/request-changes`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
 export const provideCapabilityWorkflowRunInput = async (
   capabilityId: string,
   runId: string,

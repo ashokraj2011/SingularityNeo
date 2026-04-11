@@ -28,6 +28,17 @@ const tokenize = (value: string) =>
 
 const unique = (values: string[]) => [...new Set(values.filter(Boolean))];
 
+const LEARNING_SUMMARY_TIMEOUT_MS = 90_000;
+
+const hasUsableLearningProfile = (profile: AgentLearningProfileDetail['profile']) =>
+  Boolean(
+    profile.summary?.trim() ||
+      profile.contextBlock?.trim() ||
+      profile.highlights?.length ||
+      profile.sourceCount ||
+      profile.refreshedAt,
+  );
+
 const extractJsonObject = (value: string) => {
   const start = value.indexOf('{');
   const end = value.lastIndexOf('}');
@@ -130,7 +141,7 @@ const summarizeAgentLearning = async ({
 
   const response = await requestGitHubModel({
     model: agent.model,
-    timeoutMs: 15000,
+    timeoutMs: LEARNING_SUMMARY_TIMEOUT_MS,
     messages: [
       {
         role: 'system',
@@ -251,11 +262,13 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
     return;
   }
 
+  const previousProfile = await getAgentLearningProfile(capabilityId, agent.id);
+
   await upsertAgentLearningProfile({
     capabilityId,
     agentId: agent.id,
     profile: {
-      ...agent.learningProfile,
+      ...previousProfile,
       status: 'LEARNING',
       lastRequestedAt: job.requestedAt,
       lastError: undefined,
@@ -327,12 +340,19 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
     await upsertAgentLearningProfile({
       capabilityId,
       agentId: agent.id,
-      profile: {
-        ...agent.learningProfile,
-        status: 'ERROR',
-        lastRequestedAt: job.requestedAt,
-        lastError: message,
-      },
+      profile: hasUsableLearningProfile(previousProfile)
+        ? {
+            ...previousProfile,
+            status: 'STALE',
+            lastRequestedAt: job.requestedAt,
+            lastError: message,
+          }
+        : {
+            ...previousProfile,
+            status: 'ERROR',
+            lastRequestedAt: job.requestedAt,
+            lastError: message,
+          },
     });
 
     await updateAgentLearningJob({

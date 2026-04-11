@@ -69,6 +69,7 @@ import {
   executeTool,
   listToolDescriptions,
 } from './tools';
+import { captureCodeDiffReviewArtifact } from './codeDiff';
 import {
   getCapabilityBundle,
   replaceCapabilityWorkspaceContentRecord,
@@ -1154,6 +1155,10 @@ const resolveGraphTransition = async ({
       currentPhase: nextCurrentNode?.phase || 'DONE',
       assignedAgentId: nextCurrentNode?.agentId,
       branchState: nextBranchState,
+      pauseReason: undefined,
+      currentWaitId: undefined,
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
       completedAt: nextCurrentNode ? undefined : new Date().toISOString(),
       terminalOutcome: nextCurrentNode ? undefined : summary,
     })
@@ -1320,13 +1325,18 @@ const syncWaitingProjection = async ({
   detail,
   waitType,
   waitMessage,
+  artifacts,
 }: {
   detail: WorkflowRunDetail;
   waitType: RunWaitType;
   waitMessage: string;
+  artifacts?: Artifact[];
 }) => {
   const projection = await resolveProjectionContext(detail.run.capabilityId, detail.run.workItemId, detail.run.workflowSnapshot);
   const currentStep = getCurrentWorkflowStep(detail);
+  const nextArtifacts = artifacts
+    ? replaceArtifacts(projection.workspace.artifacts, artifacts)
+    : undefined;
   const nextStatus: WorkItemStatus =
     waitType === 'APPROVAL' ? 'PENDING_APPROVAL' : 'BLOCKED';
   const nextWorkItem: WorkItem = {
@@ -1362,6 +1372,7 @@ const syncWaitingProjection = async ({
     workspace: projection.workspace,
     workItem: nextWorkItem,
     workflow: detail.run.workflowSnapshot,
+    artifacts: nextArtifacts,
     logsToAppend: [
       createExecutionLog({
         capabilityId: detail.run.capabilityId,
@@ -1681,6 +1692,15 @@ const buildHumanInteractionArtifact = ({
 }): Artifact => {
   const contrarianReview =
     wait.type === 'CONFLICT_RESOLUTION' ? wait.payload?.contrarianReview : undefined;
+  const codeDiffArtifactId =
+    wait.type === 'APPROVAL' && typeof wait.payload?.codeDiffArtifactId === 'string'
+      ? wait.payload.codeDiffArtifactId
+      : undefined;
+  const codeDiffSummary =
+    wait.type === 'APPROVAL' && typeof wait.payload?.codeDiffSummary === 'string'
+      ? wait.payload.codeDiffSummary
+      : undefined;
+  const isCodeDiffApproval = Boolean(codeDiffArtifactId);
   const artifactKind =
     wait.type === 'APPROVAL'
       ? 'APPROVAL_RECORD'
@@ -1689,7 +1709,9 @@ const buildHumanInteractionArtifact = ({
       : 'INPUT_NOTE';
 
   const artifactName =
-    wait.type === 'APPROVAL'
+    wait.type === 'APPROVAL' && isCodeDiffApproval
+      ? `${step.name} Code Review Approval`
+      : wait.type === 'APPROVAL'
       ? `${step.name} Approval Record`
       : wait.type === 'CONFLICT_RESOLUTION'
       ? `${step.name} Conflict Resolution`
@@ -1725,6 +1747,10 @@ const buildHumanInteractionArtifact = ({
       ['Request', wait.message],
       ['Resolved By', resolvedBy],
       ['Resolution', resolution],
+      isCodeDiffApproval ? ['Code Diff Summary', codeDiffSummary] : ['Code Diff Summary', undefined],
+      isCodeDiffApproval
+        ? ['Linked Code Diff Artifact', codeDiffArtifactId]
+        : ['Linked Code Diff Artifact', undefined],
       contrarianReview
         ? ['Contrarian Review', formatContrarianReviewMarkdown(contrarianReview)]
         : ['Contrarian Review', undefined],
@@ -1999,12 +2025,14 @@ const resolveRunWaitAndQueue = async ({
   expectedType,
   resolution,
   resolvedBy,
+  approvalDisposition = 'APPROVE',
 }: {
   capabilityId: string;
   runId: string;
   expectedType: RunWaitType;
   resolution: string;
   resolvedBy: string;
+  approvalDisposition?: 'APPROVE' | 'REQUEST_CHANGES';
 }) => {
   const detail = await getWorkflowRunDetail(capabilityId, runId);
   const openWait = [...detail.waits].reverse().find(wait => wait.status === 'OPEN');
@@ -2024,18 +2052,36 @@ const resolveRunWaitAndQueue = async ({
 
   const currentStep = getCurrentWorkflowStep(detail);
   const currentRunStep = getCurrentRunStep(detail);
+  const isRequestChangesApproval =
+    expectedType === 'APPROVAL' && approvalDisposition === 'REQUEST_CHANGES';
+  const approvalAdvancesWorkflow =
+    expectedType === 'APPROVAL' &&
+    !isRequestChangesApproval &&
+    (
+      currentStep.stepType === 'HUMAN_APPROVAL' ||
+      openWait.payload?.postStepApproval === true
+    );
+  const approvalCompletionSummary =
+    typeof openWait.payload?.completionSummary === 'string' &&
+    openWait.payload.completionSummary.trim()
+      ? openWait.payload.completionSummary.trim()
+      : resolution;
   let nextRun = detail.run;
   let nextRunStep = currentRunStep;
   let nextWorkflowStep: WorkflowStep | undefined;
 
-  if (expectedType === 'APPROVAL' && currentStep.stepType === 'HUMAN_APPROVAL') {
+  if (approvalAdvancesWorkflow) {
     nextRunStep = await updateWorkflowRunStep({
       ...currentRunStep,
       status: 'COMPLETED',
       completedAt: new Date().toISOString(),
-      evidenceSummary: resolution,
-      outputSummary: resolution,
+      evidenceSummary: approvalCompletionSummary,
+      outputSummary: approvalCompletionSummary,
       waitId: openWait.id,
+      metadata: {
+        ...(currentRunStep.metadata || {}),
+        lastResolution: resolution,
+      },
     });
 
     const currentNode = getCurrentWorkflowNode(detail);
@@ -2043,7 +2089,7 @@ const resolveRunWaitAndQueue = async ({
       detail,
       completedNode: currentNode,
       completedRunStep: nextRunStep,
-      summary: resolution,
+      summary: approvalCompletionSummary,
     });
     nextWorkflowStep = transition.nextStep;
     nextRun = transition.nextRun;
@@ -2084,6 +2130,8 @@ const resolveRunWaitAndQueue = async ({
       details: {
         waitType: expectedType,
         resolvedBy,
+        approvalDisposition:
+          expectedType === 'APPROVAL' ? approvalDisposition : undefined,
       },
     }),
   );
@@ -2098,26 +2146,66 @@ const resolveRunWaitAndQueue = async ({
     resolvedBy,
   });
 
-  if (expectedType === 'APPROVAL' && currentStep.stepType === 'HUMAN_APPROVAL') {
+  if (approvalAdvancesWorkflow) {
+    await insertRunEvent(
+      createRunEvent({
+        capabilityId,
+        runId,
+        workItemId: detail.run.workItemId,
+        runStepId: nextRunStep.id,
+        traceId: detail.run.traceId,
+        spanId: currentRunStep.spanId,
+        type: 'STEP_COMPLETED',
+        level: 'INFO',
+        message: approvalCompletionSummary,
+        details: {
+          stage: 'STEP_COMPLETED',
+          stepName: currentStep.name,
+          phase: currentStep.phase,
+          approvedAfterWait: true,
+        },
+      }),
+    );
+
+    const projection = await resolveProjectionContext(
+      capabilityId,
+      detail.run.workItemId,
+      detail.run.workflowSnapshot,
+    );
+    const generatedArtifactIds = Array.isArray(openWait.payload?.generatedArtifactIds)
+      ? openWait.payload.generatedArtifactIds.filter(
+          (value): value is string => typeof value === 'string' && value.trim().length > 0,
+        )
+      : [];
+    const generatedArtifacts = generatedArtifactIds
+      .map(artifactId =>
+        projection.workspace.artifacts.find(artifact => artifact.id === artifactId),
+      )
+      .filter(Boolean) as Artifact[];
     const handoffArtifact = nextWorkflowStep
       ? buildHandoffArtifact({
           detail,
           step: currentStep,
           nextStep: nextWorkflowStep,
           runStep: currentRunStep,
-          summary: resolution,
+          summary: approvalCompletionSummary,
         })
       : null;
+
+    const completionArtifacts = [
+      ...generatedArtifacts.filter(artifact => artifact.artifactKind === 'PHASE_OUTPUT'),
+      ...generatedArtifacts.filter(artifact => artifact.artifactKind !== 'PHASE_OUTPUT'),
+      interactionArtifact,
+      ...(handoffArtifact ? [handoffArtifact] : []),
+    ];
 
     await syncCompletedProjection({
       detail: nextDetail,
       completedStep: currentStep,
       completedRunStep: nextRunStep,
       nextStep: nextWorkflowStep,
-      summary: resolution,
-      artifacts: handoffArtifact
-        ? [interactionArtifact, handoffArtifact]
-        : [interactionArtifact],
+      summary: approvalCompletionSummary,
+      artifacts: completionArtifacts,
     });
 
     return nextDetail;
@@ -2140,7 +2228,11 @@ const resolveRunWaitAndQueue = async ({
       ...projection.workItem.history,
       createHistoryEntry(
         resolvedBy,
-        expectedType === 'CONFLICT_RESOLUTION' ? 'Conflict resolved' : 'Human input provided',
+        isRequestChangesApproval
+          ? 'Changes requested'
+          : expectedType === 'CONFLICT_RESOLUTION'
+          ? 'Conflict resolved'
+          : 'Human input provided',
         resolution,
         projection.workItem.phase,
         'ACTIVE',
@@ -2167,6 +2259,8 @@ const resolveRunWaitAndQueue = async ({
           waitId: openWait.id,
           waitType: expectedType,
           resolvedBy,
+          approvalDisposition:
+            expectedType === 'APPROVAL' ? approvalDisposition : undefined,
           artifactId: interactionArtifact.id,
         },
       }),
@@ -2195,6 +2289,33 @@ export const approveWorkflowRun = async ({
     resolution,
     resolvedBy,
   });
+
+export const requestChangesWorkflowRun = async ({
+  capabilityId,
+  runId,
+  resolution,
+  resolvedBy,
+}: {
+  capabilityId: string;
+  runId: string;
+  resolution: string;
+  resolvedBy: string;
+}) => {
+  const detail = await getWorkflowRunDetail(capabilityId, runId);
+  const openWait = [...detail.waits].reverse().find(wait => wait.status === 'OPEN');
+  if (!openWait || openWait.type !== 'APPROVAL' || openWait.payload?.postStepApproval !== true) {
+    throw new Error('Changes can only be requested for an open code diff approval wait.');
+  }
+
+  return resolveRunWaitAndQueue({
+    capabilityId,
+    runId,
+    expectedType: 'APPROVAL',
+    resolution,
+    resolvedBy,
+    approvalDisposition: 'REQUEST_CHANGES',
+  });
+};
 
 export const provideWorkflowRunInput = async ({
   capabilityId,
@@ -2309,12 +2430,18 @@ const completeRunWithWait = async ({
   detail,
   waitType,
   waitMessage,
+  waitPayload,
+  artifacts,
+  runStepOverride,
 }: {
   detail: WorkflowRunDetail;
   waitType: RunWaitType;
   waitMessage: string;
+  waitPayload?: Record<string, any>;
+  artifacts?: Artifact[];
+  runStepOverride?: WorkflowRunStep;
 }) => {
-  const currentRunStep = getCurrentRunStep(detail);
+  const currentRunStep = runStepOverride || getCurrentRunStep(detail);
   const currentStep = getCurrentWorkflowStep(detail);
   const projection =
     waitType === 'CONFLICT_RESOLUTION'
@@ -2339,6 +2466,7 @@ const completeRunWithWait = async ({
     requestedBy: currentRunStep.agentId,
     payload: {
       stepName: currentRunStep.name,
+      ...(waitPayload || {}),
       contrarianReview:
         waitType === 'CONFLICT_RESOLUTION' && contrarianReviewer
           ? createPendingContrarianReview(contrarianReviewer.id)
@@ -2387,6 +2515,7 @@ const completeRunWithWait = async ({
     detail: nextDetail,
     waitType,
     waitMessage,
+    artifacts,
   });
 
   if (waitType === 'CONFLICT_RESOLUTION' && projection && contrarianReviewer) {
@@ -2736,6 +2865,7 @@ const executeAutomatedStep = async (
     detail: runningDetail,
     runStep: currentRunStep,
   });
+  const stepTouchedPaths = new Set<string>();
 
   for (let iteration = 0; iteration < MAX_AGENT_TOOL_LOOPS; iteration += 1) {
     const decisionEnvelope = await requestStepDecision({
@@ -3007,6 +3137,13 @@ const executeAutomatedStep = async (
             lastToolSummary: result.summary,
           },
         });
+        if (
+          decision.toolCall.toolId === 'workspace_write' &&
+          typeof result.details?.path === 'string' &&
+          result.details.path.trim()
+        ) {
+          stepTouchedPaths.add(result.details.path.trim());
+        }
         continue;
       } catch (error) {
         const message =
@@ -3070,6 +3207,46 @@ const executeAutomatedStep = async (
         costUsd: decisionEnvelope.usage.estimatedCostUsd,
         latencyMs: decisionEnvelope.latencyMs,
       });
+      const codeDiffArtifact =
+        stepTouchedPaths.size > 0
+          ? await captureCodeDiffReviewArtifact({
+              capability: projection.capability,
+              detail: runningDetail,
+              step,
+              runStep: currentRunStep,
+              touchedPaths: Array.from(stepTouchedPaths),
+            })
+          : null;
+
+      if (codeDiffArtifact) {
+        await finishTelemetrySpan({
+          capabilityId: detail.run.capabilityId,
+          spanId: stepSpan.id,
+          status: 'WAITING',
+          costUsd: decisionEnvelope.usage.estimatedCostUsd,
+          tokenUsage: decisionEnvelope.usage,
+          attributes: {
+            outputSummary: decision.summary,
+            waitType: 'APPROVAL',
+            codeDiffArtifactId: codeDiffArtifact.id,
+          },
+        });
+        return completeRunWithWait({
+          detail: runningDetail,
+          waitType: 'APPROVAL',
+          waitMessage: `${step.name} changed workspace files. Review the code diff and approve before the workflow continues.`,
+          waitPayload: {
+            postStepApproval: true,
+            completionSummary: decision.summary,
+            generatedArtifactIds: [artifact.id, codeDiffArtifact.id],
+            codeDiffArtifactId: codeDiffArtifact.id,
+            codeDiffSummary: codeDiffArtifact.summary,
+          },
+          artifacts: [artifact, codeDiffArtifact],
+          runStepOverride: currentRunStep,
+        });
+      }
+
       currentRunStep = await updateWorkflowRunStep({
         ...currentRunStep,
         status: 'COMPLETED',

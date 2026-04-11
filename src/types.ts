@@ -346,6 +346,7 @@ export interface Blueprint {
 
 export type ArtifactKind =
   | 'PHASE_OUTPUT'
+  | 'CODE_DIFF'
   | 'HANDOFF_PACKET'
   | 'APPROVAL_RECORD'
   | 'INPUT_NOTE'
@@ -711,6 +712,11 @@ export interface ContrarianConflictReview {
 
 export type RunWaitPayload = {
   stepName?: string;
+  postStepApproval?: boolean;
+  completionSummary?: string;
+  generatedArtifactIds?: string[];
+  codeDiffArtifactId?: string;
+  codeDiffSummary?: string;
   contrarianReview?: ContrarianConflictReview;
 } & Record<string, any>;
 

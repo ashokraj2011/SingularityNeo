@@ -908,6 +908,8 @@ export const getBusinessEvidenceLabel = (value?: string) => {
   }
 
   switch (value) {
+    case 'CODE_DIFF':
+      return 'Code diff';
     case 'APPROVAL_RECORD':
       return 'Approval record';
     case 'INPUT_NOTE':

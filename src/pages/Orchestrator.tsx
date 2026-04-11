@@ -34,6 +34,7 @@ import {
   listCapabilityWorkflowRuns,
   moveCapabilityWorkItem,
   provideCapabilityWorkflowRunInput,
+  requestCapabilityWorkflowRunChanges,
   resolveCapabilityWorkflowRunConflict,
   restartCapabilityWorkflowRun,
   startCapabilityWorkflowRun,
@@ -45,6 +46,7 @@ import {
 } from '../lib/capabilityLifecycle';
 import { cn } from '../lib/utils';
 import type {
+  Artifact,
   ContrarianConflictReview,
   RunEvent,
   RunWait,
@@ -54,7 +56,7 @@ import type {
   WorkflowRun,
   WorkflowRunDetail,
 } from '../types';
-import { BoardColumn, EmptyState, StatusBadge } from '../components/EnterpriseUI';
+import { BoardColumn, EmptyState, ModalShell, StatusBadge } from '../components/EnterpriseUI';
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
 const PHASE_ACCENTS = [
@@ -426,6 +428,7 @@ const Orchestrator = () => {
   const [selectedRunEvents, setSelectedRunEvents] = useState<RunEvent[]>([]);
   const [selectedRunHistory, setSelectedRunHistory] = useState<WorkflowRun[]>([]);
   const [resolutionNote, setResolutionNote] = useState('');
+  const [isDiffReviewOpen, setIsDiffReviewOpen] = useState(false);
   const [draftWorkItem, setDraftWorkItem] = useState({
     title: '',
     description: '',
@@ -541,6 +544,7 @@ const Orchestrator = () => {
       setSelectedRunEvents([]);
       setSelectedRunHistory([]);
       setResolutionNote('');
+      setIsDiffReviewOpen(false);
       return;
     }
 
@@ -791,13 +795,31 @@ const Orchestrator = () => {
     [filteredWorkItems, workflowsById],
   );
 
+  const activeBoardPhases = useMemo(
+    () => lifecycleBoardPhases.filter(phase => phase !== 'DONE'),
+    [lifecycleBoardPhases],
+  );
+
   const groupedItems = useMemo(
     () =>
-      lifecycleBoardPhases.map(phase => ({
+      activeBoardPhases.map(phase => ({
         phase,
         items: filteredWorkItems.filter(item => item.phase === phase),
       })),
-    [filteredWorkItems, lifecycleBoardPhases],
+    [activeBoardPhases, filteredWorkItems],
+  );
+
+  const completedItems = useMemo(
+    () =>
+      filteredWorkItems
+        .filter(item => item.phase === 'DONE' || item.status === 'COMPLETED')
+        .slice()
+        .sort((left, right) => {
+          const leftTime = new Date(left.history[left.history.length - 1]?.timestamp || 0).getTime();
+          const rightTime = new Date(right.history[right.history.length - 1]?.timestamp || 0).getTime();
+          return rightTime - leftTime;
+        }),
+    [filteredWorkItems],
   );
 
   const stats = useMemo(
@@ -821,6 +843,10 @@ const Orchestrator = () => {
     selectedWorkItem,
   );
   const selectedOpenWait = getSelectedRunWait(selectedRunDetail);
+  const selectedCodeDiffArtifactId =
+    typeof selectedOpenWait?.payload?.codeDiffArtifactId === 'string'
+      ? selectedOpenWait.payload.codeDiffArtifactId
+      : undefined;
   const selectedContrarianReview =
     selectedOpenWait?.type === 'CONFLICT_RESOLUTION'
       ? getContrarianReview(selectedOpenWait)
@@ -883,6 +909,9 @@ const Orchestrator = () => {
     selectedWorkItem?.phase !== 'DONE' &&
     runtimeReady;
   const canResetAndRestart = Boolean(selectedWorkItem) && runtimeReady;
+  const codeDiffReviewRequiresResponse = Boolean(
+    selectedOpenWait?.type === 'APPROVAL' && selectedCodeDiffArtifactId,
+  );
 
   const actionButtonLabel =
     selectedOpenWait?.type === 'APPROVAL'
@@ -894,7 +923,9 @@ const Orchestrator = () => {
         : 'Continue';
 
   const resolutionPlaceholder =
-    selectedOpenWait?.type === 'APPROVAL'
+    selectedOpenWait?.type === 'APPROVAL' && selectedCodeDiffArtifactId
+      ? 'Add code review notes, implementation conditions, or sign-off guidance before continuing.'
+      : selectedOpenWait?.type === 'APPROVAL'
       ? 'Add approval notes, release conditions, or sign-off details.'
       : selectedOpenWait?.type === 'INPUT'
         ? 'Provide the missing business, technical, or governance details needed to unblock this work item.'
@@ -905,9 +936,12 @@ const Orchestrator = () => {
   const resolutionIsRequired =
     selectedOpenWait?.type === 'INPUT' ||
     selectedOpenWait?.type === 'CONFLICT_RESOLUTION';
+  const requestChangesIsAvailable = codeDiffReviewRequiresResponse;
   const canResolveSelectedWait =
     Boolean(selectedOpenWait) &&
     (!resolutionIsRequired || Boolean(resolutionNote.trim()));
+  const canRequestChanges =
+    requestChangesIsAvailable && Boolean(resolutionNote.trim());
 
   const stepOrder = useMemo(
     () =>
@@ -954,6 +988,54 @@ const Orchestrator = () => {
           new Date(right.created).getTime() - new Date(left.created).getTime(),
       );
   }, [selectedRunDetail, selectedRunStepIds, workspace.artifacts]);
+  const selectedCodeDiffArtifact = useMemo<Artifact | null>(() => {
+    if (!selectedCodeDiffArtifactId) {
+      return null;
+    }
+
+    return (
+      workspace.artifacts.find(artifact => artifact.id === selectedCodeDiffArtifactId) ||
+      null
+    );
+  }, [selectedCodeDiffArtifactId, workspace.artifacts]);
+  const selectedCodeDiffDocument = useMemo(() => {
+    if (!selectedCodeDiffArtifact) {
+      return '';
+    }
+
+    if (selectedCodeDiffArtifact.contentFormat === 'JSON' && selectedCodeDiffArtifact.contentJson) {
+      return JSON.stringify(selectedCodeDiffArtifact.contentJson, null, 2);
+    }
+
+    return (
+      selectedCodeDiffArtifact.contentText ||
+      selectedCodeDiffArtifact.summary ||
+      selectedOpenWait?.payload?.codeDiffSummary ||
+      ''
+    );
+  }, [selectedCodeDiffArtifact, selectedOpenWait]);
+  const selectedCodeDiffRepositories = useMemo(() => {
+    const repositories = (
+      selectedCodeDiffArtifact?.contentJson as
+        | { repositories?: Array<{ touchedFiles?: string[] }> }
+        | undefined
+    )?.repositories;
+    return Array.isArray(repositories) ? repositories : [];
+  }, [selectedCodeDiffArtifact]);
+  const selectedCodeDiffRepositoryCount = selectedCodeDiffRepositories.length;
+  const selectedCodeDiffTouchedFileCount = selectedCodeDiffRepositories.reduce(
+    (count, repository) => count + (repository.touchedFiles?.length || 0),
+    0,
+  );
+  const selectedHasCodeDiffApproval =
+    selectedOpenWait?.type === 'APPROVAL' && Boolean(selectedCodeDiffArtifactId);
+
+  useEffect(() => {
+    if (selectedHasCodeDiffApproval) {
+      return;
+    }
+    setIsDiffReviewOpen(false);
+  }, [selectedHasCodeDiffApproval]);
 
   const selectedLogs = useMemo(() => {
     if (!selectedWorkItem) {
@@ -1191,6 +1273,35 @@ const Orchestrator = () => {
               ? 'Input submitted'
               : 'Conflict resolved',
         description: `${selectedWorkItem.title} was updated and can continue through the workflow.`,
+      },
+    );
+  };
+
+  const handleRequestChanges = async () => {
+    if (!currentRun || !selectedWorkItem || !selectedHasCodeDiffApproval) {
+      return;
+    }
+
+    const resolution = resolutionNote.trim();
+    if (!resolution) {
+      setActionError('Add review notes before requesting changes from the developer step.');
+      return;
+    }
+
+    await withAction(
+      'requestChanges',
+      async () => {
+        await requestCapabilityWorkflowRunChanges(activeCapability.id, currentRun.id, {
+          resolution,
+          resolvedBy: 'Capability Owner',
+        });
+        setResolutionNote('');
+        setIsDiffReviewOpen(false);
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Changes requested',
+        description: `${selectedWorkItem.title} was sent back to the developer step with your review notes.`,
       },
     );
   };
@@ -1538,145 +1649,202 @@ const Orchestrator = () => {
           </div>
 
           {view === 'board' ? (
-            <div className="orchestrator-board-grid">
-              {groupedItems.map(({ phase, items }) => (
-                <BoardColumn
-                  key={phase}
-                  title={getPhaseMeta(phase).label}
-                  count={items.length}
-                  badge={
-                    <StatusBadge tone={getStatusTone(phase)}>
-                      {getPhaseMeta(phase).label}
-                    </StatusBadge>
-                  }
-                  active={dragOverPhase === phase}
-                  className="orchestrator-phase-column transition-all"
-                >
-                  <div
-                    onDragOver={event => {
-                      event.preventDefault();
-                      setDragOverPhase(phase);
-                    }}
-                    onDragLeave={() =>
-                      setDragOverPhase(current => (current === phase ? null : current))
-                    }
-                    onDrop={event => {
-                      event.preventDefault();
-                      setDragOverPhase(null);
-                      const droppedId =
-                        event.dataTransfer.getData('text/plain') || draggedWorkItemId;
-                      setDraggedWorkItemId(null);
-                      if (droppedId) {
-                        void handleMoveWorkItem(droppedId, phase);
-                      }
-                    }}
-                    className="orchestrator-phase-body"
+            <div className="space-y-6">
+              <div className="orchestrator-board-grid">
+                {groupedItems.map(({ phase, items }) => (
+                  <BoardColumn
+                    key={phase}
+                    title={getPhaseMeta(phase).label}
+                    count={items.length}
+                    active={dragOverPhase === phase}
+                    className="orchestrator-phase-column transition-all"
                   >
-                    {items.map(item => {
-                      const workflow = workflowsById.get(item.workflowId) || null;
-                      const currentStep = getCurrentWorkflowStep(workflow, null, item);
-                      const agentId = item.assignedAgentId || currentStep?.agentId;
-                      const attentionLabel =
-                        item.blocker?.status === 'OPEN' || item.pendingRequest
-                          ? getAttentionLabel({
-                              blocker: item.blocker,
-                              pendingRequest: item.pendingRequest,
-                            })
-                          : '';
-                      const attentionReason = getAttentionReason({
-                        blocker: item.blocker,
-                        pendingRequest: item.pendingRequest,
-                      });
-                      const hasConflictReview = isConflictAttention(item);
+                    <div
+                      onDragOver={event => {
+                        event.preventDefault();
+                        setDragOverPhase(phase);
+                      }}
+                      onDragLeave={() =>
+                        setDragOverPhase(current => (current === phase ? null : current))
+                      }
+                      onDrop={event => {
+                        event.preventDefault();
+                        setDragOverPhase(null);
+                        const droppedId =
+                          event.dataTransfer.getData('text/plain') || draggedWorkItemId;
+                        setDraggedWorkItemId(null);
+                        if (droppedId) {
+                          void handleMoveWorkItem(droppedId, phase);
+                        }
+                      }}
+                      className="orchestrator-phase-body"
+                    >
+                      {items.map(item => {
+                        const workflow = workflowsById.get(item.workflowId) || null;
+                        const currentStep = getCurrentWorkflowStep(workflow, null, item);
+                        const agentId = item.assignedAgentId || currentStep?.agentId;
+                        const attentionLabel =
+                          item.blocker?.status === 'OPEN' || item.pendingRequest
+                            ? getAttentionLabel({
+                                blocker: item.blocker,
+                                pendingRequest: item.pendingRequest,
+                              })
+                            : '';
+                        const attentionReason = getAttentionReason({
+                          blocker: item.blocker,
+                          pendingRequest: item.pendingRequest,
+                        });
+                        const hasConflictReview = isConflictAttention(item);
 
-                      return (
-                        <motion.button
-                          key={item.id}
-                          id={`orchestrator-item-${item.id}`}
-                          layout
-                          draggable
-                          onDragStart={event => {
-                            setDraggedWorkItemId(item.id);
-                            if ('dataTransfer' in event && event.dataTransfer) {
-                              const dataTransfer = event.dataTransfer as DataTransfer;
-                              dataTransfer.setData('text/plain', item.id);
-                            }
-                          }}
-                          onDragEnd={() => {
-                            setDraggedWorkItemId(null);
-                            setDragOverPhase(null);
-                          }}
-                          onClick={() => selectWorkItem(item.id)}
-                          className={cn(
-                            'orchestrator-board-card',
-                            selectedWorkItemId === item.id &&
-                              'orchestrator-board-card-active',
-                          )}
-                        >
-                          <div className="orchestrator-board-card-top">
-                            <div className="min-w-0">
-                              <p className="form-kicker">{item.id}</p>
-                              <h3 className="mt-1 line-clamp-2 text-sm font-semibold text-on-surface">
-                                {item.title}
-                              </h3>
-                            </div>
-                            <StatusBadge tone={getPriorityTone(item.priority)}>
-                              {item.priority}
-                            </StatusBadge>
-                          </div>
-
-                          <div className="orchestrator-board-card-status">
-                            <StatusBadge tone={getStatusTone(item.status)}>
-                              {WORK_ITEM_STATUS_META[item.status].label}
-                            </StatusBadge>
-                            {item.activeRunId && <StatusBadge tone="brand">Running</StatusBadge>}
-                            {hasConflictReview && (
-                              <StatusBadge tone="danger">Contrarian pass</StatusBadge>
+                        return (
+                          <motion.button
+                            key={item.id}
+                            id={`orchestrator-item-${item.id}`}
+                            layout
+                            draggable
+                            onDragStart={event => {
+                              setDraggedWorkItemId(item.id);
+                              if ('dataTransfer' in event && event.dataTransfer) {
+                                const dataTransfer = event.dataTransfer as DataTransfer;
+                                dataTransfer.setData('text/plain', item.id);
+                              }
+                            }}
+                            onDragEnd={() => {
+                              setDraggedWorkItemId(null);
+                              setDragOverPhase(null);
+                            }}
+                            onClick={() => selectWorkItem(item.id)}
+                            className={cn(
+                              'orchestrator-board-card',
+                              selectedWorkItemId === item.id &&
+                                'orchestrator-board-card-active',
                             )}
-                          </div>
+                          >
+                            <div className="orchestrator-board-card-top">
+                              <div className="min-w-0">
+                                <p className="form-kicker">{item.id}</p>
+                                <h3 className="mt-1 line-clamp-2 text-sm font-semibold text-on-surface">
+                                  {item.title}
+                                </h3>
+                              </div>
+                              <StatusBadge tone={getPriorityTone(item.priority)}>
+                                {item.priority}
+                              </StatusBadge>
+                            </div>
 
-                          <div className="orchestrator-board-card-body">
-                            <div className="orchestrator-board-card-step">
-                              <p className="form-kicker">Current Step</p>
-                              <p className="mt-1 text-xs font-semibold text-on-surface">
-                                {currentStep?.name || 'Awaiting orchestration'}
-                              </p>
+                            <div className="orchestrator-board-card-status">
+                              <StatusBadge tone={getStatusTone(item.status)}>
+                                {WORK_ITEM_STATUS_META[item.status].label}
+                              </StatusBadge>
+                              {item.activeRunId && <StatusBadge tone="brand">Running</StatusBadge>}
+                              {hasConflictReview && (
+                                <StatusBadge tone="danger">Contrarian pass</StatusBadge>
+                              )}
                             </div>
-                            <div className="orchestrator-board-card-footer">
-                              <span className="truncate">
-                                {agentsById.get(agentId || '')?.name || agentId || 'Unassigned'}
-                              </span>
-                              <span className="truncate">
-                                {workflow?.name || 'Workflow'}
-                              </span>
-                            </div>
-                            {attentionLabel && (
-                              <div className="orchestrator-board-card-attention">
-                                <div className="flex items-center gap-2 font-bold uppercase tracking-[0.16em]">
-                                  <AlertCircle size={14} />
-                                  <span>{attentionLabel}</span>
-                                </div>
-                                <p className="mt-1 line-clamp-2 normal-case tracking-normal font-medium">
-                                  {attentionReason}
+
+                            <div className="orchestrator-board-card-body">
+                              <div className="orchestrator-board-card-step">
+                                <p className="form-kicker">Current Step</p>
+                                <p className="mt-1 text-xs font-semibold text-on-surface">
+                                  {currentStep?.name || 'Awaiting orchestration'}
                                 </p>
                               </div>
-                            )}
-                          </div>
-                        </motion.button>
-                      );
-                    })}
+                              <div className="orchestrator-board-card-footer">
+                                <span className="truncate">
+                                  {agentsById.get(agentId || '')?.name || agentId || 'Unassigned'}
+                                </span>
+                              </div>
+                              {attentionLabel && (
+                                <div className="orchestrator-board-card-attention">
+                                  <div className="flex items-center gap-2 font-bold uppercase tracking-[0.16em]">
+                                    <AlertCircle size={14} />
+                                    <span>{attentionLabel}</span>
+                                  </div>
+                                  <p className="mt-1 line-clamp-2 normal-case tracking-normal font-medium">
+                                    {attentionReason}
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                          </motion.button>
+                        );
+                      })}
 
-                    {items.length === 0 && (
-                      <EmptyState
-                        title={`No work in ${getPhaseMeta(phase).label}`}
-                        description="Drop a work item here to re-stage it or keep the phase clear while execution moves forward."
-                        icon={WorkflowIcon}
-                        className="min-h-[10rem]"
-                      />
-                    )}
+                      {items.length === 0 && (
+                        <EmptyState
+                          title={`No work in ${getPhaseMeta(phase).label}`}
+                          description="Drop a work item here to re-stage it or keep the phase clear while execution moves forward."
+                          icon={WorkflowIcon}
+                          className="min-h-[10rem]"
+                        />
+                      )}
+                    </div>
+                  </BoardColumn>
+                ))}
+              </div>
+
+              <div className="workspace-meta-card">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="workspace-meta-label">Completed work</p>
+                    <p className="mt-1 text-sm font-semibold text-on-surface">
+                      Finished items are tracked below the active lanes
+                    </p>
                   </div>
-                </BoardColumn>
-              ))}
+                  <StatusBadge tone="success">{completedItems.length} done</StatusBadge>
+                </div>
+
+                {completedItems.length > 0 ? (
+                  <div className="mt-4 overflow-x-auto">
+                    <div className="data-table-shell min-w-[48rem]">
+                      <div className="data-table-header grid grid-cols-[1.7fr_0.9fr_0.95fr_1.1fr_1fr_1fr] gap-3">
+                        <span>Work Item</span>
+                        <span>Workflow</span>
+                        <span>Completed In</span>
+                        <span>Last Step</span>
+                        <span>Owner</span>
+                        <span>Last Update</span>
+                      </div>
+                      {completedItems.map(item => {
+                        const workflow = workflowsById.get(item.workflowId) || null;
+                        const currentStep = getCurrentWorkflowStep(workflow, null, item);
+                        const agentId = item.assignedAgentId || currentStep?.agentId;
+                        const lastHistoryEntry = item.history[item.history.length - 1];
+
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => selectWorkItem(item.id)}
+                            className={cn(
+                              'orchestrator-list-row',
+                              selectedWorkItemId === item.id && 'orchestrator-list-row-active',
+                            )}
+                          >
+                            <div>
+                              <p className="font-semibold text-on-surface">{item.title}</p>
+                              <p className="mt-1 text-xs text-secondary">{item.id}</p>
+                            </div>
+                            <span>{workflow?.name || 'Workflow missing'}</span>
+                            <div>
+                              <StatusBadge tone="success">
+                                {getPhaseMeta(item.phase).label}
+                              </StatusBadge>
+                            </div>
+                            <span>{currentStep?.name || 'Completed'}</span>
+                            <span>{agentsById.get(agentId || '')?.name || agentId || 'Unassigned'}</span>
+                            <span>{formatTimestamp(lastHistoryEntry?.timestamp)}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-4 text-sm leading-relaxed text-secondary">
+                    Completed work will collect here instead of stretching the phase board.
+                  </p>
+                )}
+              </div>
             </div>
           ) : (
             <div className="data-table-shell">
@@ -1929,6 +2097,59 @@ const Orchestrator = () => {
                       </div>
                     )}
 
+                    {selectedOpenWait?.type === 'APPROVAL' && selectedCodeDiffArtifactId && (
+                      <div className="workspace-meta-card border-primary/15 bg-primary/5">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Code Diff Review</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              Review developer changes before approving continuation
+                            </p>
+                          </div>
+                          <StatusBadge tone="info">Diff attached</StatusBadge>
+                        </div>
+
+                        <p className="mt-3 text-sm leading-relaxed text-secondary">
+                          {selectedCodeDiffArtifact?.summary ||
+                            selectedOpenWait.payload?.codeDiffSummary ||
+                            'This approval gate includes a code diff generated from the developer step.'}
+                        </p>
+
+                        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                          <div className="rounded-2xl border border-outline-variant/25 bg-white/90 px-4 py-3">
+                            <p className="workspace-meta-label">Repositories</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              {selectedCodeDiffRepositoryCount || 1}
+                            </p>
+                          </div>
+                          <div className="rounded-2xl border border-outline-variant/25 bg-white/90 px-4 py-3">
+                            <p className="workspace-meta-label">Touched files</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              {selectedCodeDiffTouchedFileCount || 'Tracked in diff'}
+                            </p>
+                          </div>
+                          <div className="rounded-2xl border border-outline-variant/25 bg-white/90 px-4 py-3">
+                            <p className="workspace-meta-label">Review surface</p>
+                            <button
+                              type="button"
+                              onClick={() => setIsDiffReviewOpen(true)}
+                              className="mt-2 inline-flex items-center gap-2 text-sm font-semibold text-primary"
+                            >
+                              Open full diff review
+                              <ExternalLink size={14} />
+                            </button>
+                          </div>
+                        </div>
+
+                        {!selectedCodeDiffArtifact && (
+                          <p className="mt-4 text-sm leading-relaxed text-secondary">
+                            The approval is waiting on a stored code diff artifact, but it
+                            is not loaded in the current workspace snapshot yet.
+                          </p>
+                        )}
+                      </div>
+                    )}
+
                     {selectedOpenWait?.type === 'CONFLICT_RESOLUTION' && (
                       <div className="workspace-meta-card border-red-200/70 bg-red-50/55">
                         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2108,6 +2329,22 @@ const Orchestrator = () => {
                         Reset progress and restart
                       </button>
 
+                      {requestChangesIsAvailable && (
+                        <button
+                          type="button"
+                          onClick={() => void handleRequestChanges()}
+                          disabled={!canRequestChanges || busyAction !== null}
+                          className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {busyAction === 'requestChanges' ? (
+                            <LoaderCircle size={16} className="animate-spin" />
+                          ) : (
+                            <RefreshCw size={16} />
+                          )}
+                          Request changes
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => void handleResolveWait()}
@@ -2161,9 +2398,20 @@ const Orchestrator = () => {
                         placeholder={resolutionPlaceholder}
                         className="field-textarea mt-3 h-28 bg-white"
                       />
+                      {requestChangesIsAvailable && (
+                        <p className="mt-2 text-xs text-secondary">
+                          Add review notes here when requesting changes so the developer step
+                          can resume with clear direction.
+                        </p>
+                      )}
                       {resolutionIsRequired && !resolutionNote.trim() && selectedOpenWait && (
                         <p className="mt-2 text-xs font-medium text-amber-700">
                           Add the missing detail above to unblock this work item and continue execution.
+                        </p>
+                      )}
+                      {requestChangesIsAvailable && !resolutionNote.trim() && (
+                        <p className="mt-2 text-xs font-medium text-amber-700">
+                          Requesting changes requires review notes.
                         </p>
                       )}
                     </div>
@@ -2456,6 +2704,89 @@ const Orchestrator = () => {
           </div>
         </aside>
       </div>
+
+      {isDiffReviewOpen && selectedHasCodeDiffApproval && (
+        <div className="fixed inset-0 z-[92] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-16 backdrop-blur-sm">
+          <button
+            type="button"
+            aria-label="Close diff review"
+            onClick={() => setIsDiffReviewOpen(false)}
+            className="absolute inset-0"
+          />
+          <ModalShell
+            title={selectedCodeDiffArtifact?.name || 'Code diff review'}
+            description="Review the generated patch in a dedicated surface before approving or sending the work back for changes."
+            eyebrow="Diff Review"
+            className="relative z-[1] max-w-6xl"
+            actions={
+              <div className="flex flex-wrap items-center gap-2">
+                {selectedCodeDiffArtifact ? (
+                  <StatusBadge tone="info">
+                    {selectedCodeDiffArtifact.contentFormat || 'TEXT'}
+                  </StatusBadge>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => setIsDiffReviewOpen(false)}
+                  className="workspace-list-action"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            }
+          >
+            <div className="grid gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
+              <div className="space-y-4">
+                <div className="workspace-meta-card">
+                  <p className="workspace-meta-label">Summary</p>
+                  <p className="mt-2 text-sm leading-relaxed text-secondary">
+                    {selectedCodeDiffArtifact?.summary ||
+                      selectedOpenWait?.payload?.codeDiffSummary ||
+                      'The diff summary is not available yet.'}
+                  </p>
+                </div>
+                <div className="workspace-meta-card">
+                  <p className="workspace-meta-label">Review facts</p>
+                  <div className="mt-3 space-y-2 text-sm text-secondary">
+                    <p>
+                      Repositories:{' '}
+                      <strong className="text-on-surface">
+                        {selectedCodeDiffRepositoryCount || 1}
+                      </strong>
+                    </p>
+                    <p>
+                      Touched files:{' '}
+                      <strong className="text-on-surface">
+                        {selectedCodeDiffTouchedFileCount || 'Tracked in diff'}
+                      </strong>
+                    </p>
+                    <p>
+                      Wait state:{' '}
+                      <strong className="text-on-surface">Approval required</strong>
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-[1.5rem] border border-outline-variant/35 bg-slate-950 px-5 py-4 text-slate-100 shadow-[0_24px_80px_rgba(12,23,39,0.24)]">
+                {selectedCodeDiffArtifact ? (
+                  <div className="max-h-[70vh] overflow-auto pr-2">
+                    <ArtifactPreview
+                      content={selectedCodeDiffDocument}
+                      format={selectedCodeDiffArtifact.contentFormat}
+                      emptyLabel="The code diff artifact is still being prepared."
+                    />
+                  </div>
+                ) : (
+                  <p className="text-sm leading-relaxed text-slate-200/80">
+                    The diff artifact is not available in the current snapshot yet.
+                  </p>
+                )}
+              </div>
+            </div>
+          </ModalShell>
+        </div>
+      )}
 
       {isCreateSheetOpen && (
         <div className="fixed inset-0 z-[90]">

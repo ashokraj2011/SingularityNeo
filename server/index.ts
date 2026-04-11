@@ -45,6 +45,7 @@ import {
   createWorkItemRecord,
   moveWorkItemToPhaseControl,
   provideWorkflowRunInput,
+  requestChangesWorkflowRun,
   resolveWorkflowRunConflict,
   restartWorkflowRun,
   startWorkflowExecution,
@@ -1427,6 +1428,23 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/approve', async (request, 
       runId: request.params.runId,
       resolution:
         String(request.body?.resolution || '').trim() || 'Approved for continuation.',
+      resolvedBy: parseActor(request.body?.resolvedBy, 'Capability Owner'),
+    });
+    wakeExecutionWorker();
+    response.json(detail);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/runs/:runId/request-changes', async (request, response) => {
+  try {
+    const detail = await requestChangesWorkflowRun({
+      capabilityId: request.params.capabilityId,
+      runId: request.params.runId,
+      resolution:
+        String(request.body?.resolution || '').trim() ||
+        'Changes requested before continuation.',
       resolvedBy: parseActor(request.body?.resolvedBy, 'Capability Owner'),
     });
     wakeExecutionWorker();

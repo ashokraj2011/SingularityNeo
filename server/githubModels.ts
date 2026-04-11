@@ -591,6 +591,9 @@ const getRateLimitBackoffMs = (attempt: number, retryAfterHeader?: string | null
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+const DEFAULT_SESSION_RESPONSE_TIMEOUT_MS = 120_000;
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30_000;
+
 export const isGitHubProviderRateLimitError = (error: unknown) => {
   if (error instanceof GitHubProviderRateLimitError) {
     return true;
@@ -608,8 +611,19 @@ const shouldFallbackToHttp = (error: unknown) => {
     /Model ".*" is not available/i.test(message) ||
     /Personal Access Tokens are not supported/i.test(message) ||
     /Copilot SDK timed out while waiting for an assistant response/i.test(message) ||
+    /Copilot SDK stopped sending output before the assistant finished responding/i.test(message) ||
     /Copilot SDK session returned an empty response/i.test(message) ||
     isGitHubProviderRateLimitError(error)
+  );
+};
+
+const shouldRetryWithFreshSession = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return (
+    /Request session\.resume failed/i.test(message) ||
+    /Copilot SDK timed out while waiting for an assistant response/i.test(message) ||
+    /Copilot SDK stopped sending output before the assistant finished responding/i.test(message) ||
+    /Copilot SDK session returned an empty response/i.test(message)
   );
 };
 
@@ -1067,7 +1081,7 @@ const runSessionExchange = async ({
   session,
   prompt,
   model,
-  timeoutMs = 45000,
+  timeoutMs = DEFAULT_SESSION_RESPONSE_TIMEOUT_MS,
   onDelta,
 }: {
   session: CopilotSession;
@@ -1082,9 +1096,36 @@ const runSessionExchange = async ({
 
   let finalAssistantMessage: AssistantMessageEvent | null = null;
   let usageEvent: CopilotUsageEvent | null = null;
+  let timeoutHandle: NodeJS.Timeout | null = null;
+
+  const idleTimeoutMs = Math.min(timeoutMs, DEFAULT_SESSION_IDLE_TIMEOUT_MS);
+  const clearWatchdog = () => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+  };
+  const armWatchdog = (message: string) => {
+    clearWatchdog();
+    timeoutHandle = setTimeout(() => {
+      timeoutHandle = null;
+      throwTimeout(message);
+    }, message === RESPONSE_TIMEOUT_MESSAGE ? timeoutMs : idleTimeoutMs);
+  };
+  let rejectPending: ((reason?: unknown) => void) | null = null;
+  const throwTimeout = (message: string) => {
+    if (rejectPending) {
+      rejectPending(new Error(message));
+    }
+  };
+  const RESPONSE_TIMEOUT_MESSAGE =
+    'GitHub Copilot SDK timed out while waiting for an assistant response.';
+  const IDLE_TIMEOUT_MESSAGE =
+    'GitHub Copilot SDK stopped sending output before the assistant finished responding.';
 
   const unbindAssistantMessage = session.on('assistant.message', event => {
     finalAssistantMessage = event;
+    armWatchdog(IDLE_TIMEOUT_MESSAGE);
   });
   const unbindAssistantUsage = session.on('assistant.usage', event => {
     usageEvent = event;
@@ -1092,16 +1133,14 @@ const runSessionExchange = async ({
   const unbindAssistantDelta = onDelta
     ? session.on('assistant.message_delta', event => {
         onDelta(event.data.deltaContent);
+        armWatchdog(IDLE_TIMEOUT_MESSAGE);
       })
     : () => undefined;
 
   try {
     const messageEvent = await new Promise<AssistantMessageEvent | null>((resolve, reject) => {
-      const timeoutHandle = setTimeout(() => {
-        reject(
-          new Error('GitHub Copilot SDK timed out while waiting for an assistant response.'),
-        );
-      }, timeoutMs);
+      rejectPending = reject;
+      armWatchdog(RESPONSE_TIMEOUT_MESSAGE);
 
       session
         .sendAndWait(
@@ -1112,11 +1151,13 @@ const runSessionExchange = async ({
           timeoutMs,
         )
         .then(result => {
-          clearTimeout(timeoutHandle);
+          clearWatchdog();
+          rejectPending = null;
           resolve(result);
         })
         .catch(error => {
-          clearTimeout(timeoutHandle);
+          clearWatchdog();
+          rejectPending = null;
           reject(error);
         });
     });
@@ -1147,6 +1188,8 @@ const runSessionExchange = async ({
       },
     };
   } finally {
+    clearWatchdog();
+    rejectPending = null;
     unbindAssistantMessage();
     unbindAssistantUsage();
     unbindAssistantDelta();
@@ -1215,15 +1258,30 @@ const buildScopedSystemPrompt = ({
 
 const buildSessionModelCandidates = async (requestedModel?: string) => {
   const requested = normalizeModel(requestedModel);
-  const candidates = [requested];
+  const candidates: string[] = [];
 
   try {
-    const { models } = await listAvailableRuntimeModels();
-    for (const model of models) {
-      candidates.push(model.apiModelId || normalizeModel(model.id));
+    const { models, fromRuntime } = await listAvailableRuntimeModels();
+    if (fromRuntime && models.length > 0) {
+      const requestedMatch = models.find(
+        model =>
+          normalizeModel(model.id) === requested ||
+          model.apiModelId === requested,
+      );
+      if (requestedMatch) {
+        candidates.push(requestedMatch.apiModelId);
+      }
+      for (const model of models) {
+        candidates.push(model.apiModelId || normalizeModel(model.id));
+      }
+    } else {
+      candidates.push(requested);
+      for (const model of models) {
+        candidates.push(model.apiModelId || normalizeModel(model.id));
+      }
     }
   } catch {
-    // Ignore model catalog failures and fall back to the static candidate list.
+    candidates.push(requested);
   }
 
   candidates.push(
@@ -1494,6 +1552,26 @@ export const invokeScopedCapabilitySession = async ({
     } catch (error) {
       if (managedSession) {
         await evictManagedSessionRecord(managedSession.sessionId);
+      }
+
+      if (
+        scope === 'GENERAL_CHAT' &&
+        !resetSession &&
+        shouldRetryWithFreshSession(error)
+      ) {
+        return invokeScopedCapabilitySession({
+          capability,
+          agent,
+          scope,
+          scopeId,
+          prompt,
+          initialPrompt,
+          developerPrompt,
+          memoryPrompt,
+          timeoutMs,
+          onDelta,
+          resetSession: true,
+        });
       }
 
       if (!shouldFallbackToHttp(error) || !shouldAllowHttpFallback()) {

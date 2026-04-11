@@ -6,6 +6,7 @@ import {
   BrainCircuit,
   BookOpen,
   Box,
+  CircleHelp,
   ChevronDown,
   FileText,
   LayoutDashboard,
@@ -31,6 +32,7 @@ import {
 } from '../lib/capabilityExperience';
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import { StatusBadge } from './EnterpriseUI';
+import { SingularityHelpMenu } from './SingularityHelpMenu';
 
 const primaryNavItems = [
   { name: 'Home', shortName: 'Home', icon: LayoutDashboard, path: '/' },
@@ -508,11 +510,13 @@ const Sidebar = ({
 const TopBar = ({
   isSidebarCollapsed,
   onOpenCommandPalette,
+  onOpenHelp,
   onOpenMobileNav,
   onToggleSidebar,
 }: {
   isSidebarCollapsed: boolean;
   onOpenCommandPalette: () => void;
+  onOpenHelp: () => void;
   onOpenMobileNav: () => void;
   onToggleSidebar: () => void;
 }) => {
@@ -567,6 +571,15 @@ const TopBar = ({
               </span>
             </button>
 
+            <button
+              type="button"
+              onClick={onOpenHelp}
+              className="enterprise-button enterprise-button-secondary w-full xl:w-auto"
+            >
+              <CircleHelp size={16} />
+              <span>Help</span>
+            </button>
+
             <div className="toolbar-shell min-w-[16rem] justify-between py-2.5">
               <div className="min-w-0">
                 <p className="form-kicker">Current View</p>
@@ -613,6 +626,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
   );
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isHelpMenuOpen, setIsHelpMenuOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
   const commandInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -704,9 +718,21 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
           onSelect: () => navigate(`/orchestrator?selected=${encodeURIComponent(item.id)}`),
         })) || [];
 
+    const helpResults = [
+      {
+        key: 'help:singularity-overview',
+        label: 'Help menu',
+        description: 'Understand how Singularity Neo works, what each workspace does, and where to go next.',
+        section: 'Guides',
+        type: 'guide' as const,
+        onSelect: () => setIsHelpMenuOpen(true),
+      },
+    ];
+
     return [
       ...primaryRouteResults,
       ...advancedRouteResults,
+      ...helpResults,
       ...capabilityResults,
       ...agentResults,
       ...workItemResults,
@@ -721,6 +747,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     navigate,
     setActiveCapability,
     setActiveChatAgent,
+    setIsHelpMenuOpen,
   ]);
   const commandResultGroups = useMemo(
     () =>
@@ -755,6 +782,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
       }
 
       if (event.key === 'Escape') {
+        setIsHelpMenuOpen(false);
         setIsCommandPaletteOpen(false);
         setIsMobileNavOpen(false);
       }
@@ -786,6 +814,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
           <TopBar
             isSidebarCollapsed={isSidebarCollapsed}
             onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+            onOpenHelp={() => setIsHelpMenuOpen(true)}
             onOpenMobileNav={() => setIsMobileNavOpen(true)}
             onToggleSidebar={() => setIsSidebarCollapsed(current => !current)}
           />
@@ -865,6 +894,17 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
           )}
         </main>
       </div>
+
+      {isImmersiveRoute ? (
+        <button
+          type="button"
+          onClick={() => setIsHelpMenuOpen(true)}
+          className="fixed right-4 top-4 z-40 inline-flex items-center gap-2 rounded-full border border-outline-variant/60 bg-white/95 px-4 py-2 text-sm font-semibold text-secondary shadow-[0_12px_28px_rgba(12,23,39,0.12)] backdrop-blur transition hover:border-primary/20 hover:text-on-surface"
+        >
+          <CircleHelp size={16} />
+          Help
+        </button>
+      ) : null}
 
       {!isImmersiveRoute && isMobileNavOpen ? (
         <div className="fixed inset-0 z-50 lg:hidden">
@@ -982,6 +1022,17 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                   className="enterprise-button enterprise-button-primary w-full disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Create Capability
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileNavOpen(false);
+                    setIsHelpMenuOpen(true);
+                  }}
+                  className="enterprise-button enterprise-button-secondary w-full"
+                >
+                  <CircleHelp size={16} />
+                  Help
                 </button>
               </div>
             </div>
@@ -1136,6 +1187,17 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
             </div>
           </div>
         </div>
+      ) : null}
+
+      {isHelpMenuOpen ? (
+        <SingularityHelpMenu
+          activeCapabilityName={activeCapability.name}
+          onClose={() => setIsHelpMenuOpen(false)}
+          onNavigate={path => {
+            setIsHelpMenuOpen(false);
+            navigate(path);
+          }}
+        />
       ) : null}
     </div>
   );
