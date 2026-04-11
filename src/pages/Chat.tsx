@@ -28,6 +28,7 @@ import {
   type RuntimeUsage,
 } from '../lib/api';
 import { EmptyState, StatusBadge } from '../components/EnterpriseUI';
+import { AdvancedDisclosure } from '../components/WorkspaceUI';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import type { AgentSessionSummary, CapabilityChatMessage, MemoryReference } from '../types';
@@ -36,7 +37,6 @@ import { readViewPreference, writeViewPreference } from '../lib/viewPreferences'
 import {
   buildCapabilityExperience,
   getAgentHealth,
-  getLearningStatusLabel,
 } from '../lib/capabilityExperience';
 
 type SessionMode = 'resume' | 'fresh';
@@ -122,7 +122,7 @@ const defaultInspectorOpen = () => {
 
 const defaultInspectorTab = (): InspectorTab => {
   return readViewPreference<InspectorTab>(INSPECTOR_TAB_KEY, 'agent', {
-    allowed: ['agent', 'learning', 'memory', 'session', 'diagnostics'] as const,
+    allowed: ['agent', 'learning', 'memory', 'session'] as const,
   });
 };
 
@@ -254,6 +254,7 @@ const Chat = () => {
   >({});
   const [rateLimitUntil, setRateLimitUntil] = useState<number | null>(null);
   const [runtimeErrorDetail, setRuntimeErrorDetail] = useState('');
+  const [diagnosticsOpenSignal, setDiagnosticsOpenSignal] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const [lastSessionSnapshot, setLastSessionSnapshot] = useState<{
     sessionId?: string;
@@ -799,13 +800,13 @@ const Chat = () => {
         icon: ShieldCheck,
         tone: 'success' as const,
         label: 'Connected',
-        helper: 'Copilot is ready',
+        helper: 'Agent connection is ready',
       }
     : {
         icon: AlertTriangle,
         tone: 'warning' as const,
         label: 'Needs Copilot setup',
-        helper: 'Open diagnostics',
+        helper: 'Open context',
       };
 
   const commandStripSummary = pendingSessionMode === 'fresh'
@@ -948,7 +949,9 @@ const Chat = () => {
 
   const openDiagnosticsPanel = () => {
     setInspectorOpen(true);
-    setInspectorTab('diagnostics');
+    setInspectorTab('session');
+    setDiagnosticsOpenSignal(value => value + 1);
+    writeViewPreference('singularity.chat.diagnostics.open', 'open');
   };
 
   const handleAgentSwitch = async (agentId: string) => {
@@ -989,8 +992,59 @@ const Chat = () => {
       { id: 'learning', label: 'Learning', icon: Brain },
       { id: 'memory', label: 'Memory', icon: Database },
       { id: 'session', label: 'Session', icon: History },
-      { id: 'diagnostics', label: 'Diagnostics', icon: ShieldCheck },
     ];
+
+    const diagnosticsContent = (
+      <div className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          {[
+            { label: 'Runtime mode', value: runtimeStatus?.runtimeAccessMode || 'Unknown' },
+            { label: 'Token source', value: runtimeStatus?.tokenSource || 'Unknown' },
+            { label: 'Provider', value: runtimeStatus?.provider || 'Unknown' },
+            { label: 'GitHub identity', value: runtimeIdentityLabel },
+          ].map(item => (
+            <div key={item.label} className="workspace-meta-card">
+              <p className="workspace-meta-label">{item.label}</p>
+              <p className="workspace-meta-value">{item.value}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="workspace-surface">
+          <p className="workspace-section-title">Runtime details</p>
+          <div className="mt-3 space-y-2 text-sm text-secondary">
+            <p>Endpoint: {runtimeStatus?.endpoint || 'Unknown'}</p>
+            <p>Streaming: {runtimeStatus?.streaming ? 'Enabled' : 'Unavailable'}</p>
+            {configError ? <p>Config warning: {configError}</p> : null}
+            {runtimeStatus?.githubIdentityError ? (
+              <p>Identity warning: {runtimeStatus.githubIdentityError}</p>
+            ) : null}
+          </div>
+        </div>
+
+        {rateLimited ? (
+          <div className="workspace-inline-alert workspace-inline-alert-warning">
+            <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+            <div>
+              <p className="font-semibold">Rate limited</p>
+              <p className="mt-1">
+                Retry in {formatRemainingRetry(rateLimitRemainingMs)}.
+              </p>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="workspace-surface">
+          <p className="workspace-section-title">Raw provider detail</p>
+          <pre className="mt-3 whitespace-pre-wrap rounded-2xl bg-slate-950 px-4 py-3 text-[11px] leading-5 text-slate-100">
+            {runtimeErrorDetail ||
+              error ||
+              configError ||
+              'No provider or runtime error is currently captured for this collaboration session.'}
+          </pre>
+        </div>
+      </div>
+    );
 
     const inspectorContent =
       inspectorTab === 'agent' ? (
@@ -1002,7 +1056,7 @@ const Chat = () => {
                 <p className="workspace-section-copy">{activeAgent.role}</p>
               </div>
               <StatusBadge tone={getLearningTone(activeAgent.learningProfile.status)}>
-                {getLearningStatusLabel(activeAgent.learningProfile.status)}
+                {activeAgentHealth.label}
               </StatusBadge>
             </div>
             <p className="mt-3 text-sm leading-7 text-secondary">{activeAgent.objective}</p>
@@ -1081,7 +1135,7 @@ const Chat = () => {
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               <StatusBadge tone={getLearningTone(activeAgent.learningProfile.status)}>
-                {getLearningStatusLabel(activeAgent.learningProfile.status)}
+                {activeAgentHealth.label}
               </StatusBadge>
               <StatusBadge tone="info">
                 {activeAgent.learningProfile.sourceCount || 0} sources
@@ -1265,57 +1319,7 @@ const Chat = () => {
             )}
           </div>
         </div>
-      ) : (
-        <div className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2">
-            {[
-              { label: 'Runtime mode', value: runtimeStatus?.runtimeAccessMode || 'Unknown' },
-              { label: 'Token source', value: runtimeStatus?.tokenSource || 'Unknown' },
-              { label: 'Provider', value: runtimeStatus?.provider || 'Unknown' },
-              { label: 'GitHub identity', value: runtimeIdentityLabel },
-            ].map(item => (
-              <div key={item.label} className="workspace-meta-card">
-                <p className="workspace-meta-label">{item.label}</p>
-                <p className="workspace-meta-value">{item.value}</p>
-              </div>
-            ))}
-          </div>
-
-          <div className="workspace-surface">
-            <p className="workspace-section-title">Runtime details</p>
-            <div className="mt-3 space-y-2 text-sm text-secondary">
-              <p>Endpoint: {runtimeStatus?.endpoint || 'Unknown'}</p>
-              <p>Streaming: {runtimeStatus?.streaming ? 'Enabled' : 'Unavailable'}</p>
-              {configError ? <p>Config warning: {configError}</p> : null}
-              {runtimeStatus?.githubIdentityError ? (
-                <p>Identity warning: {runtimeStatus.githubIdentityError}</p>
-              ) : null}
-            </div>
-          </div>
-
-          {rateLimited ? (
-            <div className="workspace-inline-alert workspace-inline-alert-warning">
-              <AlertTriangle size={18} className="mt-0.5 shrink-0" />
-              <div>
-                <p className="font-semibold">Rate limited</p>
-                <p className="mt-1">
-                  Retry in {formatRemainingRetry(rateLimitRemainingMs)}.
-                </p>
-              </div>
-            </div>
-          ) : null}
-
-          <div className="workspace-surface">
-            <p className="workspace-section-title">Raw provider detail</p>
-            <pre className="mt-3 whitespace-pre-wrap rounded-2xl bg-slate-950 px-4 py-3 text-[11px] leading-5 text-slate-100">
-              {runtimeErrorDetail ||
-                error ||
-                configError ||
-                'No provider or runtime error is currently captured for this collaboration session.'}
-            </pre>
-          </div>
-        </div>
-      );
+      ) : diagnosticsContent;
 
     return (
       <div className="flex h-full min-h-0 flex-col border-l border-outline-variant/40 bg-white">
@@ -1345,12 +1349,24 @@ const Chat = () => {
             type="button"
             onClick={() => setInspectorOpen(false)}
             className="workspace-list-action"
-            title="Hide inspector"
+            title="Hide context"
           >
             <PanelRightClose size={14} />
           </button>
         </div>
-        <div className="custom-scrollbar flex-1 overflow-y-auto p-4">{inspectorContent}</div>
+        <div className="custom-scrollbar flex-1 overflow-y-auto p-4">
+          {inspectorContent}
+          <AdvancedDisclosure
+            title="Diagnostics"
+            description="Provider, runtime, token, and raw error details for technical troubleshooting."
+            storageKey="singularity.chat.diagnostics.open"
+            openSignal={diagnosticsOpenSignal}
+            className="mt-4"
+            badge={<StatusBadge tone={runtimeErrorDetail || error || configError ? 'warning' : 'neutral'}>Advanced</StatusBadge>}
+          >
+            {diagnosticsContent}
+          </AdvancedDisclosure>
+        </div>
       </div>
     );
   };
@@ -1437,7 +1453,7 @@ const Chat = () => {
                 className="enterprise-button enterprise-button-secondary"
               >
                 {inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
-                Inspect
+                Context
               </button>
             </div>
           </div>
@@ -1568,7 +1584,7 @@ const Chat = () => {
                       onClick={openDiagnosticsPanel}
                       className="enterprise-button enterprise-button-secondary"
                     >
-                      Inspect details
+                      Open context
                     </button>
                   </div>
                 </div>
@@ -1587,7 +1603,7 @@ const Chat = () => {
                       onClick={openDiagnosticsPanel}
                       className="enterprise-button enterprise-button-secondary"
                     >
-                      Open diagnostics
+                      Open context
                     </button>
                   </div>
                 </div>
@@ -1608,7 +1624,7 @@ const Chat = () => {
                       onClick={openDiagnosticsPanel}
                       className="enterprise-button enterprise-button-secondary"
                     >
-                      Open diagnostics
+                      Open context
                     </button>
                   </div>
                 </div>

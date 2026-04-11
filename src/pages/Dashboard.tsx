@@ -19,6 +19,8 @@ import {
 import { useNavigate } from 'react-router-dom';
 import {
   buildCapabilityExperience,
+  ADVANCED_TOOL_DESCRIPTORS,
+  type AdvancedToolId,
   getAgentHealth,
   getBusinessWorkStatusLabel,
   getReadinessLabel,
@@ -34,33 +36,17 @@ import {
   SectionCard,
   StatusBadge,
 } from '../components/EnterpriseUI';
+import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
-const advancedTools = [
-  {
-    label: 'Memory Explorer',
-    description: 'Inspect capability memory, learned sources, and search grounding.',
-    path: '/memory',
-    icon: Database,
-  },
-  {
-    label: 'Run Console',
-    description: 'Open runtime telemetry, traces, policy decisions, and live run events.',
-    path: '/run-console',
-    icon: Gauge,
-  },
-  {
-    label: 'Eval Center',
-    description: 'Review structured quality checks for agents and workflows.',
-    path: '/evals',
-    icon: ClipboardCheck,
-  },
-  {
-    label: 'Skill Library',
-    description: 'Manage reusable capability skills and specialist behaviors.',
-    path: '/skills',
-    icon: Sparkles,
-  },
-];
+const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
+  memory: Database,
+  'run-console': Gauge,
+  evals: ClipboardCheck,
+  skills: Sparkles,
+  'artifact-designer': FileText,
+  tasks: PlayCircle,
+  studio: Bot,
+};
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -170,7 +156,7 @@ const Dashboard = () => {
             </p>
           </div>
           <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
-            <p className="form-kicker">Copilot</p>
+            <p className="form-kicker">Agent connection</p>
             <div className="mt-2 flex items-center gap-2">
               <StatusBadge tone={experience.runtimeHealth.tone}>
                 {experience.runtimeHealth.label}
@@ -457,10 +443,11 @@ const Dashboard = () => {
         </SectionCard>
       </div>
 
-      <SectionCard
+      <AdvancedDisclosure
         title="Capability foundation"
-        description="The core setup behind this business capability."
-        icon={Workflow}
+        description="Core setup behind this capability, available when you need to inspect the operating model."
+        storageKey="singularity.home.foundation.open"
+        badge={<StatusBadge tone="neutral">Setup details</StatusBadge>}
       >
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {[
@@ -519,16 +506,18 @@ const Dashboard = () => {
             </button>
           ))}
         </div>
-      </SectionCard>
+      </AdvancedDisclosure>
 
-      <SectionCard
+      <AdvancedDisclosure
         title="Advanced tools"
         description="Technical diagnostics and builder tools remain available, but they are no longer the main business journey."
-        icon={Gauge}
-        tone="muted"
+        storageKey="singularity.home.advanced.open"
+        badge={<StatusBadge tone="neutral">Technical tools</StatusBadge>}
       >
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          {advancedTools.map(tool => (
+          {ADVANCED_TOOL_DESCRIPTORS.map(tool => {
+            const Icon = advancedToolIcons[tool.id];
+            return (
             <button
               key={tool.path}
               type="button"
@@ -537,7 +526,7 @@ const Dashboard = () => {
             >
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-outline-variant/50 bg-surface-container-low text-secondary">
-                  <tool.icon size={16} />
+                  <Icon size={16} />
                 </div>
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-on-surface">{tool.label}</p>
@@ -547,9 +536,10 @@ const Dashboard = () => {
                 </div>
               </div>
             </button>
-          ))}
+            );
+          })}
         </div>
-      </SectionCard>
+      </AdvancedDisclosure>
     </div>
   );
 };

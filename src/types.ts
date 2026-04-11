@@ -990,6 +990,137 @@ export interface PolicyDecision {
   createdAt: string;
 }
 
+export type FlightRecorderVerdict =
+  | 'ALLOWED'
+  | 'NEEDS_APPROVAL'
+  | 'DENIED'
+  | 'INCOMPLETE';
+
+export type FlightRecorderEventType =
+  | 'RUN_STARTED'
+  | 'RUN_COMPLETED'
+  | 'RUN_FAILED'
+  | 'STEP_COMPLETED'
+  | 'WAIT_OPENED'
+  | 'WAIT_RESOLVED'
+  | 'APPROVAL_CAPTURED'
+  | 'CONFLICT_RESOLVED'
+  | 'CONTRARIAN_REVIEW'
+  | 'POLICY_DECISION'
+  | 'TOOL_COMPLETED'
+  | 'TOOL_FAILED'
+  | 'ARTIFACT_CREATED'
+  | 'HANDOFF_CREATED'
+  | 'RELEASE_VERDICT';
+
+export interface FlightRecorderEvent {
+  id: string;
+  capabilityId: string;
+  workItemId?: string;
+  workItemTitle?: string;
+  runId?: string;
+  runStepId?: string;
+  artifactId?: string;
+  waitId?: string;
+  policyDecisionId?: string;
+  toolInvocationId?: string;
+  traceId?: string;
+  timestamp: string;
+  type: FlightRecorderEventType;
+  title: string;
+  description: string;
+  actorId?: string;
+  actorName?: string;
+  phase?: WorkItemPhase;
+  verdict?: FlightRecorderVerdict;
+  severity?: 'INFO' | 'WARN' | 'ERROR';
+}
+
+export interface FlightRecorderPolicySummary {
+  id: string;
+  runId?: string;
+  runStepId?: string;
+  toolInvocationId?: string;
+  actionType: PolicyActionType;
+  targetId?: string;
+  decision: PolicyDecisionResult;
+  reason: string;
+  requestedByAgentId?: string;
+  requestedByName?: string;
+  createdAt: string;
+}
+
+export interface FlightRecorderHumanGateSummary {
+  waitId: string;
+  runId: string;
+  runStepId: string;
+  type: RunWaitType;
+  status: RunWaitStatus;
+  message: string;
+  requestedBy: string;
+  requestedByName?: string;
+  resolvedBy?: string;
+  resolvedByName?: string;
+  resolution?: string;
+  contrarianReview?: ContrarianConflictReview;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface FlightRecorderArtifactSummary {
+  artifactId: string;
+  name: string;
+  kind?: ArtifactKind;
+  summary?: string;
+  workItemId?: string;
+  runId?: string;
+  runStepId?: string;
+  phase?: WorkItemPhase;
+  agentId?: string;
+  agentName?: string;
+  createdAt: string;
+}
+
+export interface WorkItemFlightRecorderDetail {
+  capabilityId: string;
+  generatedAt: string;
+  workItem: WorkItem;
+  verdict: FlightRecorderVerdict;
+  verdictReason: string;
+  latestRun?: WorkflowRun;
+  runHistory: WorkflowRun[];
+  humanGates: FlightRecorderHumanGateSummary[];
+  policyDecisions: FlightRecorderPolicySummary[];
+  artifacts: FlightRecorderArtifactSummary[];
+  handoffArtifacts: FlightRecorderArtifactSummary[];
+  toolInvocations: ToolInvocation[];
+  events: FlightRecorderEvent[];
+  telemetry: {
+    traceIds: string[];
+    toolInvocationCount: number;
+    failedToolInvocationCount: number;
+    totalToolLatencyMs: number;
+    totalToolCostUsd: number;
+    runConsolePath: string;
+  };
+}
+
+export interface CapabilityFlightRecorderSnapshot {
+  capabilityId: string;
+  generatedAt: string;
+  verdict: FlightRecorderVerdict;
+  verdictReason: string;
+  summary: {
+    completedWorkCount: number;
+    openHumanGateCount: number;
+    policyDecisionCount: number;
+    evidenceArtifactCount: number;
+    handoffPacketCount: number;
+  };
+  events: FlightRecorderEvent[];
+  workItems: WorkItemFlightRecorderDetail[];
+}
+
 export type MemorySourceType =
   | 'CAPABILITY_METADATA'
   | 'CHAT_SESSION'

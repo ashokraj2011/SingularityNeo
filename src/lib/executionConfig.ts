@@ -32,6 +32,27 @@ const cloneCommandTemplate = (
   command: [...template.command],
 });
 
+export const normalizeWorkspacePathForComparison = (value?: string | null) =>
+  String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '');
+
+export const isWorkspacePathInsideApprovedRoot = (
+  candidatePath: string | undefined,
+  approvedWorkspaceRoots: string[],
+) => {
+  const candidate = normalizeWorkspacePathForComparison(candidatePath);
+  if (!candidate) {
+    return false;
+  }
+
+  return approvedWorkspaceRoots.some(rootValue => {
+    const root = normalizeWorkspacePathForComparison(rootValue);
+    return Boolean(root) && (candidate === root || candidate.startsWith(`${root}/`));
+  });
+};
+
 export const getDefaultExecutionConfig = (
   capability?: Pick<Capability, 'localDirectories'>,
 ): CapabilityExecutionConfig => {

@@ -52,6 +52,7 @@ import type {
   WorkflowRunDetail,
 } from '../types';
 import { BoardColumn, EmptyState, StatusBadge } from '../components/EnterpriseUI';
+import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
 const PHASE_META: Record<WorkItemPhase, { label: string; accent: string }> = {
   BACKLOG: { label: 'Backlog', accent: 'bg-slate-100 text-slate-700' },
@@ -109,6 +110,7 @@ const STORAGE_KEYS = {
   workflow: 'singularity.orchestrator.workflow',
   status: 'singularity.orchestrator.status',
   priority: 'singularity.orchestrator.priority',
+  advanced: 'singularity.orchestrator.advanced.open',
 } as const;
 
 const readSessionValue = <T extends string>(key: string, fallback: T): T => {
@@ -1212,21 +1214,21 @@ const Orchestrator = () => {
         <div className="orchestrator-commandbar-main">
           <div className="orchestrator-commandbar-heading">
             <div className="orchestrator-commandbar-copy">
-              <p className="form-kicker">Execution Workspace</p>
+              <p className="form-kicker">Work</p>
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 <h1 className="text-[1.75rem] font-bold tracking-tight text-on-surface">
-                  {activeCapability.name} Orchestrator
+                  {activeCapability.name} Work
                 </h1>
                 <StatusBadge tone={runtimeReady ? 'success' : 'danger'}>
-                  {runtimeReady ? 'Runtime ready' : 'Runtime blocked'}
+                  {runtimeReady ? 'Execution ready' : 'Needs setup'}
                 </StatusBadge>
                 <StatusBadge tone="neutral">
                   {view === 'board' ? 'Board view' : 'List view'}
                 </StatusBadge>
               </div>
               <p className="mt-2 max-w-2xl text-sm leading-relaxed text-secondary">
-                Stage work, clear waits, and keep execution moving from a lighter operator board.
-                Deep telemetry stays in Run Console so this surface can stay focused on action.
+                Stage work, clear approvals and blockers, restart when needed, and keep delivery
+                moving from one focused board.
               </p>
             </div>
 
@@ -1357,13 +1359,50 @@ const Orchestrator = () => {
               </span>
               <span className="orchestrator-commandbar-footnote-copy">
                 {runtimeError
-                  ? 'Runtime needs attention'
-                  : 'Run Console owns deep telemetry'}
+                  ? 'Agent connection needs attention'
+                  : 'Advanced execution details are collapsed below'}
               </span>
             </div>
           </div>
         </div>
       </section>
+
+      <AdvancedDisclosure
+        title="Advanced execution details"
+        description="Runtime readiness, run-event counts, and telemetry links for operators who need deeper inspection."
+        storageKey={STORAGE_KEYS.advanced}
+        badge={
+          <StatusBadge tone={runtimeReady ? 'success' : 'warning'}>
+            {runtimeReady ? 'Connected' : 'Needs attention'}
+          </StatusBadge>
+        }
+      >
+        <div className="grid gap-3 md:grid-cols-3">
+          <div className="workspace-meta-card">
+            <p className="workspace-meta-label">Agent connection</p>
+            <p className="workspace-meta-value">
+              {runtimeReady ? 'Ready' : 'Needs setup'}
+            </p>
+            <p className="mt-1 text-xs text-secondary">
+              {runtimeError || 'Agents can start or resume workflow execution.'}
+            </p>
+          </div>
+          <div className="workspace-meta-card">
+            <p className="workspace-meta-label">Selected run events</p>
+            <p className="workspace-meta-value">{selectedRunEvents.length}</p>
+            <p className="mt-1 text-xs text-secondary">
+              Detailed run events remain available in Run Console.
+            </p>
+          </div>
+          <div className="workspace-meta-card">
+            <p className="workspace-meta-label">Run history</p>
+            <p className="workspace-meta-value">{selectedRunHistory.length} runs</p>
+            <p className="mt-1 text-xs text-secondary">
+              Attempts for the currently selected work item.
+            </p>
+          </div>
+        </div>
+      </AdvancedDisclosure>
 
       <section className="workspace-surface orchestrator-attention-shell">
         <div className="orchestrator-surface-header">
@@ -1449,7 +1488,7 @@ const Orchestrator = () => {
               </h2>
               <p className="mt-1 text-sm text-secondary">
                 {view === 'board'
-                  ? 'Scan movement across SDLC phases from left to right and keep the control rail focused on a single item.'
+                  ? 'Scan movement across SDLC phases in two compact rows while the control rail stays focused on one item.'
                   : 'Use the operational table for tighter triage without leaving the orchestration surface.'}
               </p>
             </div>
@@ -1821,10 +1860,10 @@ const Orchestrator = () => {
                       <div className="workspace-inline-alert workspace-inline-alert-warning">
                         <AlertCircle size={18} className="mt-0.5 shrink-0" />
                         <div>
-                          <p className="text-sm font-semibold">Runtime is not ready</p>
+                          <p className="text-sm font-semibold">Agent connection is not ready</p>
                           <p className="mt-1 text-sm leading-relaxed">
                             {runtimeError ||
-                              'Configure the Copilot runtime before starting or restarting execution.'}
+                              'Configure the agent connection before starting or restarting execution.'}
                           </p>
                         </div>
                       </div>
@@ -2161,82 +2200,93 @@ const Orchestrator = () => {
                       })}
                     </div>
 
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <div className="workspace-meta-card">
-                        <p className="workspace-meta-label">Run events</p>
-                        <p className="workspace-meta-value">{selectedRunEvents.length}</p>
-                      </div>
-                      <div className="workspace-meta-card">
-                        <p className="workspace-meta-label">Tool actions</p>
-                        <p className="workspace-meta-value">
-                          {selectedRunDetail?.toolInvocations.length || 0}
-                        </p>
-                      </div>
-                      <div className="workspace-meta-card">
-                        <p className="workspace-meta-label">History</p>
-                        <p className="workspace-meta-value">{selectedRunHistory.length} runs</p>
-                      </div>
-                    </div>
-
-                    <div className="workspace-meta-card">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <p className="workspace-meta-label">Live agent activity</p>
-                          <p className="mt-2 text-sm leading-relaxed text-secondary">
-                            Safe execution milestones from the backend worker. This shows visible
-                            orchestration progress, not private model reasoning.
+                    <AdvancedDisclosure
+                      title="Advanced execution details"
+                      description="Run events, tool activity, and worker milestones for deeper operator inspection."
+                      storageKey="singularity.orchestrator.progress.advanced.open"
+                      badge={
+                        <StatusBadge tone="info">
+                          {recentRunActivity.length} updates
+                        </StatusBadge>
+                      }
+                    >
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        <div className="workspace-meta-card">
+                          <p className="workspace-meta-label">Run events</p>
+                          <p className="workspace-meta-value">{selectedRunEvents.length}</p>
+                        </div>
+                        <div className="workspace-meta-card">
+                          <p className="workspace-meta-label">Tool actions</p>
+                          <p className="workspace-meta-value">
+                            {selectedRunDetail?.toolInvocations.length || 0}
                           </p>
                         </div>
-                        <StatusBadge tone="info">
-                          {recentRunActivity.length} recent updates
-                        </StatusBadge>
+                        <div className="workspace-meta-card">
+                          <p className="workspace-meta-label">History</p>
+                          <p className="workspace-meta-value">{selectedRunHistory.length} runs</p>
+                        </div>
                       </div>
 
-                      <div className="mt-4 space-y-3">
-                        {recentRunActivity.length === 0 ? (
-                          <div className="rounded-2xl border border-outline-variant/35 bg-white px-4 py-4 text-sm text-secondary">
-                            No live activity is recorded yet for this run.
+                      <div className="mt-4 workspace-meta-card">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Live agent activity</p>
+                            <p className="mt-2 text-sm leading-relaxed text-secondary">
+                              Safe execution milestones from the backend worker. This shows visible
+                              orchestration progress, not private model reasoning.
+                            </p>
                           </div>
-                        ) : (
-                          recentRunActivity.map(event => (
-                            <div
-                              key={event.id}
-                              className="rounded-2xl border border-outline-variant/35 bg-white px-4 py-3"
-                            >
-                              <div className="flex flex-wrap items-start justify-between gap-3">
-                                <div className="min-w-0 flex-1">
-                                  <p className="text-sm font-semibold text-on-surface">
-                                    {event.message}
-                                  </p>
-                                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-secondary">
-                                    <span>{formatTimestamp(event.timestamp)}</span>
-                                    {typeof event.details?.toolId === 'string' ? (
-                                      <span>Tool: {formatEnumLabel(event.details.toolId)}</span>
-                                    ) : null}
-                                    {typeof event.details?.model === 'string' ? (
-                                      <span>Model: {event.details.model}</span>
-                                    ) : null}
-                                    {typeof event.details?.retrievalCount === 'number' ? (
-                                      <span>
-                                        {event.details.retrievalCount} references
-                                      </span>
-                                    ) : null}
-                                    {typeof event.details?.waitType === 'string' ? (
-                                      <span>
-                                        Wait: {formatEnumLabel(event.details.waitType)}
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                </div>
-                                <StatusBadge tone={getRunEventTone(event)}>
-                                  {getRunEventLabel(event)}
-                                </StatusBadge>
-                              </div>
+                          <StatusBadge tone="info">
+                            {recentRunActivity.length} recent updates
+                          </StatusBadge>
+                        </div>
+
+                        <div className="mt-4 space-y-3">
+                          {recentRunActivity.length === 0 ? (
+                            <div className="rounded-2xl border border-outline-variant/35 bg-white px-4 py-4 text-sm text-secondary">
+                              No live activity is recorded yet for this run.
                             </div>
-                          ))
-                        )}
+                          ) : (
+                            recentRunActivity.map(event => (
+                              <div
+                                key={event.id}
+                                className="rounded-2xl border border-outline-variant/35 bg-white px-4 py-3"
+                              >
+                                <div className="flex flex-wrap items-start justify-between gap-3">
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-sm font-semibold text-on-surface">
+                                      {event.message}
+                                    </p>
+                                    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-secondary">
+                                      <span>{formatTimestamp(event.timestamp)}</span>
+                                      {typeof event.details?.toolId === 'string' ? (
+                                        <span>Tool: {formatEnumLabel(event.details.toolId)}</span>
+                                      ) : null}
+                                      {typeof event.details?.model === 'string' ? (
+                                        <span>Model: {event.details.model}</span>
+                                      ) : null}
+                                      {typeof event.details?.retrievalCount === 'number' ? (
+                                        <span>
+                                          {event.details.retrievalCount} references
+                                        </span>
+                                      ) : null}
+                                      {typeof event.details?.waitType === 'string' ? (
+                                        <span>
+                                          Wait: {formatEnumLabel(event.details.waitType)}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                  <StatusBadge tone={getRunEventTone(event)}>
+                                    {getRunEventLabel(event)}
+                                  </StatusBadge>
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
                       </div>
-                    </div>
+                    </AdvancedDisclosure>
                   </div>
                 )}
 
@@ -2334,14 +2384,14 @@ const Orchestrator = () => {
                     </div>
 
                     <div className="workspace-meta-card">
-                      <p className="workspace-meta-label">Open related surfaces</p>
+                      <p className="workspace-meta-label">Advanced drill-downs</p>
                       <div className="orchestrator-link-grid">
                         <button
                           type="button"
                           onClick={() => navigate('/run-console')}
                           className="enterprise-button enterprise-button-secondary justify-between"
                         >
-                          <span>Open Run Console</span>
+                          <span>Run Console telemetry</span>
                           <ExternalLink size={16} />
                         </button>
                         <button
@@ -2349,7 +2399,7 @@ const Orchestrator = () => {
                           onClick={() => navigate('/ledger')}
                           className="enterprise-button enterprise-button-secondary justify-between"
                         >
-                          <span>Open Ledger</span>
+                          <span>Evidence Ledger</span>
                           <ExternalLink size={16} />
                         </button>
                         <button
@@ -2357,7 +2407,7 @@ const Orchestrator = () => {
                           onClick={() => navigate('/designer')}
                           className="enterprise-button enterprise-button-secondary justify-between"
                         >
-                          <span>Open Workflow Designer</span>
+                          <span>Workflow Designer</span>
                           <ExternalLink size={16} />
                         </button>
                       </div>

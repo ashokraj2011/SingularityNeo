@@ -22,7 +22,10 @@ import {
 import { StatusBadge } from '../components/EnterpriseUI';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
-import { getDefaultExecutionConfig } from '../lib/executionConfig';
+import {
+  getDefaultExecutionConfig,
+  isWorkspacePathInsideApprovedRoot,
+} from '../lib/executionConfig';
 import {
   validateOnboardingCommandTemplate,
   validateOnboardingConnectors,
@@ -201,7 +204,8 @@ export default function CapabilitySetup() {
       target.label &&
       target.commandTemplateId &&
       draft.commandTemplates.some(template => template.id === target.commandTemplateId) &&
-      (!target.workspacePath || approvedWorkspacePaths.includes(target.workspacePath)) &&
+      (!target.workspacePath ||
+        isWorkspacePathInsideApprovedRoot(target.workspacePath, approvedWorkspacePaths)) &&
       deploymentValidation[target.id]?.valid !== false,
     );
   const canCreate =

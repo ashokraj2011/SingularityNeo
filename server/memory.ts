@@ -13,6 +13,7 @@ import type {
 import { getPlatformFeatureState, query, transaction } from './db';
 import { getCapabilityBundle } from './repository';
 import { getAgentLearningProfile, queueAgentLearningJob } from './agentLearning/repository';
+import { getCapabilityWorkspaceRoots } from './workspacePaths';
 
 const EMBEDDING_DIMENSIONS = getPlatformFeatureState().memoryEmbeddingDimensions;
 
@@ -36,24 +37,6 @@ const normalizeText = (value: string) =>
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-
-const normalizeDirectoryPath = (value: string) => {
-  const trimmed = value.trim();
-  return trimmed ? path.resolve(trimmed) : '';
-};
-
-const getCapabilityWorkspaceRoots = (capability: Capability) =>
-  Array.from(
-    new Set(
-      [
-        capability.executionConfig.defaultWorkspacePath,
-        ...(capability.executionConfig.allowedWorkspacePaths || []),
-        ...(capability.localDirectories || []),
-      ]
-        .map(value => normalizeDirectoryPath(value || ''))
-        .filter(Boolean),
-    ),
-  );
 
 const splitIntoChunks = (content: string, limit = 900) => {
   const normalized = normalizeText(content);

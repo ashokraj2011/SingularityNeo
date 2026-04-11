@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import path from 'node:path';
 import {
   CopilotClient,
   approveAll,
@@ -27,6 +26,7 @@ import {
   isHeadlessCliConfigured,
   isHttpFallbackAllowed,
 } from './runtimePolicy';
+import { getCapabilityWorkspaceRoots } from './workspacePaths';
 
 export type ChatHistoryMessage = {
   role?: 'user' | 'agent';
@@ -320,26 +320,8 @@ const splitMessages = (messages: GitHubModelsMessage[]) => {
   };
 };
 
-const normalizeDirectoryPath = (value: string) => {
-  const trimmed = value.trim();
-  return trimmed ? path.resolve(trimmed) : '';
-};
-
-const getCapabilityWorkspacePaths = (capability?: Partial<Capability>) =>
-  Array.from(
-    new Set(
-      [
-        capability?.executionConfig?.defaultWorkspacePath,
-        ...(capability?.executionConfig?.allowedWorkspacePaths || []),
-        ...(capability?.localDirectories || []),
-      ]
-        .map(value => normalizeDirectoryPath(value || ''))
-        .filter(Boolean),
-    ),
-  );
-
 const selectWorkingDirectory = (capability?: Partial<Capability>) =>
-  getCapabilityWorkspacePaths(capability).find(directory => existsSync(directory)) ||
+  getCapabilityWorkspaceRoots(capability).find(directory => existsSync(directory)) ||
   process.cwd();
 
 const getConfiguredTokenState = (): {
@@ -569,6 +551,10 @@ export const normalizeModel = (model?: string) => {
 
 const normalizeHttpModel = (model?: string) => {
   const normalized = normalizeModel(model);
+  if (/^claude-/i.test(normalized)) {
+    return 'openai/gpt-4.1';
+  }
+
   return normalized.includes('/') ? normalized : `openai/${normalized}`;
 };
 
@@ -1323,6 +1309,7 @@ const getManagedScopedSession = async ({
       sessionId,
       cacheKey,
       fingerprint,
+      model: cached.model,
     };
   }
 
@@ -1403,6 +1390,7 @@ const getManagedScopedSession = async ({
     sessionId,
     cacheKey,
     fingerprint,
+    model: selectedModel,
   };
 };
 
@@ -1450,6 +1438,7 @@ export const invokeScopedCapabilitySession = async ({
           sessionId: string;
           cacheKey: string;
           fingerprint: string;
+          model: string;
         }
       | null = null;
 
@@ -1471,7 +1460,7 @@ export const invokeScopedCapabilitySession = async ({
             managedSession!.isNewSession && initialPrompt ? initialPrompt : prompt,
             memoryPrompt,
           ),
-          model: agent.model,
+          model: managedSession!.model || agent.model,
           timeoutMs,
           onDelta,
         }),
@@ -1514,7 +1503,7 @@ export const invokeScopedCapabilitySession = async ({
   }
 
   const fallbackResult = await requestGitHubModelsHttp({
-    model: agent.model,
+    model: await resolveRuntimeModel(agent.model),
     messages: [
       {
         role: 'system',

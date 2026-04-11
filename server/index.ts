@@ -70,6 +70,13 @@ import {
 } from './githubModels';
 import { buildMemoryContext, listMemoryDocuments, refreshCapabilityMemory, searchCapabilityMemory } from './memory';
 import {
+  buildCapabilityFlightRecorderSnapshot,
+  buildWorkItemFlightRecorderDetail,
+  getFlightRecorderDownloadName,
+  renderCapabilityFlightRecorderMarkdown,
+  renderWorkItemFlightRecorderMarkdown,
+} from './flightRecorder';
+import {
   ensureAgentLearningBackfill,
   getAgentLearningProfileDetail,
   queueCapabilityAgentLearningRefresh,
@@ -95,6 +102,11 @@ import { getMissingRuntimeConfigurationMessage } from './runtimePolicy';
 import { sendApiError } from './api/errors';
 import { buildRuntimeStatus } from './runtimeStatus';
 import { registerRuntimeRoutes } from './routes/runtime';
+import {
+  getCapabilityWorkspaceRoots,
+  isWorkspacePathApproved,
+  normalizeDirectoryPath,
+} from './workspacePaths';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -239,11 +251,6 @@ const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 const distDir = path.resolve(projectRoot, 'dist');
 
-const normalizeDirectoryPath = (value: string) => {
-  const trimmed = value.trim();
-  return trimmed ? path.resolve(trimmed) : '';
-};
-
 const parseUrl = (value: string) => {
   try {
     return new URL(value);
@@ -328,9 +335,9 @@ const validateCommandTemplatePayload = ({
   if (
     template?.workingDirectory &&
     allowedWorkspacePaths.length > 0 &&
-    !allowedWorkspacePaths.includes(template.workingDirectory)
+    !isWorkspacePathApproved(template.workingDirectory, allowedWorkspacePaths)
   ) {
-    issues.push('Working directory must be one of the approved workspace paths.');
+    issues.push('Working directory must be inside an approved workspace path.');
   }
 
   return {
@@ -370,9 +377,9 @@ const validateDeploymentTargetPayload = ({
   if (
     target?.workspacePath &&
     allowedWorkspacePaths.length > 0 &&
-    !allowedWorkspacePaths.includes(target.workspacePath)
+    !isWorkspacePathApproved(target.workspacePath, allowedWorkspacePaths)
   ) {
-    issues.push('Deployment workspace path must be approved for this capability.');
+    issues.push('Deployment workspace path must be inside an approved workspace path.');
   }
 
   return {
@@ -386,18 +393,6 @@ const validateDeploymentTargetPayload = ({
   };
 };
 
-const getCapabilityWorkspaceRoots = (capability: Capability) =>
-  Array.from(
-    new Set(
-      [
-        capability.executionConfig?.defaultWorkspacePath,
-        ...(capability.executionConfig?.allowedWorkspacePaths || []),
-        ...(capability.localDirectories || []),
-      ]
-        .map(value => normalizeDirectoryPath(value || ''))
-        .filter(Boolean),
-    ),
-  );
 const toSafeDownloadName = (value: string) =>
   value
     .toLowerCase()
@@ -908,6 +903,90 @@ app.get(
   async (request, response) => {
     try {
       response.json(await listCompletedWorkOrders(request.params.capabilityId));
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.get('/api/capabilities/:capabilityId/flight-recorder', async (request, response) => {
+  try {
+    response.json(await buildCapabilityFlightRecorderSnapshot(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/flight-recorder/download', async (request, response) => {
+  try {
+    const format = request.query.format === 'markdown' ? 'markdown' : 'json';
+    const snapshot = await buildCapabilityFlightRecorderSnapshot(request.params.capabilityId);
+    response.setHeader(
+      'Content-Type',
+      format === 'markdown'
+        ? 'text/markdown; charset=utf-8'
+        : 'application/json; charset=utf-8',
+    );
+    response.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${getFlightRecorderDownloadName({
+        title: `${request.params.capabilityId}-flight-recorder`,
+        format,
+      })}"`,
+    );
+    response.send(
+      format === 'markdown'
+        ? renderCapabilityFlightRecorderMarkdown(snapshot)
+        : JSON.stringify(snapshot, null, 2),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/flight-recorder',
+  async (request, response) => {
+    try {
+      response.json(
+        await buildWorkItemFlightRecorderDetail(
+          request.params.capabilityId,
+          request.params.workItemId,
+        ),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.get(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/flight-recorder/download',
+  async (request, response) => {
+    try {
+      const format = request.query.format === 'markdown' ? 'markdown' : 'json';
+      const detail = await buildWorkItemFlightRecorderDetail(
+        request.params.capabilityId,
+        request.params.workItemId,
+      );
+      response.setHeader(
+        'Content-Type',
+        format === 'markdown'
+          ? 'text/markdown; charset=utf-8'
+          : 'application/json; charset=utf-8',
+      );
+      response.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${getFlightRecorderDownloadName({
+          title: `${detail.workItem.id}-${detail.workItem.title}-flight-recorder`,
+          format,
+        })}"`,
+      );
+      response.send(
+        format === 'markdown'
+          ? renderWorkItemFlightRecorderMarkdown(detail)
+          : JSON.stringify(detail, null, 2),
+      );
     } catch (error) {
       sendRepositoryError(response, error);
     }
@@ -1433,12 +1512,10 @@ app.post('/api/capabilities/:capabilityId/code-workspaces/branch', async (reques
 
   try {
     const bundle = await getCapabilityBundle(request.params.capabilityId);
-    const allowedPaths = new Set(
-      getCapabilityWorkspaceRoots(bundle.capability),
-    );
+    const allowedPaths = getCapabilityWorkspaceRoots(bundle.capability);
     const resolvedPath = normalizeDirectoryPath(requestedPath);
 
-    if (!allowedPaths.has(resolvedPath)) {
+    if (!isWorkspacePathApproved(resolvedPath, allowedPaths)) {
       response.status(403).json({
         error: 'This directory is not registered under the selected capability.',
       });

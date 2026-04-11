@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   ArrowRight,
@@ -12,31 +12,48 @@ import {
   FolderArchive,
   GitMerge,
   MessageSquareQuote,
+  Pause,
+  Play,
+  Radio,
   RefreshCw,
   ShieldCheck,
   TerminalSquare,
+  Zap,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import ArtifactPreview from '../components/ArtifactPreview';
 import { useCapability } from '../context/CapabilityContext';
-import { getStatusTone } from '../lib/enterprise';
+import { EnterpriseTone, getStatusTone } from '../lib/enterprise';
 import { compactMarkdownPreview } from '../lib/markdown';
 import {
   fetchArtifactContent,
+  fetchCapabilityFlightRecorder,
   fetchCompletedWorkOrders,
   fetchLedgerArtifacts,
   fetchWorkItemEvidence,
   getArtifactDownloadUrl,
+  getCapabilityFlightRecorderDownloadUrl,
+  getWorkItemFlightRecorderDownloadUrl,
   getWorkItemEvidenceBundleDownloadUrl,
 } from '../lib/api';
 import { cn } from '../lib/utils';
+import { getBusinessEvidenceLabel } from '../lib/capabilityExperience';
+import {
+  findNearestRecorderEvent,
+  formatElapsedTime,
+  normalizeFlightRecorderTimeline,
+  type RecorderEventCategory,
+} from '../lib/flightRecorderTimeline';
 import type {
   ArtifactContentResponse,
   ArtifactKind,
+  CapabilityFlightRecorderSnapshot,
   CompletedWorkOrderDetail,
   CompletedWorkOrderSummary,
+  FlightRecorderVerdict,
   HumanInteractionRecord,
   LedgerArtifactRecord,
+  WorkItemFlightRecorderDetail,
   WorkItemPhase,
 } from '../types';
 import {
@@ -47,16 +64,25 @@ import {
   StatusBadge,
   Toolbar,
 } from '../components/EnterpriseUI';
+import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
-type LedgerTab = 'artifacts' | 'completed' | 'interactions' | 'logs';
+type LedgerTab = 'artifacts' | 'completed' | 'interactions' | 'logs' | 'flight-recorder';
 
-const LEDGER_TABS: Array<{
+const LEDGER_PRIMARY_TABS: Array<{
   id: LedgerTab;
   label: string;
   icon: React.ComponentType<{ size?: number; className?: string }>;
 }> = [
   { id: 'artifacts', label: 'Artifacts', icon: FolderArchive },
-  { id: 'completed', label: 'Completed Work Orders', icon: CheckCircle2 },
+  { id: 'completed', label: 'Completed Work', icon: CheckCircle2 },
+  { id: 'flight-recorder', label: 'Flight Recorder', icon: FileSearch },
+];
+
+const LEDGER_ADVANCED_TABS: Array<{
+  id: LedgerTab;
+  label: string;
+  icon: React.ComponentType<{ size?: number; className?: string }>;
+}> = [
   { id: 'interactions', label: 'Human Interactions', icon: MessageSquareQuote },
   { id: 'logs', label: 'Logs & Events', icon: TerminalSquare },
 ];
@@ -94,14 +120,48 @@ const formatPhase = (phase?: WorkItemPhase) =>
         .join(' ')
     : 'Unscoped';
 
-const summarizeKind = (kind?: ArtifactKind) =>
-  kind
-    ? kind
-        .toLowerCase()
-        .split('_')
-        .map(token => token.charAt(0).toUpperCase() + token.slice(1))
-        .join(' ')
-    : 'Artifact';
+const summarizeKind = (kind?: ArtifactKind) => getBusinessEvidenceLabel(kind);
+
+const getVerdictTone = (verdict?: FlightRecorderVerdict): EnterpriseTone => {
+  if (verdict === 'ALLOWED') {
+    return 'success';
+  }
+  if (verdict === 'NEEDS_APPROVAL') {
+    return 'warning';
+  }
+  if (verdict === 'DENIED') {
+    return 'danger';
+  }
+  return 'neutral';
+};
+
+const RECORDER_CATEGORY_LABELS: Record<RecorderEventCategory, string> = {
+  run: 'Runs',
+  step: 'Steps',
+  gate: 'Gates',
+  policy: 'Policies',
+  tool: 'Tools',
+  artifact: 'Evidence',
+  handoff: 'Handoffs',
+  verdict: 'Verdict',
+};
+
+const RECORDER_CATEGORY_TONES: Record<RecorderEventCategory, EnterpriseTone> = {
+  run: 'brand',
+  step: 'info',
+  gate: 'warning',
+  policy: 'warning',
+  tool: 'info',
+  artifact: 'success',
+  handoff: 'brand',
+  verdict: 'success',
+};
+
+const getRecorderCategoryTone = (category: RecorderEventCategory) =>
+  RECORDER_CATEGORY_TONES[category];
+
+const formatTimelineDate = (value?: string) =>
+  value ? formatTimestamp(value) : 'Time not recorded';
 
 const PreviewPane = ({
   content,
@@ -217,6 +277,8 @@ const Ledger = () => {
   const [tab, setTab] = useState<LedgerTab>('artifacts');
   const [artifacts, setArtifacts] = useState<LedgerArtifactRecord[]>([]);
   const [completedOrders, setCompletedOrders] = useState<CompletedWorkOrderSummary[]>([]);
+  const [flightRecorder, setFlightRecorder] =
+    useState<CapabilityFlightRecorderSnapshot | null>(null);
   const [evidenceByWorkItemId, setEvidenceByWorkItemId] = useState<
     Record<string, CompletedWorkOrderDetail>
   >({});
@@ -230,9 +292,30 @@ const Ledger = () => {
   const [kindFilter, setKindFilter] = useState<string>('ALL');
   const [agentFilter, setAgentFilter] = useState<string>('ALL');
   const [attemptFilter, setAttemptFilter] = useState<string>('ALL');
+  const [recorderSearchQuery, setRecorderSearchQuery] = useState('');
+  const [recorderCategoryFilter, setRecorderCategoryFilter] = useState<
+    'ALL' | RecorderEventCategory
+  >('ALL');
+  const [selectedRecorderEventId, setSelectedRecorderEventId] = useState('');
+  const [playbackPosition, setPlaybackPosition] = useState(0);
+  const [isPlaybackRunning, setIsPlaybackRunning] = useState(false);
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [error, setError] = useState('');
+  const autoPlayedWorkItemsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const updatePreference = () => setPrefersReducedMotion(mediaQuery.matches);
+    updatePreference();
+    mediaQuery.addEventListener('change', updatePreference);
+    return () => mediaQuery.removeEventListener('change', updatePreference);
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -241,20 +324,27 @@ const Ledger = () => {
     setError('');
     setEvidenceByWorkItemId({});
     setArtifactContentById({});
+    setFlightRecorder(null);
 
     Promise.all([
       fetchLedgerArtifacts(activeCapability.id),
       fetchCompletedWorkOrders(activeCapability.id),
+      fetchCapabilityFlightRecorder(activeCapability.id),
     ])
-      .then(([artifactRecords, summaries]) => {
+      .then(([artifactRecords, summaries, recorderSnapshot]) => {
         if (!isMounted) {
           return;
         }
 
         setArtifacts(artifactRecords);
         setCompletedOrders(summaries);
+        setFlightRecorder(recorderSnapshot);
         setSelectedArtifactId(artifactRecords[0]?.artifact.id || '');
-        setSelectedWorkItemId(summaries[0]?.workItem.id || '');
+        setSelectedWorkItemId(
+          summaries[0]?.workItem.id ||
+            recorderSnapshot.workItems[0]?.workItem.id ||
+            '',
+        );
       })
       .catch(nextError => {
         if (!isMounted) {
@@ -473,6 +563,98 @@ const Ledger = () => {
     [artifacts, completedOrders.length, interactionArtifacts.length],
   );
 
+  const recorderWorkItemOptions = useMemo(
+    () => flightRecorder?.workItems || [],
+    [flightRecorder],
+  );
+  const filteredRecorderWorkItems = useMemo(() => {
+    const query = recorderSearchQuery.trim().toLowerCase();
+    return recorderWorkItemOptions.filter(record =>
+      !query ||
+      record.workItem.title.toLowerCase().includes(query) ||
+      record.workItem.id.toLowerCase().includes(query) ||
+      record.verdict.toLowerCase().includes(query),
+    );
+  }, [recorderSearchQuery, recorderWorkItemOptions]);
+  const selectedRecorderDetail = useMemo<WorkItemFlightRecorderDetail | null>(
+    () =>
+      (selectedWorkItemId
+        ? flightRecorder?.workItems.find(
+            workItem => workItem.workItem.id === selectedWorkItemId,
+          )
+        : flightRecorder?.workItems[0]) || null,
+    [flightRecorder, selectedWorkItemId],
+  );
+  const recorderTimeline = useMemo(
+    () => normalizeFlightRecorderTimeline(selectedRecorderDetail),
+    [selectedRecorderDetail],
+  );
+  const visibleRecorderEvents = useMemo(
+    () =>
+      recorderTimeline.events.filter(
+        event =>
+          recorderCategoryFilter === 'ALL' ||
+          event.category === recorderCategoryFilter,
+      ),
+    [recorderCategoryFilter, recorderTimeline.events],
+  );
+  const selectedTimelineEvent = useMemo(
+    () =>
+      recorderTimeline.events.find(event => event.id === selectedRecorderEventId) ||
+      findNearestRecorderEvent(recorderTimeline.events, playbackPosition),
+    [playbackPosition, recorderTimeline.events, selectedRecorderEventId],
+  );
+
+  useEffect(() => {
+    const workItemId = selectedRecorderDetail?.workItem.id;
+    const firstEvent = recorderTimeline.events[0];
+
+    setRecorderCategoryFilter('ALL');
+    setSelectedRecorderEventId(firstEvent?.id || '');
+    setPlaybackPosition(firstEvent?.trackPositionPercent || 0);
+
+    if (
+      workItemId &&
+      recorderTimeline.events.length > 1 &&
+      !prefersReducedMotion &&
+      !autoPlayedWorkItemsRef.current.has(workItemId)
+    ) {
+      autoPlayedWorkItemsRef.current.add(workItemId);
+      setIsPlaybackRunning(true);
+    } else {
+      setIsPlaybackRunning(false);
+    }
+  }, [
+    prefersReducedMotion,
+    recorderTimeline.events,
+    selectedRecorderDetail?.workItem.id,
+  ]);
+
+  useEffect(() => {
+    if (!isPlaybackRunning || prefersReducedMotion || recorderTimeline.events.length <= 1) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      setPlaybackPosition(current => {
+        const next = Math.min(100, current + 1.4);
+        if (next >= 100) {
+          setIsPlaybackRunning(false);
+        }
+        return next;
+      });
+    }, 120);
+
+    return () => window.clearInterval(interval);
+  }, [isPlaybackRunning, prefersReducedMotion, recorderTimeline.events.length]);
+
+  useEffect(() => {
+    const nearest = findNearestRecorderEvent(recorderTimeline.events, playbackPosition);
+    if (nearest && nearest.id !== selectedRecorderEventId) {
+      setSelectedRecorderEventId(nearest.id);
+    }
+  }, [playbackPosition, recorderTimeline.events, selectedRecorderEventId]);
+
   const renderArtifactList = () => (
     <div className="space-y-3">
       {filteredArtifacts.map(record => {
@@ -574,6 +756,591 @@ const Ledger = () => {
     </div>
   );
 
+  const renderFlightRecorderWorkItemRail = () => (
+    <div className="rounded-[2rem] border border-outline-variant/15 bg-white p-4 shadow-sm">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex items-center gap-3">
+          <div className="rounded-2xl bg-primary/10 p-3 text-primary">
+            <Radio size={18} />
+          </div>
+          <div>
+            <p className="form-kicker">Work Item Signal</p>
+            <h2 className="text-lg font-extrabold tracking-tight text-primary">
+              Select a replay record
+            </h2>
+          </div>
+        </div>
+        <input
+          value={recorderSearchQuery}
+          onChange={event => setRecorderSearchQuery(event.target.value)}
+          placeholder="Search work item or verdict"
+          className="field-input lg:max-w-sm"
+        />
+      </div>
+
+      <div className="mt-4 flex gap-3 overflow-x-auto pb-2">
+        {filteredRecorderWorkItems.map(record => {
+          const timeline = normalizeFlightRecorderTimeline(record);
+          const finalTimelineEvent = timeline.events[timeline.events.length - 1];
+          const latestEvent = record.events[record.events.length - 1];
+          const latestPhase = latestEvent?.phase || record.workItem.phase;
+          const isSelected = record.workItem.id === selectedWorkItemId;
+
+          return (
+            <button
+              key={record.workItem.id}
+              type="button"
+              onClick={() => setSelectedWorkItemId(record.workItem.id)}
+              className={cn(
+                'min-w-[17rem] max-w-[19rem] flex-1 overflow-hidden rounded-2xl border px-4 py-3 text-left transition-all',
+                isSelected
+                  ? 'border-primary/40 bg-primary/5 shadow-[0_14px_34px_rgba(0,132,61,0.12)]'
+                  : 'border-outline-variant/50 bg-white hover:border-primary/20 hover:bg-surface-container-low',
+              )}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-extrabold text-on-surface">
+                    {record.workItem.title}
+                  </p>
+                  <p className="mt-1 text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-outline">
+                    {record.workItem.id}
+                  </p>
+                </div>
+                <StatusBadge tone={getVerdictTone(record.verdict)}>
+                  {record.verdict}
+                </StatusBadge>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2 text-[0.6875rem] font-semibold text-secondary">
+                <span>{formatPhase(latestPhase)}</span>
+                <span>{timeline.durationLabel}</span>
+                <span>{record.humanGates.length} gates</span>
+                <span>{record.artifacts.length + record.handoffArtifacts.length} evidence</span>
+              </div>
+              <div className="mt-3 h-1 overflow-hidden rounded-full bg-surface-container-high">
+                <div
+                  className="h-full rounded-full bg-primary"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.max(8, finalTimelineEvent?.trackPositionPercent || 8),
+                    )}%`,
+                  }}
+                />
+              </div>
+            </button>
+          );
+        })}
+
+        {filteredRecorderWorkItems.length === 0 && (
+          <div className="min-w-full">
+            <EmptyState
+              title="No work item flight records"
+              description="Start workflow execution to generate a replayable audit trail."
+              icon={Radio}
+              className="min-h-[10rem]"
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderControlTowerRecorder = () => {
+    if (!flightRecorder) {
+      return (
+        <EmptyState
+          title="Loading Flight Recorder"
+          description="Assembling the capability audit feed from runs, waits, policies, tools, and evidence."
+          icon={Clock3}
+        />
+      );
+    }
+
+    if (!selectedRecorderDetail) {
+      return (
+        <div className="rounded-3xl border border-outline-variant/15 bg-white px-6 py-16 text-center text-sm text-secondary shadow-sm">
+          No work-item release record is selected yet.
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-6">
+        <div className="flight-recorder-tower">
+          <div className="flight-recorder-radar-sweep" />
+          <div className="relative z-10 flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusBadge tone={getVerdictTone(selectedRecorderDetail.verdict)}>
+                  {selectedRecorderDetail.verdict}
+                </StatusBadge>
+                {selectedRecorderDetail.latestRun && (
+                  <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em] text-emerald-100">
+                    Attempt {selectedRecorderDetail.latestRun.attemptNumber}
+                  </span>
+                )}
+              </div>
+              <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-white">
+                Control Tower Replay
+              </h2>
+              <p className="mt-2 max-w-3xl text-sm leading-relaxed text-emerald-50/75">
+                {selectedRecorderDetail.workItem.title} moved through{' '}
+                {recorderTimeline.events.length} audit checkpoints over{' '}
+                {recorderTimeline.durationLabel}.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-right text-xs text-emerald-50/70">
+              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                <p className="font-bold uppercase tracking-[0.16em]">Elapsed</p>
+                <p className="mt-2 text-xl font-extrabold text-white">
+                  {formatElapsedTime(
+                    selectedTimelineEvent?.elapsedMs || recorderTimeline.durationMs,
+                  )}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                <p className="font-bold uppercase tracking-[0.16em]">Checkpoints</p>
+                <p className="mt-2 text-xl font-extrabold text-white">
+                  {recorderTimeline.events.length}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="relative z-10 mt-6 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setIsPlaybackRunning(current => !current)}
+              disabled={prefersReducedMotion || recorderTimeline.events.length <= 1}
+              className="inline-flex items-center gap-2 rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-sm font-bold text-white transition-all hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              {isPlaybackRunning ? <Pause size={16} /> : <Play size={16} />}
+              {isPlaybackRunning ? 'Pause replay' : 'Play replay'}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={0.5}
+              value={playbackPosition}
+              onChange={event => {
+                setIsPlaybackRunning(false);
+                setPlaybackPosition(Number(event.target.value));
+              }}
+              className="flight-recorder-scrubber min-w-[14rem] flex-1"
+              aria-label="Scrub Flight Recorder timeline"
+            />
+            <span className="rounded-full border border-white/10 bg-white/10 px-3 py-2 text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-emerald-50/75">
+              {prefersReducedMotion ? 'Reduced motion' : 'Auto replay armed'}
+            </span>
+          </div>
+
+          <div className="relative z-10 mt-5 flex flex-wrap gap-2">
+            {(['ALL', ...recorderTimeline.categories] as Array<'ALL' | RecorderEventCategory>).map(
+              category => (
+                <button
+                  key={category}
+                  type="button"
+                  onClick={() => setRecorderCategoryFilter(category)}
+                  className={cn(
+                    'rounded-full border px-3 py-1.5 text-[0.6875rem] font-bold uppercase tracking-[0.14em] transition-all',
+                    recorderCategoryFilter === category
+                      ? 'border-emerald-300 bg-emerald-300 text-slate-950'
+                      : 'border-white/10 bg-white/5 text-emerald-50/75 hover:bg-white/10',
+                  )}
+                >
+                  {category === 'ALL' ? (
+                    'All Signals'
+                  ) : (
+                    <>
+                      <StatusBadge tone={getRecorderCategoryTone(category)}>
+                        {RECORDER_CATEGORY_LABELS[category]}
+                      </StatusBadge>
+                    </>
+                  )}
+                </button>
+              ),
+            )}
+          </div>
+
+          <div className="flight-recorder-runway">
+            <div className="flight-recorder-route" />
+            <div
+              className="flight-recorder-route-progress"
+              style={{ width: `${playbackPosition}%` }}
+            />
+            {recorderTimeline.phaseStations.map(station => (
+              <div
+                key={station.phase}
+                className="flight-recorder-phase-station"
+                style={{ left: `${station.trackPositionPercent}%` }}
+              >
+                <span className="flight-recorder-phase-dot" />
+                <span className="flight-recorder-phase-label">{station.label}</span>
+                {station.eventCount > 0 && (
+                  <span className="flight-recorder-phase-count">{station.eventCount}</span>
+                )}
+              </div>
+            ))}
+            {visibleRecorderEvents.map(signal => (
+              <button
+                key={signal.id}
+                type="button"
+                onClick={() => {
+                  setIsPlaybackRunning(false);
+                  setPlaybackPosition(signal.trackPositionPercent);
+                  setSelectedRecorderEventId(signal.id);
+                }}
+                className={cn(
+                  'flight-recorder-checkpoint',
+                  `flight-recorder-checkpoint-${signal.category}`,
+                  signal.id === selectedTimelineEvent?.id && 'flight-recorder-checkpoint-active',
+                )}
+                style={{
+                  left: `${signal.trackPositionPercent}%`,
+                  top: `${42 + signal.laneOffset * 13}%`,
+                }}
+                title={signal.event.title}
+              >
+                <span />
+              </button>
+            ))}
+            <div
+              className="flight-recorder-capsule"
+              style={{ left: `${playbackPosition}%` }}
+            >
+              <Zap size={18} />
+            </div>
+
+            {recorderTimeline.events.length === 0 && (
+              <div className="absolute inset-x-8 top-1/2 -translate-y-1/2 rounded-3xl border border-dashed border-white/15 bg-white/5 px-6 py-10 text-center text-sm text-emerald-50/70">
+                No replay checkpoints are available for this work item yet.
+              </div>
+            )}
+          </div>
+
+          <div className="relative z-10 mt-6 grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(20rem,0.7fr)]">
+            <div className="rounded-3xl border border-white/10 bg-white/10 p-5 text-white">
+              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-emerald-100/70">
+                Active checkpoint
+              </p>
+              <h3 className="mt-3 text-xl font-extrabold">
+                {selectedTimelineEvent?.event.title || 'Awaiting signal'}
+              </h3>
+              <p className="mt-2 text-sm leading-relaxed text-emerald-50/75">
+                {selectedTimelineEvent?.event.description ||
+                  'Move the scrubber or select a checkpoint to inspect the audit signal.'}
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2 text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-emerald-50/70">
+                <span>{selectedTimelineEvent?.elapsedLabel || '0s'}</span>
+                <span>
+                  {selectedTimelineEvent
+                    ? RECORDER_CATEGORY_LABELS[selectedTimelineEvent.category]
+                    : 'No category'}
+                </span>
+                <span>{selectedTimelineEvent?.event.actorName || selectedTimelineEvent?.event.actorId || 'System'}</span>
+                <span>{formatTimelineDate(selectedTimelineEvent?.event.timestamp)}</span>
+              </div>
+            </div>
+            <div className="rounded-3xl border border-white/10 bg-slate-950/55 p-5 text-emerald-50">
+              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-emerald-100/70">
+                Jump channels
+              </p>
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                {(['gate', 'policy', 'handoff', 'verdict'] as RecorderEventCategory[]).map(
+                  category => {
+                    const target = recorderTimeline.events.find(
+                      signal => signal.category === category,
+                    );
+                    return (
+                      <button
+                        key={category}
+                        type="button"
+                        disabled={!target}
+                        onClick={() => {
+                          if (!target) {
+                            return;
+                          }
+                          setIsPlaybackRunning(false);
+                          setRecorderCategoryFilter(category);
+                          setSelectedRecorderEventId(target.id);
+                          setPlaybackPosition(target.trackPositionPercent);
+                        }}
+                        className="rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-left text-xs font-bold uppercase tracking-[0.14em] text-emerald-50/80 transition-all hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-35"
+                      >
+                        {RECORDER_CATEGORY_LABELS[category]}
+                      </button>
+                    );
+                  },
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderRecorderAuditSections = () => {
+    if (!selectedRecorderDetail) {
+      return null;
+    }
+
+    const combinedArtifacts = [
+      ...selectedRecorderDetail.artifacts,
+      ...selectedRecorderDetail.handoffArtifacts,
+    ];
+
+    return (
+      <div className="space-y-6">
+        <div className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="form-kicker">Audit drawer</p>
+              <h3 className="mt-2 text-xl font-extrabold text-primary">
+                {selectedRecorderDetail.workItem.title}
+              </h3>
+              <p className="mt-2 text-sm leading-relaxed text-secondary">
+                {selectedRecorderDetail.verdictReason}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <a
+                href={getWorkItemFlightRecorderDownloadUrl(
+                  activeCapability.id,
+                  selectedRecorderDetail.workItem.id,
+                  'markdown',
+                )}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                <Download size={16} />
+                Markdown
+              </a>
+              <a
+                href={getWorkItemFlightRecorderDownloadUrl(
+                  activeCapability.id,
+                  selectedRecorderDetail.workItem.id,
+                  'json',
+                )}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                <Download size={16} />
+                JSON
+              </a>
+              <button
+                type="button"
+                onClick={() =>
+                  navigate(
+                    `/orchestrator?selected=${encodeURIComponent(
+                      selectedRecorderDetail.workItem.id,
+                    )}`,
+                  )
+                }
+                className="enterprise-button enterprise-button-primary"
+              >
+                <ExternalLink size={16} />
+                Open work
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            {[
+              {
+                label: 'Human gates',
+                value: selectedRecorderDetail.humanGates.length,
+                icon: ShieldCheck,
+              },
+              {
+                label: 'Policies',
+                value: selectedRecorderDetail.policyDecisions.length,
+                icon: FileSearch,
+              },
+              {
+                label: 'Evidence',
+                value: selectedRecorderDetail.artifacts.length,
+                icon: FileText,
+              },
+              {
+                label: 'Handoffs',
+                value: selectedRecorderDetail.handoffArtifacts.length,
+                icon: GitMerge,
+              },
+              {
+                label: 'Tools',
+                value: selectedRecorderDetail.telemetry.toolInvocationCount,
+                icon: TerminalSquare,
+              },
+            ].map(item => (
+              <div
+                key={item.label}
+                className="rounded-2xl bg-surface-container-low px-4 py-4"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.14em] text-outline">
+                      {item.label}
+                    </p>
+                    <p className="mt-2 text-2xl font-extrabold text-primary">
+                      {item.value}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl bg-white p-3 text-primary shadow-sm">
+                    <item.icon size={16} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-6 rounded-2xl bg-surface-container-low px-4 py-4">
+            <p className="text-[0.625rem] font-bold uppercase tracking-[0.14em] text-outline">
+              Telemetry references
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2 text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-secondary">
+              <span>{selectedRecorderDetail.telemetry.toolInvocationCount} tools</span>
+              <span>{selectedRecorderDetail.telemetry.failedToolInvocationCount} failed</span>
+              <span>{selectedRecorderDetail.telemetry.totalToolLatencyMs} ms</span>
+              <span>${selectedRecorderDetail.telemetry.totalToolCostUsd.toFixed(4)}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/run-console')}
+              className="mt-4 inline-flex items-center gap-2 text-sm font-bold text-primary"
+            >
+              Open Run Console
+              <ArrowRight size={14} />
+            </button>
+          </div>
+        </div>
+
+        <div className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
+          <div className="flex items-center gap-2">
+            <ShieldCheck size={16} className="text-primary" />
+            <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
+              Human approvals, input, and conflicts
+            </h3>
+          </div>
+          <div className="mt-4 space-y-3">
+            {selectedRecorderDetail.humanGates.map(gate => (
+              <div
+                key={gate.waitId}
+                className="rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-4"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-bold text-on-surface">
+                      {summarizeKind(
+                        gate.type === 'APPROVAL'
+                          ? 'APPROVAL_RECORD'
+                          : gate.type === 'CONFLICT_RESOLUTION'
+                          ? 'CONFLICT_RESOLUTION'
+                          : 'INPUT_NOTE',
+                      )}
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      {gate.message}
+                    </p>
+                  </div>
+                  <StatusBadge tone={gate.status === 'RESOLVED' ? 'success' : 'warning'}>
+                    {gate.status}
+                  </StatusBadge>
+                </div>
+                {gate.resolution && (
+                  <div className="mt-3 rounded-2xl bg-white px-4 py-3 text-sm leading-relaxed text-secondary">
+                    {gate.resolution}
+                  </div>
+                )}
+                {gate.contrarianReview && (
+                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900">
+                    Contrarian review: {gate.contrarianReview.summary || gate.contrarianReview.status}
+                  </div>
+                )}
+              </div>
+            ))}
+            {selectedRecorderDetail.humanGates.length === 0 && (
+              <p className="rounded-2xl bg-surface-container-low px-4 py-4 text-sm text-secondary">
+                No human gate records are linked to this release record.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="grid gap-6 xl:grid-cols-2">
+          <div className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
+            <div className="flex items-center gap-2">
+              <FileSearch size={16} className="text-primary" />
+              <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
+                Policy decisions
+              </h3>
+            </div>
+            <div className="mt-4 space-y-3">
+              {selectedRecorderDetail.policyDecisions.map(policy => (
+                <div
+                  key={policy.id}
+                  className="rounded-2xl bg-surface-container-low px-4 py-4"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="text-sm font-bold text-on-surface">
+                      {policy.actionType}
+                    </p>
+                    <StatusBadge tone={getStatusTone(policy.decision)}>
+                      {policy.decision}
+                    </StatusBadge>
+                  </div>
+                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+                    {policy.reason}
+                  </p>
+                </div>
+              ))}
+              {selectedRecorderDetail.policyDecisions.length === 0 && (
+                <p className="rounded-2xl bg-surface-container-low px-4 py-4 text-sm text-secondary">
+                  No policy decisions are linked to this record.
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
+            <div className="flex items-center gap-2">
+              <FolderArchive size={16} className="text-primary" />
+              <h3 className="text-sm font-extrabold uppercase tracking-[0.16em] text-primary">
+                Artifacts and handoffs
+              </h3>
+            </div>
+            <div className="mt-4 space-y-3">
+              {combinedArtifacts.map(artifact => (
+                <button
+                  key={artifact.artifactId}
+                  type="button"
+                  onClick={() => {
+                    setTab('artifacts');
+                    setSelectedArtifactId(artifact.artifactId);
+                  }}
+                  className="flex w-full items-center justify-between rounded-2xl bg-surface-container-low px-4 py-4 text-left transition-all hover:bg-primary/5"
+                >
+                  <div>
+                    <p className="text-sm font-bold text-on-surface">{artifact.name}</p>
+                    <p className="mt-1 text-xs text-secondary">
+                      {summarizeKind(artifact.kind)} • {formatTimestamp(artifact.createdAt)}
+                    </p>
+                  </div>
+                  <ArrowRight size={14} className="text-primary" />
+                </button>
+              ))}
+              {combinedArtifacts.length === 0 && (
+                <p className="rounded-2xl bg-surface-container-low px-4 py-4 text-sm text-secondary">
+                  No artifacts or handoffs are linked to this record.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -589,12 +1356,18 @@ const Ledger = () => {
               Promise.all([
                 fetchLedgerArtifacts(activeCapability.id),
                 fetchCompletedWorkOrders(activeCapability.id),
+                fetchCapabilityFlightRecorder(activeCapability.id),
               ])
-                .then(([artifactRecords, summaries]) => {
+                .then(([artifactRecords, summaries, recorderSnapshot]) => {
                   setArtifacts(artifactRecords);
                   setCompletedOrders(summaries);
+                  setFlightRecorder(recorderSnapshot);
                   if (!selectedWorkItemId) {
-                    setSelectedWorkItemId(summaries[0]?.workItem.id || '');
+                    setSelectedWorkItemId(
+                      summaries[0]?.workItem.id ||
+                        recorderSnapshot.workItems[0]?.workItem.id ||
+                        '',
+                    );
                   }
                   if (!selectedArtifactId) {
                     setSelectedArtifactId(artifactRecords[0]?.artifact.id || '');
@@ -622,7 +1395,7 @@ const Ledger = () => {
           { label: 'Artifacts', value: stats.artifacts, icon: FileText },
           { label: 'Completed Orders', value: stats.completed, icon: CheckCircle2 },
           { label: 'Handoff Packets', value: stats.handoffs, icon: GitMerge },
-          { label: 'Human Interactions', value: stats.interactions, icon: ShieldCheck },
+          { label: 'Human gates', value: stats.interactions, icon: ShieldCheck },
         ].map(item => (
           <motion.div
             key={item.label}
@@ -641,9 +1414,9 @@ const Ledger = () => {
         ))}
       </section>
 
-      <Toolbar>
+      <Toolbar className="items-stretch">
         <nav className="flex flex-wrap gap-2">
-          {LEDGER_TABS.map(item => (
+          {LEDGER_PRIMARY_TABS.map(item => (
             <button
               key={item.id}
               type="button"
@@ -660,7 +1433,166 @@ const Ledger = () => {
             </button>
           ))}
         </nav>
+        <AdvancedDisclosure
+          title="Advanced audit details"
+          description="Human interaction records and raw logs remain available for audit and troubleshooting."
+          storageKey="singularity.ledger.advanced.open"
+          defaultOpen={tab === 'interactions' || tab === 'logs'}
+          className="w-full bg-surface-container-low/70 shadow-none"
+          contentClassName="pt-3"
+          badge={
+            <StatusBadge tone={tab === 'interactions' || tab === 'logs' ? 'brand' : 'neutral'}>
+              {tab === 'interactions' || tab === 'logs' ? 'Viewing advanced' : 'Collapsed'}
+            </StatusBadge>
+          }
+        >
+          <nav className="flex flex-wrap gap-2">
+            {LEDGER_ADVANCED_TABS.map(item => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setTab(item.id)}
+                className={cn(
+                  'inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-bold transition-all',
+                  tab === item.id
+                    ? 'bg-primary text-white shadow-sm'
+                    : 'text-secondary hover:bg-white hover:text-primary',
+                )}
+              >
+                <item.icon size={16} />
+                {item.label}
+              </button>
+            ))}
+          </nav>
+        </AdvancedDisclosure>
       </Toolbar>
+
+      {tab === 'flight-recorder' && flightRecorder && (
+        <section className="rounded-[2rem] border border-primary/10 bg-primary/5 p-5 shadow-sm">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusBadge
+                  tone={getVerdictTone(selectedRecorderDetail?.verdict || flightRecorder.verdict)}
+                >
+                  {selectedRecorderDetail?.verdict || flightRecorder.verdict}
+                </StatusBadge>
+                <span className="page-context">
+                  Generated {formatTimestamp(flightRecorder.generatedAt)}
+                </span>
+                {selectedRecorderDetail && (
+                  <span className="page-context">{selectedRecorderDetail.workItem.id}</span>
+                )}
+              </div>
+              <h2 className="mt-3 text-2xl font-extrabold tracking-tight text-primary">
+                Work Item Flight Recorder
+              </h2>
+              <p className="mt-2 max-w-3xl text-sm leading-relaxed text-secondary">
+                {selectedRecorderDetail?.verdictReason || flightRecorder.verdictReason}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {selectedRecorderDetail ? (
+                <>
+                  <a
+                    href={getWorkItemFlightRecorderDownloadUrl(
+                      activeCapability.id,
+                      selectedRecorderDetail.workItem.id,
+                      'markdown',
+                    )}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    <Download size={16} />
+                    Markdown
+                  </a>
+                  <a
+                    href={getWorkItemFlightRecorderDownloadUrl(
+                      activeCapability.id,
+                      selectedRecorderDetail.workItem.id,
+                      'json',
+                    )}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    <Download size={16} />
+                    JSON
+                  </a>
+                </>
+              ) : (
+                <a
+                  href={getCapabilityFlightRecorderDownloadUrl(
+                    activeCapability.id,
+                    'markdown',
+                  )}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  <Download size={16} />
+                  Capability export
+                </a>
+              )}
+              <button
+                type="button"
+                onClick={() =>
+                  selectedRecorderDetail
+                    ? navigate(
+                        `/orchestrator?selected=${encodeURIComponent(
+                          selectedRecorderDetail.workItem.id,
+                        )}`,
+                      )
+                    : navigate('/orchestrator')
+                }
+                className="enterprise-button enterprise-button-primary"
+              >
+                <ExternalLink size={16} />
+                Open work
+              </button>
+            </div>
+          </div>
+          <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            {[
+              [
+                'Gates',
+                selectedRecorderDetail
+                  ? selectedRecorderDetail.humanGates.length
+                  : flightRecorder.summary.openHumanGateCount,
+              ],
+              [
+                'Policies',
+                selectedRecorderDetail
+                  ? selectedRecorderDetail.policyDecisions.length
+                  : flightRecorder.summary.policyDecisionCount,
+              ],
+              [
+                'Evidence',
+                selectedRecorderDetail
+                  ? selectedRecorderDetail.artifacts.length
+                  : flightRecorder.summary.evidenceArtifactCount,
+              ],
+              [
+                'Handoffs',
+                selectedRecorderDetail
+                  ? selectedRecorderDetail.handoffArtifacts.length
+                  : flightRecorder.summary.handoffPacketCount,
+              ],
+              [
+                'Tools',
+                selectedRecorderDetail
+                  ? selectedRecorderDetail.telemetry.toolInvocationCount
+                  : flightRecorder.summary.completedWorkCount,
+              ],
+            ].map(([label, value]) => (
+              <div
+                key={label}
+                className="rounded-2xl border border-primary/10 bg-white px-4 py-3"
+              >
+                <p className="text-[0.625rem] font-bold uppercase tracking-[0.14em] text-outline">
+                  {label}
+                </p>
+                <p className="mt-2 text-2xl font-extrabold text-primary">{value}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {error && (
         <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700">
@@ -668,8 +1600,15 @@ const Ledger = () => {
         </div>
       )}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
-        <aside className="space-y-5">
+      <div
+        className={cn(
+          'grid gap-6',
+          tab === 'flight-recorder'
+            ? 'xl:grid-cols-1'
+            : 'xl:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]',
+        )}
+      >
+        <aside className={cn('space-y-5', tab === 'flight-recorder' && 'hidden')}>
           {(tab === 'artifacts' || tab === 'interactions') && (
             <>
               <FilterBar>
@@ -853,6 +1792,14 @@ const Ledger = () => {
 
               <PreviewPane content={selectedArtifactContent} />
             </>
+          )}
+
+          {tab === 'flight-recorder' && !isLoading && (
+            <div className="space-y-6">
+              {renderFlightRecorderWorkItemRail()}
+              {renderControlTowerRecorder()}
+              {renderRecorderAuditSections()}
+            </div>
           )}
 
           {(tab === 'completed' || tab === 'logs') && !isLoading && (

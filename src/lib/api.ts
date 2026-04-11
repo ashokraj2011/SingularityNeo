@@ -6,6 +6,7 @@ import {
   CapabilityChatMessage,
   CapabilityDeploymentTarget,
   CapabilityExecutionCommandTemplate,
+  CapabilityFlightRecorderSnapshot,
   CapabilityWorkspace,
   CommandTemplateValidationResult,
   CopilotSessionMonitorSnapshot,
@@ -28,6 +29,7 @@ import {
   TelemetrySpan,
   WorkspacePathValidationResult,
   WorkItem,
+  WorkItemFlightRecorderDetail,
   WorkItemPhase,
   WorkflowRun,
   WorkflowRunDetail,
@@ -266,6 +268,34 @@ export const fetchCompletedWorkOrders = async (
   requestJson<CompletedWorkOrderSummary[]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/ledger/completed-work-orders`,
   );
+
+export const fetchCapabilityFlightRecorder = async (
+  capabilityId: string,
+): Promise<CapabilityFlightRecorderSnapshot> =>
+  requestJson<CapabilityFlightRecorderSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/flight-recorder`,
+  );
+
+export const fetchWorkItemFlightRecorder = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<WorkItemFlightRecorderDetail> =>
+  requestJson<WorkItemFlightRecorderDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/flight-recorder`,
+  );
+
+export const getCapabilityFlightRecorderDownloadUrl = (
+  capabilityId: string,
+  format: 'json' | 'markdown',
+) =>
+  `/api/capabilities/${encodeURIComponent(capabilityId)}/flight-recorder/download?format=${format}`;
+
+export const getWorkItemFlightRecorderDownloadUrl = (
+  capabilityId: string,
+  workItemId: string,
+  format: 'json' | 'markdown',
+) =>
+  `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/flight-recorder/download?format=${format}`;
 
 export const fetchWorkItemEvidence = async (
   capabilityId: string,

@@ -25,6 +25,11 @@ import {
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
+import {
+  ADVANCED_TOOL_DESCRIPTORS,
+  type AdvancedToolId,
+} from '../lib/capabilityExperience';
+import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import { StatusBadge } from './EnterpriseUI';
 
 const primaryNavItems = [
@@ -36,15 +41,23 @@ const primaryNavItems = [
   { name: 'Designer', shortName: 'Design', icon: Workflow, path: '/designer' },
 ] as const;
 
-const advancedNavItems = [
-  { name: 'Memory Explorer', shortName: 'Memory', icon: BrainCircuit, path: '/memory' },
-  { name: 'Run Console', shortName: 'Runs', icon: Activity, path: '/run-console' },
-  { name: 'Eval Center', shortName: 'Evals', icon: BarChart3, path: '/evals' },
-  { name: 'Skill Library', shortName: 'Skills', icon: BookOpen, path: '/skills' },
-  { name: 'Artifact Designer', shortName: 'Artifacts', icon: FileText, path: '/artifact-designer' },
-  { name: 'Tasks', shortName: 'Tasks', icon: Terminal, path: '/tasks' },
-  { name: 'Studio', shortName: 'Studio', icon: Sparkles, path: '/studio' },
-] as const;
+const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
+  memory: BrainCircuit,
+  'run-console': Activity,
+  evals: BarChart3,
+  skills: BookOpen,
+  'artifact-designer': FileText,
+  tasks: Terminal,
+  studio: Sparkles,
+};
+
+const advancedNavItems = ADVANCED_TOOL_DESCRIPTORS.map(tool => ({
+  name: tool.label,
+  shortName: tool.shortName,
+  path: tool.path,
+  description: tool.description,
+  icon: advancedToolIcons[tool.id],
+}));
 
 const workspaceNavItems = [...primaryNavItems, ...advancedNavItems] as const;
 
@@ -54,13 +67,18 @@ const routeTitles: Record<string, string> = {
 };
 
 const SIDEBAR_STORAGE_KEY = 'singularity.sidebar.collapsed';
+const ADVANCED_NAV_STORAGE_KEY = 'singularity.navigation.advanced.open';
 
 const Sidebar = ({
   isCollapsed,
+  isAdvancedNavOpen,
   onToggleCollapsed,
+  onToggleAdvancedNav,
 }: {
   isCollapsed: boolean;
+  isAdvancedNavOpen: boolean;
   onToggleCollapsed: () => void;
+  onToggleAdvancedNav: () => void;
 }) => {
   const navigate = useNavigate();
   const {
@@ -427,37 +445,60 @@ const Sidebar = ({
         ))}
       </nav>
 
-      <nav className="mt-5 flex flex-col gap-1.5 border-t border-outline-variant/50 pt-4">
-        {!isCollapsed ? (
-          <p className="px-4 pb-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-            Advanced
-          </p>
-        ) : (
-          <div className="mx-auto mb-1 h-px w-8 bg-outline-variant/70" />
-        )}
-        {advancedNavItems.map(item => (
-          <NavLink
-            key={item.path}
-            to={item.path}
-            title={item.name}
-            className={({ isActive }) =>
-              cn(
-                'group flex items-center rounded-xl text-sm font-semibold transition-all',
-                isCollapsed ? 'justify-center gap-0 px-2 py-3' : 'gap-3 px-4 py-2.5',
-                isActive
-                  ? 'border border-primary/15 bg-primary/10 text-primary shadow-[0_8px_20px_rgba(0,132,61,0.08)]'
-                  : 'text-secondary hover:bg-surface-container-low hover:text-on-surface',
-              )
-            }
-          >
-            <item.icon
-              size={17}
-              className="shrink-0 transition-transform group-hover:scale-105"
-            />
-            {!isCollapsed ? <span>{item.name}</span> : null}
-          </NavLink>
-        ))}
-      </nav>
+      <div className="mt-5 border-t border-outline-variant/50 pt-4">
+        <button
+          type="button"
+          onClick={onToggleAdvancedNav}
+          className={cn(
+            'group flex w-full items-center rounded-xl text-sm font-semibold text-secondary transition-all hover:bg-surface-container-low hover:text-on-surface',
+            isCollapsed ? 'justify-center gap-0 px-2 py-3' : 'gap-3 px-4 py-2.5',
+            isAdvancedNavOpen && 'bg-surface-container-low text-primary',
+          )}
+          title="Advanced tools"
+          aria-expanded={isAdvancedNavOpen}
+        >
+          <Sparkles size={17} className="shrink-0 transition-transform group-hover:scale-105" />
+          {!isCollapsed ? (
+            <>
+              <span>Advanced tools</span>
+              <ChevronDown
+                size={15}
+                className={cn(
+                  'ml-auto text-outline transition-transform',
+                  isAdvancedNavOpen && 'rotate-180 text-primary',
+                )}
+              />
+            </>
+          ) : null}
+        </button>
+
+        {isAdvancedNavOpen ? (
+          <nav className="mt-2 flex flex-col gap-1.5">
+            {advancedNavItems.map(item => (
+              <NavLink
+                key={item.path}
+                to={item.path}
+                title={item.name}
+                className={({ isActive }) =>
+                  cn(
+                    'group flex items-center rounded-xl text-sm font-semibold transition-all',
+                    isCollapsed ? 'justify-center gap-0 px-2 py-3' : 'gap-3 px-4 py-2.5',
+                    isActive
+                      ? 'border border-primary/15 bg-primary/10 text-primary shadow-[0_8px_20px_rgba(0,132,61,0.08)]'
+                      : 'text-secondary hover:bg-surface-container-low hover:text-on-surface',
+                  )
+                }
+              >
+                <item.icon
+                  size={17}
+                  className="shrink-0 transition-transform group-hover:scale-105"
+                />
+                {!isCollapsed ? <span>{item.name}</span> : null}
+              </NavLink>
+            ))}
+          </nav>
+        ) : null}
+      </div>
 
       </div>
     </aside>
@@ -565,6 +606,11 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     }
     return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true';
   });
+  const [isAdvancedNavOpen, setIsAdvancedNavOpen] = useState<boolean>(() =>
+    readViewPreference<'open' | 'closed'>(ADVANCED_NAV_STORAGE_KEY, 'closed', {
+      allowed: ['open', 'closed'] as const,
+    }) === 'open',
+  );
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
@@ -577,6 +623,10 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     );
   }, [isSidebarCollapsed]);
 
+  useEffect(() => {
+    writeViewPreference(ADVANCED_NAV_STORAGE_KEY, isAdvancedNavOpen ? 'open' : 'closed');
+  }, [isAdvancedNavOpen]);
+
   const isImmersiveRoute =
     location.pathname === '/workflow-designer-neo' || location.pathname === '/designer';
   const activeWorkspace = activeCapability.id
@@ -587,12 +637,24 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     const matches = (value: string) =>
       !normalizedQuery || value.toLowerCase().includes(normalizedQuery);
 
-    const routeResults = workspaceNavItems
+    const primaryRouteResults = primaryNavItems
       .filter(item => matches(item.name))
       .map(item => ({
         key: `route:${item.path}`,
         label: item.name,
-        description: item.path,
+        description: `Primary workspace • ${item.path}`,
+        section: 'Primary routes',
+        type: 'route' as const,
+        onSelect: () => navigate(item.path),
+      }));
+
+    const advancedRouteResults = advancedNavItems
+      .filter(item => matches(item.name))
+      .map(item => ({
+        key: `advanced-route:${item.path}`,
+        label: item.name,
+        description: `Advanced tool • ${item.description}`,
+        section: 'Advanced tools',
         type: 'route' as const,
         onSelect: () => navigate(item.path),
       }));
@@ -607,6 +669,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
         description:
           [capability.domain, capability.businessUnit].filter(Boolean).join(' • ') ||
           capability.description,
+        section: 'Capabilities',
         type: 'capability' as const,
         onSelect: () => {
           setActiveCapability(capability);
@@ -621,6 +684,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
           key: `agent:${agent.id}`,
           label: agent.name,
           description: `${agent.role} • ${activeCapability.name}`,
+          section: 'Agents',
           type: 'agent' as const,
           onSelect: () => {
             void setActiveChatAgent(activeCapability.id, agent.id);
@@ -635,14 +699,18 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
           key: `work-item:${item.id}`,
           label: item.title,
           description: `${item.id} • ${item.status} • ${item.phase}`,
+          section: 'Work items',
           type: 'work-item' as const,
           onSelect: () => navigate(`/orchestrator?selected=${encodeURIComponent(item.id)}`),
         })) || [];
 
-    return [...routeResults, ...capabilityResults, ...agentResults, ...workItemResults].slice(
-      0,
-      18,
-    );
+    return [
+      ...primaryRouteResults,
+      ...advancedRouteResults,
+      ...capabilityResults,
+      ...agentResults,
+      ...workItemResults,
+    ].slice(0, 18);
   }, [
     activeCapability.id,
     activeCapability.name,
@@ -654,6 +722,22 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     setActiveCapability,
     setActiveChatAgent,
   ]);
+  const commandResultGroups = useMemo(
+    () =>
+      commandResults.reduce<Array<{ section: string; results: typeof commandResults }>>(
+        (groups, result) => {
+          const currentGroup = groups.find(group => group.section === result.section);
+          if (currentGroup) {
+            currentGroup.results.push(result);
+          } else {
+            groups.push({ section: result.section, results: [result] });
+          }
+          return groups;
+        },
+        [],
+      ),
+    [commandResults],
+  );
   const showBlockingSyncState =
     bootStatus === 'loading' || (bootStatus === 'degraded' && capabilities.length === 0);
   const showNoCapabilityState =
@@ -692,7 +776,9 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
       {!isImmersiveRoute ? (
         <Sidebar
           isCollapsed={isSidebarCollapsed}
+          isAdvancedNavOpen={isAdvancedNavOpen}
           onToggleCollapsed={() => setIsSidebarCollapsed(current => !current)}
+          onToggleAdvancedNav={() => setIsAdvancedNavOpen(current => !current)}
         />
       ) : null}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -924,29 +1010,51 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
               ))}
             </nav>
 
-            <nav className="mt-5 flex flex-col gap-1.5 border-t border-outline-variant/50 pt-4">
-              <p className="px-4 pb-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                Advanced
-              </p>
-              {advancedNavItems.map(item => (
-                <NavLink
-                  key={item.path}
-                  to={item.path}
-                  onClick={() => setIsMobileNavOpen(false)}
-                  className={({ isActive }) =>
-                    cn(
-                      'flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition-all',
-                      isActive
-                        ? 'border border-primary/15 bg-primary/10 text-primary'
-                        : 'text-secondary hover:bg-surface-container-low hover:text-on-surface',
-                    )
-                  }
-                >
-                  <item.icon size={18} />
-                  <span>{item.name}</span>
-                </NavLink>
-              ))}
-            </nav>
+            <div className="mt-5 border-t border-outline-variant/50 pt-4">
+              <button
+                type="button"
+                onClick={() => setIsAdvancedNavOpen(current => !current)}
+                className={cn(
+                  'flex w-full items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition-all',
+                  isAdvancedNavOpen
+                    ? 'bg-surface-container-low text-primary'
+                    : 'text-secondary hover:bg-surface-container-low hover:text-on-surface',
+                )}
+                aria-expanded={isAdvancedNavOpen}
+              >
+                <Sparkles size={18} />
+                <span>Advanced tools</span>
+                <ChevronDown
+                  size={16}
+                  className={cn(
+                    'ml-auto text-outline transition-transform',
+                    isAdvancedNavOpen && 'rotate-180 text-primary',
+                  )}
+                />
+              </button>
+              {isAdvancedNavOpen ? (
+                <nav className="mt-2 flex flex-col gap-1.5">
+                  {advancedNavItems.map(item => (
+                    <NavLink
+                      key={item.path}
+                      to={item.path}
+                      onClick={() => setIsMobileNavOpen(false)}
+                      className={({ isActive }) =>
+                        cn(
+                          'flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition-all',
+                          isActive
+                            ? 'border border-primary/15 bg-primary/10 text-primary'
+                            : 'text-secondary hover:bg-surface-container-low hover:text-on-surface',
+                        )
+                      }
+                    >
+                      <item.icon size={18} />
+                      <span>{item.name}</span>
+                    </NavLink>
+                  ))}
+                </nav>
+              ) : null}
+            </div>
           </div>
         </div>
       ) : null}
@@ -981,25 +1089,38 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
             <div className="mt-4 max-h-[60vh] overflow-y-auto">
               {commandResults.length > 0 ? (
                 <div className="space-y-2">
-                  {commandResults.map(result => (
-                    <button
-                      key={result.key}
-                      type="button"
-                      onClick={() => {
-                        result.onSelect();
-                        setIsCommandPaletteOpen(false);
-                        setCommandQuery('');
-                      }}
-                      className="flex w-full items-start justify-between gap-4 rounded-2xl border border-outline-variant/40 px-4 py-3 text-left transition hover:bg-surface-container-low"
-                    >
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold text-on-surface">{result.label}</p>
-                        <p className="mt-1 text-xs text-secondary">{result.description}</p>
+                  {commandResultGroups.map(group => (
+                    <div key={group.section} className="space-y-2">
+                      <p className="px-2 pt-2 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                        {group.section}
+                      </p>
+                      <div className="space-y-2">
+                        {group.results.map(result => (
+                          <button
+                            key={result.key}
+                            type="button"
+                            onClick={() => {
+                              result.onSelect();
+                              setIsCommandPaletteOpen(false);
+                              setCommandQuery('');
+                            }}
+                            className="flex w-full items-start justify-between gap-4 rounded-2xl border border-outline-variant/40 px-4 py-3 text-left transition hover:bg-surface-container-low"
+                          >
+                            <div className="min-w-0">
+                              <p className="text-sm font-semibold text-on-surface">
+                                {result.label}
+                              </p>
+                              <p className="mt-1 text-xs text-secondary">
+                                {result.description}
+                              </p>
+                            </div>
+                            <span className="rounded-full bg-surface-container-low px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                              {result.type}
+                            </span>
+                          </button>
+                        ))}
                       </div>
-                      <span className="rounded-full bg-surface-container-low px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                        {result.type}
-                      </span>
-                    </button>
+                    </div>
                   ))}
                 </div>
               ) : (

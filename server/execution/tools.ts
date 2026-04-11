@@ -9,6 +9,12 @@ import {
   ToolAdapterId,
 } from '../../src/types';
 import { runSandboxedCommand, type SandboxProfile, summarizeSandboxFailure } from '../sandbox';
+import {
+  findApprovedWorkspaceRoot,
+  formatApprovedWorkspaceRoots,
+  getCapabilityWorkspaceRoots,
+  normalizeDirectoryPath,
+} from '../workspacePaths';
 
 const execFileAsync = promisify(execFile);
 
@@ -41,24 +47,129 @@ type ToolAdapter = {
 const previewText = (value: string, limit = 1600) =>
   value.replace(/\0/g, '').slice(0, limit);
 
-const normalizeDirectoryPath = (value: string) => {
-  const trimmed = value.trim();
-  return trimmed ? path.resolve(trimmed) : '';
+const SKIP_DIRECTORIES = new Set([
+  '.git',
+  '.next',
+  '.turbo',
+  'build',
+  'coverage',
+  'dist',
+  'node_modules',
+]);
+
+const isCommandMissing = (result: { stderr?: string; stdout?: string }) =>
+  /spawn\s+\S+\s+ENOENT/i.test(`${result.stderr || ''}\n${result.stdout || ''}`);
+
+const listWorkspaceFilesFallback = async (
+  workspacePath: string,
+  limit = 200,
+) => {
+  const files: string[] = [];
+
+  const visit = async (currentPath: string, depth: number): Promise<void> => {
+    if (files.length >= limit || depth > 5) {
+      return;
+    }
+
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(currentPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (files.length >= limit) {
+        return;
+      }
+
+      const absolutePath = path.join(currentPath, entry.name);
+      const relativePath = path.relative(workspacePath, absolutePath);
+
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRECTORIES.has(entry.name)) {
+          await visit(absolutePath, depth + 1);
+        }
+        continue;
+      }
+
+      if (entry.isFile()) {
+        files.push(relativePath);
+      }
+    }
+  };
+
+  await visit(workspacePath, 0);
+  return files;
 };
 
-const getAllowedWorkspacePaths = (capability: Capability) =>
-  Array.from(
-    new Set([
-      ...(capability.executionConfig.allowedWorkspacePaths || []),
-      ...(capability.localDirectories || []),
-    ]),
-  ).map(normalizeDirectoryPath);
+const searchWorkspaceFilesFallback = async ({
+  workspacePath,
+  scopePath,
+  pattern,
+  limit = 100,
+}: {
+  workspacePath: string;
+  scopePath: string;
+  pattern: string;
+  limit?: number;
+}) => {
+  const stat = await fs.stat(scopePath).catch(() => null);
+  const searchRoot = stat?.isDirectory() ? scopePath : path.dirname(scopePath);
+  const scopedFiles = stat?.isFile()
+    ? [path.relative(workspacePath, scopePath)]
+    : await listWorkspaceFilesFallback(searchRoot, 500);
+  const matcher = (() => {
+    try {
+      return new RegExp(pattern, 'i');
+    } catch {
+      const loweredPattern = pattern.toLowerCase();
+      return {
+        test: (value: string) => value.toLowerCase().includes(loweredPattern),
+      };
+    }
+  })();
+  const matches: string[] = [];
+
+  for (const relativeFile of scopedFiles) {
+    if (matches.length >= limit) {
+      break;
+    }
+
+    const absoluteFile = stat?.isFile()
+      ? scopePath
+      : path.join(searchRoot, relativeFile);
+    const displayPath = path.relative(workspacePath, absoluteFile);
+    let content = '';
+
+    try {
+      const fileStat = await fs.stat(absoluteFile);
+      if (fileStat.size > 200_000) {
+        continue;
+      }
+      content = await fs.readFile(absoluteFile, 'utf8');
+    } catch {
+      continue;
+    }
+
+    content.split('\n').some((line, index) => {
+      if (!matcher.test(line)) {
+        return false;
+      }
+
+      matches.push(`${displayPath}:${index + 1}:${line}`);
+      return matches.length >= limit;
+    });
+  }
+
+  return matches;
+};
 
 const resolveWorkspacePath = (
   capability: Capability,
   preferredPath?: string,
 ) => {
-  const allowed = getAllowedWorkspacePaths(capability);
+  const allowed = getCapabilityWorkspaceRoots(capability);
   const configuredDefault = normalizeDirectoryPath(
     capability.executionConfig.defaultWorkspacePath || '',
   );
@@ -72,12 +183,13 @@ const resolveWorkspacePath = (
     );
   }
 
-  if (!allowed.includes(candidate)) {
+  if (!findApprovedWorkspaceRoot(candidate, allowed)) {
     if (requestedPath && allowed.length === 1) {
       return allowed[0];
     }
+
     throw new Error(
-      `Workspace path ${candidate} is not approved for capability ${capability.name}.`,
+      `Workspace path ${candidate} is not approved for capability ${capability.name}. Approved workspace roots: ${formatApprovedWorkspaceRoots(allowed)}.`,
     );
   }
 
@@ -197,22 +309,26 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     execute: async ({ capability }, args) => {
       const workspacePath = resolveWorkspacePath(capability, args.workspacePath || args.path);
       const result = await runProcess('rg', ['--files', workspacePath], workspacePath);
-      if (result.exitCode !== 0) {
+      const files = result.exitCode === 0
+        ? result.stdout.split('\n').filter(Boolean).slice(0, 200)
+        : isCommandMissing(result)
+          ? await listWorkspaceFilesFallback(workspacePath)
+          : [];
+
+      if (result.exitCode !== 0 && !isCommandMissing(result)) {
         throw new Error(
           `Unable to list files in ${workspacePath}: ${previewText(result.stderr || result.stdout)}`,
         );
       }
 
-      const files = result.stdout
-        .split('\n')
-        .filter(Boolean)
-        .slice(0, 200);
-
       return {
         summary: `Listed ${files.length} files from ${workspacePath}.`,
         workingDirectory: workspacePath,
         stdoutPreview: previewText(files.join('\n')),
-        details: { files },
+        details: {
+          files,
+          fallback: result.exitCode !== 0 ? 'node-filesystem' : undefined,
+        },
       };
     },
   },
@@ -252,18 +368,25 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         ? resolvePathWithinWorkspace(workspacePath, String(args.path))
         : workspacePath;
       const result = await runProcess('rg', ['-n', pattern, scopePath], workspacePath);
+      const matches = isCommandMissing(result)
+        ? await searchWorkspaceFilesFallback({ workspacePath, scopePath, pattern })
+        : [];
+      const output = isCommandMissing(result)
+        ? matches.join('\n')
+        : result.stdout || result.stderr;
 
       return {
         summary:
-          result.exitCode === 0
+          result.exitCode === 0 || matches.length > 0
             ? `Search completed for pattern ${pattern}.`
             : `Search found no matches for pattern ${pattern}.`,
         workingDirectory: workspacePath,
-        exitCode: result.exitCode,
-        stdoutPreview: previewText(result.stdout || result.stderr),
+        exitCode: isCommandMissing(result) ? (matches.length > 0 ? 0 : 1) : result.exitCode,
+        stdoutPreview: previewText(output),
         details: {
           pattern,
           scopePath,
+          fallback: isCommandMissing(result) ? 'node-filesystem' : undefined,
         },
       };
     },

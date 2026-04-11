@@ -1,6 +1,7 @@
-import React from 'react';
-import { X } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { ChevronDown, X } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import { StatusBadge } from './EnterpriseUI';
 import type { EnterpriseTone } from '../lib/enterprise';
 
@@ -121,3 +122,89 @@ export const StatusChipGroup = ({
     ))}
   </div>
 );
+
+export const AdvancedDisclosure = ({
+  title = 'Advanced',
+  description,
+  storageKey,
+  defaultOpen = false,
+  openSignal,
+  badge,
+  children,
+  className,
+  contentClassName,
+}: {
+  title?: string;
+  description?: React.ReactNode;
+  storageKey?: string;
+  defaultOpen?: boolean;
+  openSignal?: number;
+  badge?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+  contentClassName?: string;
+}) => {
+  const [isOpen, setIsOpen] = useState(() => {
+    if (!storageKey) {
+      return defaultOpen;
+    }
+
+    return (
+      readViewPreference<'open' | 'closed'>(
+        storageKey,
+        defaultOpen ? 'open' : 'closed',
+        { allowed: ['open', 'closed'] as const },
+      ) === 'open'
+    );
+  });
+
+  useEffect(() => {
+    if (storageKey) {
+      writeViewPreference(storageKey, isOpen ? 'open' : 'closed');
+    }
+  }, [isOpen, storageKey]);
+
+  useEffect(() => {
+    if (openSignal) {
+      setIsOpen(true);
+    }
+  }, [openSignal]);
+
+  return (
+    <section
+      className={cn(
+        'rounded-3xl border border-outline-variant/50 bg-white shadow-[0_10px_26px_rgba(12,23,39,0.04)]',
+        className,
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => setIsOpen(current => !current)}
+        className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
+        aria-expanded={isOpen}
+      >
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-bold text-on-surface">{title}</p>
+            {badge ? <span>{badge}</span> : null}
+          </div>
+          {description ? (
+            <p className="mt-1 text-xs leading-relaxed text-secondary">{description}</p>
+          ) : null}
+        </div>
+        <ChevronDown
+          size={18}
+          className={cn(
+            'shrink-0 text-outline transition-transform',
+            isOpen && 'rotate-180 text-primary',
+          )}
+        />
+      </button>
+      {isOpen ? (
+        <div className={cn('border-t border-outline-variant/40 px-5 py-5', contentClassName)}>
+          {children}
+        </div>
+      ) : null}
+    </section>
+  );
+};

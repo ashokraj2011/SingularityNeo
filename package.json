@@ -19,7 +19,6 @@
   },
   "dependencies": {
     "@github/copilot-sdk": "^0.2.1",
-    "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@types/pg": "^8.20.0",
     "@vitejs/plugin-react": "^5.0.4",

@@ -8,6 +8,7 @@ import type {
 import { CAPABILITIES } from '../constants';
 import type { RuntimeStatus } from './api';
 import type { EnterpriseTone } from './enterprise';
+import { isWorkspacePathInsideApprovedRoot } from './executionConfig';
 
 export type CapabilityReadinessStatus =
   | 'READY'
@@ -47,6 +48,23 @@ export interface UserFacingAgentHealth {
   tone: EnterpriseTone;
 }
 
+export type AdvancedToolId =
+  | 'memory'
+  | 'run-console'
+  | 'evals'
+  | 'skills'
+  | 'artifact-designer'
+  | 'tasks'
+  | 'studio';
+
+export interface AdvancedToolDescriptor {
+  id: AdvancedToolId;
+  label: string;
+  shortName: string;
+  path: string;
+  description: string;
+}
+
 export interface CapabilityExperienceModel {
   readinessItems: CapabilityReadinessItem[];
   readinessScore: number;
@@ -59,6 +77,58 @@ export interface CapabilityExperienceModel {
   completedWorkCount: number;
   latestOutputCount: number;
 }
+
+export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
+  {
+    id: 'memory',
+    label: 'Memory Explorer',
+    shortName: 'Memory',
+    path: '/memory',
+    description: 'Inspect learned sources, retrieval grounding, and memory provenance.',
+  },
+  {
+    id: 'run-console',
+    label: 'Run Console',
+    shortName: 'Runs',
+    path: '/run-console',
+    description: 'Open runtime telemetry, traces, policy decisions, and live run events.',
+  },
+  {
+    id: 'evals',
+    label: 'Eval Center',
+    shortName: 'Evals',
+    path: '/evals',
+    description: 'Review structured quality checks for agents and workflows.',
+  },
+  {
+    id: 'skills',
+    label: 'Skill Library',
+    shortName: 'Skills',
+    path: '/skills',
+    description: 'Manage reusable capability skills and specialist behaviors.',
+  },
+  {
+    id: 'artifact-designer',
+    label: 'Artifact Designer',
+    shortName: 'Artifacts',
+    path: '/artifact-designer',
+    description: 'Edit reusable artifact templates and handoff structures.',
+  },
+  {
+    id: 'tasks',
+    label: 'Tasks',
+    shortName: 'Tasks',
+    path: '/tasks',
+    description: 'Inspect lower-level workflow-managed task records.',
+  },
+  {
+    id: 'studio',
+    label: 'Studio',
+    shortName: 'Studio',
+    path: '/studio',
+    description: 'Open specialist authoring and skill composition tools.',
+  },
+];
 
 const hasText = (value?: string) => Boolean(value?.trim());
 
@@ -96,18 +166,19 @@ const hasDeploymentTargetSetup = (capability: Capability) => {
   const commandTemplateIds = new Set(
     capability.executionConfig.commandTemplates.map(template => template.id),
   );
-  const approvedPaths = new Set([
+  const approvedPaths = [
     capability.executionConfig.defaultWorkspacePath,
     ...capability.executionConfig.allowedWorkspacePaths,
     ...capability.localDirectories,
-  ].filter(Boolean));
+  ].filter(Boolean) as string[];
 
   return capability.executionConfig.deploymentTargets.every(
     target =>
       target.id &&
       target.label &&
       commandTemplateIds.has(target.commandTemplateId) &&
-      (!target.workspacePath || approvedPaths.has(target.workspacePath)),
+      (!target.workspacePath ||
+        isWorkspacePathInsideApprovedRoot(target.workspacePath, approvedPaths)),
   );
 };
 
@@ -513,6 +584,33 @@ export const getBusinessWorkStatusLabel = (status: string) => {
       return 'Failed';
     default:
       return status
+        .replace(/_/g, ' ')
+        .toLowerCase()
+        .replace(/\b\w/g, character => character.toUpperCase());
+  }
+};
+
+export const getBusinessEvidenceLabel = (value?: string) => {
+  if (!value) {
+    return 'Evidence';
+  }
+
+  switch (value) {
+    case 'APPROVAL_RECORD':
+      return 'Approval record';
+    case 'INPUT_NOTE':
+      return 'Input note';
+    case 'CONFLICT_RESOLUTION':
+      return 'Conflict resolution';
+    case 'CONTRARIAN_REVIEW':
+      return 'Contrarian review';
+    case 'HANDOFF':
+    case 'HANDOFF_PACKET':
+      return 'Handoff packet';
+    case 'RUN_SUMMARY':
+      return 'Run summary';
+    default:
+      return value
         .replace(/_/g, ' ')
         .toLowerCase()
         .replace(/\b\w/g, character => character.toUpperCase());

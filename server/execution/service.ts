@@ -75,30 +75,13 @@ import {
   recordUsageMetrics,
   startTelemetrySpan,
 } from '../telemetry';
+import { getCapabilityWorkspaceRoots } from '../workspacePaths';
 
 const MAX_AGENT_TOOL_LOOPS = 8;
 
 const createHistoryId = () => `HIST-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createLogId = () => `LOG-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createArtifactId = () => `ART-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
-
-const normalizeDirectoryPath = (value: string) => {
-  const trimmed = value.trim();
-  return trimmed ? path.resolve(trimmed) : '';
-};
-
-const getCapabilityWorkspaceRoots = (capability: Capability) =>
-  Array.from(
-    new Set(
-      [
-        capability.executionConfig.defaultWorkspacePath,
-        ...(capability.executionConfig.allowedWorkspacePaths || []),
-        ...(capability.localDirectories || []),
-      ]
-        .map(value => normalizeDirectoryPath(value || ''))
-        .filter(Boolean),
-    ),
-  );
 
 const detectWorkspaceProfile = (workspaceRoots: string[]) => {
   const sampledFiles: string[] = [];
@@ -864,8 +847,8 @@ const requestStepDecision = async ({
         workspaceProfile.sampledFiles.length
           ? `Observed workspace files: ${workspaceProfile.sampledFiles.join(', ')}`
           : null,
-        'When using workspace tools, prefer relative file paths and omit workspacePath unless you intentionally need a non-default approved workspace.',
-        'If you do provide workspacePath, it must exactly match one of the approved workspace paths.',
+        'When using workspace tools, prefer relative file paths and omit workspacePath unless you intentionally need a non-default approved workspace or approved subfolder.',
+        'If you do provide workspacePath, it must be the approved root or a child folder inside one approved workspace root. Do not use sibling paths or parent traversal.',
       ]
         .filter(Boolean)
         .join('\n')

@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
-  ArrowRight,
   Bot,
   CheckCircle2,
   ChevronRight,
   Crown,
+  Edit3,
   FileText,
   MessageSquare,
   Plus,
@@ -19,7 +19,7 @@ import { COPILOT_MODEL_OPTIONS, SKILL_LIBRARY } from '../constants';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { fetchRuntimeStatus, refreshAgentLearningProfile, type RuntimeStatus } from '../lib/api';
-import { getAgentHealth, getLearningStatusLabel } from '../lib/capabilityExperience';
+import { getAgentHealth } from '../lib/capabilityExperience';
 import { cn } from '../lib/utils';
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import { AgentLearningStatus, CapabilityAgent, Skill } from '../types';
@@ -27,9 +27,9 @@ import {
   DrawerShell,
   EmptyState,
   ModalShell,
-  PageHeader,
   StatusBadge,
 } from '../components/EnterpriseUI';
+import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
 type AgentDetailTab = 'overview' | 'learning' | 'skills' | 'sessions' | 'usage';
 
@@ -219,6 +219,8 @@ export default function Team() {
   const [createForm, setCreateForm] = useState(() =>
     createAgentForm(availableSkills, fallbackModelOptions[0]?.apiModelId || 'gpt-4.1-mini'),
   );
+  const [createAdvancedOpen, setCreateAdvancedOpen] = useState(false);
+  const [isEditingSelectedAgent, setIsEditingSelectedAgent] = useState(false);
   const [refreshingAgentId, setRefreshingAgentId] = useState('');
   const [isCreatingAgent, setIsCreatingAgent] = useState(false);
   const [isSavingAgent, setIsSavingAgent] = useState(false);
@@ -244,6 +246,13 @@ export default function Team() {
   );
   const customAgentCount = useMemo(
     () => workspace.agents.filter(agent => !agent.isBuiltIn && !agent.isOwner).length,
+    [workspace.agents],
+  );
+  const needsAttentionCount = useMemo(
+    () =>
+      workspace.agents.filter(agent =>
+        ['ERROR', 'STALE'].includes(agent.learningProfile.status),
+      ).length,
     [workspace.agents],
   );
   const totalSessionCount = useMemo(
@@ -423,10 +432,12 @@ export default function Team() {
 
   const selectAgent = (agentId: string) => {
     setSelectedAgentId(agentId);
+    setIsEditingSelectedAgent(false);
   };
 
   const openCreateModal = () => {
     setCreateForm(createAgentForm(availableSkills, runtimeDefaultModel));
+    setCreateAdvancedOpen(false);
     setCreateModalOpen(true);
   };
 
@@ -531,6 +542,7 @@ export default function Team() {
         'Agent updated',
         `${payload.name} settings were saved and learning was re-queued.`,
       );
+      setIsEditingSelectedAgent(false);
     } catch (error) {
       showError(
         'Agent update failed',
@@ -589,38 +601,36 @@ export default function Team() {
   const renderAgentRow = (agent: CapabilityAgent, options?: { pinned?: boolean }) => {
     const isSelected = selectedAgentId === agent.id;
     const isRefreshing = refreshingAgentId === agent.id;
-    const attachedSkills = availableSkills.filter(skill => agent.skillIds.includes(skill.id));
     const agentHealth = getAgentHealth(agent);
 
     return (
       <div
         key={agent.id}
         className={cn(
-          'workspace-list-row',
-          isSelected && 'workspace-list-row-active',
-          options?.pinned && 'border-primary/20 bg-primary/5',
+          'team-collaborator-row',
+          isSelected && 'team-collaborator-row-active',
+          options?.pinned && 'team-collaborator-row-pinned',
         )}
       >
         <button
           type="button"
           onClick={() => selectAgent(agent.id)}
-          className="flex min-w-0 flex-1 items-start gap-3 text-left"
+          className="flex min-w-0 flex-1 items-center gap-3 text-left"
         >
           <div
             className={cn(
-              'mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border',
+              'flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border',
               agent.isOwner
-                ? 'border-primary/15 bg-white text-primary'
+                ? 'border-primary/15 bg-primary/10 text-primary'
                 : 'border-outline-variant/30 bg-surface-container-low text-primary',
             )}
           >
             {agent.isOwner ? <Crown size={18} /> : <Bot size={18} />}
           </div>
-          <div className="min-w-0 flex-1 space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
               <p className="truncate text-sm font-bold text-on-surface">{agent.name}</p>
               {agent.isOwner ? <StatusBadge tone="brand">Owner</StatusBadge> : null}
-              {agent.isBuiltIn ? <StatusBadge tone="success">Built-in</StatusBadge> : null}
               <StatusBadge tone={getLearningTone(agent.learningProfile.status)}>
                 {agentHealth.label}
               </StatusBadge>
@@ -628,33 +638,15 @@ export default function Team() {
             <p className="truncate text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
               {agent.role}
             </p>
-            <div className="flex flex-wrap gap-2 text-xs text-secondary">
-              <span>{agent.model}</span>
+            <div className="mt-1 flex flex-wrap gap-2 text-xs text-secondary">
+              <span>{agent.isBuiltIn ? 'Built-in' : 'Custom'}</span>
               <span>{agent.sessionSummaries.length} sessions</span>
-              <span>{formatTimestamp(agent.learningProfile.refreshedAt)}</span>
-            </div>
-            <p className="line-clamp-2 text-sm leading-relaxed text-secondary">
-              {agent.objective || agentHealth.description}
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {attachedSkills.slice(0, 3).map(skill => (
-                <span
-                  key={skill.id}
-                  className="rounded-full bg-primary/5 px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.14em] text-primary"
-                >
-                  {skill.name}
-                </span>
-              ))}
-              {attachedSkills.length > 3 ? (
-                <span className="rounded-full bg-surface-container-low px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.14em] text-outline">
-                  +{attachedSkills.length - 3}
-                </span>
-              ) : null}
+              <span>Learned {formatTimestamp(agent.learningProfile.refreshedAt)}</span>
             </div>
           </div>
         </button>
 
-        <div className="flex shrink-0 items-center gap-2 self-start">
+        <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
             onClick={() => void handleRefreshLearning(agent)}
@@ -686,11 +678,11 @@ export default function Team() {
 
   const renderDetailTabContent = () => {
     if (!selectedAgent) {
-      return (
-        <EmptyState
-          title="Select an agent"
-          description="Choose a roster item to inspect its learning, runtime posture, and saved capability context."
-          icon={Users}
+          return (
+            <EmptyState
+              title="Select an agent"
+              description="Choose a roster item to inspect readiness, purpose, skills, and collaboration context."
+              icon={Users}
           action={
             <button
               type="button"
@@ -706,6 +698,181 @@ export default function Team() {
     }
 
     if (detailTab === 'overview') {
+      if (!isEditingSelectedAgent) {
+        const agentHealth = getAgentHealth(selectedAgent);
+        const attachedSkills = availableSkills.filter(skill =>
+          selectedAgent.skillIds.includes(skill.id),
+        );
+        const recentSessions = selectedAgent.sessionSummaries.slice(0, 3);
+
+        return (
+          <div className="space-y-5">
+            <section className="team-profile-hero">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <p className="form-kicker">Purpose</p>
+                  <p className="mt-2 text-base leading-7 text-on-surface">
+                    {selectedAgent.objective ||
+                      'This collaborator has not been given a clear purpose yet.'}
+                  </p>
+                </div>
+                <StatusBadge tone={agentHealth.tone}>{agentHealth.label}</StatusBadge>
+              </div>
+              <p className="mt-4 text-sm leading-7 text-secondary">
+                {agentHealth.description}
+              </p>
+            </section>
+
+            <div className="grid gap-3 md:grid-cols-4">
+              {[
+                { label: 'Role', value: selectedAgent.role },
+                {
+                  label: 'Last learned',
+                  value: formatTimestamp(selectedAgent.learningProfile.refreshedAt),
+                },
+                {
+                  label: 'Sources',
+                  value: selectedAgent.learningProfile.sourceCount || 0,
+                },
+                { label: 'Sessions', value: selectedAgent.sessionSummaries.length },
+              ].map(item => (
+                <div key={item.label} className="team-mini-metric">
+                  <p className="workspace-meta-label">{item.label}</p>
+                  <p className="workspace-meta-value">{item.value}</p>
+                </div>
+              ))}
+            </div>
+
+            <AdvancedDisclosure
+              title="Technical details"
+              description="Model, provider, token cap, and usage stay available for technical operators."
+              storageKey="singularity.team.technical.open"
+              badge={<StatusBadge tone="neutral">Advanced</StatusBadge>}
+            >
+              <div className="grid gap-3 md:grid-cols-4">
+                {[
+                  { label: 'Provider', value: selectedAgent.provider },
+                  { label: 'Model', value: selectedAgent.model },
+                  {
+                    label: 'Token cap',
+                    value: selectedAgent.tokenLimit.toLocaleString(),
+                  },
+                  {
+                    label: 'Usage',
+                    value: `${selectedAgent.usage.totalTokens.toLocaleString()} tokens`,
+                  },
+                ].map(item => (
+                  <div key={item.label} className="workspace-meta-card">
+                    <p className="workspace-meta-label">{item.label}</p>
+                    <p className="workspace-meta-value">{item.value}</p>
+                  </div>
+                ))}
+              </div>
+            </AdvancedDisclosure>
+
+            <section className="workspace-surface">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="workspace-section-title">Learning summary</p>
+                  <p className="workspace-section-copy">
+                    What this collaborator currently knows about the capability.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDetailTab('learning')}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  View learning
+                </button>
+              </div>
+              <p className="mt-4 text-sm leading-7 text-secondary">
+                {getLearningSummaryText(selectedAgent)}
+              </p>
+            </section>
+
+            <div className="grid gap-4 xl:grid-cols-2">
+              <section className="workspace-surface">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="workspace-section-title">Skills</p>
+                    <p className="workspace-section-copy">
+                      {attachedSkills.length} capability skills attached.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDetailTab('skills')}
+                    className="text-sm font-bold text-primary"
+                  >
+                    Manage
+                  </button>
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {attachedSkills.slice(0, 6).map(skill => (
+                    <span
+                      key={skill.id}
+                      className="rounded-full bg-primary/5 px-3 py-1.5 text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-primary"
+                    >
+                      {skill.name}
+                    </span>
+                  ))}
+                  {attachedSkills.length === 0 ? (
+                    <p className="text-sm text-secondary">No skills attached yet.</p>
+                  ) : null}
+                  {attachedSkills.length > 6 ? (
+                    <span className="rounded-full bg-surface-container-low px-3 py-1.5 text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-outline">
+                      +{attachedSkills.length - 6}
+                    </span>
+                  ) : null}
+                </div>
+              </section>
+
+              <section className="workspace-surface">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="workspace-section-title">Recent sessions</p>
+                    <p className="workspace-section-copy">
+                      Saved collaboration contexts this agent can resume.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDetailTab('sessions')}
+                    className="text-sm font-bold text-primary"
+                  >
+                    View all
+                  </button>
+                </div>
+                <div className="mt-4 space-y-2">
+                  {recentSessions.length > 0 ? (
+                    recentSessions.map(session => (
+                      <div
+                        key={`${session.scope}:${session.scopeId || 'general'}`}
+                        className="rounded-2xl bg-surface-container-low px-4 py-3"
+                      >
+                        <p className="text-sm font-bold text-on-surface">
+                          {session.scope}
+                          {session.scopeId ? ` · ${session.scopeId}` : ''}
+                        </p>
+                        <p className="mt-1 text-xs text-secondary">
+                          {session.requestCount} requests · Last used{' '}
+                          {formatTimestamp(session.lastUsedAt)}
+                        </p>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-secondary">
+                      No resumable sessions have been recorded yet.
+                    </p>
+                  )}
+                </div>
+              </section>
+            </div>
+          </div>
+        );
+      }
+
       return (
         <div className="space-y-5">
           {renderRuntimeNotice(detailModelUnavailable)}
@@ -819,7 +986,7 @@ export default function Team() {
             {[
               {
                 label: 'Status',
-                value: getLearningStatusLabel(selectedAgent.learningProfile.status),
+                value: getAgentHealth(selectedAgent).label,
               },
               { label: 'Sources', value: selectedAgent.learningProfile.sourceCount },
               { label: 'Highlights', value: selectedAgent.learningProfile.highlights.length },
@@ -881,13 +1048,17 @@ export default function Team() {
             </div>
           </div>
 
-          <div className="workspace-surface">
-            <p className="workspace-section-title">Context block</p>
-            <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-secondary">
+          <AdvancedDisclosure
+            title="Technical context block"
+            description="The reusable context sent to Copilot when this collaborator starts or resumes work."
+            storageKey="singularity.team.learning.context.open"
+            badge={<StatusBadge tone="neutral">Advanced</StatusBadge>}
+          >
+            <p className="whitespace-pre-wrap text-sm leading-7 text-secondary">
               {selectedAgent.learningProfile.contextBlock ||
                 'The reusable Copilot context block will appear here after learning completes.'}
             </p>
-          </div>
+          </AdvancedDisclosure>
 
           {selectedAgent.learningProfile.lastError ? (
             <div className="workspace-inline-alert workspace-inline-alert-danger">
@@ -903,6 +1074,57 @@ export default function Team() {
     }
 
     if (detailTab === 'skills') {
+      if (!isEditingSelectedAgent) {
+        const attachedSkills = availableSkills.filter(skill =>
+          selectedAgent.skillIds.includes(skill.id),
+        );
+
+        return (
+          <div className="space-y-4">
+            <div className="workspace-surface">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="workspace-section-title">Attached skills</p>
+                  <p className="workspace-section-copy">
+                    These skills shape how this collaborator contributes to the capability.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingSelectedAgent(true)}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  <Edit3 size={16} />
+                  Edit skills
+                </button>
+              </div>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              {attachedSkills.length > 0 ? (
+                attachedSkills.map(skill => (
+                  <div key={skill.id} className="team-skill-card">
+                    <p className="text-sm font-bold text-on-surface">{skill.name}</p>
+                    <p className="mt-1 text-sm leading-relaxed text-secondary">
+                      {skill.description}
+                    </p>
+                    <p className="mt-3 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                      {skill.category}
+                    </p>
+                  </div>
+                ))
+              ) : (
+                <EmptyState
+                  title="No skills attached"
+                  description="Open edit mode to attach capability skills to this collaborator."
+                  icon={FileText}
+                />
+              )}
+            </div>
+          </div>
+        );
+      }
+
       return (
         <div className="space-y-4">
           <div className="workspace-surface">
@@ -1114,32 +1336,60 @@ export default function Team() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
-        eyebrow="Capability Team"
-        context={activeCapability.id}
-        title={`${activeCapability.name} Agent Workspace`}
-        description="Review the capability roster, inspect one agent at a time, and manage learning, skills, sessions, and runtime posture from a focused operator workspace."
-        actions={
-          <>
-            <button
-              type="button"
-              onClick={() => navigate('/chat')}
-              className="enterprise-button enterprise-button-secondary"
-            >
-              <MessageSquare size={16} />
-              Open collaboration
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate('/capabilities/metadata')}
-              className="enterprise-button enterprise-button-primary"
-            >
-              <ArrowRight size={16} />
-              Capability metadata
-            </button>
-          </>
-        }
-      />
+      <section className="team-command-bar">
+        <div className="flex min-w-0 flex-1 items-center gap-4">
+          <div className="team-command-icon">
+            <Users size={20} />
+          </div>
+          <div className="min-w-0">
+            <p className="form-kicker">Capability Team</p>
+            <h1 className="truncate text-2xl font-extrabold tracking-tight text-primary">
+              {activeCapability.name}
+            </h1>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <StatusBadge tone="brand">{workspace.agents.length} collaborators</StatusBadge>
+              <StatusBadge tone="success">{learningReadyCount} ready</StatusBadge>
+              <StatusBadge tone={needsAttentionCount > 0 ? 'warning' : 'neutral'}>
+                {needsAttentionCount} need attention
+              </StatusBadge>
+              <StatusBadge tone="neutral">{totalSessionCount} sessions</StatusBadge>
+            </div>
+          </div>
+        </div>
+
+        <label className="relative min-w-0 flex-1 lg:max-w-md">
+          <Search
+            size={16}
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-outline"
+          />
+          <input
+            value={searchQuery}
+            onChange={event => setSearchQuery(event.target.value)}
+            placeholder="Search collaborators"
+            className="enterprise-input pl-10"
+          />
+        </label>
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => navigate('/chat')}
+            className="enterprise-button enterprise-button-secondary"
+          >
+            <MessageSquare size={16} />
+            Chat
+          </button>
+          <button
+            type="button"
+            onClick={openCreateModal}
+            disabled={bootStatus !== 'ready'}
+            className="enterprise-button enterprise-button-primary"
+          >
+            <Plus size={16} />
+            Create agent
+          </button>
+        </div>
+      </section>
 
       {bootStatus !== 'ready' ? (
         <div className="workspace-inline-alert workspace-inline-alert-warning">
@@ -1165,90 +1415,40 @@ export default function Team() {
 
       <div className="grid gap-5 xl:grid-cols-[minmax(320px,420px)_minmax(0,1fr)]">
         <section className="space-y-4">
-          <div className="workspace-command-strip">
-            <div className="flex min-w-0 flex-1 items-center gap-3">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-primary/10 bg-primary/10 text-primary">
-                <Users size={20} />
-              </div>
-              <div className="min-w-0">
-                <p className="text-sm font-bold text-on-surface">Agent roster</p>
-                <p className="text-sm text-secondary">
-                  {workspace.agents.length} agents · {learningReadyCount} ready ·{' '}
-                  {totalSessionCount} stored sessions
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={openCreateModal}
-              disabled={bootStatus !== 'ready'}
-              className="enterprise-button enterprise-button-primary"
-            >
-              <Plus size={16} />
-              Create agent
-            </button>
-          </div>
-
-          <div className="workspace-command-strip">
-            <label className="relative block min-w-0 flex-1">
-              <Search
-                size={16}
-                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-outline"
-              />
-              <input
-                value={searchQuery}
-                onChange={event => setSearchQuery(event.target.value)}
-                placeholder="Search agents by name, role, objective, or model"
-                className="enterprise-input pl-10"
-              />
-            </label>
-            <div className="flex flex-wrap gap-2">
-              <StatusBadge tone="brand">{customAgentCount} custom</StatusBadge>
-              <StatusBadge tone="neutral">{activeChatAgent?.name || 'No chat agent'} active</StatusBadge>
-            </div>
-          </div>
-
-          <div className="workspace-surface space-y-3">
+          <div className="team-roster-panel">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <p className="workspace-section-title">Capability owner</p>
+                <p className="workspace-section-title">Collaborators</p>
                 <p className="workspace-section-copy">
-                  Pinned at the top, but managed with the same detail workspace as every other agent.
+                  Owner is pinned first. Select anyone to review purpose, readiness, and sessions.
                 </p>
               </div>
-              <StatusBadge tone="brand">Pinned</StatusBadge>
-            </div>
-            {ownerAgent ? (
-              renderAgentRow(ownerAgent, { pinned: true })
-            ) : (
-              <EmptyState
-                title="No owner agent found"
-                description="This capability needs an owning agent before the rest of the team can be managed."
-                icon={Crown}
-              />
-            )}
-          </div>
-
-          <div className="workspace-surface space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="workspace-section-title">Team roster</p>
-                <p className="workspace-section-copy">
-                  Select an agent to inspect or edit it in the detail pane.
-                </p>
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge tone="brand">{customAgentCount} custom</StatusBadge>
+                <StatusBadge tone="neutral">
+                  {activeChatAgent?.name || 'No chat agent'} active
+                </StatusBadge>
               </div>
-              <StatusBadge tone="info">{filteredRoster.length} visible</StatusBadge>
             </div>
 
-            <div className="space-y-3">
+            <div className="mt-4 space-y-2">
+              {ownerAgent ? (
+                renderAgentRow(ownerAgent, { pinned: true })
+              ) : (
+                <EmptyState
+                  title="No owner agent found"
+                  description="This capability needs an owning agent before the rest of the team can be managed."
+                  icon={Crown}
+                />
+              )}
               {filteredRoster.length > 0 ? (
                 filteredRoster.map(agent => renderAgentRow(agent))
               ) : (
-                <EmptyState
-                  title="No agents match this search"
-                  description="Try a different keyword or clear the filter to return to the full roster."
-                  icon={Search}
-                />
+                <div className="rounded-2xl border border-dashed border-outline-variant/50 bg-surface-container-low px-4 py-6 text-center text-sm text-secondary">
+                  {searchQuery.trim()
+                    ? 'No collaborators match this search.'
+                    : 'No specialist agents have been added yet.'}
+                </div>
               )}
             </div>
           </div>
@@ -1269,7 +1469,7 @@ export default function Team() {
                         <StatusBadge tone="info">Custom</StatusBadge>
                       )}
                       <StatusBadge tone={getLearningTone(selectedAgent.learningProfile.status)}>
-                        {getLearningStatusLabel(selectedAgent.learningProfile.status)}
+                        {getAgentHealth(selectedAgent).label}
                       </StatusBadge>
                       {detailFormIsDirty ? <StatusBadge tone="warning">Unsaved</StatusBadge> : null}
                     </div>
@@ -1277,12 +1477,24 @@ export default function Team() {
                       {selectedAgent.name}
                     </h2>
                     <p className="mt-1 text-sm text-secondary">{selectedAgent.role}</p>
-                    <p className="mt-3 max-w-3xl text-sm leading-relaxed text-secondary">
-                      {selectedAgent.objective}
-                    </p>
                   </div>
 
                   <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isEditingSelectedAgent) {
+                          setIsEditingSelectedAgent(false);
+                          setDetailTab('overview');
+                          return;
+                        }
+                        setIsEditingSelectedAgent(true);
+                      }}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      {isEditingSelectedAgent ? <X size={16} /> : <Edit3 size={16} />}
+                      {isEditingSelectedAgent ? 'View profile' : 'Edit agent'}
+                    </button>
                     <button
                       type="button"
                       onClick={() => void openAgentInChat(selectedAgent)}
@@ -1333,38 +1545,44 @@ export default function Team() {
                 {renderDetailTabContent()}
               </div>
 
-              <div className="flex flex-col gap-3 border-t border-outline-variant/40 bg-surface-container-low/60 px-6 py-4 lg:flex-row lg:items-center lg:justify-between">
-                <p className="text-sm text-secondary">
-                  {detailFormIsDirty
-                    ? 'You have unsaved agent changes in this detail pane.'
-                    : 'Agent details are in sync with the latest capability bundle.'}
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => selectedAgent && setDetailForm(agentToForm(selectedAgent))}
-                    disabled={!detailFormIsDirty}
-                    className="enterprise-button enterprise-button-secondary"
-                  >
-                    Reset changes
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleSaveSelectedAgent()}
-                    disabled={!detailCanSave || !detailFormIsDirty || isSavingAgent || bootStatus !== 'ready'}
-                    className="enterprise-button enterprise-button-primary"
-                  >
-                    {isSavingAgent ? <RefreshCw size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
-                    Save changes
-                  </button>
+              {isEditingSelectedAgent || detailFormIsDirty ? (
+                <div className="flex flex-col gap-3 border-t border-outline-variant/40 bg-surface-container-low/60 px-6 py-4 lg:flex-row lg:items-center lg:justify-between">
+                  <p className="text-sm text-secondary">
+                    {detailFormIsDirty
+                      ? 'You have unsaved agent changes in this detail pane.'
+                      : 'Edit mode is open. Make changes, then save or return to profile view.'}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedAgent) {
+                          setDetailForm(agentToForm(selectedAgent));
+                        }
+                        setIsEditingSelectedAgent(false);
+                      }}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      Reset
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveSelectedAgent()}
+                      disabled={!detailCanSave || !detailFormIsDirty || isSavingAgent || bootStatus !== 'ready'}
+                      className="enterprise-button enterprise-button-primary"
+                    >
+                      {isSavingAgent ? <RefreshCw size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+                      Save changes
+                    </button>
+                  </div>
                 </div>
-              </div>
+              ) : null}
             </>
           ) : (
             <div className="flex h-full items-center justify-center p-8">
               <EmptyState
                 title="No agent selected"
-                description="Pick a roster row on the left to inspect its learning, skills, sessions, and runtime settings."
+                description="Pick a roster row on the left to inspect readiness, purpose, skills, and sessions."
                 icon={Bot}
                 action={
                   <button
@@ -1442,19 +1660,6 @@ export default function Team() {
                     ))}
                   </select>
                 </label>
-                <label className="space-y-2">
-                  <span className="field-label">Token limit</span>
-                  <input
-                    type="number"
-                    min={1000}
-                    step={500}
-                    value={createForm.tokenLimit}
-                    onChange={event =>
-                      setCreateForm(prev => ({ ...prev, tokenLimit: event.target.value }))
-                    }
-                    className="field-input"
-                  />
-                </label>
                 <label className="space-y-2 md:col-span-2">
                   <span className="field-label">Objective</span>
                   <textarea
@@ -1466,45 +1671,71 @@ export default function Team() {
                     className="field-textarea"
                   />
                 </label>
-                <label className="space-y-2 md:col-span-2">
-                  <span className="field-label">System prompt</span>
-                  <textarea
-                    value={createForm.systemPrompt}
-                    onChange={event =>
-                      setCreateForm(prev => ({ ...prev, systemPrompt: event.target.value }))
-                    }
-                    placeholder="If left blank, the capability-aware default prompt will be used."
-                    className="field-textarea"
-                  />
-                </label>
-                <label className="space-y-2">
-                  <span className="field-label">Documentation sources</span>
-                  <textarea
-                    value={createForm.documentationSources}
-                    onChange={event =>
-                      setCreateForm(prev => ({
-                        ...prev,
-                        documentationSources: event.target.value,
-                      }))
-                    }
-                    placeholder={'Confluence capability page\nJira board\nArchitecture runbook'}
-                    className="field-textarea"
-                  />
-                </label>
-                <label className="space-y-2">
-                  <span className="field-label">Learning scope</span>
-                  <textarea
-                    value={createForm.learningNotes}
-                    onChange={event =>
-                      setCreateForm(prev => ({ ...prev, learningNotes: event.target.value }))
-                    }
-                    placeholder={'Pricing policy changes\nAPI governance updates'}
-                    className="field-textarea"
-                  />
-                </label>
               </div>
 
-              <div className="space-y-4 rounded-3xl border border-outline-variant/20 bg-surface-container-low p-5">
+              <button
+                type="button"
+                onClick={() => setCreateAdvancedOpen(current => !current)}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                {createAdvancedOpen ? 'Hide advanced setup' : 'Show advanced setup'}
+              </button>
+
+              {createAdvancedOpen ? (
+                <>
+                  <div className="grid gap-4 rounded-3xl border border-outline-variant/20 bg-surface-container-low p-5 md:grid-cols-2">
+                    <label className="space-y-2">
+                      <span className="field-label">Token limit</span>
+                      <input
+                        type="number"
+                        min={1000}
+                        step={500}
+                        value={createForm.tokenLimit}
+                        onChange={event =>
+                          setCreateForm(prev => ({ ...prev, tokenLimit: event.target.value }))
+                        }
+                        className="field-input"
+                      />
+                    </label>
+                    <label className="space-y-2 md:col-span-2">
+                      <span className="field-label">System prompt</span>
+                      <textarea
+                        value={createForm.systemPrompt}
+                        onChange={event =>
+                          setCreateForm(prev => ({ ...prev, systemPrompt: event.target.value }))
+                        }
+                        placeholder="If left blank, the capability-aware default prompt will be used."
+                        className="field-textarea"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">Documentation sources</span>
+                      <textarea
+                        value={createForm.documentationSources}
+                        onChange={event =>
+                          setCreateForm(prev => ({
+                            ...prev,
+                            documentationSources: event.target.value,
+                          }))
+                        }
+                        placeholder={'Confluence capability page\nJira board\nArchitecture runbook'}
+                        className="field-textarea"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">Learning scope</span>
+                      <textarea
+                        value={createForm.learningNotes}
+                        onChange={event =>
+                          setCreateForm(prev => ({ ...prev, learningNotes: event.target.value }))
+                        }
+                        placeholder={'Pricing policy changes\nAPI governance updates'}
+                        className="field-textarea"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="space-y-4 rounded-3xl border border-outline-variant/20 bg-surface-container-low p-5">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="workspace-section-title">Attached skills</p>
@@ -1558,6 +1789,8 @@ export default function Team() {
                   })}
                 </div>
               </div>
+                </>
+              ) : null}
 
               <div className="flex flex-col gap-3 border-t border-outline-variant/40 pt-6 lg:flex-row lg:items-center lg:justify-between">
                 <p className="text-sm text-secondary">
