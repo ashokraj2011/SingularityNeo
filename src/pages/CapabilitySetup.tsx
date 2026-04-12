@@ -12,19 +12,20 @@ import {
   Layers,
   Link2,
   Rocket,
-  ShieldCheck,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import {
   CommandTemplateEditor,
   DeploymentTargetEditor,
 } from '../components/CapabilityExecutionSetup';
+import { AdvancedDisclosure } from '../components/WorkspaceUI';
 import { StatusBadge } from '../components/EnterpriseUI';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { createDefaultCapabilityLifecycle } from '../lib/capabilityLifecycle';
 import {
   getDefaultExecutionConfig,
+  hasMeaningfulExecutionCommandTemplate,
   isWorkspacePathInsideApprovedRoot,
 } from '../lib/executionConfig';
 import {
@@ -103,40 +104,31 @@ const createDraft = (): CapabilityOnboardingDraft => ({
 const steps = [
   {
     id: 'profile',
-    title: 'Profile',
-    description: 'Business identity and ownership.',
+    title: 'Start',
+    description: 'Name the capability and describe what it owns.',
     icon: Layers,
   },
   {
-    id: 'connectors',
-    title: 'Connectors',
-    description: 'GitHub, Jira, and Confluence references.',
-    icon: GitBranch,
+    id: 'sources',
+    title: 'Learning sources',
+    description: 'Add code, docs, or approved paths the owning agent can learn from.',
+    icon: Link2,
   },
   {
-    id: 'workspace',
-    title: 'Workspace Approval',
-    description: 'Approved local paths for agent execution.',
-    icon: ShieldCheck,
-  },
-  {
-    id: 'commands',
-    title: 'Commands',
-    description: 'Approved build, test, docs, and deploy commands.',
+    id: 'execution',
+    title: 'Execution setup',
+    description: 'Optional commands and deployment targets for later real execution.',
     icon: KeyRound,
   },
   {
-    id: 'deploy',
-    title: 'Deployment & Review',
-    description: 'Approval-gated targets and final create.',
+    id: 'review',
+    title: 'Review & create',
+    description: 'Create now and let agents enrich the rest during initial learning.',
     icon: Rocket,
   },
 ] as const;
 
 type StepId = (typeof steps)[number]['id'];
-
-const getValidationTone = (ready: boolean, warning = false) =>
-  ready ? 'success' : warning ? 'warning' : 'neutral';
 
 export default function CapabilitySetup() {
   const navigate = useNavigate();
@@ -177,24 +169,39 @@ export default function CapabilitySetup() {
     [draft.allowedWorkspacePaths, draft.defaultWorkspacePath, draft.localDirectories],
   );
 
-  const profileReady = Boolean(
-    draft.name.trim() &&
-      draft.domain.trim() &&
-      draft.businessUnit.trim() &&
-      draft.description.trim() &&
-      draft.businessOutcome.trim() &&
-      draft.successMetrics.length > 0,
+  const minimumReady = Boolean(draft.name.trim() && draft.description.trim());
+  const hasBusinessCharterDetails = Boolean(
+    draft.businessOutcome.trim() ||
+      draft.successMetrics.length > 0 ||
+      draft.requiredEvidenceKinds.length > 0 ||
+      draft.definitionOfDone.trim() ||
+      draft.operatingPolicySummary.trim(),
+  );
+  const hasGroundingSource = Boolean(
+    draft.githubRepositories.length ||
+      draft.jiraBoardLink.trim() ||
+      draft.confluenceLink.trim() ||
+      draft.documentationNotes.trim() ||
+      approvedWorkspacePaths.length,
   );
   const connectorShapeReady =
     draft.githubRepositories.every(isOptionalConnectorUrl) &&
     isOptionalConnectorUrl(draft.jiraBoardLink) &&
     isOptionalConnectorUrl(draft.confluenceLink);
   const connectorReady =
-    connectorShapeReady &&
-    (!connectorValidation || connectorValidation.items.every(item => item.valid));
+    !draft.githubRepositories.length &&
+    !draft.jiraBoardLink.trim() &&
+    !draft.confluenceLink.trim()
+      ? true
+      : connectorShapeReady &&
+        (!connectorValidation || connectorValidation.items.every(item => item.valid));
   const workspaceReady =
     approvedWorkspacePaths.length === 0 ||
     approvedWorkspacePaths.every(path => pathValidation[path]?.valid);
+  const sourcesReady = hasGroundingSource ? connectorReady && workspaceReady : true;
+  const hasExecutionSetup =
+    hasMeaningfulExecutionCommandTemplate(draft.commandTemplates) ||
+    draft.deploymentTargets.length > 0;
   const commandReady =
     new Set(draft.commandTemplates.map(template => template.id)).size ===
       draft.commandTemplates.length &&
@@ -216,20 +223,29 @@ export default function CapabilitySetup() {
         isWorkspacePathInsideApprovedRoot(target.workspacePath, approvedWorkspacePaths)) &&
       deploymentValidation[target.id]?.valid !== false,
     );
-  const canCreate =
-    profileReady &&
-    connectorReady &&
-    workspaceReady &&
-    commandReady &&
-    deploymentReady &&
-    bootStatus === 'ready';
+  const executionReady = hasExecutionSetup ? commandReady && deploymentReady : true;
+  const canCreate = minimumReady && bootStatus === 'ready';
 
-  const stepReadiness: Record<StepId, boolean> = {
-    profile: profileReady,
-    connectors: connectorReady,
-    workspace: workspaceReady,
-    commands: commandReady,
-    deploy: deploymentReady,
+  const stepStates: Record<
+    StepId,
+    { label: string; tone: 'success' | 'neutral' | 'warning'; ready: boolean }
+  > = {
+    profile: minimumReady
+      ? { label: 'Ready', tone: 'success', ready: true }
+      : { label: 'Required', tone: 'neutral', ready: false },
+    sources: !hasGroundingSource
+      ? { label: 'Recommended', tone: 'neutral', ready: false }
+      : sourcesReady
+      ? { label: 'Ready', tone: 'success', ready: true }
+      : { label: 'Review', tone: 'warning', ready: false },
+    execution: !hasExecutionSetup
+      ? { label: 'Later', tone: 'neutral', ready: false }
+      : executionReady
+      ? { label: 'Ready', tone: 'success', ready: true }
+      : { label: 'Review', tone: 'warning', ready: false },
+    review: canCreate
+      ? { label: 'Ready', tone: 'success', ready: true }
+      : { label: 'Pending', tone: 'neutral', ready: false },
   };
 
   const updateDraft = (updates: Partial<CapabilityOnboardingDraft>) => {
@@ -342,7 +358,7 @@ export default function CapabilitySetup() {
 
   const handleCreate = async () => {
     if (!canCreate) {
-      setSubmitError('Complete required onboarding checks before creating the capability.');
+      setSubmitError('Add a capability name and purpose before creating the capability.');
       return;
     }
 
@@ -417,12 +433,13 @@ export default function CapabilitySetup() {
           </button>
           <p className="mt-5 form-kicker">Enterprise onboarding</p>
           <h1 className="mt-2 text-4xl font-extrabold tracking-tight text-primary">
-            Create a real capability workspace
+            Start a capability without over-configuring it
           </h1>
           <p className="mt-3 max-w-3xl text-sm leading-relaxed text-secondary">
-            Configure profile, enterprise references, approved paths, command
-            templates, and deployment targets before the capability is created.
-            No durable capability is written until final review.
+            Start with the business purpose and any code or documentation you
+            already have. The owning agent can infer a lot during initial
+            learning, so execution rules, evidence expectations, and deployment
+            details can be layered in later.
           </p>
         </div>
 
@@ -436,8 +453,8 @@ export default function CapabilitySetup() {
                 Capability Owning Agent
               </p>
               <p className="mt-1 text-xs leading-relaxed text-secondary">
-                Created only after final submit and scoped to this real
-                enterprise workspace.
+                Created after final submit and grounded first in the charter,
+                then in the repos, docs, and approved paths you attach here.
               </p>
             </div>
           </div>
@@ -465,7 +482,7 @@ export default function CapabilitySetup() {
           {steps.map((step, index) => {
             const Icon = step.icon;
             const isActive = step.id === activeStepId;
-            const isReady = stepReadiness[step.id];
+            const stepState = stepStates[step.id];
 
             return (
               <button
@@ -487,8 +504,8 @@ export default function CapabilitySetup() {
                       <p className="text-sm font-bold text-on-surface">
                         {index + 1}. {step.title}
                       </p>
-                      <StatusBadge tone={getValidationTone(isReady)}>
-                        {isReady ? 'Ready' : 'Setup'}
+                      <StatusBadge tone={stepState.tone}>
+                        {stepState.label}
                       </StatusBadge>
                     </div>
                     <p className="mt-1 text-xs leading-relaxed text-secondary">
@@ -517,154 +534,186 @@ export default function CapabilitySetup() {
                 {activeStep.description}
               </p>
             </div>
-            <StatusBadge tone={getValidationTone(stepReadiness[activeStep.id])}>
-              {stepReadiness[activeStep.id] ? 'Ready' : 'Needs setup'}
+            <StatusBadge tone={stepStates[activeStep.id].tone}>
+              {stepStates[activeStep.id].label}
             </StatusBadge>
           </div>
 
           <div className="mt-6">
             {activeStepId === 'profile' && (
-              <div className="grid gap-5 md:grid-cols-2">
-                <label className="space-y-2">
-                  <span className="form-kicker">Capability name</span>
-                  <input
-                    value={draft.name}
-                    onChange={event => updateDraft({ name: event.target.value })}
-                    placeholder="Payments Command Center"
-                    className="field-input"
-                  />
-                </label>
-                <label className="space-y-2">
-                  <span className="form-kicker">Domain</span>
-                  <input
-                    value={draft.domain}
-                    onChange={event => updateDraft({ domain: event.target.value })}
-                    placeholder="Payments"
-                    className="field-input"
-                  />
-                </label>
-                <label className="space-y-2">
-                  <span className="form-kicker">Parent capability</span>
-                  <select
-                    value={draft.parentCapabilityId}
-                    onChange={event =>
-                      updateDraft({ parentCapabilityId: event.target.value })
-                    }
-                    className="field-select"
-                  >
-                    <option value="">Standalone capability</option>
-                    {capabilities.map(capability => (
-                      <option key={capability.id} value={capability.id}>
-                        {capability.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="space-y-2">
-                  <span className="form-kicker">Business unit</span>
-                  <input
-                    value={draft.businessUnit}
-                    onChange={event =>
-                      updateDraft({ businessUnit: event.target.value })
-                    }
-                    placeholder="Digital Platforms"
-                    className="field-input"
-                  />
-                </label>
-                <label className="space-y-2 md:col-span-2">
-                  <span className="form-kicker">Owner team</span>
-                  <input
-                    value={draft.ownerTeam}
-                    onChange={event =>
-                      updateDraft({ ownerTeam: event.target.value })
-                    }
-                    placeholder="Capability Strategy Office"
-                    className="field-input"
-                  />
-                </label>
-                <label className="space-y-2 md:col-span-2">
-                  <span className="form-kicker">Capability purpose</span>
-                  <textarea
-                    value={draft.description}
-                    onChange={event =>
-                      updateDraft({ description: event.target.value })
-                    }
-                    placeholder="Describe the business scope, systems, and outcome this capability owns."
-                    className="field-textarea h-32"
-                  />
-                </label>
-                <label className="space-y-2 md:col-span-2">
-                  <span className="form-kicker">Business outcome</span>
-                  <textarea
-                    value={draft.businessOutcome}
-                    onChange={event =>
-                      updateDraft({ businessOutcome: event.target.value })
-                    }
-                    placeholder="Explain the business result this capability must reliably produce."
-                    className="field-textarea h-28"
-                  />
-                </label>
-                <label className="space-y-2">
-                  <span className="form-kicker">Success metrics</span>
-                  <textarea
-                    value={listToText(draft.successMetrics)}
-                    onChange={event =>
-                      updateDraft({ successMetrics: textToList(event.target.value) })
-                    }
-                    placeholder={'Cycle time reduced by 30%\nEvery completed work item produces evidence'}
-                    className="field-textarea h-32"
-                  />
-                </label>
-                <label className="space-y-2">
-                  <span className="form-kicker">Required evidence</span>
-                  <textarea
-                    value={listToText(draft.requiredEvidenceKinds)}
-                    onChange={event =>
-                      updateDraft({
-                        requiredEvidenceKinds: textToList(event.target.value),
-                      })
-                    }
-                    placeholder={'Requirements pack\nTest evidence\nRelease decision'}
-                    className="field-textarea h-32"
-                  />
-                </label>
-                <label className="space-y-2">
-                  <span className="form-kicker">Definition of done</span>
-                  <textarea
-                    value={draft.definitionOfDone}
-                    onChange={event =>
-                      updateDraft({ definitionOfDone: event.target.value })
-                    }
-                    placeholder="Describe what must be true before this capability can call work done."
-                    className="field-textarea h-28"
-                  />
-                </label>
-                <label className="space-y-2">
-                  <span className="form-kicker">Operating policy summary</span>
-                  <textarea
-                    value={draft.operatingPolicySummary}
-                    onChange={event =>
-                      updateDraft({ operatingPolicySummary: event.target.value })
-                    }
-                    placeholder="Summarize approvals, workspace constraints, and release expectations."
-                    className="field-textarea h-28"
-                  />
-                </label>
-              </div>
-            )}
-
-            {activeStepId === 'connectors' && (
-              <div className="space-y-5">
+              <div className="space-y-6">
                 <div className="rounded-3xl border border-primary/10 bg-primary/5 px-5 py-4">
                   <div className="flex items-start gap-3">
-                    <Link2 size={18} className="mt-0.5 text-primary" />
+                    <Bot size={18} className="mt-0.5 text-primary" />
                     <p className="text-sm leading-relaxed text-secondary">
-                      Connector setup v1 validates enterprise references only.
-                      OAuth and token sync can layer on later without changing
-                      the capability schema.
+                      Start with the capability name and purpose. During initial
+                      learning, the owning agent can infer domain vocabulary,
+                      likely stakeholders, candidate evidence, and execution
+                      hints from the codebase and documentation you attach next.
                     </p>
                   </div>
                 </div>
+
+                <div className="grid gap-5 md:grid-cols-2">
+                  <label className="space-y-2 md:col-span-2">
+                    <span className="form-kicker">Capability name</span>
+                    <input
+                      value={draft.name}
+                      onChange={event => updateDraft({ name: event.target.value })}
+                      placeholder="Payments Command Center"
+                      className="field-input"
+                    />
+                  </label>
+                  <label className="space-y-2 md:col-span-2">
+                    <span className="form-kicker">Capability purpose</span>
+                    <textarea
+                      value={draft.description}
+                      onChange={event =>
+                        updateDraft({ description: event.target.value })
+                      }
+                      placeholder="Describe the business scope, systems, and outcome this capability owns."
+                      className="field-textarea h-32"
+                    />
+                  </label>
+                  <label className="space-y-2">
+                    <span className="form-kicker">Domain</span>
+                    <input
+                      value={draft.domain}
+                      onChange={event => updateDraft({ domain: event.target.value })}
+                      placeholder="Payments"
+                      className="field-input"
+                    />
+                  </label>
+                  <label className="space-y-2">
+                    <span className="form-kicker">Business unit</span>
+                    <input
+                      value={draft.businessUnit}
+                      onChange={event =>
+                        updateDraft({ businessUnit: event.target.value })
+                      }
+                      placeholder="Digital Platforms"
+                      className="field-input"
+                    />
+                  </label>
+                  <label className="space-y-2">
+                    <span className="form-kicker">Owner team</span>
+                    <input
+                      value={draft.ownerTeam}
+                      onChange={event =>
+                        updateDraft({ ownerTeam: event.target.value })
+                      }
+                      placeholder="Capability Strategy Office"
+                      className="field-input"
+                    />
+                  </label>
+                  <label className="space-y-2">
+                    <span className="form-kicker">Parent capability</span>
+                    <select
+                      value={draft.parentCapabilityId}
+                      onChange={event =>
+                        updateDraft({ parentCapabilityId: event.target.value })
+                      }
+                      className="field-select"
+                    >
+                      <option value="">Standalone capability</option>
+                      {capabilities.map(capability => (
+                        <option key={capability.id} value={capability.id}>
+                          {capability.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <AdvancedDisclosure
+                  title="Business charter details"
+                  description="Optional now. Add them if you know them, or let the team infer and refine them after initial learning."
+                  storageKey="capability-setup-business-charter"
+                  badge={
+                    <StatusBadge tone={hasBusinessCharterDetails ? 'success' : 'neutral'}>
+                      {hasBusinessCharterDetails ? 'Added' : 'Optional'}
+                    </StatusBadge>
+                  }
+                >
+                  <div className="grid gap-5 md:grid-cols-2">
+                    <label className="space-y-2 md:col-span-2">
+                      <span className="form-kicker">Business outcome</span>
+                      <textarea
+                        value={draft.businessOutcome}
+                        onChange={event =>
+                          updateDraft({ businessOutcome: event.target.value })
+                        }
+                        placeholder="Explain the business result this capability must reliably produce."
+                        className="field-textarea h-28"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="form-kicker">Success metrics</span>
+                      <textarea
+                        value={listToText(draft.successMetrics)}
+                        onChange={event =>
+                          updateDraft({
+                            successMetrics: textToList(event.target.value),
+                          })
+                        }
+                        placeholder={'Cycle time reduced by 30%\nEvery completed work item produces evidence'}
+                        className="field-textarea h-32"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="form-kicker">Required evidence</span>
+                      <textarea
+                        value={listToText(draft.requiredEvidenceKinds)}
+                        onChange={event =>
+                          updateDraft({
+                            requiredEvidenceKinds: textToList(event.target.value),
+                          })
+                        }
+                        placeholder={'Requirements pack\nTest evidence\nRelease decision'}
+                        className="field-textarea h-32"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="form-kicker">Definition of done</span>
+                      <textarea
+                        value={draft.definitionOfDone}
+                        onChange={event =>
+                          updateDraft({ definitionOfDone: event.target.value })
+                        }
+                        placeholder="Describe what must be true before this capability can call work done."
+                        className="field-textarea h-28"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="form-kicker">Operating policy summary</span>
+                      <textarea
+                        value={draft.operatingPolicySummary}
+                        onChange={event =>
+                          updateDraft({ operatingPolicySummary: event.target.value })
+                        }
+                        placeholder="Summarize approvals, workspace constraints, and release expectations."
+                        className="field-textarea h-28"
+                      />
+                    </label>
+                  </div>
+                </AdvancedDisclosure>
+              </div>
+            )}
+
+            {activeStepId === 'sources' && (
+              <div className="space-y-6">
+                <div className="rounded-3xl border border-primary/10 bg-primary/5 px-5 py-4">
+                  <div className="flex items-start gap-3">
+                    <GitBranch size={18} className="mt-0.5 text-primary" />
+                    <p className="text-sm leading-relaxed text-secondary">
+                      Give the owning agent a repo, docs, or an approved local
+                      path if you want useful initial learning right away. You
+                      can also create the capability now and attach sources
+                      later from Metadata.
+                    </p>
+                  </div>
+                </div>
+
                 <label className="space-y-2 block">
                   <span className="form-kicker">GitHub repositories</span>
                   <textarea
@@ -678,6 +727,7 @@ export default function CapabilitySetup() {
                     className="field-textarea h-32"
                   />
                 </label>
+
                 <div className="grid gap-5 md:grid-cols-2">
                   <label className="space-y-2">
                     <span className="form-kicker">Jira board</span>
@@ -702,6 +752,7 @@ export default function CapabilitySetup() {
                     />
                   </label>
                 </div>
+
                 <label className="space-y-2 block">
                   <span className="form-kicker">Documentation notes</span>
                   <textarea
@@ -713,19 +764,26 @@ export default function CapabilitySetup() {
                     className="field-textarea h-28"
                   />
                 </label>
-                <button
-                  type="button"
-                  onClick={() => void validateConnectors()}
-                  className="enterprise-button enterprise-button-secondary"
-                >
-                  {isValidating === 'connectors' ? 'Validating' : 'Validate connectors'}
-                </button>
+
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={() => void validateConnectors()}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    {isValidating === 'connectors' ? 'Validating' : 'Validate source links'}
+                  </button>
+                  <StatusBadge tone={hasGroundingSource ? 'brand' : 'neutral'}>
+                    {hasGroundingSource ? 'Learning inputs added' : 'No learning sources yet'}
+                  </StatusBadge>
+                </div>
+
                 {connectorValidation && (
                   <div className="space-y-2">
                     {connectorValidation.items.length === 0 ? (
                       <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
-                        No connector links were provided. You can add them later
-                        from Metadata.
+                        No source links were provided yet. You can still create
+                        the capability and add them later.
                       </div>
                     ) : (
                       connectorValidation.items.map((item, index) => (
@@ -752,151 +810,207 @@ export default function CapabilitySetup() {
                     )}
                   </div>
                 )}
-              </div>
-            )}
 
-            {activeStepId === 'workspace' && (
-              <div className="space-y-5">
-                <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4">
-                  <div className="flex items-start gap-3">
-                    <FolderCode size={18} className="mt-0.5 text-amber-800" />
-                    <p className="text-sm leading-relaxed text-amber-900">
-                      Agents can read, write, and run commands only inside
-                      approved local paths. Leave paths empty for a planning-only
-                      capability, or validate paths before execution.
-                    </p>
-                  </div>
-                </div>
-                <label className="space-y-2 block">
-                  <span className="form-kicker">Default workspace path</span>
-                  <input
-                    value={draft.defaultWorkspacePath}
-                    onChange={event =>
-                      updateDraft({ defaultWorkspacePath: event.target.value })
-                    }
-                    placeholder="/Users/ashokraj/Documents/workDir/service"
-                    className="field-input"
-                  />
-                </label>
-                <div className="grid gap-5 md:grid-cols-2">
-                  <label className="space-y-2">
-                    <span className="form-kicker">Local code directories</span>
-                    <textarea
-                      value={listToText(draft.localDirectories)}
-                      onChange={event =>
-                        updateDraft({
-                          localDirectories: textToList(event.target.value),
-                        })
-                      }
-                      className="field-textarea h-36"
-                    />
-                  </label>
-                  <label className="space-y-2">
-                    <span className="form-kicker">Additional allowed paths</span>
-                    <textarea
-                      value={listToText(draft.allowedWorkspacePaths)}
-                      onChange={event =>
-                        updateDraft({
-                          allowedWorkspacePaths: textToList(event.target.value),
-                        })
-                      }
-                      className="field-textarea h-36"
-                    />
-                  </label>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void validateWorkspacePaths()}
-                  disabled={approvedWorkspacePaths.length === 0}
-                  className="enterprise-button enterprise-button-secondary disabled:opacity-50"
+                <AdvancedDisclosure
+                  title="Approved workspace paths"
+                  description="Optional now. Add them when you want agents to read, write, or run commands inside a local codebase."
+                  storageKey="capability-setup-workspace-paths"
+                  badge={
+                    <StatusBadge tone={approvedWorkspacePaths.length ? 'brand' : 'neutral'}>
+                      {approvedWorkspacePaths.length
+                        ? `${approvedWorkspacePaths.length} path${approvedWorkspacePaths.length === 1 ? '' : 's'}`
+                        : 'Optional'}
+                    </StatusBadge>
+                  }
                 >
-                  {isValidating === 'workspace' ? 'Validating' : 'Validate approved paths'}
-                </button>
-                <div className="space-y-2">
-                  {approvedWorkspacePaths.length === 0 ? (
-                    <div className="rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm text-secondary">
-                      No local path is configured yet. Execution tools will stay
-                      disabled until a workspace path is approved.
+                  <div className="space-y-5">
+                    <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4">
+                      <div className="flex items-start gap-3">
+                        <FolderCode size={18} className="mt-0.5 text-amber-800" />
+                        <p className="text-sm leading-relaxed text-amber-900">
+                          Agents can read, write, and run commands only inside
+                          approved local paths. Leave this empty for a planning
+                          or discovery-first capability.
+                        </p>
+                      </div>
                     </div>
-                  ) : (
-                    approvedWorkspacePaths.map(path => {
-                      const validation = pathValidation[path];
-
-                      return (
-                        <div
-                          key={path}
-                          className="flex items-start justify-between gap-3 rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3"
-                        >
-                          <div>
-                            <p className="break-all text-sm font-semibold text-on-surface">
-                              {path}
-                            </p>
-                            <p className="mt-1 text-xs text-secondary">
-                              {validation?.message || 'Not validated yet.'}
-                            </p>
-                          </div>
-                          <StatusBadge
-                            tone={validation?.valid ? 'success' : 'warning'}
-                          >
-                            {validation?.valid ? 'Approved' : 'Check'}
-                          </StatusBadge>
+                    <label className="space-y-2 block">
+                      <span className="form-kicker">Default workspace path</span>
+                      <input
+                        value={draft.defaultWorkspacePath}
+                        onChange={event =>
+                          updateDraft({ defaultWorkspacePath: event.target.value })
+                        }
+                        placeholder="/Users/ashokraj/Documents/workDir/service"
+                        className="field-input"
+                      />
+                    </label>
+                    <div className="grid gap-5 md:grid-cols-2">
+                      <label className="space-y-2">
+                        <span className="form-kicker">Local code directories</span>
+                        <textarea
+                          value={listToText(draft.localDirectories)}
+                          onChange={event =>
+                            updateDraft({
+                              localDirectories: textToList(event.target.value),
+                            })
+                          }
+                          className="field-textarea h-36"
+                        />
+                      </label>
+                      <label className="space-y-2">
+                        <span className="form-kicker">Additional allowed paths</span>
+                        <textarea
+                          value={listToText(draft.allowedWorkspacePaths)}
+                          onChange={event =>
+                            updateDraft({
+                              allowedWorkspacePaths: textToList(event.target.value),
+                            })
+                          }
+                          className="field-textarea h-36"
+                        />
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void validateWorkspacePaths()}
+                      disabled={approvedWorkspacePaths.length === 0}
+                      className="enterprise-button enterprise-button-secondary disabled:opacity-50"
+                    >
+                      {isValidating === 'workspace'
+                        ? 'Validating'
+                        : 'Validate approved paths'}
+                    </button>
+                    <div className="space-y-2">
+                      {approvedWorkspacePaths.length === 0 ? (
+                        <div className="rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm text-secondary">
+                          No local path is configured yet. The capability can
+                          still be created and used for chat, planning, and
+                          discovery before execution is enabled.
                         </div>
-                      );
-                    })
-                  )}
-                </div>
+                      ) : (
+                        approvedWorkspacePaths.map(path => {
+                          const validation = pathValidation[path];
+
+                          return (
+                            <div
+                              key={path}
+                              className="flex items-start justify-between gap-3 rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3"
+                            >
+                              <div>
+                                <p className="break-all text-sm font-semibold text-on-surface">
+                                  {path}
+                                </p>
+                                <p className="mt-1 text-xs text-secondary">
+                                  {validation?.message || 'Not validated yet.'}
+                                </p>
+                              </div>
+                              <StatusBadge
+                                tone={validation?.valid ? 'success' : 'warning'}
+                              >
+                                {validation?.valid ? 'Approved' : 'Check'}
+                              </StatusBadge>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                </AdvancedDisclosure>
               </div>
             )}
 
-            {activeStepId === 'commands' && (
-              <div className="space-y-5">
+            {activeStepId === 'execution' && (
+              <div className="space-y-6">
                 <div className="rounded-3xl border border-primary/10 bg-primary/5 px-5 py-4 text-sm leading-relaxed text-secondary">
-                  Command templates turn execution into named, approved actions.
-                  Agents request templates by id instead of inventing shell
-                  commands.
+                  Skip this if you only need learning, chat, or planning first.
+                  Command templates and deployment targets can be refined once
+                  the owning agent understands the codebase and your operating
+                  model more clearly.
                 </div>
-                <CommandTemplateEditor
-                  templates={draft.commandTemplates}
-                  allowedWorkspacePaths={approvedWorkspacePaths}
-                  validationResults={commandValidation}
-                  onChange={commandTemplates => updateDraft({ commandTemplates })}
-                  onValidate={template => void validateCommand(template)}
-                />
+
+                <AdvancedDisclosure
+                  title="Command templates"
+                  description="Turn execution into named, approved actions when you are ready for build, test, docs, or deployment work."
+                  storageKey="capability-setup-command-templates"
+                  badge={
+                    <StatusBadge tone={hasMeaningfulExecutionCommandTemplate(draft.commandTemplates) ? 'success' : 'neutral'}>
+                      {hasMeaningfulExecutionCommandTemplate(draft.commandTemplates)
+                        ? 'Configured'
+                        : 'Optional'}
+                    </StatusBadge>
+                  }
+                >
+                  <CommandTemplateEditor
+                    templates={draft.commandTemplates}
+                    allowedWorkspacePaths={approvedWorkspacePaths}
+                    validationResults={commandValidation}
+                    onChange={commandTemplates => updateDraft({ commandTemplates })}
+                    onValidate={template => void validateCommand(template)}
+                  />
+                </AdvancedDisclosure>
+
+                <AdvancedDisclosure
+                  title="Deployment targets"
+                  description="Define approval-gated release targets when this capability is ready to ship changes."
+                  storageKey="capability-setup-deployment-targets"
+                  badge={
+                    <StatusBadge tone={draft.deploymentTargets.length ? 'brand' : 'neutral'}>
+                      {draft.deploymentTargets.length
+                        ? `${draft.deploymentTargets.length} target${draft.deploymentTargets.length === 1 ? '' : 's'}`
+                        : 'Optional'}
+                    </StatusBadge>
+                  }
+                >
+                  <div className="space-y-5">
+                    <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-relaxed text-amber-900">
+                      Deployment remains approval-gated. A deployment target
+                      only defines where and how release execution can happen
+                      after human approval.
+                    </div>
+                    <DeploymentTargetEditor
+                      targets={draft.deploymentTargets}
+                      commandTemplates={draft.commandTemplates}
+                      allowedWorkspacePaths={approvedWorkspacePaths}
+                      validationResults={deploymentValidation}
+                      onChange={deploymentTargets =>
+                        updateDraft({ deploymentTargets })
+                      }
+                      onValidate={target => void validateDeployment(target)}
+                    />
+                  </div>
+                </AdvancedDisclosure>
               </div>
             )}
 
-            {activeStepId === 'deploy' && (
+            {activeStepId === 'review' && (
               <div className="space-y-5">
-                <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-relaxed text-amber-900">
-                  Deployment remains approval-gated. A deployment target only
-                  defines where and how release execution can happen after human
-                  approval.
-                </div>
-                <DeploymentTargetEditor
-                  targets={draft.deploymentTargets}
-                  commandTemplates={draft.commandTemplates}
-                  allowedWorkspacePaths={approvedWorkspacePaths}
-                  validationResults={deploymentValidation}
-                  onChange={deploymentTargets => updateDraft({ deploymentTargets })}
-                  onValidate={target => void validateDeployment(target)}
-                />
-
                 <div className="rounded-3xl border border-outline-variant/25 bg-surface-container-low p-5">
-                  <p className="form-kicker">Final review</p>
+                  <p className="form-kicker">What will be created</p>
                   <h3 className="mt-2 text-lg font-bold text-on-surface">
-                    What will be created
+                    A lightweight capability with room to learn
                   </h3>
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     {[
                       ['Capability', draft.name || 'Unnamed'],
-                      ['Domain', draft.domain || 'Missing'],
-                      ['Owner team', draft.ownerTeam || 'Not set'],
-                      ['Business outcome', draft.businessOutcome || 'Missing'],
-                      ['Success metrics', String(draft.successMetrics.length)],
-                      ['Required evidence', String(draft.requiredEvidenceKinds.length)],
-                      ['Git repos', String(draft.githubRepositories.length)],
+                      ['Purpose', draft.description || 'Missing'],
+                      ['Owner team', draft.ownerTeam || 'Can be inferred later'],
+                      ['Learning sources', String(
+                        draft.githubRepositories.length +
+                          Number(Boolean(draft.jiraBoardLink.trim())) +
+                          Number(Boolean(draft.confluenceLink.trim())) +
+                          Number(Boolean(draft.documentationNotes.trim())) +
+                          approvedWorkspacePaths.length,
+                      )],
+                      [
+                        'Business charter details',
+                        hasBusinessCharterDetails ? 'Provided' : 'To refine later',
+                      ],
+                      [
+                        'Execution setup',
+                        hasExecutionSetup ? 'Partially configured' : 'Planning-first',
+                      ],
                       ['Approved paths', String(approvedWorkspacePaths.length)],
-                      ['Command templates', String(draft.commandTemplates.length)],
                       ['Deployment targets', String(draft.deploymentTargets.length)],
                       ['Owner agent', ownerAgentId],
                     ].map(([label, value]) => (
@@ -912,6 +1026,40 @@ export default function CapabilitySetup() {
                     ))}
                   </div>
                 </div>
+
+                <div className="rounded-3xl border border-primary/10 bg-primary/5 px-5 py-4">
+                  <p className="form-kicker">What happens next</p>
+                  <div className="mt-3 space-y-2 text-sm leading-relaxed text-secondary">
+                    <p>1. We create the capability and owning agent.</p>
+                    <p>2. The team learns from any repos, docs, and paths you attached.</p>
+                    <p>3. You can refine the business contract, commands, and release setup later from Metadata and Designer.</p>
+                  </div>
+                </div>
+
+                {!hasGroundingSource && (
+                  <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-relaxed text-amber-900">
+                    No learning sources are attached yet. The capability can
+                    still be created, but the owning agent will only start from
+                    the charter until you connect code, docs, or workspace
+                    paths.
+                  </div>
+                )}
+
+                {hasGroundingSource && !sourcesReady && (
+                  <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-relaxed text-amber-900">
+                    Some attached source links or approved paths still need
+                    review. You can create the capability now, but it is worth
+                    cleaning these up so initial learning has trustworthy input.
+                  </div>
+                )}
+
+                {hasExecutionSetup && !executionReady && (
+                  <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-relaxed text-amber-900">
+                    Some execution or deployment entries still need review.
+                    Since execution is optional at creation time, you can keep
+                    moving and finish this setup after the capability exists.
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -963,7 +1111,7 @@ export default function CapabilitySetup() {
             <p className="form-kicker">Completion checklist</p>
             <div className="mt-4 space-y-3">
               {steps.map(step => {
-                const ready = stepReadiness[step.id];
+                const stepState = stepStates[step.id];
                 return (
                   <div
                     key={step.id}
@@ -972,7 +1120,7 @@ export default function CapabilitySetup() {
                     <CheckCircle2
                       size={16}
                       className={`mt-0.5 shrink-0 ${
-                        ready ? 'text-primary' : 'text-outline'
+                        stepState.ready ? 'text-primary' : 'text-outline'
                       }`}
                     />
                     <div>
@@ -980,7 +1128,9 @@ export default function CapabilitySetup() {
                         {step.title}
                       </p>
                       <p className="mt-1 text-xs leading-relaxed text-secondary">
-                        {ready ? 'Ready for final review.' : step.description}
+                        {stepState.ready
+                          ? 'Ready for final review.'
+                          : `${step.description} ${stepState.label === 'Recommended' || stepState.label === 'Later' ? 'You can keep moving and return later.' : ''}`}
                       </p>
                     </div>
                   </div>

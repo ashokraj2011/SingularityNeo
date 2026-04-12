@@ -36,6 +36,7 @@ import {
   Workflow,
 } from '../src/types';
 import { query, transaction, getDatabaseRuntimeInfo } from './db';
+import { resolveRuntimeModel } from './githubModels';
 import {
   applyWorkspaceRuntime,
   buildBaseAgents,
@@ -621,6 +622,8 @@ const upsertAgentTx = async (
   capabilityId: string,
   agent: Omit<CapabilityAgent, 'usage' | 'previousOutputs'>,
 ) => {
+  const normalizedModel = await resolveRuntimeModel(agent.model || undefined);
+
   await client.query(
     `
       INSERT INTO capability_agents (
@@ -683,7 +686,7 @@ const upsertAgentTx = async (
       agent.learningNotes || [],
       agent.skillIds,
       agent.provider,
-      agent.model,
+      normalizedModel,
       agent.tokenLimit,
     ],
   );

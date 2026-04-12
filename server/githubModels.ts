@@ -129,6 +129,16 @@ type RuntimeModelOption = {
   apiModelId: string;
 };
 
+const BUDGET_MODEL_HINTS = [
+  { pattern: /\b(free|included|no[- ]?cost)\b/i, score: 0 },
+  { pattern: /\b(lowest cost|lower cost|low cost|cheap|cheapest|budget|economy)\b/i, score: 1 },
+  { pattern: /\b(nano|mini|small|haiku|flash-lite|flash|lite)\b/i, score: 2 },
+  { pattern: /\b(fast)\b/i, score: 3 },
+  { pattern: /\b(balanced)\b/i, score: 4 },
+] as const;
+
+const EXPENSIVE_MODEL_HINTS = /\b(opus|pro|max|broad|premium)\b/i;
+
 const modelAliases: Record<string, string> = {
   'openai/gpt-4.1-mini': 'gpt-4.1-mini',
   'gpt-4.1-mini': 'gpt-4.1-mini',
@@ -675,6 +685,35 @@ const getStaticRuntimeModels = (): RuntimeModelOption[] =>
     apiModelId: normalizeModel(model.id),
   }));
 
+const scoreRuntimeModelAffordability = (model: RuntimeModelOption) => {
+  const text = `${model.id} ${model.label} ${model.profile}`.toLowerCase();
+  const hintMatch = BUDGET_MODEL_HINTS.find(hint => hint.pattern.test(text));
+  const expensivePenalty = EXPENSIVE_MODEL_HINTS.test(text) ? 4 : 0;
+
+  return {
+    score: (hintMatch?.score ?? 6) + expensivePenalty,
+    tieBreaker: `${normalizeModel(model.apiModelId || model.id)}|${text}`,
+  };
+};
+
+export const rankRuntimeModelsByAffordability = (
+  models: RuntimeModelOption[],
+) =>
+  [...models].sort((left, right) => {
+    const leftScore = scoreRuntimeModelAffordability(left);
+    const rightScore = scoreRuntimeModelAffordability(right);
+
+    if (leftScore.score !== rightScore.score) {
+      return leftScore.score - rightScore.score;
+    }
+
+    return leftScore.tieBreaker.localeCompare(rightScore.tieBreaker);
+  });
+
+export const pickLowestCostRuntimeModel = (
+  models: RuntimeModelOption[],
+) => rankRuntimeModelsByAffordability(models)[0];
+
 export const listAvailableRuntimeModels = async ({
   refresh = false,
 }: {
@@ -749,10 +788,10 @@ export const listAvailableRuntimeModels = async ({
 
 export const getRuntimeDefaultModel = async () => {
   const { models } = await listAvailableRuntimeModels();
-  return models[0]?.apiModelId || normalizeModel(defaultModel);
+  return pickLowestCostRuntimeModel(models)?.apiModelId || normalizeModel(defaultModel);
 };
 
-const resolveRuntimeModel = async (requestedModel?: string) => {
+export const resolveRuntimeModel = async (requestedModel?: string) => {
   const normalizedRequested = normalizeModel(requestedModel);
 
   try {
@@ -763,13 +802,17 @@ const resolveRuntimeModel = async (requestedModel?: string) => {
           normalizeModel(model.id) === normalizedRequested ||
           model.apiModelId === normalizedRequested,
       );
-      return supportedModel?.apiModelId || models[0].apiModelId;
+      return (
+        supportedModel?.apiModelId ||
+        pickLowestCostRuntimeModel(models)?.apiModelId ||
+        models[0].apiModelId
+      );
     }
   } catch {
     // Fall back to the requested model when the runtime catalog cannot be loaded.
   }
 
-  return normalizedRequested;
+  return normalizedRequested || normalizeModel(defaultModel);
 };
 
 export const buildCapabilitySystemPrompt = ({

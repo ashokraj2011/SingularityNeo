@@ -278,14 +278,7 @@ export default function CapabilityMetadata() {
     };
   }, []);
 
-  const canSave = Boolean(
-    form.name.trim() &&
-      form.domain.trim() &&
-      form.businessUnit.trim() &&
-      form.description.trim() &&
-      form.businessOutcome.trim() &&
-      textToList(form.successMetrics).length > 0,
-  );
+  const canSave = Boolean(form.name.trim() && form.description.trim());
 
   const filteredStakeholders = useMemo(
     () => form.stakeholders.filter(hasStakeholderContent),

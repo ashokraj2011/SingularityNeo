@@ -68,11 +68,13 @@ import {
   defaultModel,
   getConfiguredToken,
   getConfiguredTokenSource,
+  getRuntimeDefaultModel,
   invokeCapabilityChat,
   invokeCapabilityChatStream,
   listManagedCopilotSessions,
   listAvailableRuntimeModels,
   normalizeModel,
+  resolveRuntimeModel,
   type ChatHistoryMessage,
 } from './githubModels';
 import { buildMemoryContext, listMemoryDocuments, refreshCapabilityMemory, searchCapabilityMemory } from './memory';
@@ -224,7 +226,7 @@ const ensureAgentCreatePayload = (
 };
 
 const resolveWritableAgentModel = async (requestedModel?: string) => {
-  const requested = normalizeModel(requestedModel || defaultModel);
+  const requested = normalizeModel(requestedModel || (await getRuntimeDefaultModel()));
 
   try {
     const { models } = await listAvailableRuntimeModels();
@@ -237,7 +239,7 @@ const resolveWritableAgentModel = async (requestedModel?: string) => {
 
     return selected?.apiModelId || requested;
   } catch {
-    return requested;
+    return resolveRuntimeModel(requested);
   }
 };
 
