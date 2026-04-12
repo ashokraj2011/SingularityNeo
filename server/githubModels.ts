@@ -802,6 +802,25 @@ export const buildCapabilitySystemPrompt = ({
     toPromptSection('Applications', capability?.applications),
     toPromptSection('APIs', capability?.apis),
     toPromptSection('Databases', capability?.databases),
+    capability?.databaseConfigs?.length
+      ? `Database profiles: ${capability.databaseConfigs
+          .map(config =>
+            [
+              config.label || config.databaseName,
+              config.engine,
+              config.host,
+              config.port,
+              config.databaseName,
+              config.schema,
+              config.secretReference
+                ? `Secret reference: ${config.secretReference}`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(' | '),
+          )
+          .join('; ')}`
+      : null,
     toPromptSection('Git repositories', capability?.gitRepositories),
     capability?.executionConfig?.defaultWorkspacePath
       ? `Default workspace path: ${capability.executionConfig.defaultWorkspacePath}`

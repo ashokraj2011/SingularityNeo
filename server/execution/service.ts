@@ -5,6 +5,9 @@ import {
   Artifact,
   Capability,
   CapabilityAgent,
+  CompiledRequiredInputField,
+  CompiledStepContext,
+  CompiledWorkItemPlan,
   ContrarianConflictReview,
   ExecutionLog,
   MemoryReference,
@@ -29,6 +32,10 @@ import {
   WorkflowStep,
 } from '../../src/types';
 import { syncWorkflowManagedTasksForWorkItem } from '../../src/lib/workflowTaskAutomation';
+import {
+  compileStepContext,
+  compileWorkItemPlan,
+} from '../../src/lib/workflowRuntime';
 import {
   getCapabilityBoardPhaseIds,
   getLifecyclePhaseLabel,
@@ -815,9 +822,9 @@ const requestStepDecision = async ({
   step,
   runStep,
   agent,
+  compiledStepContext,
+  compiledWorkItemPlan,
   toolHistory,
-  handoffContext,
-  resolvedWaitContext,
 }: {
   capability: Capability;
   workItem: WorkItem;
@@ -825,11 +832,11 @@ const requestStepDecision = async ({
   step: WorkflowStep;
   runStep: WorkflowRunStep;
   agent: CapabilityAgent;
+  compiledStepContext: CompiledStepContext;
+  compiledWorkItemPlan: CompiledWorkItemPlan;
   toolHistory: Array<{ role: 'assistant' | 'user'; content: string }>;
-  handoffContext?: string;
-  resolvedWaitContext?: string;
 }): Promise<DecisionEnvelope> => {
-  const allowedToolIds = step.allowedToolIds || [];
+  const allowedToolIds = compiledStepContext.executionBoundary.allowedToolIds;
   const toolDescriptions = allowedToolIds.length
     ? listToolDescriptions(allowedToolIds).join('\n')
     : 'No tools are allowed for this step.';
@@ -869,15 +876,17 @@ const requestStepDecision = async ({
       'You are an execution engine inside a capability workflow. Return JSON only with no markdown.',
     memoryPrompt: memoryContext.prompt || undefined,
     prompt: [
+      `Execution plan summary: ${compiledWorkItemPlan.planSummary}`,
       `Current workflow: ${workflow.name}`,
       `Current step: ${step.name}`,
       `Current phase: ${workItem.phase}`,
       `Current step attempt: ${runStep.attemptCount}`,
-      `Step objective: ${step.action}`,
-      `Step guidance: ${step.description || 'None'}`,
-      `Execution notes: ${step.executionNotes || 'None'}`,
-      `Workflow hand-off context from prior completed steps:\n${handoffContext || 'None'}`,
-      `Resolved human input/conflict context for this step:\n${resolvedWaitContext || 'None'}`,
+      `Step contract:\n${JSON.stringify(compiledStepContext, null, 2)}`,
+      `Step objective: ${compiledStepContext.objective}`,
+      `Step guidance: ${compiledStepContext.description || 'None'}`,
+      `Execution notes: ${compiledStepContext.executionNotes || 'None'}`,
+      `Workflow hand-off context from prior completed steps:\n${compiledStepContext.handoffContext || 'None'}`,
+      `Resolved human input/conflict context for this step:\n${compiledStepContext.resolvedWaitContext || 'None'}`,
       `Allowed tools:\n${toolDescriptions}`,
       `Workspace policy:\n${workspaceGuidance}`,
       toolHistory.length
@@ -885,6 +894,7 @@ const requestStepDecision = async ({
             .map(item => `${item.role.toUpperCase()}: ${item.content}`)
             .join('\n\n')}`
         : null,
+      'Treat the compiled step contract as authoritative. Stay inside the execution boundary, use the required inputs and artifact checklist as the operating contract, and never invent orchestration outside this single step.',
       'Use prior-step hand-offs, retrieved memory, and resolved human inputs as authoritative downstream context. Do not ask for information that is already present in those sections. If you truly need more input, explain exactly what new gap remains and why the existing context is insufficient.',
       'Return JSON with one of these shapes:',
       '1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"README.md"}}}',
@@ -1272,6 +1282,85 @@ const buildResolvedWaitContext = ({
 
   return lines.length > 0 ? lines.join('\n') : undefined;
 };
+
+const buildStructuredInputWaitMessage = (
+  step: WorkflowStep,
+  missingInputs: CompiledRequiredInputField[],
+) => {
+  const labels = missingInputs.map(input => input.label);
+
+  if (labels.length === 1) {
+    return `${step.name} needs one more structured input before execution can continue: ${labels[0]}.`;
+  }
+
+  if (labels.length === 2) {
+    return `${step.name} needs two structured inputs before execution can continue: ${labels.join(' and ')}.`;
+  }
+
+  return `${step.name} is waiting for ${labels.length} structured inputs before execution can continue: ${labels.join(', ')}.`;
+};
+
+const buildExecutionPlanArtifact = ({
+  detail,
+  step,
+  runStep,
+  plan,
+}: {
+  detail: WorkflowRunDetail;
+  step: WorkflowStep;
+  runStep: WorkflowRunStep;
+  plan: CompiledWorkItemPlan;
+}): Artifact => ({
+  id: createArtifactId(),
+  name: `${step.name} Execution Plan`,
+  capabilityId: detail.run.capabilityId,
+  type: 'Execution Plan',
+  version: `run-${detail.run.attemptNumber}`,
+  agent: step.agentId,
+  created: plan.compiledAt,
+  direction: 'OUTPUT',
+  connectedAgentId: step.agentId,
+  sourceWorkflowId: detail.run.workflowId,
+  runId: detail.run.id,
+  runStepId: runStep.id,
+  summary: compactMarkdownSummary(plan.planSummary),
+  artifactKind: 'EXECUTION_PLAN',
+  phase: step.phase,
+  workItemId: detail.run.workItemId,
+  sourceRunId: detail.run.id,
+  sourceRunStepId: runStep.id,
+  contentFormat: 'MARKDOWN',
+  mimeType: 'text/markdown',
+  fileName: `${toFileSlug(detail.run.workItemId)}-${toFileSlug(step.name)}-execution-plan.md`,
+  contentText: `# ${step.name} Execution Plan\n\n${buildMarkdownArtifact([
+    ['Work Item', detail.run.workItemId],
+    ['Workflow', detail.run.workflowSnapshot.name],
+    ['Phase', getLifecyclePhaseLabel(undefined, step.phase)],
+    ['Current Step', step.name],
+    ['Plan Summary', plan.planSummary],
+    [
+      'Required Inputs',
+      plan.currentStep.requiredInputs
+        .map(input => `${input.label} (${input.status})`)
+        .join(', '),
+    ],
+    [
+      'Completion Checklist',
+      plan.currentStep.completionChecklist.length > 0
+        ? plan.currentStep.completionChecklist.join('\n')
+        : 'Complete the step when the current objective and evidence contract are satisfied.',
+    ],
+    [
+      'Allowed Tools',
+      plan.currentStep.executionBoundary.allowedToolIds.length > 0
+        ? plan.currentStep.executionBoundary.allowedToolIds.join(', ')
+        : 'No tools allowed',
+    ],
+  ])}`,
+  contentJson: plan,
+  downloadable: true,
+  traceId: detail.run.traceId,
+});
 
 const syncRunningProjection = async ({
   detail,
@@ -1692,6 +1781,9 @@ const buildHumanInteractionArtifact = ({
 }): Artifact => {
   const contrarianReview =
     wait.type === 'CONFLICT_RESOLUTION' ? wait.payload?.contrarianReview : undefined;
+  const requestedInputFields = Array.isArray(wait.payload?.requestedInputFields)
+    ? (wait.payload?.requestedInputFields as CompiledRequiredInputField[])
+    : [];
   const codeDiffArtifactId =
     wait.type === 'APPROVAL' && typeof wait.payload?.codeDiffArtifactId === 'string'
       ? wait.payload.codeDiffArtifactId
@@ -1745,6 +1837,14 @@ const buildHumanInteractionArtifact = ({
       ['Phase', getLifecyclePhaseLabel(undefined, step.phase)],
       ['Requested By', wait.requestedBy],
       ['Request', wait.message],
+      requestedInputFields.length > 0
+        ? [
+            'Requested Inputs',
+            requestedInputFields
+              .map(field => `${field.label}${field.description ? ` - ${field.description}` : ''}`)
+              .join('\n'),
+          ]
+        : ['Requested Inputs', undefined],
       ['Resolved By', resolvedBy],
       ['Resolution', resolution],
       isCodeDiffApproval ? ['Code Diff Summary', codeDiffSummary] : ['Code Diff Summary', undefined],
@@ -2866,6 +2966,86 @@ const executeAutomatedStep = async (
     runStep: currentRunStep,
   });
   const stepTouchedPaths = new Set<string>();
+  const compiledStepContext = compileStepContext({
+    capability: projection.capability,
+    workItem: projection.workItem,
+    workflow: detail.run.workflowSnapshot,
+    step,
+    handoffContext,
+    resolvedWaitContext,
+    artifacts: projection.workspace.artifacts,
+  });
+  const compiledWorkItemPlan = compileWorkItemPlan({
+    capability: projection.capability,
+    workItem: projection.workItem,
+    workflow: detail.run.workflowSnapshot,
+    currentStep: step,
+    currentStepContext: compiledStepContext,
+  });
+  const executionPlanArtifact = buildExecutionPlanArtifact({
+    detail: runningDetail,
+    step,
+    runStep: currentRunStep,
+    plan: compiledWorkItemPlan,
+  });
+
+  currentRunStep = await updateWorkflowRunStep({
+    ...currentRunStep,
+    metadata: {
+      ...(currentRunStep.metadata || {}),
+      compiledStepContext,
+      compiledWorkItemPlan,
+      executionPlanArtifactId: executionPlanArtifact.id,
+    },
+  });
+
+  await replaceCapabilityWorkspaceContentRecord(detail.run.capabilityId, {
+    artifacts: replaceArtifacts(projection.workspace.artifacts, [executionPlanArtifact]),
+  });
+  await emitRunProgressEvent({
+    capabilityId: detail.run.capabilityId,
+    runId: detail.run.id,
+    workItemId: detail.run.workItemId,
+    runStepId: currentRunStep.id,
+    traceId,
+    spanId: stepSpan.id,
+    message: `${step.name} compiled a bounded execution plan for this step.`,
+    details: {
+      stage: 'STEP_CONTRACT_COMPILED',
+      stepName: step.name,
+      missingInputs: compiledStepContext.missingInputs.length,
+      allowedToolCount: compiledStepContext.executionBoundary.allowedToolIds.length,
+    },
+  });
+
+  if (compiledStepContext.missingInputs.length > 0) {
+    await finishTelemetrySpan({
+      capabilityId: detail.run.capabilityId,
+      spanId: stepSpan.id,
+      status: 'WAITING',
+      attributes: {
+        waitType: 'INPUT',
+        missingInputs: compiledStepContext.missingInputs
+          .map(input => input.label)
+          .join(', '),
+      },
+    });
+    return completeRunWithWait({
+      detail: runningDetail,
+      waitType: 'INPUT',
+      waitMessage: buildStructuredInputWaitMessage(
+        step,
+        compiledStepContext.missingInputs,
+      ),
+      waitPayload: {
+        requestedInputFields: compiledStepContext.missingInputs,
+        compiledStepContext,
+        compiledWorkItemPlan,
+      },
+      artifacts: [executionPlanArtifact],
+      runStepOverride: currentRunStep,
+    });
+  }
 
   for (let iteration = 0; iteration < MAX_AGENT_TOOL_LOOPS; iteration += 1) {
     const decisionEnvelope = await requestStepDecision({
@@ -2875,9 +3055,9 @@ const executeAutomatedStep = async (
       step,
       runStep: currentRunStep,
       agent,
+      compiledStepContext,
+      compiledWorkItemPlan,
       toolHistory,
-      handoffContext,
-      resolvedWaitContext,
     });
     const decision = decisionEnvelope.decision;
     await emitRunProgressEvent({
@@ -3005,6 +3185,10 @@ const executeAutomatedStep = async (
           detail: runningDetail,
           waitType: 'APPROVAL',
           waitMessage: policyDecision.reason,
+          waitPayload: {
+            compiledStepContext,
+            compiledWorkItemPlan,
+          },
         });
       }
 
@@ -3241,6 +3425,8 @@ const executeAutomatedStep = async (
             generatedArtifactIds: [artifact.id, codeDiffArtifact.id],
             codeDiffArtifactId: codeDiffArtifact.id,
             codeDiffSummary: codeDiffArtifact.summary,
+            compiledStepContext,
+            compiledWorkItemPlan,
           },
           artifacts: [artifact, codeDiffArtifact],
           runStepOverride: currentRunStep,
@@ -3343,6 +3529,30 @@ const executeAutomatedStep = async (
         detail: runningDetail,
         waitType,
         waitMessage: decision.wait.message,
+        waitPayload:
+          waitType === 'INPUT'
+            ? {
+                requestedInputFields:
+                  compiledStepContext.missingInputs.length > 0
+                    ? compiledStepContext.missingInputs
+                    : [
+                        {
+                          id: 'operator-input',
+                          label: 'Operator input',
+                          description: decision.wait.message,
+                          required: true,
+                          source: 'HUMAN_INPUT',
+                          kind: 'MARKDOWN',
+                          status: 'MISSING',
+                        },
+                      ],
+                compiledStepContext,
+                compiledWorkItemPlan,
+              }
+            : {
+                compiledStepContext,
+                compiledWorkItemPlan,
+              },
       });
     }
 
@@ -3393,6 +3603,59 @@ export const processWorkflowRun = async (
   for (let index = 0; index < maxTransitions; index += 1) {
     const currentStep = getCurrentWorkflowStep(currentDetail);
     if (currentStep.stepType === 'HUMAN_APPROVAL') {
+      const projection = await resolveProjectionContext(
+        currentDetail.run.capabilityId,
+        currentDetail.run.workItemId,
+        currentDetail.run.workflowSnapshot,
+      );
+      const currentRunStep = getCurrentRunStep(currentDetail);
+      const handoffContext = buildWorkflowHandoffContext({
+        detail: currentDetail,
+        workItem: projection.workItem,
+        artifacts: projection.workspace.artifacts,
+      });
+      const resolvedWaitContext = buildResolvedWaitContext({
+        detail: currentDetail,
+        runStep: currentRunStep,
+      });
+      const compiledStepContext = compileStepContext({
+        capability: projection.capability,
+        workItem: projection.workItem,
+        workflow: currentDetail.run.workflowSnapshot,
+        step: currentStep,
+        handoffContext,
+        resolvedWaitContext,
+        artifacts: projection.workspace.artifacts,
+      });
+      const compiledWorkItemPlan = compileWorkItemPlan({
+        capability: projection.capability,
+        workItem: projection.workItem,
+        workflow: currentDetail.run.workflowSnapshot,
+        currentStep,
+        currentStepContext: compiledStepContext,
+      });
+      const executionPlanArtifact = buildExecutionPlanArtifact({
+        detail: currentDetail,
+        step: currentStep,
+        runStep: currentRunStep,
+        plan: compiledWorkItemPlan,
+      });
+
+      await updateWorkflowRunStep({
+        ...currentRunStep,
+        metadata: {
+          ...(currentRunStep.metadata || {}),
+          compiledStepContext,
+          compiledWorkItemPlan,
+          executionPlanArtifactId: executionPlanArtifact.id,
+        },
+      });
+      await replaceCapabilityWorkspaceContentRecord(currentDetail.run.capabilityId, {
+        artifacts: replaceArtifacts(projection.workspace.artifacts, [
+          executionPlanArtifact,
+        ]),
+      });
+
       return completeRunWithWait({
         detail: currentDetail,
         waitType: 'APPROVAL',
@@ -3400,6 +3663,12 @@ export const processWorkflowRun = async (
           currentStep.approverRoles?.length
             ? `${currentStep.name} is waiting for ${currentStep.approverRoles.join(', ')} approval.`
             : `${currentStep.name} is waiting for human approval.`,
+        waitPayload: {
+          compiledStepContext,
+          compiledWorkItemPlan,
+        },
+        artifacts: [executionPlanArtifact],
+        runStepOverride: currentRunStep,
       });
     }
 

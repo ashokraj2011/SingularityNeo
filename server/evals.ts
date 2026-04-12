@@ -6,6 +6,7 @@ import type {
   EvalSuite,
 } from '../src/types';
 import { isTestingWorkflowStep } from '../src/lib/workflowStepSemantics';
+import { WORKSPACE_EVAL_SUITE_TEMPLATES } from '../src/lib/workspaceFoundations';
 import { getCapabilityBundle } from './repository';
 import { buildMemoryContext, refreshCapabilityMemory } from './memory';
 import { query } from './db';
@@ -63,90 +64,6 @@ const resultFromRow = (row: Record<string, any>): EvalRunCaseResult => ({
   createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
 });
 
-const BUILT_IN_EVAL_SUITES = [
-  {
-    id: 'EVAL-SUITE-ARCHITECT',
-    name: 'Architect Coverage',
-    description: 'Checks workflow design, hand-offs, and capability metadata coverage.',
-    agentRole: 'Architect',
-    evalType: 'STRUCTURED_OUTPUT' as const,
-  },
-  {
-    id: 'EVAL-SUITE-BA',
-    name: 'Business Context Retrieval',
-    description: 'Validates that long-term capability memory returns relevant stakeholder and scope context.',
-    agentRole: 'Business Analyst',
-    evalType: 'RETRIEVAL' as const,
-  },
-  {
-    id: 'EVAL-SUITE-SDLC',
-    name: 'Workflow Execution Safety',
-    description: 'Verifies approval gates, hand-off packets, and workflow-managed QA coverage.',
-    agentRole: 'Validation',
-    evalType: 'WORKFLOW' as const,
-  },
-];
-
-const createDefaultCases = (capabilityId: string, suite: typeof BUILT_IN_EVAL_SUITES[number]) => {
-  if (suite.evalType === 'RETRIEVAL') {
-    return [
-      {
-        id: `${suite.id}-CASE-1`,
-        capabilityId,
-        suiteId: suite.id,
-        name: 'Capability metadata is retrievable',
-        description: 'Searching for the capability name should return a capability profile memory document.',
-        input: { queryText: 'capability profile business unit stakeholders' },
-        expected: { sourceType: 'CAPABILITY_METADATA' },
-      },
-    ];
-  }
-
-  if (suite.evalType === 'WORKFLOW') {
-    return [
-      {
-        id: `${suite.id}-CASE-1`,
-        capabilityId,
-        suiteId: suite.id,
-        name: 'Approval gates are present',
-        description: 'At least one workflow step should require human approval for release-grade activity.',
-        input: { requiresApprovalStep: true },
-        expected: { stepType: 'HUMAN_APPROVAL' },
-      },
-      {
-        id: `${suite.id}-CASE-2`,
-        capabilityId,
-        suiteId: suite.id,
-        name: 'Workflow hand-offs are defined',
-        description: 'Workflow steps should carry forward phase or agent hand-off metadata.',
-        input: { requiresHandoff: true },
-        expected: { hasHandoff: true },
-      },
-    ];
-  }
-
-  return [
-    {
-      id: `${suite.id}-CASE-1`,
-      capabilityId,
-      suiteId: suite.id,
-      name: 'Built-in architect exists',
-      description: 'The capability should include the Architect built-in agent.',
-      input: { agentRole: 'Architect' },
-      expected: { exists: true },
-    },
-    {
-      id: `${suite.id}-CASE-2`,
-      capabilityId,
-      suiteId: suite.id,
-      name: 'Architect workflows expose allowed tools',
-      description: 'Workflow steps should define explicit tool allowlists.',
-      input: { allowedToolsRequired: true },
-      expected: { allowlistConfigured: true },
-    },
-  ];
-};
-
 const ensureEvalSuites = async (capabilityId: string) => {
   const suiteCount = await query<{ count: string }>(
     `
@@ -161,7 +78,7 @@ const ensureEvalSuites = async (capabilityId: string) => {
     return;
   }
 
-  for (const suite of BUILT_IN_EVAL_SUITES) {
+  for (const suite of WORKSPACE_EVAL_SUITE_TEMPLATES) {
     await query(
       `
         INSERT INTO capability_eval_suites (
@@ -187,7 +104,7 @@ const ensureEvalSuites = async (capabilityId: string) => {
       ],
     );
 
-    for (const evalCase of createDefaultCases(capabilityId, suite)) {
+    for (const evalCase of suite.cases) {
       await query(
         `
           INSERT INTO capability_eval_cases (

@@ -27,6 +27,8 @@ import {
   Skill,
   TelemetryMetricSample,
   TelemetrySpan,
+  WorkspaceSettings,
+  WorkspaceCatalogSnapshot,
   WorkspacePathValidationResult,
   WorkItem,
   WorkItemFlightRecorderDetail,
@@ -102,6 +104,7 @@ export interface CapabilityChatStreamResult {
 export interface AppState {
   capabilities: Capability[];
   capabilityWorkspaces: CapabilityWorkspace[];
+  workspaceSettings: WorkspaceSettings;
 }
 
 export interface CapabilityBundle {
@@ -196,6 +199,28 @@ export const sendCapabilityChat = async (
 
 export const fetchAppState = async (): Promise<AppState> =>
   requestJson<AppState>('/api/state');
+
+export const fetchWorkspaceSettings = async (): Promise<WorkspaceSettings> =>
+  requestJson<WorkspaceSettings>('/api/workspace/settings');
+
+export const updateWorkspaceSettingsRecord = async (
+  updates: Partial<WorkspaceSettings>,
+): Promise<WorkspaceSettings> =>
+  requestJson<WorkspaceSettings>('/api/workspace/settings', {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(updates),
+  });
+
+export const fetchWorkspaceCatalogSnapshot = async (): Promise<WorkspaceCatalogSnapshot> =>
+  requestJson<WorkspaceCatalogSnapshot>('/api/workspace/catalog');
+
+export const initializeWorkspaceFoundationCatalog = async (): Promise<WorkspaceCatalogSnapshot> =>
+  requestJson<WorkspaceCatalogSnapshot>('/api/workspace/catalog/initialize', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({}),
+  });
 
 export const fetchCapabilityBundle = async (
   capabilityId: string,

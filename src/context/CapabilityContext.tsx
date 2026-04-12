@@ -8,6 +8,7 @@ import {
   CapabilityChatMessage,
   CapabilityWorkspace,
   Skill,
+  WorkspaceSettings,
 } from '../types';
 import {
   AGENT_TASKS,
@@ -35,6 +36,7 @@ import {
   setActiveChatAgentRecord,
   updateCapabilityAgentRecord,
   updateCapabilityRecord,
+  updateWorkspaceSettingsRecord,
   type AppState,
 } from '../lib/api';
 import { createDefaultCapabilityLifecycle } from '../lib/capabilityLifecycle';
@@ -56,6 +58,7 @@ interface CapabilityContextType {
   setActiveCapability: (capability: Capability) => void;
   capabilities: Capability[];
   capabilityWorkspaces: CapabilityWorkspace[];
+  workspaceSettings: WorkspaceSettings;
   createCapability: (capability: CreateCapabilityInput) => Promise<CapabilityBundle>;
   getCapabilityWorkspace: (capabilityId: string) => CapabilityWorkspace;
   updateCapabilityMetadata: (
@@ -88,6 +91,7 @@ interface CapabilityContextType {
     >,
   ) => Promise<CapabilityWorkspace>;
   refreshCapabilityBundle: (capabilityId: string) => Promise<CapabilityWorkspace | null>;
+  updateWorkspaceSettings: (updates: Partial<WorkspaceSettings>) => Promise<WorkspaceSettings>;
   retryInitialSync: () => Promise<boolean>;
 }
 
@@ -128,6 +132,10 @@ const EMPTY_CAPABILITY: Capability = {
   status: 'PENDING',
   specialAgentId: '',
   skillLibrary: [],
+};
+
+const EMPTY_WORKSPACE_SETTINGS: WorkspaceSettings = {
+  databaseConfigs: [],
 };
 
 const createDefaultAgentLearningProfile = (): AgentLearningProfile => ({
@@ -369,6 +377,7 @@ const buildBuiltInAgents = (capability: Capability): CapabilityAgent[] =>
       inputArtifacts: [...template.inputArtifacts],
       outputArtifacts: [...template.outputArtifacts],
       isBuiltIn: true,
+      standardTemplateKey: template.key,
       learningNotes: [
         `${template.name} is a built-in agent for ${capability.name}.`,
         `Keep all outputs aligned to ${capability.domain || capability.name} capability context.`,
@@ -638,6 +647,7 @@ const readInitialState = () => {
     capabilityWorkspaces: capabilities.map(capability =>
       buildCapabilityWorkspace(capability, true),
     ),
+    workspaceSettings: EMPTY_WORKSPACE_SETTINGS,
   };
 };
 
@@ -662,6 +672,7 @@ const normalizeAppState = (
     capabilities: nextCapabilities,
     activeCapability: nextActiveCapability,
     capabilityWorkspaces: nextWorkspaces,
+    workspaceSettings: state.workspaceSettings || EMPTY_WORKSPACE_SETTINGS,
   };
 };
 
@@ -676,6 +687,9 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
   );
   const [capabilityWorkspaces, setCapabilityWorkspaces] = useState<CapabilityWorkspace[]>(
     initialState.capabilityWorkspaces,
+  );
+  const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings>(
+    initialState.workspaceSettings,
   );
   const [mutationStatusByCapability, setMutationStatusByCapability] = useState<
     Record<string, { status: 'idle' | 'pending' | 'error'; error?: string }>
@@ -796,6 +810,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
       const nextState = normalizeAppState(await fetchAppState(), activeCapabilityRef.current.id);
       setCapabilities(nextState.capabilities);
       setCapabilityWorkspaces(nextState.capabilityWorkspaces);
+      setWorkspaceSettings(nextState.workspaceSettings);
       setActiveCapabilityState(nextState.activeCapability);
       setLastSyncError('');
       setBootStatus('ready');
@@ -811,6 +826,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
       if (!capabilitiesRef.current.length) {
         setCapabilities([]);
         setCapabilityWorkspaces([]);
+        setWorkspaceSettings(EMPTY_WORKSPACE_SETTINGS);
         setActiveCapabilityState(EMPTY_CAPABILITY);
       }
       return false;
@@ -1082,6 +1098,26 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     }) as Promise<CapabilityWorkspace>;
   };
 
+  const updateWorkspaceSettings = async (updates: Partial<WorkspaceSettings>) => {
+    ensureWritableState();
+    const nextSettings = await updateWorkspaceSettingsRecord(updates);
+    const applySharedDatabases = (capability: Capability): Capability => ({
+      ...capability,
+      databaseConfigs: nextSettings.databaseConfigs,
+      databases: nextSettings.databaseConfigs
+        .map(config => config.label)
+        .filter(Boolean),
+    });
+    setWorkspaceSettings(nextSettings);
+    setCapabilities(current => current.map(applySharedDatabases));
+    setActiveCapabilityState(current =>
+      current.id ? applySharedDatabases(current) : current,
+    );
+    setLastSyncError('');
+    setBootStatus('ready');
+    return nextSettings;
+  };
+
   const refreshCapabilityBundle = async (capabilityId: string) => {
     try {
       const bundle = await fetchCapabilityBundle(capabilityId);
@@ -1123,6 +1159,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
         },
         capabilities,
         capabilityWorkspaces,
+        workspaceSettings,
         createCapability,
         getCapabilityWorkspace,
         updateCapabilityMetadata,
@@ -1133,6 +1170,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
         appendCapabilityMessage,
         setActiveChatAgent,
         setCapabilityWorkspaceContent,
+        updateWorkspaceSettings,
         refreshCapabilityBundle,
         retryInitialSync: runInitialSync,
       }}

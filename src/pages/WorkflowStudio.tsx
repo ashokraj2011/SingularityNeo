@@ -4428,7 +4428,7 @@ export default function WorkflowStudio({
           description={
             archivedWorkflows.length
               ? 'All workflows are archived. Restore one from the archive or create a new graph workflow.'
-              : 'Start with the standard workflow template or create a new graph workflow in the new studio.'
+              : 'Start with the shared standard workflow template or create a capability-specific graph workflow in the new studio.'
           }
           icon={WorkflowIcon}
         >
@@ -4521,7 +4521,9 @@ export default function WorkflowStudio({
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2">
                 <StatusBadge tone="brand">{selectedWorkflow.workflowType || 'Custom'}</StatusBadge>
-                <StatusBadge tone="neutral">{selectedWorkflow.scope || 'CAPABILITY'}</StatusBadge>
+                <StatusBadge tone="neutral">
+                  {selectedWorkflow.templateId ? 'Shared template' : selectedWorkflow.scope || 'CAPABILITY'}
+                </StatusBadge>
                 {validationState.all.length > 0 ? (
                   <StatusBadge tone="warning">
                     {validationState.all.length} validation issue{validationState.all.length > 1 ? 's' : ''}
@@ -5945,7 +5947,7 @@ export default function WorkflowStudio({
                           Scope
                         </p>
                         <p className="mt-2 text-sm font-semibold text-on-surface">
-                          {selectedWorkflow.scope || 'CAPABILITY'}
+                          {selectedWorkflow.templateId ? 'Shared workspace default' : selectedWorkflow.scope || 'CAPABILITY'}
                         </p>
                       </div>
                       <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">

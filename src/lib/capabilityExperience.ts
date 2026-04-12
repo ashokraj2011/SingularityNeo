@@ -918,6 +918,8 @@ export const getBusinessEvidenceLabel = (value?: string) => {
       return 'Conflict resolution';
     case 'CONTRARIAN_REVIEW':
       return 'Contrarian review';
+    case 'EXECUTION_PLAN':
+      return 'Execution plan';
     case 'HANDOFF':
     case 'HANDOFF_PACKET':
       return 'Handoff packet';

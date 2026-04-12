@@ -313,6 +313,23 @@ const buildCapabilityMetadataContent = (capability: Capability) =>
     capability.businessUnit ? `Business unit: ${capability.businessUnit}` : null,
     capability.ownerTeam ? `Owner team: ${capability.ownerTeam}` : null,
     capability.teamNames.length ? `Associated teams: ${capability.teamNames.join(', ')}` : null,
+    capability.databaseConfigs?.length
+      ? `Database profiles: ${capability.databaseConfigs
+          .map(config =>
+            [
+              config.label || config.databaseName,
+              config.engine,
+              config.host,
+              config.port,
+              config.databaseName,
+              config.schema,
+              config.secretReference ? `secret=${config.secretReference}` : null,
+            ]
+              .filter(Boolean)
+              .join(' | '),
+          )
+          .join('; ')}`
+      : null,
     capability.gitRepositories.length ? `Git repositories: ${capability.gitRepositories.join(', ')}` : null,
     capability.executionConfig.defaultWorkspacePath
       ? `Default workspace path: ${capability.executionConfig.defaultWorkspacePath}`

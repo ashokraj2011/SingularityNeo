@@ -47,6 +47,10 @@ import {
 import { cn } from '../lib/utils';
 import type {
   Artifact,
+  CompiledArtifactChecklistItem,
+  CompiledRequiredInputField,
+  CompiledStepContext,
+  CompiledWorkItemPlan,
   ContrarianConflictReview,
   RunEvent,
   RunWait,
@@ -336,6 +340,17 @@ const getContrarianReviewTone = (review?: ContrarianConflictReview) => {
   return 'info' as const;
 };
 
+const asCompiledStepContext = (value: unknown): CompiledStepContext | undefined =>
+  value && typeof value === 'object' ? (value as CompiledStepContext) : undefined;
+
+const asCompiledWorkItemPlan = (value: unknown): CompiledWorkItemPlan | undefined =>
+  value && typeof value === 'object' ? (value as CompiledWorkItemPlan) : undefined;
+
+const asCompiledInputFields = (
+  value: unknown,
+): CompiledRequiredInputField[] =>
+  Array.isArray(value) ? (value as CompiledRequiredInputField[]) : [];
+
 const isConflictAttention = (item: WorkItem) =>
   item.blocker?.type === 'CONFLICT_RESOLUTION' ||
   item.pendingRequest?.type === 'CONFLICT_RESOLUTION';
@@ -352,6 +367,71 @@ const renderReviewList = (items: string[], emptyLabel: string) =>
     </ul>
   ) : (
     <p className="mt-2 text-xs leading-relaxed text-secondary">{emptyLabel}</p>
+  );
+
+const renderStructuredInputs = (
+  items: CompiledRequiredInputField[],
+  emptyLabel: string,
+) =>
+  items.length > 0 ? (
+    <div className="mt-3 space-y-2">
+      {items.map(item => (
+        <div
+          key={item.id}
+          className="rounded-2xl border border-outline-variant/30 bg-white/85 px-3 py-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-on-surface">{item.label}</p>
+            <StatusBadge tone={item.status === 'READY' ? 'success' : 'warning'}>
+              {item.status === 'READY' ? 'Ready' : 'Missing'}
+            </StatusBadge>
+          </div>
+          {item.description ? (
+            <p className="mt-1 text-xs leading-relaxed text-secondary">{item.description}</p>
+          ) : null}
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[0.72rem] text-secondary">
+            <span>Source: {formatEnumLabel(item.source)}</span>
+            <span>Type: {formatEnumLabel(item.kind)}</span>
+            {item.valueSummary ? <span>Current: {item.valueSummary}</span> : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  ) : (
+    <p className="mt-3 text-xs leading-relaxed text-secondary">{emptyLabel}</p>
+  );
+
+const renderArtifactChecklist = (items: CompiledArtifactChecklistItem[]) =>
+  items.length > 0 ? (
+    <div className="mt-3 space-y-2">
+      {items.map(item => (
+        <div
+          key={item.id}
+          className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-outline-variant/30 bg-white/85 px-3 py-3"
+        >
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-on-surface">{item.label}</p>
+            {item.description ? (
+              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                {item.description}
+              </p>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2">
+            <StatusBadge tone={item.direction === 'INPUT' ? 'info' : 'neutral'}>
+              {item.direction}
+            </StatusBadge>
+            <StatusBadge tone={item.status === 'READY' ? 'success' : 'warning'}>
+              {item.status === 'READY' ? 'Ready' : 'Expected'}
+            </StatusBadge>
+          </div>
+        </div>
+      ))}
+    </div>
+  ) : (
+    <p className="mt-3 text-xs leading-relaxed text-secondary">
+      This step does not declare an artifact checklist yet.
+    </p>
   );
 
 const Orchestrator = () => {
@@ -842,7 +922,22 @@ const Orchestrator = () => {
     selectedRunDetail,
     selectedWorkItem,
   );
+  const selectedRunStep =
+    selectedRunDetail?.steps.find(
+      step =>
+        step.workflowStepId === selectedRunDetail.run.currentStepId ||
+        step.workflowNodeId === selectedRunDetail.run.currentNodeId,
+    ) || null;
   const selectedOpenWait = getSelectedRunWait(selectedRunDetail);
+  const selectedCompiledStepContext =
+    asCompiledStepContext(selectedRunStep?.metadata?.compiledStepContext) ||
+    asCompiledStepContext(selectedOpenWait?.payload?.compiledStepContext);
+  const selectedCompiledWorkItemPlan =
+    asCompiledWorkItemPlan(selectedRunStep?.metadata?.compiledWorkItemPlan) ||
+    asCompiledWorkItemPlan(selectedOpenWait?.payload?.compiledWorkItemPlan);
+  const selectedRequestedInputFields = asCompiledInputFields(
+    selectedOpenWait?.payload?.requestedInputFields,
+  );
   const selectedCodeDiffArtifactId =
     typeof selectedOpenWait?.payload?.codeDiffArtifactId === 'string'
       ? selectedOpenWait.payload.codeDiffArtifactId
@@ -2039,6 +2134,174 @@ const Orchestrator = () => {
                       </div>
                     </div>
 
+                    {selectedCompiledStepContext && (
+                      <div className="grid gap-3">
+                        <div className="workspace-meta-card">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <p className="workspace-meta-label">Current step contract</p>
+                              <p className="mt-2 text-sm font-semibold text-on-surface">
+                                {selectedCompiledStepContext.objective}
+                              </p>
+                              <p className="mt-2 text-sm leading-relaxed text-secondary">
+                                {selectedCompiledStepContext.description ||
+                                  selectedCompiledStepContext.executionNotes ||
+                                  'The engine compiled this step into a bounded execution contract.'}
+                              </p>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <StatusBadge
+                                tone={
+                                  selectedCompiledStepContext.executionBoundary
+                                    .workspaceMode === 'APPROVED_WRITE'
+                                    ? 'warning'
+                                    : selectedCompiledStepContext.executionBoundary
+                                        .workspaceMode === 'READ_ONLY'
+                                    ? 'info'
+                                    : 'neutral'
+                                }
+                              >
+                                {selectedCompiledStepContext.executionBoundary.workspaceMode.replace(
+                                  /_/g,
+                                  ' ',
+                                )}
+                              </StatusBadge>
+                              <StatusBadge
+                                tone={
+                                  selectedCompiledStepContext.executionBoundary
+                                    .requiresHumanApproval
+                                    ? 'warning'
+                                    : 'success'
+                                }
+                              >
+                                {selectedCompiledStepContext.executionBoundary
+                                  .requiresHumanApproval
+                                  ? 'Approval-aware'
+                                  : 'Engine-managed'}
+                              </StatusBadge>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                            <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                              <p className="workspace-meta-label">Allowed tools</p>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {selectedCompiledStepContext.executionBoundary.allowedToolIds
+                                  .length > 0 ? (
+                                  selectedCompiledStepContext.executionBoundary.allowedToolIds.map(
+                                    toolId => (
+                                      <StatusBadge key={toolId} tone="info">
+                                        {formatEnumLabel(toolId)}
+                                      </StatusBadge>
+                                    ),
+                                  )
+                                ) : (
+                                  <span className="text-sm text-secondary">
+                                    No tools for this step
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                              <p className="workspace-meta-label">Next allowed actions</p>
+                              <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
+                                {selectedCompiledStepContext.nextActions.map(action => (
+                                  <li key={action} className="flex gap-2">
+                                    <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />
+                                    <span>{action}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="workspace-meta-card">
+                            <div className="flex items-center justify-between gap-3">
+                              <p className="workspace-meta-label">Required inputs</p>
+                              <StatusBadge
+                                tone={
+                                  selectedCompiledStepContext.missingInputs.length > 0
+                                    ? 'warning'
+                                    : 'success'
+                                }
+                              >
+                                {selectedCompiledStepContext.missingInputs.length > 0
+                                  ? `${selectedCompiledStepContext.missingInputs.length} missing`
+                                  : 'Ready'}
+                              </StatusBadge>
+                            </div>
+                            {renderStructuredInputs(
+                              selectedCompiledStepContext.requiredInputs,
+                              'No structured inputs are declared for this step.',
+                            )}
+                          </div>
+
+                          <div className="workspace-meta-card">
+                            <p className="workspace-meta-label">Artifact checklist</p>
+                            {renderArtifactChecklist(
+                              selectedCompiledStepContext.artifactChecklist,
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="workspace-meta-card">
+                            <p className="workspace-meta-label">Completion checklist</p>
+                            {selectedCompiledStepContext.completionChecklist.length > 0 ? (
+                              <ul className="mt-3 space-y-1 text-xs leading-relaxed text-secondary">
+                                {selectedCompiledStepContext.completionChecklist.map(item => (
+                                  <li key={item} className="flex gap-2">
+                                    <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />
+                                    <span>{item}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <p className="mt-3 text-xs leading-relaxed text-secondary">
+                                This step does not define an explicit completion checklist yet.
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="workspace-meta-card">
+                            <p className="workspace-meta-label">Memory boundary</p>
+                            {selectedCompiledStepContext.memoryBoundary.length > 0 ? (
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                {selectedCompiledStepContext.memoryBoundary.map(item => (
+                                  <StatusBadge key={item} tone="neutral">
+                                    {item}
+                                  </StatusBadge>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="mt-3 text-xs leading-relaxed text-secondary">
+                                The engine will rely on retrieved capability memory and current
+                                step context.
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedCompiledWorkItemPlan && (
+                      <div className="workspace-meta-card">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Compiled work plan</p>
+                            <p className="mt-2 text-sm leading-relaxed text-secondary">
+                              {selectedCompiledWorkItemPlan.planSummary}
+                            </p>
+                          </div>
+                          <StatusBadge tone="info">
+                            {selectedCompiledWorkItemPlan.stepSequence.length} steps
+                          </StatusBadge>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="workspace-meta-card">
                       <p className="workspace-meta-label">Tags and routing</p>
                       <div className="mt-3 flex flex-wrap gap-2">
@@ -2094,6 +2357,27 @@ const Orchestrator = () => {
                             {selectedOpenWait.message}
                           </p>
                         </div>
+                      </div>
+                    )}
+
+                    {selectedOpenWait?.type === 'INPUT' && (
+                      <div className="workspace-meta-card border-amber-200/80 bg-amber-50/50">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Structured input request</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              Fill the exact gaps the engine detected for this step
+                            </p>
+                          </div>
+                          <StatusBadge tone="warning">
+                            {selectedRequestedInputFields.length || 1} inputs
+                          </StatusBadge>
+                        </div>
+
+                        {renderStructuredInputs(
+                          selectedRequestedInputFields,
+                          'The step is waiting for operator input, but no structured field list was attached to this wait.',
+                        )}
                       </div>
                     )}
 

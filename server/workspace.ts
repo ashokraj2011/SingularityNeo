@@ -239,6 +239,7 @@ export const buildBuiltInAgents = (capability: Capability): CapabilityAgent[] =>
       inputArtifacts: [...template.inputArtifacts],
       outputArtifacts: [...template.outputArtifacts],
       isBuiltIn: true,
+      standardTemplateKey: template.key,
       learningNotes: [
         `${template.name} is a built-in agent for ${capability.name}.`,
         `Keep all outputs aligned to ${capability.domain || capability.name} capability context.`,

@@ -132,6 +132,7 @@ export default function CapabilityMetadata() {
     lastSyncError,
     setCapabilityWorkspaceContent,
     updateCapabilityMetadata,
+    workspaceSettings,
   } = useCapability();
   const { success, error: showError } = useToast();
   const [isSaving, setIsSaving] = useState(false);
@@ -860,9 +861,17 @@ export default function CapabilityMetadata() {
             icon={Bot}
             tone="brand"
             className="min-w-[22rem] p-4"
-            contentClassName="space-y-2"
+            contentClassName="space-y-3"
           >
             <StatusBadge tone="brand">{ownerAgent?.id || 'Owner Agent'}</StatusBadge>
+            <button
+              type="button"
+              onClick={() => navigate('/workspace/databases')}
+              className="enterprise-button enterprise-button-secondary w-full justify-center"
+            >
+              <Database size={16} />
+              Workspace databases
+            </button>
           </SectionCard>
         }
       />
@@ -1211,12 +1220,35 @@ export default function CapabilityMetadata() {
                 <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
                   Databases
                 </span>
-                <textarea
-                  value={form.databases}
-                  onChange={event => setField('databases', event.target.value)}
-                  placeholder={'Retail_DB_01\nUser_Auth_DB'}
-                  className="field-textarea h-32"
-                />
+                <div className="rounded-[1.5rem] border border-outline-variant/35 bg-surface-container-low px-4 py-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-on-surface">
+                        {workspaceSettings.databaseConfigs.length} shared database profile
+                        {workspaceSettings.databaseConfigs.length === 1 ? '' : 's'}
+                      </p>
+                      <p className="mt-1 text-sm leading-relaxed text-secondary">
+                        Manage the shared workspace catalog for hosts, schemas, usernames, and
+                        secret references without storing raw passwords here.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/workspace/databases')}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      <Database size={16} />
+                      Open setup
+                    </button>
+                  </div>
+
+                  <textarea
+                    value={form.databases}
+                    readOnly
+                    placeholder={'Orders Primary\nUser Auth Replica'}
+                    className="field-textarea mt-4 h-24 bg-white/70"
+                  />
+                </div>
               </label>
 
               <label className="space-y-2 md:col-span-2">

@@ -44,6 +44,7 @@ const schemaStatements = [
       applications TEXT[] NOT NULL DEFAULT '{}',
       apis TEXT[] NOT NULL DEFAULT '{}',
       databases TEXT[] NOT NULL DEFAULT '{}',
+      database_configs JSONB NOT NULL DEFAULT '[]'::jsonb,
       git_repositories TEXT[] NOT NULL DEFAULT '{}',
       local_directories TEXT[] NOT NULL DEFAULT '{}',
       team_names TEXT[] NOT NULL DEFAULT '{}',
@@ -53,6 +54,20 @@ const schemaStatements = [
       execution_config JSONB NOT NULL DEFAULT '{}'::jsonb,
       status TEXT NOT NULL,
       special_agent_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS workspace_settings (
+      id TEXT PRIMARY KEY,
+      database_configs JSONB NOT NULL DEFAULT '[]'::jsonb,
+      foundation_agent_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
+      foundation_workflow_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
+      foundation_eval_suite_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
+      foundation_skill_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
+      foundation_artifact_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
+      foundations_initialized_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
@@ -697,8 +712,40 @@ const migrationStatements = [
     ADD COLUMN IF NOT EXISTS operating_policy_summary TEXT
   `,
   `
+    ALTER TABLE capabilities
+    ADD COLUMN IF NOT EXISTS database_configs JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE workspace_settings
+    ADD COLUMN IF NOT EXISTS foundation_agent_templates JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE workspace_settings
+    ADD COLUMN IF NOT EXISTS foundation_workflow_templates JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE workspace_settings
+    ADD COLUMN IF NOT EXISTS foundation_eval_suite_templates JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE workspace_settings
+    ADD COLUMN IF NOT EXISTS foundation_skill_templates JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE workspace_settings
+    ADD COLUMN IF NOT EXISTS foundation_artifact_templates JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE workspace_settings
+    ADD COLUMN IF NOT EXISTS foundations_initialized_at TIMESTAMPTZ
+  `,
+  `
     ALTER TABLE capability_agents
     ADD COLUMN IF NOT EXISTS is_built_in BOOLEAN NOT NULL DEFAULT FALSE
+  `,
+  `
+    ALTER TABLE capability_agents
+    ADD COLUMN IF NOT EXISTS standard_template_key TEXT
   `,
   `
     ALTER TABLE capability_tasks
@@ -775,6 +822,10 @@ const migrationStatements = [
   `
     ALTER TABLE capability_workflows
     ADD COLUMN IF NOT EXISTS publish_state TEXT NOT NULL DEFAULT 'DRAFT'
+  `,
+  `
+    ALTER TABLE capability_workflows
+    ADD COLUMN IF NOT EXISTS template_id TEXT
   `,
   `
     ALTER TABLE capability_artifacts
@@ -1100,6 +1151,16 @@ const ensureDatabaseExists = async () => {
     await adminPool.end();
   }
 };
+
+export const getDatabaseRuntimeInfo = () => ({
+  host: connectionConfig.host,
+  port: connectionConfig.port,
+  databaseName,
+  user: connectionConfig.user,
+  adminDatabaseName: process.env.PGADMIN_DATABASE || 'postgres',
+  passwordConfigured: Boolean(connectionConfig.password),
+  pgvectorAvailable: platformFeatureState.pgvectorAvailable,
+});
 
 export const getPool = async () => {
   if (!poolPromise) {

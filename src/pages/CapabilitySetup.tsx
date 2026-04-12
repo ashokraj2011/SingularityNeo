@@ -367,6 +367,7 @@ export default function CapabilitySetup() {
       applications: [],
       apis: [],
       databases: [],
+      databaseConfigs: [],
       gitRepositories: uniqueList(draft.githubRepositories),
       localDirectories: uniqueList(draft.localDirectories),
       teamNames: [],

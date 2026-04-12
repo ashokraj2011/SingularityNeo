@@ -53,6 +53,7 @@ type StandardWorkflowStepTemplate = {
 
 const STANDARD_LIFECYCLE = createDefaultCapabilityLifecycle();
 const STANDARD_VISIBLE_PHASE_IDS = getCapabilityGraphPhaseIds(STANDARD_LIFECYCLE);
+export const STANDARD_WORKFLOW_TEMPLATE_ID = 'STANDARD-SDLC';
 
 export const SDLC_BOARD_PHASES: WorkItemPhase[] = getCapabilityBoardPhaseIds(
   STANDARD_LIFECYCLE,
@@ -645,11 +646,12 @@ export const createStandardCapabilityWorkflow = (
 
   return buildWorkflowFromGraph({
     id: `WF-${slugify(capability.id)}-STANDARD-SDLC`,
+    templateId: STANDARD_WORKFLOW_TEMPLATE_ID,
     name: 'Enterprise SDLC Flow',
     capabilityId: capability.id,
     status: 'STABLE',
     workflowType: 'SDLC',
-    scope: 'CAPABILITY',
+    scope: 'GLOBAL',
     schemaVersion: 2,
     entryNodeId: startNodeId,
     nodes,
@@ -685,7 +687,9 @@ export const applyStandardArtifactsToWorkflow = (
 ): Workflow => {
   const standardWorkflowId = `WF-${slugify(capability.id)}-STANDARD-SDLC`;
   const isStandardWorkflow =
-    workflow.id === standardWorkflowId || workflow.name === 'Enterprise SDLC Flow';
+    workflow.templateId === STANDARD_WORKFLOW_TEMPLATE_ID ||
+    workflow.id === standardWorkflowId ||
+    workflow.name === 'Enterprise SDLC Flow';
 
   if (!isStandardWorkflow) {
     return workflow;

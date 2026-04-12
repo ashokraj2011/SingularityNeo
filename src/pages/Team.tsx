@@ -639,7 +639,7 @@ export default function Team() {
               {agent.role}
             </p>
             <div className="mt-1 flex flex-wrap gap-2 text-xs text-secondary">
-              <span>{agent.isBuiltIn ? 'Built-in' : 'Custom'}</span>
+              <span>{agent.isBuiltIn ? 'Shared standard' : 'Capability custom'}</span>
               <span>{agent.sessionSummaries.length} sessions</span>
               <span>Learned {formatTimestamp(agent.learningProfile.refreshedAt)}</span>
             </div>
@@ -1464,9 +1464,9 @@ export default function Team() {
                       <StatusBadge tone="brand">{activeCapability.id}</StatusBadge>
                       {selectedAgent.isOwner ? <StatusBadge tone="brand">Owner</StatusBadge> : null}
                       {selectedAgent.isBuiltIn ? (
-                        <StatusBadge tone="success">Built-in</StatusBadge>
+                        <StatusBadge tone="success">Shared standard</StatusBadge>
                       ) : (
-                        <StatusBadge tone="info">Custom</StatusBadge>
+                        <StatusBadge tone="info">Capability custom</StatusBadge>
                       )}
                       <StatusBadge tone={getLearningTone(selectedAgent.learningProfile.status)}>
                         {getAgentHealth(selectedAgent).label}

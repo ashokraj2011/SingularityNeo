@@ -66,6 +66,8 @@ const workspaceNavItems = [...primaryNavItems, ...advancedNavItems] as const;
 const routeTitles: Record<string, string> = {
   '/capabilities/new': 'Create Capability',
   '/capabilities/metadata': 'Capability Metadata',
+  '/capabilities/databases': 'Workspace Databases',
+  '/workspace/databases': 'Workspace Databases',
 };
 
 const SIDEBAR_STORAGE_KEY = 'singularity.sidebar.collapsed';

@@ -17,6 +17,7 @@ import type {
   WorkItemPhase,
 } from '../src/types';
 import { normalizeCapabilityLifecycle } from '../src/lib/capabilityLifecycle';
+import { normalizeCapabilityDatabaseConfigs } from '../src/lib/capabilityDatabases';
 import { initializeDatabase } from './db';
 import {
   addCapabilityAgentRecord,
@@ -25,12 +26,16 @@ import {
   createCapabilityRecord,
   fetchAppState,
   getCapabilityBundle,
+  getWorkspaceCatalogSnapshot,
+  getWorkspaceSettings,
+  initializeWorkspaceFoundations,
   initializeSeedData,
   removeCapabilitySkillRecord,
   replaceCapabilityWorkspaceContentRecord,
   setActiveChatAgentRecord,
   updateCapabilityAgentRecord,
   updateCapabilityRecord,
+  updateWorkspaceSettings,
 } from './repository';
 import {
   getWorkflowRunDetail,
@@ -105,6 +110,10 @@ import { sendApiError } from './api/errors';
 import { buildRuntimeStatus } from './runtimeStatus';
 import { registerRuntimeRoutes } from './routes/runtime';
 import {
+  buildLiveWorkspaceBriefing,
+  maybeHandleCapabilityChatAction,
+} from './chatWorkspace';
+import {
   getCapabilityWorkspaceRoots,
   isWorkspacePathApproved,
   normalizeDirectoryPath,
@@ -154,6 +163,9 @@ const ensureCapabilityCreatePayload = (
     applications: capability.applications || [],
     apis: capability.apis || [],
     databases: capability.databases || [],
+    databaseConfigs: normalizeCapabilityDatabaseConfigs(
+      capability.databaseConfigs || [],
+    ),
     gitRepositories: capability.gitRepositories || [],
     localDirectories: capability.localDirectories || [],
     teamNames: capability.teamNames || [],
@@ -486,6 +498,13 @@ const parseActor = (value: unknown, fallback: string) => {
   return actor || fallback;
 };
 
+const ZERO_RUNTIME_USAGE = {
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+  estimatedCostUsd: 0,
+} as const;
+
 const writeSseEvent = (
   response: express.Response,
   event: string,
@@ -499,6 +518,17 @@ const isRuntimeConfigured = () => {
   const tokenSource = getConfiguredTokenSource();
   return tokenSource === 'headless-cli' || Boolean(getConfiguredToken());
 };
+
+const buildChatMemoryPrompt = ({
+  liveBriefing,
+  memoryPrompt,
+}: {
+  liveBriefing: string;
+  memoryPrompt?: string;
+}) =>
+  [liveBriefing, memoryPrompt ? `Retrieved memory context:\n${memoryPrompt}` : null]
+    .filter(Boolean)
+    .join('\n\n');
 
 const buildCopilotSessionMonitorSnapshot = async (capabilityId: string) => {
   const [bundle, runtimeStatus] = await Promise.all([
@@ -718,6 +748,44 @@ app.post('/api/onboarding/validate-deployment-target', (request, response) => {
 app.get('/api/state', async (_request, response) => {
   try {
     response.json(await fetchAppState());
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/workspace/settings', async (_request, response) => {
+  try {
+    response.json(await getWorkspaceSettings());
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.patch('/api/workspace/settings', async (request, response) => {
+  try {
+    response.json(
+      await updateWorkspaceSettings({
+        databaseConfigs: normalizeCapabilityDatabaseConfigs(
+          request.body?.databaseConfigs || [],
+        ),
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/workspace/catalog', async (_request, response) => {
+  try {
+    response.json(await getWorkspaceCatalogSnapshot());
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/workspace/catalog/initialize', async (_request, response) => {
+  try {
+    response.json(await initializeWorkspaceFoundations());
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -1582,13 +1650,6 @@ app.post('/api/capabilities/:capabilityId/code-workspaces/branch', async (reques
 registerRuntimeRoutes(app);
 
 app.post('/api/runtime/chat', async (request, response) => {
-  if (!isRuntimeConfigured()) {
-    response.status(503).json({
-      error: getMissingRuntimeConfigurationMessage(),
-    });
-    return;
-  }
-
   const body = request.body as ChatRequestBody;
   const message = body.message?.trim();
   if (!message || !body.capability || !body.agent) {
@@ -1603,6 +1664,38 @@ app.post('/api/runtime/chat', async (request, response) => {
     const liveAgent =
       bundle.workspace.agents.find(agent => agent.id === body.agent?.id) || body.agent;
     const liveCapability = bundle.capability;
+    const chatAction = await maybeHandleCapabilityChatAction({
+      bundle,
+      agent: liveAgent,
+      message,
+    });
+    if (chatAction.handled) {
+      if (chatAction.wakeWorker) {
+        wakeExecutionWorker();
+      }
+
+      response.json({
+        content:
+          chatAction.content ||
+          'The workspace request completed, but there was no additional message to show.',
+        model: 'workspace-control',
+        usage: ZERO_RUNTIME_USAGE,
+        responseId: null,
+        createdAt: new Date().toISOString(),
+        traceId: createTraceId(),
+        sessionMode: body.sessionMode || 'resume',
+        memoryReferences: [],
+      });
+      return;
+    }
+
+    if (!isRuntimeConfigured()) {
+      response.status(503).json({
+        error: getMissingRuntimeConfigurationMessage(),
+      });
+      return;
+    }
+
     const traceId = createTraceId();
     const span = await startTelemetrySpan({
       capabilityId: liveCapability.id,
@@ -1628,9 +1721,10 @@ app.post('/api/runtime/chat', async (request, response) => {
       history: body.history || [],
       message,
       resetSession: body.sessionMode === 'fresh',
-      memoryPrompt: memoryContext.prompt
-        ? `Retrieved memory context:\n${memoryContext.prompt}`
-        : undefined,
+      memoryPrompt: buildChatMemoryPrompt({
+        liveBriefing: buildLiveWorkspaceBriefing(bundle),
+        memoryPrompt: memoryContext.prompt,
+      }),
     });
     await finishTelemetrySpan({
       capabilityId: liveCapability.id,
@@ -1669,13 +1763,6 @@ app.post('/api/runtime/chat', async (request, response) => {
 });
 
 app.post('/api/runtime/chat/stream', async (request, response) => {
-  if (!isRuntimeConfigured()) {
-    response.status(503).json({
-      error: getMissingRuntimeConfigurationMessage(),
-    });
-    return;
-  }
-
   const body = request.body as ChatRequestBody;
   const message = body.message?.trim();
   if (!message || !body.capability || !body.agent) {
@@ -1704,6 +1791,44 @@ app.post('/api/runtime/chat/stream', async (request, response) => {
     const liveAgent =
       bundle.workspace.agents.find(agent => agent.id === body.agent?.id) || body.agent;
     const liveCapability = bundle.capability;
+    const chatAction = await maybeHandleCapabilityChatAction({
+      bundle,
+      agent: liveAgent,
+      message,
+    });
+
+    if (chatAction.handled) {
+      if (chatAction.wakeWorker) {
+        wakeExecutionWorker();
+      }
+
+      writeSseEvent(response, 'complete', {
+        type: 'complete',
+        traceId,
+        content:
+          chatAction.content ||
+          'The workspace request completed, but there was no additional message to show.',
+        createdAt: new Date().toISOString(),
+        model: 'workspace-control',
+        usage: ZERO_RUNTIME_USAGE,
+        sessionMode: body.sessionMode || 'resume',
+        memoryReferences: [],
+      });
+      response.end();
+      return;
+    }
+
+    if (!isRuntimeConfigured()) {
+      writeSseEvent(response, 'error', {
+        type: 'error',
+        traceId,
+        sessionMode: body.sessionMode || 'resume',
+        error: getMissingRuntimeConfigurationMessage(),
+      });
+      response.end();
+      return;
+    }
+
     const memoryContext = await buildMemoryContext({
       capabilityId: liveCapability.id,
       agentId: liveAgent.id,
@@ -1734,9 +1859,10 @@ app.post('/api/runtime/chat/stream', async (request, response) => {
       history: body.history || [],
       message,
       resetSession: body.sessionMode === 'fresh',
-      memoryPrompt: memoryContext.prompt
-        ? `Retrieved memory context:\n${memoryContext.prompt}`
-        : undefined,
+      memoryPrompt: buildChatMemoryPrompt({
+        liveBriefing: buildLiveWorkspaceBriefing(bundle),
+        memoryPrompt: memoryContext.prompt,
+      }),
       onDelta: delta => {
         writeSseEvent(response, 'delta', {
           type: 'delta',

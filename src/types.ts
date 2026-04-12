@@ -20,6 +20,138 @@ export interface CapabilityMetadataEntry {
   value: string;
 }
 
+export type CapabilityDatabaseEngine =
+  | 'POSTGRES'
+  | 'MYSQL'
+  | 'MARIADB'
+  | 'SQLSERVER'
+  | 'ORACLE'
+  | 'SNOWFLAKE'
+  | 'MONGODB'
+  | 'REDIS'
+  | 'OTHER';
+
+export type CapabilityDatabaseAuthentication =
+  | 'SECRET_REFERENCE'
+  | 'USERNAME_PASSWORD'
+  | 'IAM'
+  | 'INTEGRATED'
+  | 'NONE';
+
+export type CapabilityDatabaseSslMode = 'DISABLE' | 'PREFER' | 'REQUIRE';
+
+export interface CapabilityDatabaseConfig {
+  id: string;
+  label: string;
+  engine: CapabilityDatabaseEngine;
+  host: string;
+  port?: number;
+  databaseName: string;
+  schema?: string;
+  username?: string;
+  authentication: CapabilityDatabaseAuthentication;
+  secretReference?: string;
+  sslMode?: CapabilityDatabaseSslMode;
+  readOnly?: boolean;
+  notes?: string;
+}
+
+export interface WorkspaceSettings {
+  databaseConfigs: CapabilityDatabaseConfig[];
+}
+
+export interface WorkspaceDatabaseRuntimeInfo {
+  host: string;
+  port: number;
+  databaseName: string;
+  user: string;
+  adminDatabaseName?: string;
+  passwordConfigured: boolean;
+  pgvectorAvailable: boolean;
+}
+
+export interface WorkspaceAgentTemplate {
+  id: string;
+  key: string;
+  name: string;
+  role: string;
+  objective: string;
+  systemPrompt: string;
+  inputArtifacts: string[];
+  outputArtifacts: string[];
+}
+
+export interface WorkspaceEvalCaseTemplate {
+  id: string;
+  name: string;
+  description: string;
+  input: Record<string, any>;
+  expected: Record<string, any>;
+}
+
+export interface WorkspaceEvalSuiteTemplate {
+  id: string;
+  name: string;
+  description: string;
+  agentRole: string;
+  evalType: 'STRUCTURED_OUTPUT' | 'RETRIEVAL' | 'WORKFLOW';
+  enabled: boolean;
+  cases: WorkspaceEvalCaseTemplate[];
+}
+
+export interface WorkspaceWorkflowTemplate {
+  id: string;
+  templateId: string;
+  name: string;
+  summary?: string;
+  workflowType?: 'SDLC' | 'Operational' | 'Governance' | 'Custom';
+  scope: 'GLOBAL';
+  schemaVersion?: number;
+  entryNodeId?: string;
+  nodes?: WorkflowNode[];
+  edges?: WorkflowEdge[];
+  steps: WorkflowStep[];
+  publishState?: WorkflowPublishState;
+}
+
+export interface WorkspaceArtifactTemplate {
+  id: string;
+  name: string;
+  type: string;
+  direction: 'INPUT' | 'OUTPUT';
+  agentLabel: string;
+  description: string;
+  inputs: string[];
+  template: string;
+  sourceWorkflow: boolean;
+}
+
+export interface WorkspaceFoundationCatalog {
+  agentTemplates: WorkspaceAgentTemplate[];
+  workflowTemplates: WorkspaceWorkflowTemplate[];
+  evalSuiteTemplates: WorkspaceEvalSuiteTemplate[];
+  skillTemplates: Skill[];
+  artifactTemplates: WorkspaceArtifactTemplate[];
+  initializedAt?: string;
+}
+
+export interface WorkspaceFoundationSummary {
+  initialized: boolean;
+  lastInitializedAt?: string;
+  agentTemplateCount: number;
+  workflowTemplateCount: number;
+  evalSuiteTemplateCount: number;
+  skillTemplateCount: number;
+  artifactTemplateCount: number;
+  totalTemplateCount: number;
+}
+
+export interface WorkspaceCatalogSnapshot {
+  databaseRuntime: WorkspaceDatabaseRuntimeInfo;
+  foundations: WorkspaceFoundationCatalog;
+  summary: WorkspaceFoundationSummary;
+}
+
 export interface CapabilityExecutionCommandTemplate {
   id: string;
   label: string;
@@ -143,6 +275,7 @@ export interface Capability {
   applications: string[];
   apis: string[];
   databases: string[];
+  databaseConfigs?: CapabilityDatabaseConfig[];
   gitRepositories: string[];
   localDirectories: string[];
   teamNames: string[];
@@ -271,6 +404,7 @@ export interface CapabilityAgent {
   outputArtifacts: string[];
   isOwner?: boolean;
   isBuiltIn?: boolean;
+  standardTemplateKey?: string;
   learningNotes?: string[];
   skillIds: string[];
   provider: 'GitHub Copilot SDK' | 'GitHub Copilot API';
@@ -352,6 +486,7 @@ export type ArtifactKind =
   | 'INPUT_NOTE'
   | 'CONFLICT_RESOLUTION'
   | 'CONTRARIAN_REVIEW'
+  | 'EXECUTION_PLAN'
   | 'EXECUTION_SUMMARY';
 
 export type ArtifactContentFormat = 'TEXT' | 'MARKDOWN' | 'JSON';
@@ -490,6 +625,95 @@ export interface WorkflowArtifactContract {
   notes?: string;
 }
 
+export type RequiredInputFieldSource =
+  | 'WORK_ITEM'
+  | 'CAPABILITY'
+  | 'WORKSPACE'
+  | 'HANDOFF'
+  | 'ARTIFACT'
+  | 'HUMAN_INPUT'
+  | 'RUNTIME';
+
+export type RequiredInputFieldKind =
+  | 'TEXT'
+  | 'MARKDOWN'
+  | 'PATH'
+  | 'ARTIFACT'
+  | 'CONTEXT';
+
+export interface RequiredInputField {
+  id: string;
+  label: string;
+  description?: string;
+  required: boolean;
+  source: RequiredInputFieldSource;
+  kind: RequiredInputFieldKind;
+  valueHint?: string;
+}
+
+export interface CompiledRequiredInputField extends RequiredInputField {
+  status: 'READY' | 'MISSING';
+  valueSummary?: string;
+}
+
+export interface CompiledArtifactChecklistItem {
+  id: string;
+  label: string;
+  direction: 'INPUT' | 'OUTPUT';
+  status: 'READY' | 'EXPECTED';
+  description?: string;
+}
+
+export interface ExecutionBoundary {
+  allowedToolIds: ToolAdapterId[];
+  workspaceMode: 'NONE' | 'READ_ONLY' | 'APPROVED_WRITE';
+  requiresHumanApproval: boolean;
+  escalationTriggers: string[];
+}
+
+export interface CompiledStepContext {
+  compiledAt: string;
+  stepId: string;
+  stepName: string;
+  phase: WorkItemPhase;
+  stepType: WorkflowStepType;
+  objective: string;
+  description?: string;
+  executionNotes?: string;
+  preferredWorkspacePath?: string;
+  executionBoundary: ExecutionBoundary;
+  requiredInputs: CompiledRequiredInputField[];
+  missingInputs: CompiledRequiredInputField[];
+  artifactChecklist: CompiledArtifactChecklistItem[];
+  completionChecklist: string[];
+  memoryBoundary: string[];
+  nextActions: string[];
+  handoffContext?: string;
+  resolvedWaitContext?: string;
+}
+
+export interface CompiledWorkItemPlanStepSummary {
+  stepId: string;
+  name: string;
+  phase: WorkItemPhase;
+  stepType: WorkflowStepType;
+  agentId: string;
+}
+
+export interface CompiledWorkItemPlan {
+  compiledAt: string;
+  workItemId: string;
+  workflowId: string;
+  workflowName: string;
+  currentPhase: WorkItemPhase;
+  currentStepId: string;
+  currentStepName: string;
+  lifecyclePhases: WorkItemPhase[];
+  planSummary: string;
+  stepSequence: CompiledWorkItemPlanStepSummary[];
+  currentStep: CompiledStepContext;
+}
+
 export interface WorkflowNode {
   id: string;
   name: string;
@@ -512,6 +736,9 @@ export interface WorkflowNode {
   eventConfig?: WorkflowEventConfig;
   alertConfig?: WorkflowAlertConfig;
   artifactContract?: WorkflowArtifactContract;
+  requiredInputs?: RequiredInputField[];
+  completionGates?: string[];
+  executionBoundary?: Partial<ExecutionBoundary>;
 }
 
 export interface WorkflowEdge {
@@ -560,12 +787,16 @@ export interface WorkflowStep {
   preferredWorkspacePath?: string;
   executionNotes?: string;
   artifactContract?: WorkflowArtifactContract;
+  requiredInputs?: RequiredInputField[];
+  completionGates?: string[];
+  executionBoundary?: Partial<ExecutionBoundary>;
 }
 
 export interface Workflow {
   id: string;
   name: string;
   capabilityId: string;
+  templateId?: string;
   schemaVersion?: number;
   entryNodeId?: string;
   nodes?: WorkflowNode[];
@@ -717,6 +948,9 @@ export type RunWaitPayload = {
   generatedArtifactIds?: string[];
   codeDiffArtifactId?: string;
   codeDiffSummary?: string;
+  requestedInputFields?: CompiledRequiredInputField[];
+  compiledStepContext?: CompiledStepContext;
+  compiledWorkItemPlan?: CompiledWorkItemPlan;
   contrarianReview?: ContrarianConflictReview;
 } & Record<string, any>;
 

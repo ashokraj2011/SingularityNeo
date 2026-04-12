@@ -17,6 +17,7 @@ const Orchestrator = lazy(() => import('./pages/Orchestrator'));
 const ArtifactDesigner = lazy(() => import('./pages/ArtifactDesigner'));
 const CapabilitySetup = lazy(() => import('./pages/CapabilitySetup'));
 const CapabilityMetadata = lazy(() => import('./pages/CapabilityMetadata'));
+const CapabilityDatabases = lazy(() => import('./pages/CapabilityDatabases'));
 const RunConsole = lazy(() => import('./pages/RunConsole'));
 const MemoryExplorer = lazy(() => import('./pages/MemoryExplorer'));
 const EvalCenter = lazy(() => import('./pages/EvalCenter'));
@@ -64,6 +65,8 @@ export default function App() {
                   <Route path="/artifact-designer" element={<ArtifactDesigner />} />
                   <Route path="/capabilities/new" element={<CapabilitySetup />} />
                   <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
+                  <Route path="/capabilities/databases" element={<CapabilityDatabases />} />
+                  <Route path="/workspace/databases" element={<CapabilityDatabases />} />
                   <Route path="/run-console" element={<RunConsole />} />
                   <Route path="/memory" element={<MemoryExplorer />} />
                   <Route path="/evals" element={<EvalCenter />} />

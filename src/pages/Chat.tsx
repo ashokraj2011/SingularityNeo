@@ -710,6 +710,8 @@ const Chat = () => {
         createdAt,
       });
 
+      await refreshCapabilityBundle(activeCapability.id);
+
       if (deliveryState === 'recovered') {
         warning(
           'Recovered streamed draft',
@@ -825,6 +827,7 @@ const Chat = () => {
       ['BLOCKED', 'PENDING_APPROVAL'].includes(item.status),
     );
     if (attentionItem) {
+      prompts.push(`Show the live status of ${attentionItem.id}.`);
       prompts.push(`Explain what is needed to move "${attentionItem.title}" forward.`);
     } else if (capabilityExperience.readinessScore < 100) {
       prompts.push('What setup gaps should we close before starting work?');
