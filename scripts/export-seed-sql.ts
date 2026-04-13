@@ -3,10 +3,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BUILT_IN_AGENT_TEMPLATES, SKILL_LIBRARY } from '../src/constants';
 import {
+  createBrokerageCapabilityWorkflow,
   createStandardCapabilityWorkflow,
   STANDARD_SDLC_STEP_TEMPLATES,
 } from '../src/lib/standardWorkflow';
-import { createDefaultCapabilityLifecycle } from '../src/lib/capabilityLifecycle';
+import {
+  createBrokerageCapabilityLifecycle,
+  createDefaultCapabilityLifecycle,
+} from '../src/lib/capabilityLifecycle';
 
 type AgentRef = (typeof BUILT_IN_AGENT_TEMPLATES)[number]['key'] | 'OWNER';
 type ArtifactSeedRecord = {
@@ -436,18 +440,29 @@ const createWorkflowSql = () => {
     specialAgentId: 'OWNERAGENTTOKEN',
     lifecycle: createDefaultCapabilityLifecycle(),
   });
+  const brokerageWorkflow = createBrokerageCapabilityWorkflow({
+    id: 'CAPABILITYIDTOKEN',
+    name: 'Capability Template',
+    specialAgentId: 'OWNERAGENTTOKEN',
+    lifecycle: createBrokerageCapabilityLifecycle(),
+  });
   const workflowTemplate = JSON.stringify({
     nodes: sampleWorkflow.nodes,
     edges: sampleWorkflow.edges,
     steps: sampleWorkflow.steps,
   });
+  const brokerageWorkflowTemplate = JSON.stringify({
+    nodes: brokerageWorkflow.nodes,
+    edges: brokerageWorkflow.edges,
+    steps: brokerageWorkflow.steps,
+  });
 
-  return `-- Singularity Neo capability-scoped standard workflow seed
--- Seeds the standard Enterprise SDLC Flow into existing capabilities.
+  return `-- Singularity Neo capability-scoped shared workflow seed
+-- Seeds the shared Enterprise and Brokerage SDLC flows into existing capabilities.
 -- Note:
---   This starter workflow uses the default SDLC phase set. Capabilities that
---   use a custom lifecycle may need the workflow regenerated or adjusted after
---   import.
+--   The Enterprise workflow uses the default SDLC phase set.
+--   The Brokerage workflow uses Inception, Elaboration, Construction, and Delivery.
+--   Capabilities with other custom lifecycles may still need the workflow regenerated or adjusted after import.
 
 BEGIN;
 
@@ -492,14 +507,30 @@ SELECT
   ) AS owner_agent_id
 FROM capabilities cap;
 
-WITH workflow_payload AS (
+WITH workflow_templates AS (
+  SELECT
+    'STANDARD-SDLC'::TEXT AS workflow_suffix,
+    'Enterprise SDLC Flow'::TEXT AS workflow_name,
+    'Standard SDLC workflow with explicit agent hand-offs, standard input/output document artifacts, governance validation, and human approval before release.'::TEXT AS workflow_summary,
+    ${sqlString(workflowTemplate)}::TEXT AS workflow_template
+  UNION ALL
+  SELECT
+    'BROKERAGE-SDLC'::TEXT AS workflow_suffix,
+    'Brokerage SDLC Flow'::TEXT AS workflow_name,
+    'Brokerage SDLC workflow with Inception, Elaboration, Construction, and Delivery lanes plus entry points for strategic initiatives, feature enhancements, production issues, bugfixes, security findings, and rehydration work.'::TEXT AS workflow_summary,
+    ${sqlString(brokerageWorkflowTemplate)}::TEXT AS workflow_template
+),
+workflow_payload AS (
   SELECT
     seed.capability_id,
     seed.capability_slug,
     seed.owner_agent_id,
+    template.workflow_suffix,
+    template.workflow_name,
+    template.workflow_summary,
     REPLACE(
       REPLACE(
-        ${sqlString(workflowTemplate)},
+        template.workflow_template,
         'OWNERAGENTTOKEN',
         seed.owner_agent_id
       ),
@@ -507,6 +538,7 @@ WITH workflow_payload AS (
       seed.capability_slug
     )::jsonb AS payload
   FROM tmp_singularity_seed_capabilities seed
+  CROSS JOIN workflow_templates template
 )
 INSERT INTO capability_workflows (
   capability_id,
@@ -527,12 +559,12 @@ INSERT INTO capability_workflows (
 )
 SELECT
   capability_id,
-  'WF-' || capability_slug || '-STANDARD-SDLC',
-  'Enterprise SDLC Flow',
+  'WF-' || capability_slug || '-' || workflow_suffix,
+  workflow_name,
   'STABLE',
   'SDLC',
   'CAPABILITY',
-  'Standard SDLC workflow with explicit agent hand-offs, standard input/output document artifacts, governance validation, and human approval before release.',
+  workflow_summary,
   2,
   'NODE-' || capability_slug || '-START',
   payload->'nodes',

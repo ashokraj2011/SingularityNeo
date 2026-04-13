@@ -1,6 +1,8 @@
 import type {
   AgentLearningProfileDetail,
+  AgentOperatingContract,
   CapabilityAgent,
+  Skill,
 } from '../../src/types';
 import { requestGitHubModel } from '../githubModels';
 import {
@@ -53,7 +55,10 @@ const extractJsonObject = (value: string) => {
   };
 };
 
-const buildAgentKeywordSet = (agent: CapabilityAgent) =>
+const buildAgentKeywordSet = (
+  agent: CapabilityAgent,
+  skills: Skill[] = [],
+) =>
   new Set(
     unique(
       [
@@ -62,13 +67,60 @@ const buildAgentKeywordSet = (agent: CapabilityAgent) =>
         agent.objective,
         agent.systemPrompt,
         ...(agent.skillIds || []),
+        ...skills.flatMap(skill => [
+          skill.name,
+          skill.description,
+          skill.contentMarkdown,
+          ...(skill.defaultTemplateKeys || []),
+        ]),
         ...(agent.learningNotes || []),
         ...(agent.documentationSources || []),
         ...(agent.inputArtifacts || []),
         ...(agent.outputArtifacts || []),
+        agent.contract?.description,
+        ...(agent.contract?.primaryResponsibilities || []),
+        ...(agent.contract?.workingApproach || []),
+        ...(agent.contract?.preferredOutputs || []),
+        ...(agent.contract?.guardrails || []),
+        ...(agent.contract?.conflictResolution || []),
+        agent.contract?.definitionOfDone,
+        ...(agent.contract?.suggestedInputArtifacts || []).flatMap(expectation => [
+          expectation.artifactName,
+          expectation.description,
+        ]),
+        ...(agent.contract?.expectedOutputArtifacts || []).flatMap(expectation => [
+          expectation.artifactName,
+          expectation.description,
+        ]),
       ].flatMap(value => tokenize(value || '')),
     ),
   );
+
+const summarizeContract = (contract?: AgentOperatingContract) => {
+  if (!contract) {
+    return 'No structured agent contract was available.';
+  }
+
+  return [
+    contract.description ? `Description: ${contract.description}` : null,
+    contract.primaryResponsibilities.length
+      ? `Responsibilities: ${contract.primaryResponsibilities.join(' | ')}`
+      : null,
+    contract.workingApproach.length
+      ? `Working approach: ${contract.workingApproach.join(' | ')}`
+      : null,
+    contract.preferredOutputs.length
+      ? `Preferred outputs: ${contract.preferredOutputs.join(' | ')}`
+      : null,
+    contract.guardrails.length ? `Guardrails: ${contract.guardrails.join(' | ')}` : null,
+    contract.conflictResolution.length
+      ? `Conflict resolution: ${contract.conflictResolution.join(' | ')}`
+      : null,
+    contract.definitionOfDone ? `Definition of done: ${contract.definitionOfDone}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n');
+};
 
 const getSourceWeight = (sourceType?: string) => {
   switch (sourceType) {
@@ -94,8 +146,9 @@ const getSourceWeight = (sourceType?: string) => {
 const rankCorpusForAgent = (
   agent: CapabilityAgent,
   corpus: Awaited<ReturnType<typeof getCapabilityMemoryCorpus>>,
+  skills: Skill[] = [],
 ) => {
-  const keywords = buildAgentKeywordSet(agent);
+  const keywords = buildAgentKeywordSet(agent, skills);
 
   return [...corpus]
     .map(item => {
@@ -124,9 +177,11 @@ const rankCorpusForAgent = (
 const summarizeAgentLearning = async ({
   agent,
   selectedCorpus,
+  skills,
 }: {
   agent: CapabilityAgent;
   selectedCorpus: Awaited<ReturnType<typeof getCapabilityMemoryCorpus>>;
+  skills: Skill[];
 }) => {
   const payload = selectedCorpus
     .map((item, index) =>
@@ -157,6 +212,16 @@ const summarizeAgentLearning = async ({
           `Input artifacts: ${(agent.inputArtifacts || []).join(', ') || 'None'}`,
           `Output artifacts: ${(agent.outputArtifacts || []).join(', ') || 'None'}`,
           `Documentation sources: ${(agent.documentationSources || []).join(', ') || 'None'}`,
+          `Preferred tools: ${(agent.preferredToolIds || []).join(', ') || 'None'}`,
+          `Structured contract:\n${summarizeContract(agent.contract)}`,
+          '',
+          'Attached skill content:',
+          ...(skills.length > 0
+            ? skills.map(
+                skill =>
+                  `- ${skill.name} (${skill.kind}/${skill.origin}): ${(skill.contentMarkdown || skill.description).slice(0, 1200)}`,
+              )
+            : ['- None']),
           '',
           'Using the source material below, produce JSON with this shape:',
           '{"summary":"...","highlights":["..."],"contextBlock":"..."}',
@@ -282,7 +347,10 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
     });
 
     const corpus = await getCapabilityMemoryCorpus(capabilityId);
-    const ranked = rankCorpusForAgent(agent, corpus);
+    const attachedSkills = bundle.capability.skillLibrary.filter(skill =>
+      agent.skillIds.includes(skill.id),
+    );
+    const ranked = rankCorpusForAgent(agent, corpus, attachedSkills);
     const selected = ranked.slice(0, Math.min(12, ranked.length));
 
     const summarized =
@@ -290,6 +358,7 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
         ? await summarizeAgentLearning({
             agent,
             selectedCorpus: selected,
+            skills: attachedSkills,
           })
         : {
             summary: `${agent.name} does not have capability memory sources available yet.`,

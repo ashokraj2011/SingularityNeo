@@ -14,11 +14,33 @@ import type {
   CapabilityWorkspace,
   Skill,
   WorkItem,
+  WorkItemAttachmentUpload,
   WorkItemPhase,
+  WorkspaceDatabaseBootstrapProfileSnapshot,
+  WorkspaceDatabaseBootstrapResult,
 } from '../src/types';
 import { normalizeCapabilityLifecycle } from '../src/lib/capabilityLifecycle';
 import { normalizeCapabilityDatabaseConfigs } from '../src/lib/capabilityDatabases';
-import { initializeDatabase } from './db';
+import { normalizeWorkItemPhaseStakeholders } from '../src/lib/workItemStakeholders';
+import { normalizeWorkItemTaskType } from '../src/lib/workItemTaskTypes';
+import { normalizeWorkspaceConnectorSettings } from '../src/lib/workspaceConnectors';
+import {
+  getLegacyArtifactListsFromContract,
+  normalizeAgentOperatingContract,
+  normalizeAgentRoleStarterKey,
+} from '../src/lib/agentRuntime';
+import {
+  initializeDatabase,
+  inspectDatabaseBootstrapStatus,
+  setDatabaseRuntimeConfig,
+} from './db';
+import {
+  findMatchingWorkspaceDatabaseBootstrapProfile,
+  readWorkspaceDatabaseBootstrapProfileSnapshot,
+  resolveActiveWorkspaceDatabaseBootstrapProfileId,
+  upsertWorkspaceDatabaseBootstrapProfile,
+  writeWorkspaceDatabaseBootstrapProfileSnapshot,
+} from './databaseProfiles';
 import {
   addCapabilityAgentRecord,
   addCapabilitySkillRecord,
@@ -34,6 +56,7 @@ import {
   replaceCapabilityWorkspaceContentRecord,
   setActiveChatAgentRecord,
   updateCapabilityAgentRecord,
+  updateCapabilityAgentModelsRecord,
   updateCapabilityRecord,
   updateWorkspaceSettings,
 } from './repository';
@@ -47,6 +70,7 @@ import {
 import {
   approveWorkflowRun,
   cancelWorkflowRun,
+  continueWorkflowStageControl,
   createWorkItemRecord,
   moveWorkItemToPhaseControl,
   provideWorkflowRunInput,
@@ -63,6 +87,18 @@ import {
   listCompletedWorkOrders,
   listLedgerArtifacts,
 } from './ledger';
+import {
+  buildCapabilityConnectorContext,
+  publishArtifactToConfluence,
+  syncCapabilityConfluenceContext,
+  syncCapabilityGithubContext,
+  syncCapabilityJiraContext,
+  transitionJiraIssue,
+} from './connectors';
+import {
+  buildWorkItemExplainDetail,
+  generateReviewPacketForWorkItem,
+} from './workItemExplain';
 import {
   GitHubProviderRateLimitError,
   defaultModel,
@@ -112,6 +148,7 @@ import { sendApiError } from './api/errors';
 import { buildRuntimeStatus } from './runtimeStatus';
 import { registerRuntimeRoutes } from './routes/runtime';
 import {
+  buildWorkItemStageControlBriefing,
   buildLiveWorkspaceBriefing,
   maybeHandleCapabilityChatAction,
 } from './chatWorkspace';
@@ -120,6 +157,10 @@ import {
   isWorkspacePathApproved,
   normalizeDirectoryPath,
 } from './workspacePaths';
+import {
+  detectCapabilityWorkspaceProfile,
+  detectWorkspaceProfile,
+} from './workspaceProfile';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -128,10 +169,54 @@ const app = express();
 const port = Number(process.env.PORT || '3001');
 const execFileAsync = promisify(execFile);
 
-const runDeferredStartupTasks = async () => {
+let workersStarted = false;
+let startupInitializationPromise: Promise<void> | null = null;
+
+const ensureWorkersStarted = () => {
+  if (workersStarted) {
+    return;
+  }
+
   startExecutionWorker();
   startAgentLearningWorker();
   wakeAgentLearningWorker();
+  workersStarted = true;
+};
+
+const bootstrapWorkspaceDatabaseAndStandards =
+  async (): Promise<WorkspaceDatabaseBootstrapResult> => {
+    await initializeDatabase();
+    await initializeSeedData();
+    const catalogSnapshot = await initializeWorkspaceFoundations();
+    ensureWorkersStarted();
+
+    return {
+      status: await inspectDatabaseBootstrapStatus(),
+      catalogSnapshot,
+    };
+  };
+
+const initializePersistentWorkspace = async () => {
+  await bootstrapWorkspaceDatabaseAndStandards();
+};
+
+const ensurePersistentWorkspaceInitialization = () => {
+  if (!startupInitializationPromise) {
+    startupInitializationPromise = initializePersistentWorkspace().catch(error => {
+      startupInitializationPromise = null;
+      throw error;
+    });
+  }
+
+  return startupInitializationPromise;
+};
+
+const awaitStartupInitialization = async () => {
+  if (!startupInitializationPromise) {
+    return;
+  }
+
+  await startupInitializationPromise.catch(() => undefined);
 };
 
 const slugify = (value: string) =>
@@ -176,6 +261,8 @@ const ensureCapabilityCreatePayload = (
     lifecycle: normalizeCapabilityLifecycle(capability.lifecycle),
     skillLibrary: capability.skillLibrary || [],
     status: capability.status || 'PENDING',
+    isSystemCapability: false,
+    systemCapabilityRole: undefined,
     executionConfig: capability.executionConfig || {
       allowedWorkspacePaths: [],
       commandTemplates: [],
@@ -192,6 +279,12 @@ const ensureAgentCreatePayload = (
     return null;
   }
 
+  const contract = normalizeAgentOperatingContract(agent.contract, {
+    description: agent.objective || agent.role,
+    suggestedInputArtifacts: agent.inputArtifacts || [],
+    expectedOutputArtifacts: agent.outputArtifacts || [],
+  });
+
   return {
     ...agent,
     id:
@@ -202,14 +295,16 @@ const ensureAgentCreatePayload = (
         .toUpperCase()}`,
     name: agent.name,
     role: agent.role,
+    roleStarterKey: normalizeAgentRoleStarterKey(agent.roleStarterKey),
     objective: agent.objective,
     systemPrompt: agent.systemPrompt || '',
+    contract,
     initializationStatus: agent.initializationStatus || 'READY',
     documentationSources: agent.documentationSources || [],
-    inputArtifacts: agent.inputArtifacts || [],
-    outputArtifacts: agent.outputArtifacts || [],
+    ...getLegacyArtifactListsFromContract(contract),
     learningNotes: agent.learningNotes || [],
     skillIds: agent.skillIds || [],
+    preferredToolIds: agent.preferredToolIds || [],
     provider: agent.provider || 'GitHub Copilot SDK',
     model: agent.model || defaultModel,
     tokenLimit:
@@ -249,6 +344,12 @@ type ChatRequestBody = {
   history?: ChatHistoryMessage[];
   message?: string;
   sessionMode?: 'resume' | 'fresh';
+  sessionScope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  sessionScopeId?: string;
+  contextMode?: 'GENERAL' | 'WORK_ITEM_STAGE';
+  workItemId?: string;
+  runId?: string;
+  workflowStepId?: string;
 };
 
 type WorkspacePatchBody = Partial<
@@ -278,6 +379,48 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 const distDir = path.resolve(projectRoot, 'dist');
+const envLocalPath = path.resolve(projectRoot, '.env.local');
+const databaseBootstrapStatePath = path.resolve(
+  projectRoot,
+  '.singularity',
+  'database-runtime.json',
+);
+
+const getDatabaseBootstrapProfileSnapshot =
+  async (): Promise<WorkspaceDatabaseBootstrapProfileSnapshot> =>
+    readWorkspaceDatabaseBootstrapProfileSnapshot(
+      databaseBootstrapStatePath,
+      envLocalPath,
+    );
+
+const persistDatabaseBootstrapProfileSnapshot = async (
+  snapshot: WorkspaceDatabaseBootstrapProfileSnapshot,
+) => {
+  await writeWorkspaceDatabaseBootstrapProfileSnapshot(
+    databaseBootstrapStatePath,
+    snapshot,
+  );
+};
+
+const hydratePersistedDatabaseBootstrapRuntime = async () => {
+  const snapshot = await getDatabaseBootstrapProfileSnapshot();
+  const activeProfile =
+    snapshot.profiles.find(profile => profile.id === snapshot.activeProfileId) ||
+    snapshot.profiles[0];
+
+  if (!activeProfile) {
+    return;
+  }
+
+  await setDatabaseRuntimeConfig({
+    host: activeProfile.host,
+    port: activeProfile.port,
+    databaseName: activeProfile.databaseName,
+    user: activeProfile.user,
+    adminDatabaseName: activeProfile.adminDatabaseName,
+    ...(activeProfile.password ? { password: activeProfile.password } : {}),
+  });
+};
 
 const parseUrl = (value: string) => {
   try {
@@ -532,6 +675,82 @@ const buildChatMemoryPrompt = ({
     .filter(Boolean)
     .join('\n\n');
 
+const buildStageControlDeveloperPrompt = ({
+  agentName,
+}: {
+  agentName: string;
+}) =>
+  [
+    `You are ${agentName}, temporarily working with a human operator inside a direct stage-control window.`,
+    'Stay focused on the current work item and current workflow stage only.',
+    'Help the operator understand the current status, required inputs, expected outputs, and the smallest concrete next steps needed to complete this stage well.',
+    'Be practical and action-oriented. Prefer clear proposed edits, decisions, tradeoffs, and acceptance checks over generic advice.',
+    'Do not pretend the workflow has already advanced. The UI will decide when to continue the stage after the operator is satisfied.',
+    'If the user asks for direct work-state changes such as approve, provide input, resolve conflict, restart, or unblock, those workspace-control actions may be executed by the system outside the model response.',
+  ].join('\n');
+
+const resolveChatRuntimeContext = async ({
+  body,
+  bundle,
+  liveAgent,
+}: {
+  body: ChatRequestBody;
+  bundle: {
+    capability: Capability;
+    workspace: CapabilityWorkspace;
+  };
+  liveAgent: CapabilityAgent;
+}) => {
+  const requestedWorkItem = body.workItemId
+    ? bundle.workspace.workItems.find(item => item.id === body.workItemId)
+    : undefined;
+  const requestedWorkflow = requestedWorkItem
+    ? bundle.workspace.workflows.find(workflow => workflow.id === requestedWorkItem.workflowId)
+    : undefined;
+  const requestedStep =
+    body.workflowStepId && requestedWorkflow
+      ? requestedWorkflow.steps.find(step => step.id === body.workflowStepId)
+      : requestedWorkItem?.currentStepId && requestedWorkflow
+      ? requestedWorkflow.steps.find(step => step.id === requestedWorkItem.currentStepId)
+      : undefined;
+  const isStageControlRequest =
+    body.contextMode === 'WORK_ITEM_STAGE' && Boolean(requestedWorkItem);
+  const liveBriefing = isStageControlRequest && requestedWorkItem
+    ? await buildWorkItemStageControlBriefing({
+        bundle,
+        workItemId: requestedWorkItem.id,
+      })
+    : buildLiveWorkspaceBriefing(bundle);
+  const chatScope = isStageControlRequest
+    ? 'WORK_ITEM'
+    : body.sessionScope || 'GENERAL_CHAT';
+  const chatScopeId = isStageControlRequest
+    ? requestedWorkItem?.id
+    : body.sessionScopeId || (chatScope === 'GENERAL_CHAT' ? bundle.capability.id : undefined);
+  const memoryQueryText = isStageControlRequest
+    ? [
+        body.message?.trim(),
+        requestedWorkItem?.title,
+        requestedWorkItem?.description,
+        requestedStep?.name,
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : body.message?.trim() || '';
+
+  return {
+    liveBriefing,
+    chatScope,
+    chatScopeId,
+    memoryQueryText,
+    developerPrompt: isStageControlRequest
+      ? buildStageControlDeveloperPrompt({
+          agentName: liveAgent.name || liveAgent.role || 'the current stage agent',
+        })
+      : undefined,
+  };
+};
+
 const buildCopilotSessionMonitorSnapshot = async (capabilityId: string) => {
   const [bundle, runtimeStatus] = await Promise.all([
     getCapabilityBundle(capabilityId),
@@ -727,6 +946,22 @@ app.post('/api/onboarding/validate-workspace-path', async (request, response) =>
   }
 });
 
+app.post('/api/onboarding/detect-workspace-profile', (request, response) => {
+  const defaultWorkspacePath = String(request.body?.defaultWorkspacePath || '').trim();
+  const approvedWorkspacePaths = Array.isArray(request.body?.approvedWorkspacePaths)
+    ? request.body.approvedWorkspacePaths
+        .map((value: unknown) => String(value || '').trim())
+        .filter(Boolean)
+    : [];
+
+  response.json(
+    detectWorkspaceProfile({
+      defaultWorkspacePath,
+      workspaceRoots: approvedWorkspacePaths,
+    }),
+  );
+});
+
 app.post('/api/onboarding/validate-command-template', (request, response) => {
   response.json(
     validateCommandTemplatePayload({
@@ -747,8 +982,173 @@ app.post('/api/onboarding/validate-deployment-target', (request, response) => {
   );
 });
 
+app.post(
+  '/api/capabilities/:capabilityId/detect-workspace-profile',
+  async (request, response) => {
+    try {
+      const bundle = await getCapabilityBundle(request.params.capabilityId);
+      const defaultWorkspacePath = String(request.body?.defaultWorkspacePath || '').trim();
+      const approvedWorkspacePaths = Array.isArray(request.body?.approvedWorkspacePaths)
+        ? request.body.approvedWorkspacePaths
+            .map((value: unknown) => String(value || '').trim())
+            .filter(Boolean)
+        : [];
+
+      response.json(
+        detectCapabilityWorkspaceProfile(bundle.capability, {
+          defaultWorkspacePath:
+            defaultWorkspacePath || bundle.capability.executionConfig.defaultWorkspacePath,
+          workspaceRoots: approvedWorkspacePaths.length
+            ? approvedWorkspacePaths
+            : getCapabilityWorkspaceRoots(bundle.capability),
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.get('/api/bootstrap/database/status', async (_request, response) => {
+  try {
+    response.json(await inspectDatabaseBootstrapStatus());
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/bootstrap/database/profiles', async (_request, response) => {
+  try {
+    const [snapshot, status] = await Promise.all([
+      getDatabaseBootstrapProfileSnapshot(),
+      inspectDatabaseBootstrapStatus(),
+    ]);
+
+    response.json({
+      ...snapshot,
+      activeProfileId:
+        resolveActiveWorkspaceDatabaseBootstrapProfileId(snapshot, status.runtime) ||
+        snapshot.activeProfileId,
+    } satisfies WorkspaceDatabaseBootstrapProfileSnapshot);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/bootstrap/database/setup', async (request, response) => {
+  const body = request.body as Partial<{
+    host: string;
+    port: number;
+    databaseName: string;
+    user: string;
+    adminDatabaseName: string;
+    password: string;
+  }>;
+
+  const host = String(body.host || '').trim();
+  const user = String(body.user || '').trim();
+  const databaseName = String(body.databaseName || '').trim();
+  const adminDatabaseName = String(body.adminDatabaseName || 'postgres').trim() || 'postgres';
+  const port = Number(body.port || 0);
+
+  if (!host || !user || !databaseName || !Number.isFinite(port) || port <= 0) {
+    response.status(400).json({
+      error: 'Host, port, database name, and user are required to initialize the database.',
+    });
+    return;
+  }
+
+  try {
+    const currentProfileSnapshot = await getDatabaseBootstrapProfileSnapshot();
+    const matchingSavedProfile = findMatchingWorkspaceDatabaseBootstrapProfile(
+      currentProfileSnapshot,
+      {
+        host,
+        port,
+        databaseName,
+        user,
+        adminDatabaseName,
+      },
+    );
+    const resolvedPassword =
+      body.password?.trim() || matchingSavedProfile?.password || undefined;
+
+    await setDatabaseRuntimeConfig({
+      host,
+      port,
+      databaseName,
+      user,
+      adminDatabaseName,
+      ...(resolvedPassword ? { password: resolvedPassword } : {}),
+    });
+    const bootstrapResult = await bootstrapWorkspaceDatabaseAndStandards();
+    const profileSnapshot = upsertWorkspaceDatabaseBootstrapProfile(
+      currentProfileSnapshot,
+      {
+        host,
+        port,
+        databaseName,
+        user,
+        adminDatabaseName,
+        ...(resolvedPassword ? { password: resolvedPassword } : {}),
+      },
+      { makeActive: true },
+    );
+    await persistDatabaseBootstrapProfileSnapshot(profileSnapshot);
+    response.json({
+      ...bootstrapResult,
+      profileSnapshot,
+    } satisfies WorkspaceDatabaseBootstrapResult);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/bootstrap/database/profiles/:profileId/activate', async (request, response) => {
+  const profileId = String(request.params.profileId || '').trim();
+  if (!profileId) {
+    response.status(400).json({ error: 'A saved database profile id is required.' });
+    return;
+  }
+
+  try {
+    const currentSnapshot = await getDatabaseBootstrapProfileSnapshot();
+    const profile = currentSnapshot.profiles.find(item => item.id === profileId);
+
+    if (!profile) {
+      response.status(404).json({ error: `Saved database profile ${profileId} was not found.` });
+      return;
+    }
+
+    await setDatabaseRuntimeConfig({
+      host: profile.host,
+      port: profile.port,
+      databaseName: profile.databaseName,
+      user: profile.user,
+      adminDatabaseName: profile.adminDatabaseName,
+      ...(profile.password ? { password: profile.password } : {}),
+    });
+
+    const bootstrapResult = await bootstrapWorkspaceDatabaseAndStandards();
+    const profileSnapshot = upsertWorkspaceDatabaseBootstrapProfile(
+      currentSnapshot,
+      profile,
+      { makeActive: true },
+    );
+    await persistDatabaseBootstrapProfileSnapshot(profileSnapshot);
+
+    response.json({
+      ...bootstrapResult,
+      profileSnapshot,
+    } satisfies WorkspaceDatabaseBootstrapResult);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
 app.get('/api/state', async (_request, response) => {
   try {
+    await awaitStartupInitialization();
     response.json(await fetchAppState());
   } catch (error) {
     sendRepositoryError(response, error);
@@ -757,6 +1157,7 @@ app.get('/api/state', async (_request, response) => {
 
 app.get('/api/workspace/settings', async (_request, response) => {
   try {
+    await awaitStartupInitialization();
     response.json(await getWorkspaceSettings());
   } catch (error) {
     sendRepositoryError(response, error);
@@ -770,7 +1171,32 @@ app.patch('/api/workspace/settings', async (request, response) => {
         databaseConfigs: normalizeCapabilityDatabaseConfigs(
           request.body?.databaseConfigs || [],
         ),
+        connectors: request.body?.connectors
+          ? normalizeWorkspaceConnectorSettings(request.body.connectors)
+          : undefined,
       }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/workspace/connectors', async (_request, response) => {
+  try {
+    response.json((await getWorkspaceSettings()).connectors);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.patch('/api/workspace/connectors', async (request, response) => {
+  try {
+    response.json(
+      (
+        await updateWorkspaceSettings({
+          connectors: normalizeWorkspaceConnectorSettings(request.body || {}),
+        })
+      ).connectors,
     );
   } catch (error) {
     sendRepositoryError(response, error);
@@ -779,6 +1205,7 @@ app.patch('/api/workspace/settings', async (request, response) => {
 
 app.get('/api/workspace/catalog', async (_request, response) => {
   try {
+    await awaitStartupInitialization();
     response.json(await getWorkspaceCatalogSnapshot());
   } catch (error) {
     sendRepositoryError(response, error);
@@ -787,6 +1214,7 @@ app.get('/api/workspace/catalog', async (_request, response) => {
 
 app.post('/api/workspace/catalog/initialize', async (_request, response) => {
   try {
+    await awaitStartupInitialization();
     response.json(await initializeWorkspaceFoundations());
   } catch (error) {
     sendRepositoryError(response, error);
@@ -1045,6 +1473,84 @@ app.get(
 );
 
 app.get(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/explain',
+  async (request, response) => {
+    try {
+      response.json(
+        await buildWorkItemExplainDetail(
+          request.params.capabilityId,
+          request.params.workItemId,
+        ),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/review-packet',
+  async (request, response) => {
+    try {
+      response.status(201).json(
+        await generateReviewPacketForWorkItem(
+          request.params.capabilityId,
+          request.params.workItemId,
+        ),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/stage-control/continue',
+  async (request, response) => {
+    const body = request.body as {
+      conversation?: Array<{
+        role?: 'user' | 'agent';
+        content?: string;
+        timestamp?: string;
+      }>;
+      carryForwardNote?: string;
+      resolvedBy?: string;
+    };
+
+    try {
+      response.json(
+        await continueWorkflowStageControl({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          conversation: (body.conversation || [])
+            .filter(
+              entry =>
+                (entry.role === 'user' || entry.role === 'agent') &&
+                typeof entry.content === 'string',
+            )
+            .map(entry => ({
+              role: entry.role as 'user' | 'agent',
+              content: String(entry.content || ''),
+              timestamp:
+                typeof entry.timestamp === 'string' ? entry.timestamp : undefined,
+            })),
+          carryForwardNote:
+            typeof body.carryForwardNote === 'string'
+              ? body.carryForwardNote
+              : undefined,
+          resolvedBy:
+            typeof body.resolvedBy === 'string' && body.resolvedBy.trim()
+              ? body.resolvedBy.trim()
+              : 'Capability Owner',
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.get(
   '/api/capabilities/:capabilityId/work-items/:workItemId/flight-recorder/download',
   async (request, response) => {
     try {
@@ -1089,6 +1595,93 @@ app.get('/api/capabilities/:capabilityId/work-items/:workItemId/evidence', async
     sendRepositoryError(response, error);
   }
 });
+
+app.get('/api/capabilities/:capabilityId/connectors', async (request, response) => {
+  try {
+    response.json(await buildCapabilityConnectorContext(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/connectors/github/sync', async (request, response) => {
+  try {
+    const [bundle, settings] = await Promise.all([
+      getCapabilityBundle(request.params.capabilityId),
+      getWorkspaceSettings(),
+    ]);
+    response.json(
+      await syncCapabilityGithubContext(bundle.capability, settings.connectors),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/connectors/jira/sync', async (request, response) => {
+  try {
+    const [bundle, settings] = await Promise.all([
+      getCapabilityBundle(request.params.capabilityId),
+      getWorkspaceSettings(),
+    ]);
+    response.json(await syncCapabilityJiraContext(bundle.capability, settings.connectors));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/connectors/jira/transition', async (request, response) => {
+  try {
+    response.json(
+      await transitionJiraIssue({
+        capabilityId: request.params.capabilityId,
+        issueKey: String(request.body?.issueKey || ''),
+        transitionId: String(request.body?.transitionId || ''),
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post(
+  '/api/capabilities/:capabilityId/connectors/confluence/sync',
+  async (request, response) => {
+    try {
+      const [bundle, settings] = await Promise.all([
+        getCapabilityBundle(request.params.capabilityId),
+        getWorkspaceSettings(),
+      ]);
+      response.json(
+        await syncCapabilityConfluenceContext(bundle.capability, settings.connectors),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/connectors/confluence/publish',
+  async (request, response) => {
+    try {
+      response.json(
+        await publishArtifactToConfluence({
+          capabilityId: request.params.capabilityId,
+          artifactId: String(request.body?.artifactId || ''),
+          title:
+            typeof request.body?.title === 'string' ? request.body.title : undefined,
+          parentPageId:
+            typeof request.body?.parentPageId === 'string'
+              ? request.body.parentPageId
+              : undefined,
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
 
 app.get('/api/capabilities/:capabilityId/artifacts/:artifactId/content', async (request, response) => {
   try {
@@ -1196,7 +1789,14 @@ app.post('/api/capabilities/:capabilityId/skills', async (request, response) => 
   }
 
   try {
-    await addCapabilitySkillRecord(request.params.capabilityId, skill);
+    await addCapabilitySkillRecord(request.params.capabilityId, {
+      ...skill,
+      contentMarkdown:
+        skill.contentMarkdown?.trim() || `# ${skill.name}\n\n${skill.description}`,
+      kind: skill.kind || 'CUSTOM',
+      origin: skill.origin || 'CAPABILITY',
+      defaultTemplateKeys: skill.defaultTemplateKeys || [],
+    });
     await queueCapabilityAgentLearningRefresh(
       request.params.capabilityId,
       'capability-skill-added',
@@ -1250,6 +1850,28 @@ app.post('/api/capabilities/:capabilityId/agents', async (request, response) => 
     wakeAgentLearningWorker();
     response.status(201).json(
       await getCapabilityBundle(request.params.capabilityId),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.patch('/api/capabilities/:capabilityId/agents/bulk-model', async (request, response) => {
+  const requestedModel = String(request.body?.model || '').trim();
+  if (!requestedModel) {
+    response.status(400).json({
+      error: 'Target model is required for bulk agent updates.',
+    });
+    return;
+  }
+
+  try {
+    const resolvedModel = await resolveWritableAgentModel(requestedModel);
+    response.json(
+      await updateCapabilityAgentModelsRecord(
+        request.params.capabilityId,
+        resolvedModel,
+      ),
     );
   } catch (error) {
     sendRepositoryError(response, error);
@@ -1342,9 +1964,27 @@ app.post('/api/capabilities/:capabilityId/work-items', async (request, response)
   const title = String(request.body?.title || '').trim();
   const workflowId = String(request.body?.workflowId || '').trim();
   const description = String(request.body?.description || '').trim();
+  const rawTaskType = String(request.body?.taskType || '').trim();
+  const taskType = rawTaskType ? normalizeWorkItemTaskType(rawTaskType) : undefined;
   const priority = String(request.body?.priority || 'Med') as WorkItem['priority'];
   const tags = Array.isArray(request.body?.tags)
     ? request.body.tags.map((tag: unknown) => String(tag).trim()).filter(Boolean)
+    : [];
+  const phaseStakeholders = normalizeWorkItemPhaseStakeholders(
+    Array.isArray(request.body?.phaseStakeholders) ? request.body.phaseStakeholders : [],
+  );
+  const attachments = Array.isArray(request.body?.attachments)
+    ? request.body.attachments
+        .map((attachment: Partial<WorkItemAttachmentUpload>) => ({
+          fileName: String(attachment?.fileName || '').trim(),
+          mimeType: String(attachment?.mimeType || '').trim() || undefined,
+          contentText: String(attachment?.contentText || ''),
+          sizeBytes:
+            typeof attachment?.sizeBytes === 'number' && Number.isFinite(attachment.sizeBytes)
+              ? attachment.sizeBytes
+              : undefined,
+        }))
+        .filter(attachment => attachment.fileName && attachment.contentText.trim().length > 0)
     : [];
 
   if (!title || !workflowId) {
@@ -1361,6 +2001,9 @@ app.post('/api/capabilities/:capabilityId/work-items', async (request, response)
         title,
         description,
         workflowId,
+        taskType,
+        phaseStakeholders,
+        attachments,
         priority,
         tags,
       }),
@@ -1399,6 +2042,8 @@ app.post('/api/capabilities/:capabilityId/work-items/:workItemId/runs', async (r
       capabilityId: request.params.capabilityId,
       workItemId: request.params.workItemId,
       restartFromPhase: request.body?.restartFromPhase as WorkItemPhase | undefined,
+      guidance: String(request.body?.guidance || '').trim() || undefined,
+      guidedBy: parseActor(request.body?.guidedBy, 'Capability Owner'),
     });
     wakeExecutionWorker();
     response.status(201).json(detail);
@@ -1577,6 +2222,8 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/restart', async (request, 
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
       restartFromPhase: request.body?.restartFromPhase as WorkItemPhase | undefined,
+      guidance: String(request.body?.guidance || '').trim() || undefined,
+      guidedBy: parseActor(request.body?.guidedBy, 'Capability Owner'),
     });
     wakeExecutionWorker();
     response.status(201).json(detail);
@@ -1712,10 +2359,15 @@ app.post('/api/runtime/chat', async (request, response) => {
         agentId: liveAgent.id,
       },
     });
+    const chatContext = await resolveChatRuntimeContext({
+      body,
+      bundle,
+      liveAgent,
+    });
     const memoryContext = await buildMemoryContext({
       capabilityId: liveCapability.id,
       agentId: liveAgent.id,
-      queryText: message,
+      queryText: chatContext.memoryQueryText || message,
     });
     const chatResponse = await invokeCapabilityChat({
       capability: liveCapability,
@@ -1723,8 +2375,11 @@ app.post('/api/runtime/chat', async (request, response) => {
       history: body.history || [],
       message,
       resetSession: body.sessionMode === 'fresh',
+      scope: chatContext.chatScope,
+      scopeId: chatContext.chatScopeId,
+      developerPrompt: chatContext.developerPrompt,
       memoryPrompt: buildChatMemoryPrompt({
-        liveBriefing: buildLiveWorkspaceBriefing(bundle),
+        liveBriefing: chatContext.liveBriefing,
         memoryPrompt: memoryContext.prompt,
       }),
     });
@@ -1831,10 +2486,15 @@ app.post('/api/runtime/chat/stream', async (request, response) => {
       return;
     }
 
+    const chatContext = await resolveChatRuntimeContext({
+      body,
+      bundle,
+      liveAgent,
+    });
     const memoryContext = await buildMemoryContext({
       capabilityId: liveCapability.id,
       agentId: liveAgent.id,
-      queryText: message,
+      queryText: chatContext.memoryQueryText || message,
     });
     writeSseEvent(response, 'memory', {
       type: 'memory',
@@ -1861,8 +2521,11 @@ app.post('/api/runtime/chat/stream', async (request, response) => {
       history: body.history || [],
       message,
       resetSession: body.sessionMode === 'fresh',
+      scope: chatContext.chatScope,
+      scopeId: chatContext.chatScopeId,
+      developerPrompt: chatContext.developerPrompt,
       memoryPrompt: buildChatMemoryPrompt({
-        liveBriefing: buildLiveWorkspaceBriefing(bundle),
+        liveBriefing: chatContext.liveBriefing,
         memoryPrompt: memoryContext.prompt,
       }),
       onDelta: delta => {
@@ -1941,16 +2604,21 @@ if (fs.existsSync(distDir)) {
 }
 
 const startServer = async () => {
-  await initializeDatabase();
-  await initializeSeedData();
+  await hydratePersistedDatabaseBootstrapRuntime().catch(error => {
+    console.warn(
+      'Unable to restore the last saved database runtime profile. Falling back to environment defaults.',
+      error,
+    );
+  });
+  void ensurePersistentWorkspaceInitialization().catch(error => {
+    console.error(
+      'Singularity Neo started without a ready database. Open /workspace/databases to configure or repair the connection.',
+      error,
+    );
+  });
   const server = app.listen(port);
   server.on('listening', () => {
     console.log(`Singularity Neo API listening on http://localhost:${port}`);
-    setTimeout(() => {
-      void runDeferredStartupTasks().catch(error => {
-        console.error('Deferred startup initialization failed.', error);
-      });
-    }, 2500);
   });
   server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') {

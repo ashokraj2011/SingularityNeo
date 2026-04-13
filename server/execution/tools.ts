@@ -37,6 +37,7 @@ type ToolExecutionContext = {
 type ToolAdapter = {
   id: ToolAdapterId;
   description: string;
+  usageExample?: string;
   retryable: boolean;
   execute: (
     context: ToolExecutionContext,
@@ -46,6 +47,30 @@ type ToolAdapter = {
 
 const previewText = (value: string, limit = 1600) =>
   value.replace(/\0/g, '').slice(0, limit);
+
+const getRequiredStringArg = (
+  args: Record<string, any>,
+  key: string,
+  toolId: ToolAdapterId,
+) => {
+  if (Array.isArray(args[key])) {
+    const label =
+      key === 'path' || key === 'pattern' || key === 'workspacePath'
+        ? `${key} string`
+        : `${key} value`;
+    throw new Error(`${toolId} requires a single ${label}.`);
+  }
+
+  const value = String(args[key] || '').trim();
+  if (!value) {
+    const label =
+      key === 'path' || key === 'pattern' || key === 'workspacePath'
+        ? `a ${key}`
+        : key;
+    throw new Error(`${toolId} requires ${label}.`);
+  }
+  return value;
+};
 
 const describeDeploymentTargets = (
   targets: Capability['executionConfig']['deploymentTargets'],
@@ -220,6 +245,58 @@ const resolvePathWithinWorkspace = (
   return nextPath;
 };
 
+export const classifyToolExecutionError = ({
+  toolId,
+  message,
+}: {
+  toolId: ToolAdapterId;
+  message: string;
+}) => {
+  const normalized = message.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (new RegExp(`^${toolId}\\s+requires\\b`, 'i').test(normalized)) {
+    return {
+      recoverable: true,
+      feedback: `Tool ${toolId} validation failed: ${normalized} Fix the missing required argument and try again.`,
+    };
+  }
+
+  if (
+    /is not approved for capability/i.test(normalized) ||
+    /escapes the approved workspace root/i.test(normalized)
+  ) {
+    return {
+      recoverable: true,
+      feedback: `Tool ${toolId} used an invalid workspace path: ${normalized} Pick an approved workspace root or child path and try again.`,
+    };
+  }
+
+  if (
+    toolId === 'run_deploy' &&
+    /does not define deployment target|must remain approval-gated/i.test(normalized)
+  ) {
+    return {
+      recoverable: true,
+      feedback: `Tool ${toolId} could not run with the provided deployment target: ${normalized} Use one of the approved deployment targets or wait for the required approval gate.`,
+    };
+  }
+
+  if (
+    (toolId === 'run_build' || toolId === 'run_test' || toolId === 'run_docs') &&
+    /does not define the (build|test|docs) command template/i.test(normalized)
+  ) {
+    return {
+      recoverable: true,
+      feedback: `Tool ${toolId} cannot run because ${normalized} If explicit operator guidance says to skip this command for the current attempt, do not call ${toolId} again. Complete the step and clearly state that the validation was skipped by operator direction. Otherwise pause_for_input and ask whether to configure the missing command template or skip this command for this attempt.`,
+    };
+  }
+
+  return null;
+};
+
 const runProcess = async (
   file: string,
   args: string[],
@@ -353,6 +430,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_list: {
     id: 'workspace_list',
     description: 'List files inside an approved workspace path.',
+    usageExample: '{"path":"src"}',
     retryable: true,
     execute: async ({ capability }, args) => {
       const workspacePath = resolveWorkspacePath(capability, args.workspacePath || args.path);
@@ -383,10 +461,14 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_read: {
     id: 'workspace_read',
     description: 'Read a text file from an approved workspace path.',
+    usageExample: '{"path":"src/main/java/App.java"}',
     retryable: true,
     execute: async ({ capability }, args) => {
       const workspacePath = resolveWorkspacePath(capability, args.workspacePath);
-      const targetPath = resolvePathWithinWorkspace(workspacePath, String(args.path || ''));
+      const targetPath = resolvePathWithinWorkspace(
+        workspacePath,
+        getRequiredStringArg(args, 'path', 'workspace_read'),
+      );
       const maxBytes = Math.max(256, Math.min(Number(args.maxBytes || 8000), 20000));
       const content = await fs.readFile(targetPath, 'utf8');
 
@@ -404,12 +486,10 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_search: {
     id: 'workspace_search',
     description: 'Search within an approved workspace for a string or regex pattern.',
+    usageExample: '{"pattern":"Operator","path":"src"}',
     retryable: true,
     execute: async ({ capability }, args) => {
-      const pattern = String(args.pattern || '').trim();
-      if (!pattern) {
-        throw new Error('workspace_search requires a pattern.');
-      }
+      const pattern = getRequiredStringArg(args, 'pattern', 'workspace_search');
 
       const workspacePath = resolveWorkspacePath(capability, args.workspacePath);
       const scopePath = args.path
@@ -466,10 +546,14 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_write: {
     id: 'workspace_write',
     description: 'Write a text file inside an approved workspace path.',
+    usageExample: '{"path":"src/main/java/App.java","content":"..."}',
     retryable: false,
     execute: async ({ capability }, args) => {
       const workspacePath = resolveWorkspacePath(capability, args.workspacePath);
-      const targetPath = resolvePathWithinWorkspace(workspacePath, String(args.path || ''));
+      const targetPath = resolvePathWithinWorkspace(
+        workspacePath,
+        getRequiredStringArg(args, 'path', 'workspace_write'),
+      );
       const content = String(args.content || '');
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, content, 'utf8');
@@ -487,6 +571,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   run_build: {
     id: 'run_build',
     description: 'Run the approved build command template.',
+    usageExample: '{"templateId":"build"}',
     retryable: true,
     execute: async ({ capability }, args) =>
       executeCommandTemplate(
@@ -499,6 +584,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   run_test: {
     id: 'run_test',
     description: 'Run the approved test command template.',
+    usageExample: '{"templateId":"test"}',
     retryable: true,
     execute: async ({ capability }, args) =>
       executeCommandTemplate(
@@ -511,6 +597,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   run_docs: {
     id: 'run_docs',
     description: 'Run the approved docs command template.',
+    usageExample: '{"templateId":"docs"}',
     retryable: true,
     execute: async ({ capability }, args) =>
       executeCommandTemplate(
@@ -524,6 +611,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     id: 'run_deploy',
     description:
       'Execute an approved deployment target using a named command template after approval.',
+    usageExample: '{"targetId":"staging"}',
     retryable: false,
     execute: async ({ capability, requireApprovedDeployment }, args) => {
       if (!requireApprovedDeployment) {
@@ -565,7 +653,7 @@ export const getToolAdapter = (toolId: ToolAdapterId) => {
 export const listToolDescriptions = (toolIds: ToolAdapterId[]) =>
   toolIds.map(toolId => {
     const adapter = getToolAdapter(toolId);
-    return `- ${adapter.id}: ${adapter.description}`;
+    return `- ${adapter.id}: ${adapter.description}${adapter.usageExample ? ` Example args: ${adapter.usageExample}` : ''}`;
   });
 
 export const executeTool = async ({

@@ -8,6 +8,7 @@ import {
   PhaseEvidenceGroup,
   RunEvent,
   RunWait,
+  Workflow,
   WorkflowRun,
   WorkflowRunDetail,
   WorkItem,
@@ -22,7 +23,7 @@ import {
   listWorkflowRunsByCapability,
   listWorkflowRunsForWorkItem,
 } from './execution/repository';
-import { getCapabilityBundle } from './repository';
+import { getCapabilityArtifact, getCapabilityBundle } from './repository';
 
 const ACTIVE_RUN_STATUSES = new Set([
   'QUEUED',
@@ -34,6 +35,12 @@ const ACTIVE_RUN_STATUSES = new Set([
 
 const sortIsoDesc = (left?: string, right?: string) =>
   String(right || '').localeCompare(String(left || ''));
+
+const asStringArray = (value: unknown): string[] | undefined =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : undefined;
+
+const asIso = (value: unknown) =>
+  value instanceof Date ? value.toISOString() : String(value || '');
 
 const toSafeFileSlug = (value: string) =>
   value
@@ -149,6 +156,58 @@ const buildArtifactContent = (artifact: Artifact): ArtifactContentResponse => {
   };
 };
 
+const artifactSummaryFromRow = (row: Record<string, any>): Artifact => ({
+  id: row.id,
+  name: row.name,
+  capabilityId: row.capability_id,
+  type: row.type,
+  version: row.version,
+  agent: row.agent,
+  created: row.created,
+  description: row.description || undefined,
+  connectedAgentId: row.connected_agent_id || undefined,
+  runId: row.run_id || undefined,
+  summary: row.summary || undefined,
+  workItemId: row.work_item_id || undefined,
+  artifactKind: row.artifact_kind || undefined,
+  phase: row.phase || undefined,
+  sourceRunId: row.source_run_id || undefined,
+  handoffFromAgentId: row.handoff_from_agent_id || undefined,
+  handoffToAgentId: row.handoff_to_agent_id || undefined,
+});
+
+const workflowRunSummaryFromRow = (row: Record<string, any>): WorkflowRun => ({
+  id: row.id,
+  capabilityId: row.capability_id,
+  workItemId: row.work_item_id,
+  workflowId: row.workflow_id,
+  status: row.status,
+  attemptNumber: Number(row.attempt_number || 1),
+  workflowSnapshot: {
+    id: row.workflow_id,
+    capabilityId: row.capability_id,
+    name: 'Workflow',
+    steps: [],
+    status: 'STABLE',
+  } as Workflow,
+  currentNodeId: row.current_node_id || undefined,
+  currentStepId: row.current_step_id || undefined,
+  currentPhase: row.current_phase || undefined,
+  assignedAgentId: row.assigned_agent_id || undefined,
+  branchState: undefined,
+  pauseReason: row.pause_reason || undefined,
+  currentWaitId: row.current_wait_id || undefined,
+  terminalOutcome: row.terminal_outcome || undefined,
+  restartFromPhase: row.restart_from_phase || undefined,
+  traceId: row.trace_id || undefined,
+  leaseOwner: row.lease_owner || undefined,
+  leaseExpiresAt: row.lease_expires_at ? asIso(row.lease_expires_at) : undefined,
+  startedAt: row.started_at ? asIso(row.started_at) : undefined,
+  completedAt: row.completed_at ? asIso(row.completed_at) : undefined,
+  createdAt: asIso(row.created_at),
+  updatedAt: asIso(row.updated_at),
+});
+
 const buildHumanInteractionRecords = ({
   waits,
   runsById,
@@ -213,7 +272,10 @@ const buildLedgerArtifactRecords = ({
   workItemsById: Map<string, WorkItem>;
   runsById: Map<string, WorkflowRun>;
   agentsById: Map<string, string>;
-  stepContextByRunStepId: Map<string, { phase?: WorkItemPhase; stepName?: string; stepType?: string }>;
+  stepContextByRunStepId?: Map<
+    string,
+    { phase?: WorkItemPhase; stepName?: string; stepType?: string }
+  >;
 }): LedgerArtifactRecord[] =>
   artifacts
     .map(artifact => {
@@ -221,7 +283,7 @@ const buildLedgerArtifactRecords = ({
       const run = runId ? runsById.get(runId) : undefined;
       const workItemId = artifact.workItemId || run?.workItemId;
       const workItem = workItemId ? workItemsById.get(workItemId) : undefined;
-      const stepContext = stepContextByRunStepId.get(
+      const stepContext = stepContextByRunStepId?.get(
         artifact.sourceRunStepId || artifact.runStepId || '',
       );
 
@@ -229,6 +291,9 @@ const buildLedgerArtifactRecords = ({
         artifact: {
           ...artifact,
           workItemId,
+          contentText: undefined,
+          contentJson: undefined,
+          retrievalReferences: undefined,
         },
         workItemTitle: workItem?.title,
         runStatus: run?.status,
@@ -327,19 +392,129 @@ const buildCompletedWorkOrders = async (
 export const listLedgerArtifacts = async (
   capabilityId: string,
 ): Promise<LedgerArtifactRecord[]> => {
-  const { bundle, workItemsById } = await buildCompletedWorkOrders(capabilityId);
-  const runs = await listWorkflowRunsByCapability(capabilityId);
-  const runDetails = await Promise.all(runs.map(run => getWorkflowRunDetail(capabilityId, run.id)));
+  const [artifactResult, workItemResult, agentResult, taskResult, runsResult] = await Promise.all([
+    query(
+      `
+        SELECT
+          id,
+          name,
+          capability_id,
+          type,
+          version,
+          agent,
+          created,
+          description,
+          connected_agent_id,
+          run_id,
+          summary,
+          work_item_id,
+          artifact_kind,
+          phase,
+          source_run_id,
+          handoff_from_agent_id,
+          handoff_to_agent_id
+        FROM capability_artifacts
+        WHERE capability_id = $1
+        ORDER BY created_at DESC, id DESC
+      `,
+      [capabilityId],
+    ),
+    query(
+      `
+        SELECT id, title
+        FROM capability_work_items
+        WHERE capability_id = $1
+      `,
+      [capabilityId],
+    ),
+    query(
+      `
+        SELECT id, name
+        FROM capability_agents
+        WHERE capability_id = $1
+      `,
+      [capabilityId],
+    ),
+    query(
+      `
+        SELECT work_item_id, title
+        FROM capability_tasks
+        WHERE capability_id = $1
+          AND work_item_id IS NOT NULL
+      `,
+      [capabilityId],
+    ),
+    query(
+      `
+        SELECT
+          id,
+          capability_id,
+          work_item_id,
+          workflow_id,
+          status,
+          attempt_number,
+          current_node_id,
+          current_step_id,
+          current_phase,
+          assigned_agent_id,
+          pause_reason,
+          current_wait_id,
+          terminal_outcome,
+          restart_from_phase,
+          trace_id,
+          lease_owner,
+          lease_expires_at,
+          started_at,
+          completed_at,
+          created_at,
+          updated_at
+        FROM capability_workflow_runs
+        WHERE capability_id = $1
+        ORDER BY created_at DESC, id DESC
+      `,
+      [capabilityId],
+    ),
+  ]);
+
+  const workItemsById = new Map(
+    workItemResult.rows.map(row => [
+      String(row.id),
+      {
+        id: String(row.id),
+        title: String(row.title),
+      } as WorkItem,
+    ]),
+  );
+  const taskTitleByWorkItemId = new Map(
+    taskResult.rows.map(row => [String(row.work_item_id), String(row.title)]),
+  );
+
+  const runs = runsResult.rows.map(workflowRunSummaryFromRow);
+
+  runs.forEach(run => {
+    if (!workItemsById.has(run.workItemId)) {
+      workItemsById.set(
+        run.workItemId,
+        buildFallbackWorkItem({
+          capabilityId,
+          workItemId: run.workItemId,
+          run,
+          taskTitle: taskTitleByWorkItemId.get(run.workItemId),
+        }),
+      );
+    }
+  });
+
   const runsById = new Map(runs.map(run => [run.id, run]));
-  const stepContextByRunStepId = buildStepContextByRunStepId(runDetails);
-  const agentsById = new Map(bundle.workspace.agents.map(agent => [agent.id, agent.name]));
+  const agentsById = new Map(
+    agentResult.rows.map(row => [String(row.id), String(row.name)]),
+  );
 
   return buildLedgerArtifactRecords({
-    artifacts: bundle.workspace.artifacts,
+    artifacts: artifactResult.rows.map(artifactSummaryFromRow),
     workItemsById,
     runsById,
     agentsById,
-    stepContextByRunStepId,
   });
 };
 
@@ -547,8 +722,7 @@ export const getLedgerArtifactContent = async (
   capabilityId: string,
   artifactId: string,
 ): Promise<ArtifactContentResponse> => {
-  const bundle = await getCapabilityBundle(capabilityId);
-  const artifact = bundle.workspace.artifacts.find(current => current.id === artifactId);
+  const artifact = await getCapabilityArtifact(capabilityId, artifactId);
   if (!artifact) {
     throw new Error(`Artifact ${artifactId} was not found.`);
   }

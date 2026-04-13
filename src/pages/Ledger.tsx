@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   ArrowRight,
@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import ArtifactPreview from '../components/ArtifactPreview';
+import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
 import { useCapability } from '../context/CapabilityContext';
 import { EnterpriseTone, getStatusTone } from '../lib/enterprise';
 import { compactMarkdownPreview } from '../lib/markdown';
@@ -66,6 +67,9 @@ import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
 type LedgerTab = 'artifacts' | 'completed' | 'interactions' | 'logs' | 'flight-recorder';
 
+const ARTIFACT_LEDGER_TABS = new Set<LedgerTab>(['artifacts', 'interactions']);
+const COMPLETED_LEDGER_TABS = new Set<LedgerTab>(['completed', 'logs']);
+
 const LEDGER_PRIMARY_TABS: Array<{
   id: LedgerTab;
   label: string;
@@ -90,6 +94,10 @@ const HUMAN_INTERACTION_KINDS = new Set<ArtifactKind>([
   'INPUT_NOTE',
   'CONFLICT_RESOLUTION',
 ]);
+
+const LEDGER_PAGE_SIZE = 20;
+const PREVIEW_SOFT_LIMIT = 12000;
+const PREVIEW_COMPACT_LIMIT = 6000;
 
 const formatTimestamp = (value?: string) => {
   if (!value) {
@@ -159,8 +167,14 @@ const formatTimelineDate = (value?: string) =>
 
 const PreviewPane = ({
   content,
+  expanded,
+  onExpand,
+  onCollapse,
 }: {
   content?: ArtifactContentResponse;
+  expanded: boolean;
+  onExpand: () => void;
+  onCollapse: () => void;
 }) => {
   if (!content) {
     return (
@@ -169,6 +183,21 @@ const PreviewPane = ({
       </div>
     );
   }
+
+  const serializedContent =
+    content.contentFormat === 'JSON'
+      ? JSON.stringify(content.contentJson || {}, null, 2)
+      : content.contentText || '';
+
+  const isHeavyPreview = serializedContent.length > PREVIEW_SOFT_LIMIT;
+  const isCompactPreview = isHeavyPreview && !expanded;
+  const previewContent = isCompactPreview
+    ? `${serializedContent.slice(0, PREVIEW_COMPACT_LIMIT)}\n\n[Preview truncated for faster rendering. Load full preview to inspect the complete document.]`
+    : serializedContent;
+  const previewFormat =
+    isCompactPreview && content.contentFormat === 'MARKDOWN'
+      ? 'TEXT'
+      : content.contentFormat;
 
   return (
     <div className="rounded-3xl border border-outline-variant/15 bg-surface-container-low">
@@ -183,16 +212,79 @@ const PreviewPane = ({
           {content.contentFormat}
         </span>
       </div>
+      {isHeavyPreview && (
+        <div className="flex flex-col gap-3 border-b border-outline-variant/10 bg-white/80 px-5 py-4 text-sm text-secondary lg:flex-row lg:items-center lg:justify-between">
+          <p>
+            Showing {isCompactPreview ? 'a compact preview' : 'the full document'} for a large artifact.
+            {' '}This file is about {serializedContent.length.toLocaleString()} characters.
+          </p>
+          <button
+            type="button"
+            onClick={isCompactPreview ? onExpand : onCollapse}
+            className="inline-flex items-center justify-center rounded-2xl border border-outline-variant/20 bg-white px-4 py-2 text-sm font-bold text-primary transition-all hover:bg-surface-container-low"
+          >
+            {isCompactPreview ? 'Load full preview' : 'Use lighter preview'}
+          </button>
+        </div>
+      )}
       <div className="px-5 py-5">
         <ArtifactPreview
-          format={content.contentFormat}
-          content={
-            content.contentFormat === 'JSON'
-              ? JSON.stringify(content.contentJson || {}, null, 2)
-              : content.contentText || ''
-          }
+          format={previewFormat}
+          content={previewContent}
           emptyLabel="No preview is available for this artifact."
         />
+      </div>
+    </div>
+  );
+};
+
+const PaginationBar = ({
+  page,
+  pageSize,
+  total,
+  label,
+  onPageChange,
+}: {
+  page: number;
+  pageSize: number;
+  total: number;
+  label: string;
+  onPageChange: (page: number) => void;
+}) => {
+  if (total <= pageSize) {
+    return null;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const start = (currentPage - 1) * pageSize + 1;
+  const end = Math.min(total, currentPage * pageSize);
+
+  return (
+    <div className="flex flex-col gap-3 rounded-2xl border border-outline-variant/15 bg-white px-4 py-3 text-sm text-secondary lg:flex-row lg:items-center lg:justify-between">
+      <p>
+        Showing {label} {start}-{end} of {total}
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onPageChange(currentPage - 1)}
+          disabled={currentPage <= 1}
+          className="rounded-xl border border-outline-variant/20 px-3 py-2 font-bold text-primary transition-all hover:bg-surface-container-low disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Previous
+        </button>
+        <span className="rounded-xl bg-surface-container-low px-3 py-2 font-bold text-on-surface">
+          Page {currentPage} of {totalPages}
+        </span>
+        <button
+          type="button"
+          onClick={() => onPageChange(currentPage + 1)}
+          disabled={currentPage >= totalPages}
+          className="rounded-xl border border-outline-variant/20 px-3 py-2 font-bold text-primary transition-all hover:bg-surface-container-low disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Next
+        </button>
       </div>
     </div>
   );
@@ -291,37 +383,60 @@ const Ledger = () => {
     'ALL' | RecorderEventCategory
   >('ALL');
   const [selectedRecorderEventId, setSelectedRecorderEventId] = useState('');
-  const [isLoading, setIsLoading] = useState(true);
+  const [isArtifactsLoading, setIsArtifactsLoading] = useState(true);
+  const [isCompletedLoading, setIsCompletedLoading] = useState(false);
+  const [isFlightRecorderLoading, setIsFlightRecorderLoading] = useState(false);
+  const [hasLoadedCompletedOrders, setHasLoadedCompletedOrders] = useState(false);
+  const [hasLoadedFlightRecorder, setHasLoadedFlightRecorder] = useState(false);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [error, setError] = useState('');
+  const [isExplainOpen, setIsExplainOpen] = useState(false);
+  const [artifactPage, setArtifactPage] = useState(1);
+  const [completedPage, setCompletedPage] = useState(1);
+  const [expandedArtifactPreviewIds, setExpandedArtifactPreviewIds] = useState<
+    Record<string, boolean>
+  >({});
+  const isArtifactTab = ARTIFACT_LEDGER_TABS.has(tab);
+  const isCompletedTab = COMPLETED_LEDGER_TABS.has(tab);
+  const isFlightRecorderTab = tab === 'flight-recorder';
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+  const deferredRecorderSearchQuery = useDeferredValue(recorderSearchQuery);
+  const isLoading =
+    isArtifactsLoading ||
+    (isCompletedTab && isCompletedLoading && !hasLoadedCompletedOrders) ||
+    (isFlightRecorderTab && isFlightRecorderLoading && !hasLoadedFlightRecorder);
 
   useEffect(() => {
     let isMounted = true;
 
-    setIsLoading(true);
+    setIsArtifactsLoading(true);
     setError('');
+    setArtifacts([]);
+    setCompletedOrders([]);
     setEvidenceByWorkItemId({});
     setArtifactContentById({});
+    setHasLoadedCompletedOrders(false);
+    setHasLoadedFlightRecorder(false);
+    setIsCompletedLoading(false);
+    setIsFlightRecorderLoading(false);
     setFlightRecorder(null);
+    setSelectedArtifactId('');
+    setSelectedWorkItemId('');
+    setSelectedRecorderEventId('');
+    setRecorderCategoryFilter('ALL');
+    setArtifactPage(1);
+    setCompletedPage(1);
+    setExpandedArtifactPreviewIds({});
 
-    Promise.all([
-      fetchLedgerArtifacts(activeCapability.id),
-      fetchCompletedWorkOrders(activeCapability.id),
-      fetchCapabilityFlightRecorder(activeCapability.id),
-    ])
-      .then(([artifactRecords, summaries, recorderSnapshot]) => {
+    fetchLedgerArtifacts(activeCapability.id)
+      .then(artifactRecords => {
         if (!isMounted) {
           return;
         }
 
         setArtifacts(artifactRecords);
-        setCompletedOrders(summaries);
-        setFlightRecorder(recorderSnapshot);
-        setSelectedArtifactId(artifactRecords[0]?.artifact.id || '');
         setSelectedWorkItemId(
-          summaries[0]?.workItem.id ||
-            recorderSnapshot.workItems[0]?.workItem.id ||
-            '',
+          artifactRecords.find(record => record.artifact.workItemId)?.artifact.workItemId || '',
         );
       })
       .catch(nextError => {
@@ -336,7 +451,7 @@ const Ledger = () => {
       })
       .finally(() => {
         if (isMounted) {
-          setIsLoading(false);
+          setIsArtifactsLoading(false);
         }
       });
 
@@ -346,7 +461,13 @@ const Ledger = () => {
   }, [activeCapability.id]);
 
   useEffect(() => {
-    if (!selectedWorkItemId || evidenceByWorkItemId[selectedWorkItemId]) {
+    if (
+      !isCompletedTab ||
+      !selectedWorkItemId ||
+      !completedOrders.some(order => order.workItem.id === selectedWorkItemId) ||
+      evidenceByWorkItemId[selectedWorkItemId] ||
+      !hasLoadedCompletedOrders
+    ) {
       return;
     }
 
@@ -381,7 +502,106 @@ const Ledger = () => {
     return () => {
       isMounted = false;
     };
-  }, [activeCapability.id, evidenceByWorkItemId, selectedWorkItemId]);
+  }, [
+    activeCapability.id,
+    completedOrders,
+    evidenceByWorkItemId,
+    hasLoadedCompletedOrders,
+    isCompletedTab,
+    selectedWorkItemId,
+  ]);
+
+  useEffect(() => {
+    if (!isCompletedTab || hasLoadedCompletedOrders || isCompletedLoading) {
+      return;
+    }
+
+    let isMounted = true;
+    setIsCompletedLoading(true);
+    fetchCompletedWorkOrders(activeCapability.id)
+      .then(summaries => {
+        if (!isMounted) {
+          return;
+        }
+        setCompletedOrders(summaries);
+        setHasLoadedCompletedOrders(true);
+        setSelectedWorkItemId(previous =>
+          summaries.some(order => order.workItem.id === previous)
+            ? previous
+            : summaries[0]?.workItem.id || '',
+        );
+      })
+      .catch(nextError => {
+        if (!isMounted) {
+          return;
+        }
+        setError(
+          nextError instanceof Error
+            ? nextError.message
+            : 'Completed work evidence could not be loaded.',
+        );
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsCompletedLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [
+    activeCapability.id,
+    hasLoadedCompletedOrders,
+    isCompletedLoading,
+    isCompletedTab,
+  ]);
+
+  useEffect(() => {
+    if (!isFlightRecorderTab || hasLoadedFlightRecorder || isFlightRecorderLoading) {
+      return;
+    }
+
+    let isMounted = true;
+    setIsFlightRecorderLoading(true);
+    fetchCapabilityFlightRecorder(activeCapability.id)
+      .then(recorderSnapshot => {
+        if (!isMounted) {
+          return;
+        }
+        setFlightRecorder(recorderSnapshot);
+        setHasLoadedFlightRecorder(true);
+        setSelectedWorkItemId(previous =>
+          recorderSnapshot.workItems.some(workItem => workItem.workItem.id === previous)
+            ? previous
+            : recorderSnapshot.workItems[0]?.workItem.id || '',
+        );
+      })
+      .catch(nextError => {
+        if (!isMounted) {
+          return;
+        }
+        setError(
+          nextError instanceof Error
+            ? nextError.message
+            : 'Flight Recorder could not be loaded.',
+        );
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsFlightRecorderLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [
+    activeCapability.id,
+    hasLoadedFlightRecorder,
+    isFlightRecorderLoading,
+    isFlightRecorderTab,
+  ]);
 
   const artifactPhaseOptions = useMemo(
     () =>
@@ -436,7 +656,7 @@ const Ledger = () => {
   const filteredArtifacts = useMemo(() => {
     const source = tab === 'interactions' ? interactionArtifacts : artifacts;
     return source.filter(record => {
-      const query = searchQuery.trim().toLowerCase();
+      const query = deferredSearchQuery.trim().toLowerCase();
       const matchesQuery =
         !query ||
         record.artifact.name.toLowerCase().includes(query) ||
@@ -464,27 +684,48 @@ const Ledger = () => {
     interactionArtifacts,
     kindFilter,
     phaseFilter,
-    searchQuery,
+    deferredSearchQuery,
     tab,
   ]);
 
   useEffect(() => {
-    if (tab !== 'artifacts' && tab !== 'interactions') {
-      return;
-    }
+    setArtifactPage(1);
+  }, [deferredSearchQuery, phaseFilter, kindFilter, agentFilter, attemptFilter, tab]);
 
-    if (filteredArtifacts.some(record => record.artifact.id === selectedArtifactId)) {
-      return;
-    }
-
-    setSelectedArtifactId(filteredArtifacts[0]?.artifact.id || '');
-  }, [filteredArtifacts, selectedArtifactId, tab]);
+  const paginatedArtifacts = useMemo(() => {
+    const startIndex = (artifactPage - 1) * LEDGER_PAGE_SIZE;
+    return filteredArtifacts.slice(startIndex, startIndex + LEDGER_PAGE_SIZE);
+  }, [artifactPage, filteredArtifacts]);
 
   useEffect(() => {
-    const selectedArtifact = filteredArtifacts.find(
-      record => record.artifact.id === selectedArtifactId,
-    );
-    if (!selectedArtifact) {
+    const totalPages = Math.max(1, Math.ceil(filteredArtifacts.length / LEDGER_PAGE_SIZE));
+    if (artifactPage > totalPages) {
+      setArtifactPage(totalPages);
+    }
+  }, [artifactPage, filteredArtifacts.length]);
+
+  useEffect(() => {
+    if (!isArtifactTab) {
+      return;
+    }
+
+    if (paginatedArtifacts.some(record => record.artifact.id === selectedArtifactId)) {
+      return;
+    }
+
+    if (selectedArtifactId) {
+      setSelectedArtifactId('');
+    }
+  }, [isArtifactTab, paginatedArtifacts, selectedArtifactId]);
+
+  const selectedArtifact = useMemo(
+    () =>
+      paginatedArtifacts.find(record => record.artifact.id === selectedArtifactId) || null,
+    [paginatedArtifacts, selectedArtifactId],
+  );
+
+  useEffect(() => {
+    if (!isArtifactTab || !selectedArtifact) {
       return;
     }
 
@@ -517,14 +758,14 @@ const Ledger = () => {
     return () => {
       isMounted = false;
     };
-  }, [activeCapability.id, artifactContentById, filteredArtifacts, selectedArtifactId]);
+  }, [activeCapability.id, artifactContentById, isArtifactTab, selectedArtifact]);
 
-  const selectedArtifact = filteredArtifacts.find(
-    record => record.artifact.id === selectedArtifactId,
-  );
   const selectedArtifactContent = selectedArtifact
     ? artifactContentById[selectedArtifact.artifact.id]
     : undefined;
+  const isSelectedArtifactPreviewExpanded = selectedArtifact
+    ? expandedArtifactPreviewIds[selectedArtifact.artifact.id] || false
+    : false;
   const selectedEvidence = selectedWorkItemId
     ? evidenceByWorkItemId[selectedWorkItemId]
     : undefined;
@@ -542,27 +783,62 @@ const Ledger = () => {
   );
 
   const recorderWorkItemOptions = useMemo(
-    () => flightRecorder?.workItems || [],
-    [flightRecorder],
+    () => (isFlightRecorderTab ? flightRecorder?.workItems || [] : []),
+    [flightRecorder, isFlightRecorderTab],
   );
   const filteredRecorderWorkItems = useMemo(() => {
-    const query = recorderSearchQuery.trim().toLowerCase();
+    const query = deferredRecorderSearchQuery.trim().toLowerCase();
     return recorderWorkItemOptions.filter(record =>
       !query ||
       record.workItem.title.toLowerCase().includes(query) ||
       record.workItem.id.toLowerCase().includes(query) ||
       record.verdict.toLowerCase().includes(query),
     );
-  }, [recorderSearchQuery, recorderWorkItemOptions]);
+  }, [deferredRecorderSearchQuery, recorderWorkItemOptions]);
+
+  const paginatedCompletedOrders = useMemo(() => {
+    const startIndex = (completedPage - 1) * LEDGER_PAGE_SIZE;
+    return completedOrders.slice(startIndex, startIndex + LEDGER_PAGE_SIZE);
+  }, [completedOrders, completedPage]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(completedOrders.length / LEDGER_PAGE_SIZE));
+    if (completedPage > totalPages) {
+      setCompletedPage(totalPages);
+    }
+  }, [completedOrders.length, completedPage]);
+
+  useEffect(() => {
+    setCompletedPage(1);
+  }, [tab, completedOrders.length]);
+
+  useEffect(() => {
+    if (!isCompletedTab || !paginatedCompletedOrders.length) {
+      return;
+    }
+
+    if (paginatedCompletedOrders.some(order => order.workItem.id === selectedWorkItemId)) {
+      return;
+    }
+
+    setSelectedWorkItemId(paginatedCompletedOrders[0]?.workItem.id || '');
+  }, [isCompletedTab, paginatedCompletedOrders, selectedWorkItemId]);
   const selectedRecorderDetail = useMemo<WorkItemFlightRecorderDetail | null>(
     () =>
-      (selectedWorkItemId
+      (!isFlightRecorderTab
+        ? null
+        : selectedWorkItemId
         ? flightRecorder?.workItems.find(
             workItem => workItem.workItem.id === selectedWorkItemId,
           )
         : flightRecorder?.workItems[0]) || null,
-    [flightRecorder, selectedWorkItemId],
+    [flightRecorder, isFlightRecorderTab, selectedWorkItemId],
   );
+  const selectedExplainWorkItem =
+    selectedEvidence?.workItem ||
+    selectedRecorderDetail?.workItem ||
+    completedOrders.find(order => order.workItem.id === selectedWorkItemId)?.workItem ||
+    null;
   const recorderTimeline = useMemo(
     () => normalizeFlightRecorderTimeline(selectedRecorderDetail, activeCapability.lifecycle),
     [activeCapability.lifecycle, selectedRecorderDetail],
@@ -604,7 +880,15 @@ const Ledger = () => {
 
   const renderArtifactList = () => (
     <div className="space-y-3">
-      {filteredArtifacts.map(record => {
+      <PaginationBar
+        page={artifactPage}
+        pageSize={LEDGER_PAGE_SIZE}
+        total={filteredArtifacts.length}
+        label="artifacts"
+        onPageChange={setArtifactPage}
+      />
+
+      {paginatedArtifacts.map(record => {
         const isSelected = record.artifact.id === selectedArtifactId;
         return (
           <button
@@ -659,7 +943,24 @@ const Ledger = () => {
 
   const renderCompletedOrderList = () => (
     <div className="space-y-3">
-      {completedOrders.map(order => {
+      <PaginationBar
+        page={completedPage}
+        pageSize={LEDGER_PAGE_SIZE}
+        total={completedOrders.length}
+        label="completed work items"
+        onPageChange={setCompletedPage}
+      />
+
+      {isCompletedLoading && completedOrders.length === 0 && (
+        <EmptyState
+          title="Loading completed work orders"
+          description="Gathering completed work evidence, handoffs, and human interaction history for this capability."
+          icon={Clock3}
+          className="min-h-[12rem]"
+        />
+      )}
+
+      {paginatedCompletedOrders.map(order => {
         const isSelected = order.workItem.id === selectedWorkItemId;
         return (
           <button
@@ -692,7 +993,7 @@ const Ledger = () => {
         );
       })}
 
-      {completedOrders.length === 0 && (
+      {!isCompletedLoading && completedOrders.length === 0 && (
         <EmptyState
           title="No completed work orders"
           description="Completed stories, evidence bundles, approvals, and phase outputs will appear here after execution finishes."
@@ -1001,6 +1302,13 @@ const Ledger = () => {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setIsExplainOpen(true)}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                Explain
+              </button>
               <a
                 href={getWorkItemFlightRecorderDownloadUrl(
                   activeCapability.id,
@@ -1247,27 +1555,59 @@ const Ledger = () => {
           <button
             type="button"
             onClick={() => {
-              setIsLoading(true);
-              Promise.all([
-                fetchLedgerArtifacts(activeCapability.id),
-                fetchCompletedWorkOrders(activeCapability.id),
-                fetchCapabilityFlightRecorder(activeCapability.id),
-              ])
-                .then(([artifactRecords, summaries, recorderSnapshot]) => {
+              setError('');
+              setIsArtifactsLoading(true);
+              const refreshRequests: Array<Promise<void>> = [
+                fetchLedgerArtifacts(activeCapability.id).then(artifactRecords => {
                   setArtifacts(artifactRecords);
-                  setCompletedOrders(summaries);
-                  setFlightRecorder(recorderSnapshot);
-                  if (!selectedWorkItemId) {
-                    setSelectedWorkItemId(
-                      summaries[0]?.workItem.id ||
-                        recorderSnapshot.workItems[0]?.workItem.id ||
-                        '',
+                  setSelectedArtifactId(previous =>
+                    previous && artifactRecords.some(record => record.artifact.id === previous)
+                      ? previous
+                      : '',
+                  );
+                  setSelectedWorkItemId(
+                    previous =>
+                      previous ||
+                      artifactRecords.find(record => record.artifact.workItemId)?.artifact
+                        .workItemId ||
+                      '',
+                  );
+                }),
+              ];
+
+              if (isCompletedTab || hasLoadedCompletedOrders) {
+                setIsCompletedLoading(true);
+                refreshRequests.push(
+                  fetchCompletedWorkOrders(activeCapability.id).then(summaries => {
+                    setCompletedOrders(summaries);
+                    setHasLoadedCompletedOrders(true);
+                    setSelectedWorkItemId(previous =>
+                      summaries.some(order => order.workItem.id === previous)
+                        ? previous
+                        : summaries[0]?.workItem.id || '',
                     );
-                  }
-                  if (!selectedArtifactId) {
-                    setSelectedArtifactId(artifactRecords[0]?.artifact.id || '');
-                  }
-                })
+                  }),
+                );
+              }
+
+              if (isFlightRecorderTab || hasLoadedFlightRecorder) {
+                setIsFlightRecorderLoading(true);
+                refreshRequests.push(
+                  fetchCapabilityFlightRecorder(activeCapability.id).then(recorderSnapshot => {
+                    setFlightRecorder(recorderSnapshot);
+                    setHasLoadedFlightRecorder(true);
+                    setSelectedWorkItemId(previous =>
+                      recorderSnapshot.workItems.some(
+                        workItem => workItem.workItem.id === previous,
+                      )
+                        ? previous
+                        : recorderSnapshot.workItems[0]?.workItem.id || '',
+                    );
+                  }),
+                );
+              }
+
+              Promise.all(refreshRequests)
                 .catch(nextError => {
                   setError(
                     nextError instanceof Error
@@ -1275,7 +1615,11 @@ const Ledger = () => {
                       : 'Ledger evidence could not be refreshed.',
                   );
                 })
-                .finally(() => setIsLoading(false));
+                .finally(() => {
+                  setIsArtifactsLoading(false);
+                  setIsCompletedLoading(false);
+                  setIsFlightRecorderLoading(false);
+                });
             }}
             className="enterprise-button enterprise-button-secondary"
           >
@@ -1288,7 +1632,11 @@ const Ledger = () => {
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {[
           { label: 'Artifacts', value: stats.artifacts, icon: FileText },
-          { label: 'Completed Orders', value: stats.completed, icon: CheckCircle2 },
+          {
+            label: 'Completed Orders',
+            value: hasLoadedCompletedOrders ? stats.completed : '—',
+            icon: CheckCircle2,
+          },
           { label: 'Handoff Packets', value: stats.handoffs, icon: GitMerge },
           { label: 'Human gates', value: stats.interactions, icon: ShieldCheck },
         ].map(item => (
@@ -1685,7 +2033,28 @@ const Ledger = () => {
                 </div>
               </div>
 
-              <PreviewPane content={selectedArtifactContent} />
+              <PreviewPane
+                content={selectedArtifactContent}
+                expanded={isSelectedArtifactPreviewExpanded}
+                onExpand={() => {
+                  if (!selectedArtifact) {
+                    return;
+                  }
+                  setExpandedArtifactPreviewIds(previous => ({
+                    ...previous,
+                    [selectedArtifact.artifact.id]: true,
+                  }));
+                }}
+                onCollapse={() => {
+                  if (!selectedArtifact) {
+                    return;
+                  }
+                  setExpandedArtifactPreviewIds(previous => ({
+                    ...previous,
+                    [selectedArtifact.artifact.id]: false,
+                  }));
+                }}
+              />
             </>
           )}
 
@@ -1730,6 +2099,13 @@ const Ledger = () => {
                         </p>
                       </div>
                       <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setIsExplainOpen(true)}
+                          className="enterprise-button enterprise-button-secondary"
+                        >
+                          Explain
+                        </button>
                         <a
                           href={getWorkItemEvidenceBundleDownloadUrl(
                             activeCapability.id,
@@ -2100,6 +2476,13 @@ const Ledger = () => {
           )}
         </section>
       </div>
+
+      <ExplainWorkItemDrawer
+        capability={activeCapability}
+        workItem={selectedExplainWorkItem}
+        isOpen={isExplainOpen}
+        onClose={() => setIsExplainOpen(false)}
+      />
     </div>
   );
 };

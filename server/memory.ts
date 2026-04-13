@@ -380,6 +380,7 @@ const buildSources = (
   workspace.artifacts.forEach(artifact => {
     const isHumanInteraction =
       artifact.artifactKind === 'INPUT_NOTE' ||
+      artifact.artifactKind === 'STAGE_CONTROL_NOTE' ||
       artifact.artifactKind === 'CONFLICT_RESOLUTION' ||
       artifact.artifactKind === 'APPROVAL_RECORD';
     const sourceType: MemorySourceType = isHumanInteraction
@@ -393,7 +394,9 @@ const buildSources = (
       title: artifact.name,
       sourceType,
       tier:
-        artifact.artifactKind === 'INPUT_NOTE' || artifact.artifactKind === 'CONFLICT_RESOLUTION'
+        artifact.artifactKind === 'INPUT_NOTE' ||
+        artifact.artifactKind === 'STAGE_CONTROL_NOTE' ||
+        artifact.artifactKind === 'CONFLICT_RESOLUTION'
           ? 'SESSION'
           : artifact.artifactKind === 'APPROVAL_RECORD'
           ? 'LONG_TERM'

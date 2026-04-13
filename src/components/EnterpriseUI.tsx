@@ -205,6 +205,7 @@ export const ModalShell = ({
   actions,
   children,
   className,
+  bodyClassName,
 }: {
   title: string;
   description?: string;
@@ -212,6 +213,7 @@ export const ModalShell = ({
   actions?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
+  bodyClassName?: string;
 }) => (
   <div className={cn('modal-shell', className)}>
     <div className="modal-shell-header">
@@ -226,7 +228,7 @@ export const ModalShell = ({
       </div>
       {actions ? <div className="shrink-0">{actions}</div> : null}
     </div>
-    {children}
+    <div className={cn('modal-shell-body', bodyClassName)}>{children}</div>
   </div>
 );
 

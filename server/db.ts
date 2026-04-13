@@ -1,27 +1,76 @@
 import { Pool, PoolClient, QueryResult } from 'pg';
+import type {
+  WorkspaceDatabaseBootstrapConfig,
+  WorkspaceDatabaseBootstrapStatus,
+} from '../src/types';
 
-const databaseName = process.env.PGDATABASE || 'singularity';
-const connectionConfig = {
-  host: process.env.PGHOST || '127.0.0.1',
-  port: Number(process.env.PGPORT || '5432'),
-  user: process.env.PGUSER || process.env.USER || 'postgres',
-  password: process.env.PGPASSWORD || undefined,
+type RuntimeDatabaseConfig = Required<
+  Omit<WorkspaceDatabaseBootstrapConfig, 'password'>
+> & {
+  password?: string;
 };
+
+const toOptionalSecret = (value?: string | null) => {
+  const trimmed = String(value || '').trim();
+  return trimmed ? trimmed : undefined;
+};
+
+const toNumberOrDefault = (value: unknown, fallback: number) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const createRuntimeDatabaseConfig = (
+  overrides: Partial<WorkspaceDatabaseBootstrapConfig> = {},
+): RuntimeDatabaseConfig => ({
+  host: String(overrides.host ?? process.env.PGHOST ?? '127.0.0.1').trim() || '127.0.0.1',
+  port: toNumberOrDefault(overrides.port ?? process.env.PGPORT, 5432),
+  databaseName:
+    String(overrides.databaseName ?? process.env.PGDATABASE ?? 'singularity').trim() ||
+    'singularity',
+  user:
+    String(overrides.user ?? process.env.PGUSER ?? process.env.USER ?? 'postgres').trim() ||
+    'postgres',
+  password:
+    overrides.password !== undefined
+      ? toOptionalSecret(overrides.password)
+      : toOptionalSecret(process.env.PGPASSWORD),
+  adminDatabaseName:
+    String(overrides.adminDatabaseName ?? process.env.PGADMIN_DATABASE ?? 'postgres').trim() ||
+    'postgres',
+});
 
 const MEMORY_EMBEDDING_DIMENSIONS = 64;
 const platformFeatureState = {
   pgvectorAvailable: false,
 };
 
+let runtimeDatabaseConfig = createRuntimeDatabaseConfig();
+let lastDatabaseConnectionError: string | null = null;
 let poolPromise: Promise<Pool> | null = null;
 
-const getSafeDatabaseName = () => {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(databaseName)) {
-    throw new Error(`Unsupported database name "${databaseName}".`);
+const getSafeDatabaseName = (value = runtimeDatabaseConfig.databaseName) => {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    throw new Error(`Unsupported database name "${value}".`);
   }
 
-  return databaseName;
+  return value;
 };
+
+const getSafeAdminDatabaseName = (value = runtimeDatabaseConfig.adminDatabaseName) => {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    throw new Error(`Unsupported admin database name "${value}".`);
+  }
+
+  return value;
+};
+
+const getConnectionConfig = (config: RuntimeDatabaseConfig = runtimeDatabaseConfig) => ({
+  host: config.host,
+  port: config.port,
+  user: config.user,
+  password: config.password,
+});
 
 const schemaStatements = [
   `
@@ -54,6 +103,8 @@ const schemaStatements = [
       execution_config JSONB NOT NULL DEFAULT '{}'::jsonb,
       status TEXT NOT NULL,
       special_agent_id TEXT,
+      is_system_capability BOOLEAN NOT NULL DEFAULT FALSE,
+      system_capability_role TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
@@ -62,11 +113,13 @@ const schemaStatements = [
     CREATE TABLE IF NOT EXISTS workspace_settings (
       id TEXT PRIMARY KEY,
       database_configs JSONB NOT NULL DEFAULT '[]'::jsonb,
+      connector_settings JSONB NOT NULL DEFAULT '{}'::jsonb,
       foundation_agent_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
       foundation_workflow_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
       foundation_eval_suite_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
       foundation_skill_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
       foundation_artifact_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
+      foundation_tool_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
       foundations_initialized_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -88,6 +141,10 @@ const schemaStatements = [
       description TEXT NOT NULL,
       category TEXT NOT NULL,
       version TEXT NOT NULL,
+      content_markdown TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL DEFAULT 'CUSTOM',
+      origin TEXT NOT NULL DEFAULT 'CAPABILITY',
+      default_template_keys TEXT[] NOT NULL DEFAULT '{}',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
@@ -107,8 +164,11 @@ const schemaStatements = [
       output_artifacts TEXT[] NOT NULL DEFAULT '{}',
       is_owner BOOLEAN NOT NULL DEFAULT FALSE,
       is_built_in BOOLEAN NOT NULL DEFAULT FALSE,
+      role_starter_key TEXT,
       learning_notes TEXT[] NOT NULL DEFAULT '{}',
+      contract JSONB NOT NULL DEFAULT '{}'::jsonb,
       skill_ids TEXT[] NOT NULL DEFAULT '{}',
+      preferred_tool_ids TEXT[] NOT NULL DEFAULT '{}',
       provider TEXT NOT NULL,
       model TEXT NOT NULL,
       token_limit INTEGER NOT NULL,
@@ -317,6 +377,9 @@ const schemaStatements = [
       insight TEXT NOT NULL,
       skill_update TEXT,
       timestamp TEXT NOT NULL,
+      trigger_type TEXT,
+      related_work_item_id TEXT,
+      related_run_id TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
     )
@@ -327,6 +390,8 @@ const schemaStatements = [
       id TEXT NOT NULL,
       title TEXT NOT NULL,
       description TEXT NOT NULL,
+      task_type TEXT,
+      phase_stakeholders JSONB NOT NULL DEFAULT '[]'::jsonb,
       phase TEXT NOT NULL,
       workflow_id TEXT NOT NULL,
       current_step_id TEXT,
@@ -716,6 +781,18 @@ const migrationStatements = [
     ADD COLUMN IF NOT EXISTS database_configs JSONB NOT NULL DEFAULT '[]'::jsonb
   `,
   `
+    ALTER TABLE capabilities
+    ADD COLUMN IF NOT EXISTS is_system_capability BOOLEAN NOT NULL DEFAULT FALSE
+  `,
+  `
+    ALTER TABLE capabilities
+    ADD COLUMN IF NOT EXISTS system_capability_role TEXT
+  `,
+  `
+    ALTER TABLE workspace_settings
+    ADD COLUMN IF NOT EXISTS connector_settings JSONB NOT NULL DEFAULT '{}'::jsonb
+  `,
+  `
     ALTER TABLE workspace_settings
     ADD COLUMN IF NOT EXISTS foundation_agent_templates JSONB NOT NULL DEFAULT '[]'::jsonb
   `,
@@ -737,7 +814,27 @@ const migrationStatements = [
   `,
   `
     ALTER TABLE workspace_settings
+    ADD COLUMN IF NOT EXISTS foundation_tool_templates JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE workspace_settings
     ADD COLUMN IF NOT EXISTS foundations_initialized_at TIMESTAMPTZ
+  `,
+  `
+    ALTER TABLE capability_skills
+    ADD COLUMN IF NOT EXISTS content_markdown TEXT NOT NULL DEFAULT ''
+  `,
+  `
+    ALTER TABLE capability_skills
+    ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'CUSTOM'
+  `,
+  `
+    ALTER TABLE capability_skills
+    ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'CAPABILITY'
+  `,
+  `
+    ALTER TABLE capability_skills
+    ADD COLUMN IF NOT EXISTS default_template_keys TEXT[] NOT NULL DEFAULT '{}'
   `,
   `
     ALTER TABLE capability_agents
@@ -746,6 +843,30 @@ const migrationStatements = [
   `
     ALTER TABLE capability_agents
     ADD COLUMN IF NOT EXISTS standard_template_key TEXT
+  `,
+  `
+    ALTER TABLE capability_agents
+    ADD COLUMN IF NOT EXISTS role_starter_key TEXT
+  `,
+  `
+    ALTER TABLE capability_agents
+    ADD COLUMN IF NOT EXISTS contract JSONB NOT NULL DEFAULT '{}'::jsonb
+  `,
+  `
+    ALTER TABLE capability_agents
+    ADD COLUMN IF NOT EXISTS preferred_tool_ids TEXT[] NOT NULL DEFAULT '{}'
+  `,
+  `
+    ALTER TABLE capability_learning_updates
+    ADD COLUMN IF NOT EXISTS trigger_type TEXT
+  `,
+  `
+    ALTER TABLE capability_learning_updates
+    ADD COLUMN IF NOT EXISTS related_work_item_id TEXT
+  `,
+  `
+    ALTER TABLE capability_learning_updates
+    ADD COLUMN IF NOT EXISTS related_run_id TEXT
   `,
   `
     ALTER TABLE capability_tasks
@@ -782,6 +903,14 @@ const migrationStatements = [
   `
     ALTER TABLE capability_tasks
     ADD COLUMN IF NOT EXISTS tool_invocation_id TEXT
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS task_type TEXT
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS phase_stakeholders JSONB NOT NULL DEFAULT '[]'::jsonb
   `,
   `
     ALTER TABLE capability_work_items
@@ -1115,12 +1244,32 @@ const ensureOptionalVectorSchema = async (client: PoolClient) => {
   }
 };
 
-const ensureDatabaseExists = async () => {
-  const safeDatabaseName = getSafeDatabaseName();
+const getDatabaseErrorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : 'Unable to reach the configured Postgres server.';
+
+const withDisposablePool = async <T>(
+  config: RuntimeDatabaseConfig,
+  database: string,
+  fn: (pool: Pool) => Promise<T>,
+) => {
+  const pool = new Pool({
+    ...getConnectionConfig(config),
+    database,
+  });
+
+  try {
+    return await fn(pool);
+  } finally {
+    await pool.end().catch(() => undefined);
+  }
+};
+
+const ensureDatabaseExists = async (config: RuntimeDatabaseConfig = runtimeDatabaseConfig) => {
+  const safeDatabaseName = getSafeDatabaseName(config.databaseName);
 
   try {
     const probePool = new Pool({
-      ...connectionConfig,
+      ...getConnectionConfig(config),
       database: safeDatabaseName,
     });
     await probePool.query('SELECT 1');
@@ -1134,8 +1283,8 @@ const ensureDatabaseExists = async () => {
   }
 
   const adminPool = new Pool({
-    ...connectionConfig,
-    database: process.env.PGADMIN_DATABASE || 'postgres',
+    ...getConnectionConfig(config),
+    database: getSafeAdminDatabaseName(config.adminDatabaseName),
   });
 
   try {
@@ -1153,26 +1302,144 @@ const ensureDatabaseExists = async () => {
 };
 
 export const getDatabaseRuntimeInfo = () => ({
-  host: connectionConfig.host,
-  port: connectionConfig.port,
-  databaseName,
-  user: connectionConfig.user,
-  adminDatabaseName: process.env.PGADMIN_DATABASE || 'postgres',
-  passwordConfigured: Boolean(connectionConfig.password),
+  host: runtimeDatabaseConfig.host,
+  port: runtimeDatabaseConfig.port,
+  databaseName: runtimeDatabaseConfig.databaseName,
+  user: runtimeDatabaseConfig.user,
+  adminDatabaseName: runtimeDatabaseConfig.adminDatabaseName,
+  passwordConfigured: Boolean(runtimeDatabaseConfig.password),
   pgvectorAvailable: platformFeatureState.pgvectorAvailable,
+  lastConnectionError: lastDatabaseConnectionError || undefined,
 });
+
+export const resetDatabasePool = async () => {
+  const activePoolPromise = poolPromise;
+  poolPromise = null;
+
+  if (!activePoolPromise) {
+    return;
+  }
+
+  const pool = await activePoolPromise.catch(() => null);
+  await pool?.end().catch(() => undefined);
+};
+
+export const setDatabaseRuntimeConfig = async (
+  updates: Partial<WorkspaceDatabaseBootstrapConfig>,
+) => {
+  runtimeDatabaseConfig = createRuntimeDatabaseConfig({
+    ...runtimeDatabaseConfig,
+    ...updates,
+  });
+  process.env.PGHOST = runtimeDatabaseConfig.host;
+  process.env.PGPORT = String(runtimeDatabaseConfig.port);
+  process.env.PGDATABASE = runtimeDatabaseConfig.databaseName;
+  process.env.PGUSER = runtimeDatabaseConfig.user;
+  process.env.PGADMIN_DATABASE = runtimeDatabaseConfig.adminDatabaseName;
+  if (updates.password !== undefined) {
+    if (runtimeDatabaseConfig.password) {
+      process.env.PGPASSWORD = runtimeDatabaseConfig.password;
+    } else {
+      delete process.env.PGPASSWORD;
+    }
+  }
+  lastDatabaseConnectionError = null;
+  await resetDatabasePool();
+  return getDatabaseRuntimeInfo();
+};
+
+export const inspectDatabaseBootstrapStatus = async (): Promise<WorkspaceDatabaseBootstrapStatus> => {
+  const config = runtimeDatabaseConfig;
+  let adminReachable = false;
+  let databaseExists = false;
+  let databaseReachable = false;
+  let schemaInitialized = false;
+  let foundationsInitialized = false;
+  let lastError = lastDatabaseConnectionError || undefined;
+
+  try {
+    await withDisposablePool(
+      config,
+      getSafeAdminDatabaseName(config.adminDatabaseName),
+      async pool => {
+        await pool.query('SELECT 1');
+        adminReachable = true;
+        const databaseResult = await pool.query<{ exists: boolean }>(
+          'SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1) AS exists',
+          [getSafeDatabaseName(config.databaseName)],
+        );
+        databaseExists = Boolean(databaseResult.rows[0]?.exists);
+      },
+    );
+  } catch (error) {
+    lastError = getDatabaseErrorMessage(error);
+  }
+
+  try {
+    await withDisposablePool(config, getSafeDatabaseName(config.databaseName), async pool => {
+      await pool.query('SELECT 1');
+      databaseReachable = true;
+      databaseExists = true;
+
+      const schemaResult = await pool.query<{
+        capabilities: string | null;
+        workspace_settings: string | null;
+      }>(
+        `
+          SELECT
+            to_regclass('public.capabilities') AS capabilities,
+            to_regclass('public.workspace_settings') AS workspace_settings
+        `,
+      );
+
+      schemaInitialized = Boolean(
+        schemaResult.rows[0]?.capabilities && schemaResult.rows[0]?.workspace_settings,
+      );
+
+      if (schemaInitialized) {
+        const foundationsResult = await pool.query<{ initialized: string | null }>(
+          `
+            SELECT foundations_initialized_at::text AS initialized
+            FROM workspace_settings
+            WHERE id = $1
+          `,
+          ['DEFAULT'],
+        );
+        foundationsInitialized = Boolean(foundationsResult.rows[0]?.initialized);
+      }
+    });
+  } catch (error) {
+    lastError = lastError || getDatabaseErrorMessage(error);
+  }
+
+  return {
+    runtime: getDatabaseRuntimeInfo(),
+    adminReachable,
+    databaseExists,
+    databaseReachable,
+    schemaInitialized,
+    foundationsInitialized,
+    ready: databaseReachable && schemaInitialized && foundationsInitialized,
+    lastError,
+  };
+};
 
 export const getPool = async () => {
   if (!poolPromise) {
     poolPromise = (async () => {
-      await ensureDatabaseExists();
+      await ensureDatabaseExists(runtimeDatabaseConfig);
       const pool = new Pool({
-        ...connectionConfig,
-        database: getSafeDatabaseName(),
+        ...getConnectionConfig(runtimeDatabaseConfig),
+        database: getSafeDatabaseName(runtimeDatabaseConfig.databaseName),
       });
       await pool.query('SELECT 1');
+      lastDatabaseConnectionError = null;
       return pool;
-    })();
+    })().catch(error => {
+      lastDatabaseConnectionError = getDatabaseErrorMessage(error);
+      poolPromise = null;
+      throw error;
+    });
   }
 
   return poolPromise;
@@ -1212,16 +1479,22 @@ export const transaction = async <T>(fn: (client: PoolClient) => Promise<T>) =>
   });
 
 export const initializeDatabase = async () => {
-  await withClient(async client => {
-    await detectOptionalPlatformExtensions(client);
-    for (const statement of schemaStatements) {
-      await client.query(statement);
-    }
-    for (const statement of migrationStatements) {
-      await client.query(statement);
-    }
-    await ensureOptionalVectorSchema(client);
-  });
+  try {
+    await withClient(async client => {
+      await detectOptionalPlatformExtensions(client);
+      for (const statement of schemaStatements) {
+        await client.query(statement);
+      }
+      for (const statement of migrationStatements) {
+        await client.query(statement);
+      }
+      await ensureOptionalVectorSchema(client);
+    });
+    lastDatabaseConnectionError = null;
+  } catch (error) {
+    lastDatabaseConnectionError = getDatabaseErrorMessage(error);
+    throw error;
+  }
 };
 
 export const getPlatformFeatureState = () => ({

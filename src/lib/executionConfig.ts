@@ -4,7 +4,7 @@ import {
   CapabilityExecutionConfig,
 } from '../types';
 
-const DEFAULT_COMMAND_TEMPLATES: CapabilityExecutionCommandTemplate[] = [
+const LEGACY_DEFAULT_COMMAND_TEMPLATES: CapabilityExecutionCommandTemplate[] = [
   {
     id: 'build',
     label: 'Build',
@@ -59,7 +59,7 @@ export const isWorkspacePathInsideApprovedRoot = (
 export const isDefaultExecutionCommandTemplatePlaceholder = (
   template: CapabilityExecutionCommandTemplate,
 ) => {
-  const matchingDefault = DEFAULT_COMMAND_TEMPLATES.find(
+  const matchingDefault = LEGACY_DEFAULT_COMMAND_TEMPLATES.find(
     defaultTemplate => defaultTemplate.id === template.id,
   );
 
@@ -93,7 +93,7 @@ export const getDefaultExecutionConfig = (
   return {
     defaultWorkspacePath: allowedWorkspacePaths[0],
     allowedWorkspacePaths,
-    commandTemplates: DEFAULT_COMMAND_TEMPLATES.map(cloneCommandTemplate),
+    commandTemplates: [],
     deploymentTargets: [],
   };
 };

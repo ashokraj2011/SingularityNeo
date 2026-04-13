@@ -1,24 +1,33 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   AlertCircle,
   ArrowRight,
+  Bot,
   Clock3,
   ExternalLink,
+  FileCode,
+  FileText,
   LayoutGrid,
   List,
   LoaderCircle,
+  MessageSquareText,
   Play,
   Plus,
   RefreshCw,
   Search,
+  Send,
   ShieldCheck,
   Square,
+  User,
   Workflow as WorkflowIcon,
   X,
 } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ArtifactPreview from '../components/ArtifactPreview';
+import ErrorBoundary from '../components/ErrorBoundary';
+import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
+import StageControlModal from '../components/StageControlModal';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
@@ -38,15 +47,34 @@ import {
   resolveCapabilityWorkflowRunConflict,
   restartCapabilityWorkflowRun,
   startCapabilityWorkflowRun,
+  streamCapabilityChat,
   type RuntimeStatus,
 } from '../lib/api';
 import {
   getCapabilityBoardPhaseIds,
+  getCapabilityVisibleLifecyclePhases,
   getLifecyclePhaseLabel,
 } from '../lib/capabilityLifecycle';
+import {
+  createEmptyWorkItemPhaseStakeholder,
+  formatWorkItemPhaseStakeholderLine,
+  getWorkItemPhaseStakeholders,
+  normalizeWorkItemPhaseStakeholders,
+} from '../lib/workItemStakeholders';
+import {
+  DEFAULT_WORK_ITEM_TASK_TYPE,
+  getWorkItemTaskTypeDescription,
+  getWorkItemTaskTypeEntryPhase,
+  getWorkItemTaskTypeLabel,
+  resolveWorkItemEntryStep,
+  WORK_ITEM_TASK_TYPE_OPTIONS,
+} from '../lib/workItemTaskTypes';
+import { normalizeCompiledStepContext } from '../lib/workflowRuntime';
 import { cn } from '../lib/utils';
 import type {
+  AgentArtifactExpectation,
   Artifact,
+  CapabilityStakeholder,
   CompiledArtifactChecklistItem,
   CompiledRequiredInputField,
   CompiledStepContext,
@@ -55,7 +83,10 @@ import type {
   RunEvent,
   RunWait,
   WorkItem,
+  WorkItemAttachmentUpload,
   WorkItemPhase,
+  WorkItemPhaseStakeholderAssignment,
+  WorkItemTaskType,
   Workflow,
   WorkflowRun,
   WorkflowRunDetail,
@@ -106,10 +137,89 @@ const ACTIVE_RUN_STATUSES: WorkflowRun['status'][] = [
   'WAITING_CONFLICT',
 ];
 
+const LIVE_EXECUTION_RUN_STATUSES: WorkflowRun['status'][] = ['QUEUED', 'RUNNING'];
+
+const toDraftPhaseStakeholder = (
+  stakeholder?: CapabilityStakeholder,
+) => ({
+  role: stakeholder?.role || 'Stakeholder',
+  name: stakeholder?.name || '',
+  email: stakeholder?.email || '',
+  teamName: stakeholder?.teamName || '',
+});
+
+const MAX_WORK_ITEM_ATTACHMENT_BYTES = 300_000;
+
+const formatAttachmentSizeLabel = (sizeBytes?: number): string => {
+  if (typeof sizeBytes !== 'number' || Number.isNaN(sizeBytes) || sizeBytes <= 0) {
+    return '';
+  }
+
+  if (sizeBytes >= 1024 * 1024) {
+    return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  if (sizeBytes >= 1024) {
+    return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
+  }
+
+  return `${sizeBytes} B`;
+};
+
+const renderAttachmentIcon = (attachment: WorkItemAttachmentUpload) => {
+  const fileName = attachment.fileName.toLowerCase();
+  const mimeType = (attachment.mimeType || '').toLowerCase();
+  const isCodeLike =
+    mimeType.includes('json') ||
+    mimeType.includes('javascript') ||
+    mimeType.includes('typescript') ||
+    mimeType.includes('xml') ||
+    mimeType.includes('yaml') ||
+    mimeType.includes('x-sh') ||
+    /\.(json|js|jsx|ts|tsx|py|java|kt|kts|go|rb|php|cs|cpp|c|h|sql|yaml|yml|xml|sh|mdx?)$/.test(
+      fileName,
+    );
+
+  if (isCodeLike) {
+    return <FileCode size={18} className="text-primary" />;
+  }
+
+  return <FileText size={18} className="text-primary" />;
+};
+
 type OrchestratorView = 'board' | 'list';
-type DetailTab = 'overview' | 'control' | 'progress' | 'outputs';
+type DetailTab = 'operate' | 'artifacts' | 'attempts';
 type WorkItemStatusFilter = 'ALL' | WorkItem['status'];
 type WorkItemPriorityFilter = 'ALL' | WorkItem['priority'];
+type ArtifactWorkbenchFilter =
+  | 'ALL'
+  | 'INPUTS'
+  | 'OUTPUTS'
+  | 'DIFFS'
+  | 'APPROVALS'
+  | 'HANDOFFS';
+type StageChatMessage = {
+  id: string;
+  role: 'user' | 'agent';
+  content: string;
+  timestamp: string;
+  deliveryState?: 'clean' | 'recovered' | 'interrupted';
+  error?: string;
+};
+type WorkNavigatorItem = {
+  item: WorkItem;
+  attentionLabel?: string;
+  attentionReason?: string;
+  currentStepName: string;
+  agentName: string;
+  ageLabel: string;
+};
+type WorkNavigatorSection = {
+  id: string;
+  title: string;
+  helper: string;
+  items: WorkNavigatorItem[];
+};
 
 const STORAGE_KEYS = {
   view: 'singularity.orchestrator.view',
@@ -126,14 +236,14 @@ const readSessionValue = <T extends string>(key: string, fallback: T): T => {
   return readViewPreference(key, fallback, { storage: 'session' });
 };
 
-const formatTimestamp = (value?: string) => {
+const formatTimestamp = (value?: string | Date): string => {
   if (!value) {
     return 'Not yet';
   }
 
-  const parsed = new Date(value);
+  const parsed = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(parsed.getTime())) {
-    return value;
+    return value instanceof Date ? value.toISOString() : value;
   }
 
   return parsed.toLocaleString([], {
@@ -189,15 +299,18 @@ const getCurrentWorkflowStep = (
     return null;
   }
 
-  if (runDetail?.run.currentStepId) {
-    return workflow.steps.find(step => step.id === runDetail.run.currentStepId) || null;
+  const runRecord = runDetail?.run || null;
+  const runSteps = Array.isArray(runDetail?.steps) ? runDetail.steps : [];
+
+  if (runRecord?.currentStepId) {
+    return workflow.steps.find(step => step.id === runRecord.currentStepId) || null;
   }
 
   if (workItem?.currentStepId) {
     return workflow.steps.find(step => step.id === workItem.currentStepId) || null;
   }
 
-  const lastCompletedRunStep = runDetail?.steps
+  const lastCompletedRunStep = runSteps
     .filter(step => step.status === 'COMPLETED')
     .slice(-1)[0];
 
@@ -211,7 +324,9 @@ const getCurrentWorkflowStep = (
 };
 
 const getSelectedRunWait = (runDetail: WorkflowRunDetail | null) =>
-  runDetail?.waits.slice().reverse().find(wait => wait.status === 'OPEN') || null;
+  (Array.isArray(runDetail?.waits) ? [...runDetail.waits] : [])
+    .reverse()
+    .find(wait => wait.status === 'OPEN') || null;
 
 const getAttentionReason = ({
   blocker,
@@ -287,6 +402,9 @@ const getAttentionCallToAction = ({
 const getWorkItemAttentionTimestamp = (item: WorkItem) =>
   item.blocker?.timestamp || item.pendingRequest?.timestamp || item.history.slice(-1)[0]?.timestamp;
 
+const buildBlockedGuidanceSeed = (reason: string) =>
+  `Blocking reason from agent:\n- ${reason}\n\nGuidance for the next attempt:\n- `;
+
 const getRunEventTone = (event: RunEvent) => {
   if (event.level === 'ERROR' || event.type === 'STEP_FAILED' || event.type === 'TOOL_FAILED') {
     return 'danger' as const;
@@ -320,6 +438,41 @@ const getContrarianReview = (
   return review && typeof review === 'object' ? review : undefined;
 };
 
+const buildGuidanceSuggestions = ({
+  workItem,
+  wait,
+  requestedInputFields,
+}: {
+  workItem?: WorkItem | null;
+  wait?: RunWait | null;
+  requestedInputFields: CompiledRequiredInputField[];
+}) => {
+  const suggestions = new Set<string>();
+
+  requestedInputFields.forEach(field => {
+    suggestions.add(`Provide ${field.label.toLowerCase()} with concrete values and constraints.`);
+  });
+
+  if (wait?.type === 'APPROVAL') {
+    suggestions.add('State the conditions the agent must satisfy before continuing.');
+  }
+
+  if (wait?.type === 'INPUT') {
+    suggestions.add('Give the exact missing business or technical detail instead of a general instruction.');
+  }
+
+  if (wait?.type === 'CONFLICT_RESOLUTION') {
+    suggestions.add('Choose the final path and explain the tradeoff the agent should honor.');
+  }
+
+  if (workItem?.status === 'BLOCKED' && !wait) {
+    suggestions.add('Explain what changed since the failed attempt and what the agent should do differently on retry.');
+    suggestions.add('Reference approved paths, commands, constraints, or acceptance criteria the agent should follow.');
+  }
+
+  return Array.from(suggestions).slice(0, 3);
+};
+
 const getContrarianReviewTone = (review?: ContrarianConflictReview) => {
   if (!review) {
     return 'neutral' as const;
@@ -341,7 +494,9 @@ const getContrarianReviewTone = (review?: ContrarianConflictReview) => {
 };
 
 const asCompiledStepContext = (value: unknown): CompiledStepContext | undefined =>
-  value && typeof value === 'object' ? (value as CompiledStepContext) : undefined;
+  value && typeof value === 'object'
+    ? normalizeCompiledStepContext(value as Partial<CompiledStepContext>)
+    : undefined;
 
 const asCompiledWorkItemPlan = (value: unknown): CompiledWorkItemPlan | undefined =>
   value && typeof value === 'object' ? (value as CompiledWorkItemPlan) : undefined;
@@ -434,12 +589,118 @@ const renderArtifactChecklist = (items: CompiledArtifactChecklistItem[]) =>
     </p>
   );
 
+const renderAgentArtifactExpectations = (
+  items: AgentArtifactExpectation[],
+  emptyLabel: string,
+  tone: 'neutral' | 'brand',
+) =>
+  items.length > 0 ? (
+    <div className="mt-3 flex flex-wrap gap-2">
+      {items.map(item => (
+        <StatusBadge key={`${item.direction}:${item.artifactName}`} tone={tone}>
+          {item.artifactName}
+        </StatusBadge>
+      ))}
+    </div>
+  ) : (
+    <p className="mt-3 text-xs leading-relaxed text-secondary">{emptyLabel}</p>
+  );
+
+const matchesArtifactWorkbenchFilter = (
+  artifact: Artifact,
+  filter: ArtifactWorkbenchFilter,
+) => {
+  if (filter === 'ALL') {
+    return true;
+  }
+
+  if (filter === 'INPUTS') {
+    return artifact.direction === 'INPUT' || artifact.artifactKind === 'INPUT_NOTE';
+  }
+
+  if (filter === 'OUTPUTS') {
+    return artifact.direction !== 'INPUT';
+  }
+
+  if (filter === 'DIFFS') {
+    return artifact.artifactKind === 'CODE_DIFF';
+  }
+
+  if (filter === 'APPROVALS') {
+    return (
+      artifact.artifactKind === 'APPROVAL_RECORD' ||
+      artifact.artifactKind === 'CONFLICT_RESOLUTION' ||
+      artifact.artifactKind === 'CONTRARIAN_REVIEW'
+    );
+  }
+
+  if (filter === 'HANDOFFS') {
+    return artifact.artifactKind === 'HANDOFF_PACKET';
+  }
+
+  return true;
+};
+
+const getArtifactDocumentBody = (artifact: Artifact | null): string => {
+  if (!artifact) {
+    return '';
+  }
+
+  if (artifact.contentFormat === 'JSON' && artifact.contentJson) {
+    try {
+      return JSON.stringify(artifact.contentJson, null, 2);
+    } catch {
+      return '[This JSON artifact could not be rendered safely in the approval preview.]';
+    }
+  }
+
+  const fallback =
+    artifact.contentText ??
+    artifact.summary ??
+    artifact.description ??
+    `${artifact.type} · ${artifact.version}`;
+
+  return typeof fallback === 'string' ? fallback : String(fallback);
+};
+
+const getLatestRunFailureReason = ({
+  run,
+  runSteps,
+  runEvents,
+}: {
+  run?: WorkflowRun | null;
+  runSteps?: WorkflowRunDetail['steps'];
+  runEvents?: RunEvent[];
+}) => {
+  const failedStep = [...(runSteps || [])]
+    .reverse()
+    .find(step => step.status === 'FAILED');
+  const failedEvent = [...(runEvents || [])]
+    .reverse()
+    .find(event => event.level === 'ERROR' || event.type === 'STEP_FAILED');
+
+  return (
+    failedStep?.outputSummary ||
+    failedStep?.evidenceSummary ||
+    (typeof failedStep?.metadata?.lastError === 'string'
+      ? failedStep.metadata.lastError
+      : undefined) ||
+    run?.terminalOutcome ||
+    failedEvent?.message ||
+    ''
+  );
+};
+
 const Orchestrator = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { activeCapability, getCapabilityWorkspace, refreshCapabilityBundle } =
-    useCapability();
-  const { success } = useToast();
+  const {
+    activeCapability,
+    getCapabilityWorkspace,
+    refreshCapabilityBundle,
+    setActiveChatAgent,
+  } = useCapability();
+  const { error: showError, success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const lifecycleBoardPhases = useMemo(
     () => getCapabilityBoardPhaseIds(activeCapability),
@@ -483,9 +744,19 @@ const Orchestrator = () => {
   const [view, setView] = useState<OrchestratorView>(() =>
     readSessionValue(STORAGE_KEYS.view, 'board'),
   );
-  const [detailTab, setDetailTab] = useState<DetailTab>(() =>
-    readSessionValue(STORAGE_KEYS.detailTab, 'overview'),
-  );
+  const [detailTab, setDetailTab] = useState<DetailTab>(() => {
+    const stored = readSessionValue(STORAGE_KEYS.detailTab, 'operate') as string;
+    if (stored === 'overview' || stored === 'control') {
+      return 'operate';
+    }
+    if (stored === 'progress') {
+      return 'attempts';
+    }
+    if (stored === 'outputs') {
+      return 'artifacts';
+    }
+    return stored as DetailTab;
+  });
   const [searchQuery, setSearchQuery] = useState<string>(() =>
     readSessionValue(STORAGE_KEYS.search, ''),
   );
@@ -507,12 +778,40 @@ const Orchestrator = () => {
   const [selectedRunDetail, setSelectedRunDetail] = useState<WorkflowRunDetail | null>(null);
   const [selectedRunEvents, setSelectedRunEvents] = useState<RunEvent[]>([]);
   const [selectedRunHistory, setSelectedRunHistory] = useState<WorkflowRun[]>([]);
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const [selectedApprovalArtifactId, setSelectedApprovalArtifactId] = useState<string | null>(
+    null,
+  );
   const [resolutionNote, setResolutionNote] = useState('');
   const [isDiffReviewOpen, setIsDiffReviewOpen] = useState(false);
+  const [isApprovalReviewOpen, setIsApprovalReviewOpen] = useState(false);
+  const [isApprovalReviewHydrated, setIsApprovalReviewHydrated] = useState(false);
+  const [approvalReviewWaitSnapshot, setApprovalReviewWaitSnapshot] = useState<RunWait | null>(
+    null,
+  );
+  const [isExplainOpen, setIsExplainOpen] = useState(false);
+  const [isStageControlOpen, setIsStageControlOpen] = useState(false);
+  const [artifactFilter, setArtifactFilter] = useState<ArtifactWorkbenchFilter>('ALL');
+  const [approvalArtifactFilter, setApprovalArtifactFilter] =
+    useState<ArtifactWorkbenchFilter>('ALL');
+  const [stageChatInput, setStageChatInput] = useState('');
+  const [stageChatDraft, setStageChatDraft] = useState('');
+  const [stageChatError, setStageChatError] = useState('');
+  const [isStageChatSending, setIsStageChatSending] = useState(false);
+  const [stageChatByScope, setStageChatByScope] = useState<Record<string, StageChatMessage[]>>(
+    {},
+  );
+  const stageChatThreadRef = useRef<HTMLDivElement | null>(null);
+  const stageChatStickToBottomRef = useRef(true);
+  const stageChatRequestRef = useRef(0);
+  const resolutionNoteRef = useRef<HTMLTextAreaElement | null>(null);
   const [draftWorkItem, setDraftWorkItem] = useState({
     title: '',
     description: '',
     workflowId: workspace.workflows[0]?.id || '',
+    taskType: DEFAULT_WORK_ITEM_TASK_TYPE as WorkItemTaskType,
+    phaseStakeholders: [] as WorkItemPhaseStakeholderAssignment[],
+    attachments: [] as WorkItemAttachmentUpload[],
     priority: 'Med' as WorkItem['priority'],
     tags: '',
   });
@@ -526,6 +825,14 @@ const Orchestrator = () => {
     [workspace.agents],
   );
   const workItems = workspace.workItems;
+  const visibleLifecyclePhases = useMemo(
+    () => getCapabilityVisibleLifecyclePhases(activeCapability.lifecycle),
+    [activeCapability.lifecycle],
+  );
+  const visibleLifecyclePhaseIds = useMemo(
+    () => new Set(visibleLifecyclePhases.map(phase => phase.id)),
+    [visibleLifecyclePhases],
+  );
 
   const loadRuntime = useCallback(async () => {
     try {
@@ -537,6 +844,17 @@ const Orchestrator = () => {
         error instanceof Error ? error.message : 'Unable to load runtime configuration.',
       );
     }
+  }, []);
+
+  const focusGuidanceComposer = useCallback(() => {
+    setDetailTab('operate');
+    window.requestAnimationFrame(() => {
+      resolutionNoteRef.current?.focus();
+      resolutionNoteRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+    });
   }, []);
 
   const loadSelectedRunData = useCallback(
@@ -573,17 +891,51 @@ const Orchestrator = () => {
 
   const selectWorkItem = useCallback(
     (workItemId: string, options?: { focusBoard?: boolean; openControl?: boolean }) => {
+      stageChatRequestRef.current += 1;
       setSelectedWorkItemId(workItemId);
       setActionError('');
       setResolutionNote('');
+      setIsStageChatSending(false);
+      setStageChatDraft('');
+      setStageChatError('');
       if (options?.openControl) {
-        setDetailTab('control');
+        setDetailTab('operate');
       }
       if (options?.focusBoard) {
         setView('board');
         window.setTimeout(() => {
           const element = document.getElementById(`orchestrator-item-${workItemId}`);
           element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 80);
+      }
+    },
+    [],
+  );
+
+  const clearSelectedWorkItem = useCallback(
+    (options?: { focusBoard?: boolean }) => {
+      stageChatRequestRef.current += 1;
+      setSelectedWorkItemId(null);
+      setSelectedRunDetail(null);
+      setSelectedRunEvents([]);
+      setSelectedRunHistory([]);
+      setSelectedArtifactId(null);
+      setResolutionNote('');
+      setActionError('');
+      setIsExplainOpen(false);
+      setIsStageControlOpen(false);
+      setIsDiffReviewOpen(false);
+      setIsApprovalReviewOpen(false);
+      setIsApprovalReviewHydrated(false);
+      setApprovalReviewWaitSnapshot(null);
+      setStageChatInput('');
+      setStageChatDraft('');
+      setStageChatError('');
+      setIsStageChatSending(false);
+      if (options?.focusBoard) {
+        window.setTimeout(() => {
+          const element = document.getElementById('orchestrator-flow-map');
+          element?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }, 80);
       }
     },
@@ -616,6 +968,7 @@ const Orchestrator = () => {
     setSelectedRunDetail(null);
     setSelectedRunEvents([]);
     setSelectedRunHistory([]);
+    setSelectedArtifactId(null);
   }, [selectedWorkItemId, workItems]);
 
   useEffect(() => {
@@ -623,11 +976,20 @@ const Orchestrator = () => {
       setSelectedRunDetail(null);
       setSelectedRunEvents([]);
       setSelectedRunHistory([]);
+      setSelectedArtifactId(null);
+      setSelectedApprovalArtifactId(null);
       setResolutionNote('');
       setIsDiffReviewOpen(false);
+      setIsApprovalReviewOpen(false);
+      setIsApprovalReviewHydrated(false);
+      setApprovalReviewWaitSnapshot(null);
+      setStageChatInput('');
+      setStageChatDraft('');
+      setStageChatError('');
       return;
     }
 
+    stageChatStickToBottomRef.current = true;
     void loadSelectedRunData(selectedWorkItemId).catch(error => {
       setActionError(
         error instanceof Error ? error.message : 'Failed to load workflow run details.',
@@ -637,8 +999,15 @@ const Orchestrator = () => {
 
   useEffect(() => {
     const selectedRunStreamId =
-      selectedRunDetail?.run.id || selectedRunHistory[0]?.id || null;
-    if (!selectedRunStreamId) {
+      selectedRunDetail?.run?.id || selectedRunHistory[0]?.id || null;
+    const selectedRunStreamStatus =
+      selectedRunDetail?.run?.status || selectedRunHistory[0]?.status || null;
+
+    if (
+      !selectedRunStreamId ||
+      !selectedRunStreamStatus ||
+      !LIVE_EXECUTION_RUN_STATUSES.includes(selectedRunStreamStatus)
+    ) {
       return;
     }
 
@@ -699,7 +1068,12 @@ const Orchestrator = () => {
       isMounted = false;
       eventSource.close();
     };
-  }, [activeCapability.id, selectedRunDetail?.run.id, selectedRunHistory[0]?.id]);
+  }, [
+    activeCapability.id,
+    selectedRunDetail?.run?.id,
+    selectedRunDetail?.run?.status,
+    selectedRunHistory,
+  ]);
 
   useEffect(() => {
     const nextSearchParams = new URLSearchParams(searchParams);
@@ -724,17 +1098,34 @@ const Orchestrator = () => {
   }, [searchParams, setSearchParams, workItems]);
 
   useEffect(() => {
-    const hasActiveRuns = workItems.some(item => Boolean(item.activeRunId));
-    if (!hasActiveRuns && !selectedWorkItemId) {
+    const hasLiveExecution = workItems.some(item => item.status === 'ACTIVE');
+    const selectedWorkItemHasLiveExecution = Boolean(
+      (selectedWorkItemId &&
+        workItems.some(
+          item => item.id === selectedWorkItemId && item.status === 'ACTIVE',
+        )) ||
+        (selectedRunDetail?.run?.status &&
+          LIVE_EXECUTION_RUN_STATUSES.includes(selectedRunDetail.run.status)) ||
+        (selectedRunHistory[0] &&
+          LIVE_EXECUTION_RUN_STATUSES.includes(selectedRunHistory[0].status)),
+    );
+
+    if (!hasLiveExecution && !selectedWorkItemHasLiveExecution) {
       return;
     }
 
     const timer = window.setInterval(() => {
-      void refreshSelection(selectedWorkItemId);
+      void refreshSelection(selectedWorkItemHasLiveExecution ? selectedWorkItemId : undefined);
     }, 3000);
 
     return () => window.clearInterval(timer);
-  }, [refreshSelection, selectedWorkItemId, workItems]);
+  }, [
+    refreshSelection,
+    selectedRunDetail?.run,
+    selectedRunHistory,
+    selectedWorkItemId,
+    workItems,
+  ]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -912,21 +1303,82 @@ const Orchestrator = () => {
     [workItems],
   );
 
+  const buildNavigatorItem = useCallback(
+    (item: WorkItem): WorkNavigatorItem => {
+      const workflow = workflowsById.get(item.workflowId) || null;
+      const currentStep = getCurrentWorkflowStep(workflow, null, item);
+      const agentId = item.assignedAgentId || currentStep?.agentId;
+      return {
+        item,
+        attentionLabel:
+          item.blocker?.status === 'OPEN' || item.pendingRequest
+            ? getAttentionLabel({
+                blocker: item.blocker,
+                pendingRequest: item.pendingRequest,
+              })
+            : undefined,
+        attentionReason:
+          item.blocker?.status === 'OPEN' || item.pendingRequest
+            ? getAttentionReason({
+                blocker: item.blocker,
+                pendingRequest: item.pendingRequest,
+              })
+            : undefined,
+        currentStepName: currentStep?.name || 'Awaiting orchestration',
+        agentName: agentsById.get(agentId || '')?.name || agentId || 'Unassigned',
+        ageLabel: formatRelativeTime(item.history[item.history.length - 1]?.timestamp),
+      };
+    },
+    [agentsById, workflowsById],
+  );
+
+  const navigatorSections = useMemo<WorkNavigatorSection[]>(
+    () => [
+      {
+        id: 'attention',
+        title: 'Needs attention',
+        helper: 'Approvals, blockers, and waits that need operator action now.',
+        items: attentionItems.slice(0, 6).map(entry => buildNavigatorItem(entry.item)),
+      },
+      {
+        id: 'active',
+        title: 'Active work',
+        helper: 'Current in-flight items across the capability.',
+        items: filteredWorkItems
+          .filter(item => item.status !== 'COMPLETED' && item.phase !== 'DONE')
+          .slice(0, 12)
+          .map(buildNavigatorItem),
+      },
+      {
+        id: 'completed',
+        title: 'Completed',
+        helper: 'Recently finished work kept nearby for review and traceability.',
+        items: completedItems.slice(0, 8).map(buildNavigatorItem),
+      },
+    ],
+    [attentionItems, buildNavigatorItem, completedItems, filteredWorkItems],
+  );
+
   const selectedWorkItem =
     workItems.find(item => item.id === selectedWorkItemId) || null;
   const selectedWorkflow = selectedWorkItem
     ? workflowsById.get(selectedWorkItem.workflowId) || null
     : null;
+  const selectedRunRecord = selectedRunDetail?.run || null;
+  const selectedRunSteps = useMemo(
+    () => (Array.isArray(selectedRunDetail?.steps) ? selectedRunDetail.steps : []),
+    [selectedRunDetail?.steps],
+  );
   const selectedCurrentStep = getCurrentWorkflowStep(
     selectedWorkflow,
     selectedRunDetail,
     selectedWorkItem,
   );
   const selectedRunStep =
-    selectedRunDetail?.steps.find(
+    selectedRunSteps.find(
       step =>
-        step.workflowStepId === selectedRunDetail.run.currentStepId ||
-        step.workflowNodeId === selectedRunDetail.run.currentNodeId,
+        step.workflowStepId === selectedRunRecord?.currentStepId ||
+        step.workflowNodeId === selectedRunRecord?.currentNodeId,
     ) || null;
   const selectedOpenWait = getSelectedRunWait(selectedRunDetail);
   const selectedCompiledStepContext =
@@ -951,7 +1403,7 @@ const Orchestrator = () => {
   const selectedContrarianReviewIsReady =
     selectedContrarianReview?.status === 'READY';
   const selectedAgentId =
-    selectedRunDetail?.run.assignedAgentId ||
+    selectedRunRecord?.assignedAgentId ||
     selectedCurrentStep?.agentId ||
     selectedWorkItem?.assignedAgentId;
   const selectedAgent = selectedAgentId ? agentsById.get(selectedAgentId) || null : null;
@@ -987,11 +1439,26 @@ const Orchestrator = () => {
     ? agentsById.get(selectedResetStep.agentId) || null
     : null;
 
-  const currentRun = selectedRunDetail?.run || selectedRunHistory[0] || null;
+  const currentRun = selectedRunRecord || selectedRunHistory[0] || null;
   const currentRunIsActive = Boolean(
     currentRun && ACTIVE_RUN_STATUSES.includes(currentRun.status),
   );
   const runtimeReady = Boolean(runtimeStatus?.configured) && !runtimeError;
+  const selectedCanTakeControl = Boolean(
+    selectedWorkItem && selectedAgent && runtimeReady,
+  );
+  const selectedCanGuideBlockedAgent = Boolean(
+    selectedWorkItem &&
+      selectedWorkItem.status === 'BLOCKED' &&
+      !selectedOpenWait &&
+      !currentRunIsActive &&
+      runtimeReady,
+  );
+  const guidanceSuggestions = buildGuidanceSuggestions({
+    workItem: selectedWorkItem,
+    wait: selectedOpenWait,
+    requestedInputFields: selectedRequestedInputFields,
+  });
 
   const canStartExecution =
     Boolean(selectedWorkItem) &&
@@ -1019,14 +1486,16 @@ const Orchestrator = () => {
 
   const resolutionPlaceholder =
     selectedOpenWait?.type === 'APPROVAL' && selectedCodeDiffArtifactId
-      ? 'Add code review notes, implementation conditions, or sign-off guidance before continuing.'
+      ? 'Guide the developer with code review notes, implementation conditions, or sign-off guidance before continuing.'
       : selectedOpenWait?.type === 'APPROVAL'
       ? 'Add approval notes, release conditions, or sign-off details.'
       : selectedOpenWait?.type === 'INPUT'
-        ? 'Provide the missing business, technical, or governance details needed to unblock this work item.'
+        ? 'Guide the agent with the missing business, technical, or governance details needed to unblock this work item.'
         : selectedOpenWait?.type === 'CONFLICT_RESOLUTION'
-          ? 'Describe the conflict resolution, final decision, and any implementation constraints.'
-          : 'Approval note, human input, restart note, or cancellation reason.';
+          ? 'Guide the agent with the final conflict decision and any implementation constraints.'
+          : selectedCanGuideBlockedAgent
+            ? 'Guide the next attempt. Explain what changed, what the agent should do differently, and any constraints it must respect.'
+            : 'Approval note, human input, restart note, or cancellation reason.';
 
   const resolutionIsRequired =
     selectedOpenWait?.type === 'INPUT' ||
@@ -1037,6 +1506,8 @@ const Orchestrator = () => {
     (!resolutionIsRequired || Boolean(resolutionNote.trim()));
   const canRequestChanges =
     requestChangesIsAvailable && Boolean(resolutionNote.trim());
+  const canGuideAndRestart =
+    selectedCanGuideBlockedAgent && Boolean(resolutionNote.trim());
 
   const stepOrder = useMemo(
     () =>
@@ -1062,8 +1533,8 @@ const Orchestrator = () => {
   }, [selectedWorkItem, stepOrder, workspace.tasks]);
 
   const selectedRunStepIds = useMemo(
-    () => new Set(selectedRunDetail?.steps.map(step => step.id) || []),
-    [selectedRunDetail],
+    () => new Set(selectedRunSteps.map(step => step.id)),
+    [selectedRunSteps],
   );
 
   const selectedArtifacts = useMemo(() => {
@@ -1074,7 +1545,7 @@ const Orchestrator = () => {
     return workspace.artifacts
       .filter(
         artifact =>
-          artifact.runId === selectedRunDetail.run.id ||
+          artifact.runId === selectedRunRecord?.id ||
           (artifact.runStepId && selectedRunStepIds.has(artifact.runStepId)),
       )
       .slice()
@@ -1082,7 +1553,89 @@ const Orchestrator = () => {
         (left, right) =>
           new Date(right.created).getTime() - new Date(left.created).getTime(),
       );
-  }, [selectedRunDetail, selectedRunStepIds, workspace.artifacts]);
+  }, [selectedRunRecord?.id, selectedRunStepIds, workspace.artifacts]);
+  const selectedRunIds = useMemo(
+    () =>
+      new Set(
+        [selectedRunRecord?.id, ...selectedRunHistory.map(run => run.id)].filter(
+          Boolean,
+        ) as string[],
+      ),
+    [selectedRunHistory, selectedRunRecord?.id],
+  );
+  const selectedWorkItemArtifacts = useMemo(() => {
+    if (!selectedWorkItem) {
+      return [];
+    }
+
+    return workspace.artifacts
+      .filter(artifact => {
+        if (artifact.workItemId === selectedWorkItem.id) {
+          return true;
+        }
+
+        if (
+          artifact.runId &&
+          selectedRunIds.has(artifact.runId)
+        ) {
+          return true;
+        }
+
+        if (
+          artifact.sourceRunId &&
+          selectedRunIds.has(artifact.sourceRunId)
+        ) {
+          return true;
+        }
+
+        return false;
+      })
+      .slice()
+      .sort(
+        (left, right) =>
+          new Date(right.created).getTime() - new Date(left.created).getTime(),
+      );
+  }, [selectedRunIds, selectedWorkItem, workspace.artifacts]);
+  const filteredArtifacts = useMemo(
+    () => selectedArtifacts.filter(artifact => matchesArtifactWorkbenchFilter(artifact, artifactFilter)),
+    [artifactFilter, selectedArtifacts],
+  );
+  const filteredApprovalArtifacts = useMemo(
+    () =>
+      selectedWorkItemArtifacts.filter(artifact =>
+        matchesArtifactWorkbenchFilter(artifact, approvalArtifactFilter),
+      ),
+    [approvalArtifactFilter, selectedWorkItemArtifacts],
+  );
+  const selectedArtifact = useMemo(
+    () =>
+      (selectedArtifactId
+        ? filteredArtifacts.find(artifact => artifact.id === selectedArtifactId)
+        : null) || filteredArtifacts[0] || null,
+    [filteredArtifacts, selectedArtifactId],
+  );
+  const selectedApprovalArtifact = useMemo(
+    () => {
+      if (isApprovalReviewOpen && !selectedApprovalArtifactId) {
+        return null;
+      }
+
+      return (
+        (selectedApprovalArtifactId
+          ? filteredApprovalArtifacts.find(artifact => artifact.id === selectedApprovalArtifactId)
+          : null) ||
+        filteredApprovalArtifacts.find(artifact => artifact.id === selectedCodeDiffArtifactId) ||
+        filteredApprovalArtifacts[0] ||
+        null
+      );
+    },
+    [
+      filteredApprovalArtifacts,
+      isApprovalReviewOpen,
+      selectedApprovalArtifactId,
+      selectedCodeDiffArtifactId,
+    ],
+  );
   const selectedCodeDiffArtifact = useMemo<Artifact | null>(() => {
     if (!selectedCodeDiffArtifactId) {
       return null;
@@ -1098,13 +1651,8 @@ const Orchestrator = () => {
       return '';
     }
 
-    if (selectedCodeDiffArtifact.contentFormat === 'JSON' && selectedCodeDiffArtifact.contentJson) {
-      return JSON.stringify(selectedCodeDiffArtifact.contentJson, null, 2);
-    }
-
     return (
-      selectedCodeDiffArtifact.contentText ||
-      selectedCodeDiffArtifact.summary ||
+      getArtifactDocumentBody(selectedCodeDiffArtifact) ||
       selectedOpenWait?.payload?.codeDiffSummary ||
       ''
     );
@@ -1124,6 +1672,8 @@ const Orchestrator = () => {
   );
   const selectedHasCodeDiffApproval =
     selectedOpenWait?.type === 'APPROVAL' && Boolean(selectedCodeDiffArtifactId);
+  const approvalReviewWait =
+    selectedOpenWait?.type === 'APPROVAL' ? selectedOpenWait : approvalReviewWaitSnapshot;
 
   useEffect(() => {
     if (selectedHasCodeDiffApproval) {
@@ -1131,6 +1681,64 @@ const Orchestrator = () => {
     }
     setIsDiffReviewOpen(false);
   }, [selectedHasCodeDiffApproval]);
+
+  useEffect(() => {
+    if (selectedOpenWait?.type === 'APPROVAL') {
+      setApprovalReviewWaitSnapshot(selectedOpenWait);
+      return;
+    }
+
+    if (!isApprovalReviewOpen) {
+      setApprovalReviewWaitSnapshot(null);
+    }
+  }, [isApprovalReviewOpen, selectedOpenWait]);
+
+  useEffect(() => {
+    if (filteredArtifacts.length === 0) {
+      setSelectedArtifactId(null);
+      return;
+    }
+
+    if (
+      !selectedArtifactId ||
+      !filteredArtifacts.some(artifact => artifact.id === selectedArtifactId)
+    ) {
+      setSelectedArtifactId(filteredArtifacts[0].id);
+    }
+  }, [filteredArtifacts, selectedArtifactId]);
+
+  useEffect(() => {
+    if (filteredApprovalArtifacts.length === 0) {
+      setSelectedApprovalArtifactId(null);
+      return;
+    }
+
+    if (isApprovalReviewOpen && !selectedApprovalArtifactId) {
+      return;
+    }
+
+    if (
+      selectedCodeDiffArtifactId &&
+      filteredApprovalArtifacts.some(artifact => artifact.id === selectedCodeDiffArtifactId)
+    ) {
+      setSelectedApprovalArtifactId(current =>
+        current === selectedCodeDiffArtifactId ? current : selectedCodeDiffArtifactId,
+      );
+      return;
+    }
+
+    if (
+      !selectedApprovalArtifactId ||
+      !filteredApprovalArtifacts.some(artifact => artifact.id === selectedApprovalArtifactId)
+    ) {
+      setSelectedApprovalArtifactId(filteredApprovalArtifacts[0].id);
+    }
+  }, [
+    filteredApprovalArtifacts,
+    isApprovalReviewOpen,
+    selectedApprovalArtifactId,
+    selectedCodeDiffArtifactId,
+  ]);
 
   const selectedLogs = useMemo(() => {
     if (!selectedWorkItem) {
@@ -1144,7 +1752,7 @@ const Orchestrator = () => {
 
     return workspace.executionLogs
       .filter(log => {
-        if (selectedRunDetail && log.runId === selectedRunDetail.run.id) {
+        if (selectedRunRecord && log.runId === selectedRunRecord.id) {
           return true;
         }
         return relatedTaskIds.has(log.taskId);
@@ -1154,36 +1762,372 @@ const Orchestrator = () => {
         (left, right) =>
           new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime(),
       );
-  }, [selectedRunDetail, selectedTasks, selectedWorkItem, workspace.executionLogs]);
+  }, [selectedRunRecord, selectedTasks, selectedWorkItem, workspace.executionLogs]);
 
   const recentRunActivity = useMemo(
     () => selectedRunEvents.slice(-8).reverse(),
     [selectedRunEvents],
   );
 
-  const latestArtifact = selectedArtifacts[0] || null;
+  const latestArtifact = selectedArtifact || null;
   const latestArtifactDocument = useMemo(() => {
-    if (!latestArtifact) {
-      return '';
+    return getArtifactDocumentBody(selectedArtifact);
+  }, [selectedArtifact]);
+  const selectedApprovalArtifactDocument = useMemo(
+    () => getArtifactDocumentBody(selectedApprovalArtifact),
+    [selectedApprovalArtifact],
+  );
+  const stageChatScopeKey = selectedWorkItem && selectedAgent
+    ? `${selectedWorkItem.id}:${selectedAgent.id}:${selectedCurrentStep?.id || 'stage'}`
+    : null;
+  const selectedStageChatMessages = stageChatScopeKey
+    ? stageChatByScope[stageChatScopeKey] || []
+    : [];
+
+  useEffect(() => {
+    stageChatRequestRef.current += 1;
+    setStageChatDraft('');
+    setStageChatError('');
+    setIsStageChatSending(false);
+  }, [stageChatScopeKey]);
+
+  const stageChatSuggestedPrompts = useMemo(() => {
+    if (!selectedWorkItem || !selectedCurrentStep) {
+      return [];
     }
 
-    if (latestArtifact.contentFormat === 'JSON' && latestArtifact.contentJson) {
-      return JSON.stringify(latestArtifact.contentJson, null, 2);
+    const prompts = [
+      `Explain the current status of ${selectedWorkItem.id} in simple terms.`,
+      `What exact files or artifacts do you expect to touch in ${selectedCurrentStep.name}?`,
+      `What is blocking ${selectedWorkItem.id}, and what do you need from me to continue?`,
+    ];
+
+    if (selectedAttentionReason) {
+      prompts.unshift(
+        `Use this blocker context and tell me the safest next move: ${selectedAttentionReason}`,
+      );
     }
 
-    return (
-      latestArtifact.contentText ||
-      latestArtifact.summary ||
-      latestArtifact.description ||
-      `${latestArtifact.type} · ${latestArtifact.version}`
-    );
-  }, [latestArtifact]);
+    return prompts.slice(0, 3);
+  }, [selectedAttentionReason, selectedCurrentStep, selectedWorkItem]);
+  const selectedStateSummary = useMemo(() => {
+    if (!selectedWorkItem) {
+      return 'Select a work item to see the current delivery state.';
+    }
+
+    if (currentRun) {
+      return `${RUN_STATUS_META[currentRun.status].label} in ${
+        selectedCurrentStep?.name || getPhaseMeta(selectedWorkItem.phase).label
+      } with ${selectedAgent?.name || 'the assigned agent'} working this stage.`;
+    }
+
+    if (selectedWorkItem.status === 'COMPLETED' || selectedWorkItem.phase === 'DONE') {
+      return 'This work item has completed and is ready for evidence review.';
+    }
+
+    return 'This work item is staged but execution has not started yet.';
+  }, [currentRun, getPhaseMeta, selectedAgent?.name, selectedCurrentStep?.name, selectedWorkItem]);
+  const selectedFailureReason = useMemo(
+    () =>
+      getLatestRunFailureReason({
+        run: currentRun,
+        runSteps: selectedRunSteps,
+        runEvents: selectedRunEvents,
+      }),
+    [currentRun, selectedRunEvents, selectedRunSteps],
+  );
+  const selectedBlockerSummary =
+    selectedAttentionReason ||
+    selectedFailureReason ||
+    'No blocker is open right now. You can inspect context, review artifacts, or continue execution.';
+  const selectedNextActionSummary = useMemo(() => {
+    if (!selectedWorkItem) {
+      return 'Choose a work item to see the recommended next action.';
+    }
+
+    if (selectedOpenWait?.type === 'APPROVAL') {
+      return 'Review the approval request and continue once the output meets the required conditions.';
+    }
+    if (selectedOpenWait?.type === 'INPUT') {
+      return 'Provide the missing structured input so the engine can continue this stage.';
+    }
+    if (selectedOpenWait?.type === 'CONFLICT_RESOLUTION') {
+      return 'Resolve the conflict and give the final decision the agent must honor.';
+    }
+    if (selectedCanGuideBlockedAgent) {
+      return 'Guide the agent with what changed, then restart the blocked step from this page.';
+    }
+    if (canStartExecution) {
+      return 'Start execution when the work item is ready to move into active delivery.';
+    }
+    if (currentRunIsActive) {
+      return 'Monitor the stage, answer agent questions inline, or wait for the next operator gate.';
+    }
+    if (selectedWorkItem.status === 'COMPLETED' || selectedWorkItem.phase === 'DONE') {
+      return 'Review artifacts, explainability, and completion evidence for this finished item.';
+    }
+    return 'Use the workbench to inspect context, talk to the agent, or restart the latest attempt.';
+  }, [
+    canStartExecution,
+    currentRunIsActive,
+    selectedCanGuideBlockedAgent,
+    selectedOpenWait,
+    selectedWorkItem,
+  ]);
+  const latestRunSummary = selectedRunHistory[0] || null;
+  const previousRunSummary = selectedRunHistory[1] || null;
+  const attemptComparisonLines = useMemo(() => {
+    if (!latestRunSummary || !previousRunSummary) {
+      return [];
+    }
+
+    const lines: string[] = [];
+
+    if (latestRunSummary.status !== previousRunSummary.status) {
+      lines.push(
+        `Status changed from ${RUN_STATUS_META[previousRunSummary.status].label} to ${RUN_STATUS_META[latestRunSummary.status].label}.`,
+      );
+    }
+
+    if (latestRunSummary.currentPhase !== previousRunSummary.currentPhase) {
+      lines.push(
+        `The latest attempt is now in ${getPhaseMeta(latestRunSummary.currentPhase).label} instead of ${getPhaseMeta(previousRunSummary.currentPhase).label}.`,
+      );
+    }
+
+    if (latestRunSummary.terminalOutcome && latestRunSummary.terminalOutcome !== previousRunSummary.terminalOutcome) {
+      lines.push(`Latest outcome note: ${latestRunSummary.terminalOutcome}`);
+    }
+
+    if (selectedArtifacts.length > 0) {
+      lines.push(`${selectedArtifacts.length} artifacts are attached to the latest attempt.`);
+    }
+
+    if (selectedOpenWait) {
+      lines.push(`The current attempt is paused on ${formatEnumLabel(selectedOpenWait.type)}.`);
+    }
+
+    return lines.slice(0, 4);
+  }, [
+    getPhaseMeta,
+    latestRunSummary,
+    previousRunSummary,
+    selectedArtifacts.length,
+    selectedOpenWait,
+  ]);
+
+  useEffect(() => {
+    const thread = stageChatThreadRef.current;
+    if (!thread) {
+      return;
+    }
+
+    if (!stageChatStickToBottomRef.current && !isStageChatSending && !stageChatDraft) {
+      return;
+    }
+
+    thread.scrollTop = thread.scrollHeight;
+  }, [isStageChatSending, selectedStageChatMessages, stageChatDraft]);
 
   const draftWorkflow = workflowsById.get(draftWorkItem.workflowId) || null;
-  const draftFirstStep = draftWorkflow?.steps[0] || null;
+  const draftFirstStep = draftWorkflow
+    ? resolveWorkItemEntryStep(draftWorkflow, draftWorkItem.taskType, activeCapability.lifecycle) ||
+      draftWorkflow.steps[0]
+    : null;
   const draftFirstAgent = draftFirstStep
     ? agentsById.get(draftFirstStep.agentId) || null
     : null;
+  const draftTaskTypeEntryPhase = getWorkItemTaskTypeEntryPhase(draftWorkItem.taskType);
+  const draftPhaseStakeholderAssignments = useMemo(
+    () =>
+      normalizeWorkItemPhaseStakeholders(
+        draftWorkItem.phaseStakeholders,
+        activeCapability.lifecycle,
+      ),
+    [activeCapability.lifecycle, draftWorkItem.phaseStakeholders],
+  );
+  const selectedPhaseStakeholderAssignments = useMemo(
+    () =>
+      normalizeWorkItemPhaseStakeholders(
+        selectedWorkItem?.phaseStakeholders,
+        activeCapability.lifecycle,
+      ),
+    [activeCapability.lifecycle, selectedWorkItem?.phaseStakeholders],
+  );
+  const selectedCurrentPhaseStakeholders = useMemo(
+    () => getWorkItemPhaseStakeholders(selectedWorkItem, selectedWorkItem?.phase),
+    [selectedWorkItem],
+  );
+
+  const sanitizeDraftPhaseStakeholderAssignments = useCallback(
+    (assignments: WorkItemPhaseStakeholderAssignment[]) => {
+      const seen = new Set<string>();
+
+      return assignments
+        .map(assignment => {
+          const phaseId = String(assignment.phaseId || '').trim().toUpperCase();
+          if (!phaseId || seen.has(phaseId) || !visibleLifecyclePhaseIds.has(phaseId)) {
+            return null;
+          }
+          seen.add(phaseId);
+          return {
+            phaseId,
+            stakeholders: assignment.stakeholders.map(stakeholder => ({
+              role: stakeholder.role || 'Stakeholder',
+              name: stakeholder.name || '',
+              email: stakeholder.email || '',
+              teamName: stakeholder.teamName || '',
+            })),
+          } satisfies WorkItemPhaseStakeholderAssignment;
+        })
+        .filter(Boolean) as WorkItemPhaseStakeholderAssignment[];
+    },
+    [visibleLifecyclePhaseIds],
+  );
+
+  const getDraftPhaseStakeholders = useCallback(
+    (phaseId: string) =>
+      draftWorkItem.phaseStakeholders.find(assignment => assignment.phaseId === phaseId)
+        ?.stakeholders || [],
+    [draftWorkItem.phaseStakeholders],
+  );
+
+  const updateDraftPhaseStakeholders = useCallback(
+    (
+      phaseId: string,
+      mutator: (
+        current: ReturnType<typeof getWorkItemPhaseStakeholders>,
+      ) => ReturnType<typeof getWorkItemPhaseStakeholders>,
+    ) => {
+      setDraftWorkItem(current => {
+        const existing = sanitizeDraftPhaseStakeholderAssignments(current.phaseStakeholders);
+        const currentStakeholders =
+          existing.find(assignment => assignment.phaseId === phaseId)?.stakeholders || [];
+        const nextStakeholders = mutator(currentStakeholders);
+        const nextAssignments = [
+          ...existing.filter(assignment => assignment.phaseId !== phaseId),
+          ...(nextStakeholders.length > 0
+            ? [{ phaseId, stakeholders: nextStakeholders }]
+            : []),
+        ];
+
+        return {
+          ...current,
+          phaseStakeholders: sanitizeDraftPhaseStakeholderAssignments(nextAssignments),
+        };
+      });
+    },
+    [sanitizeDraftPhaseStakeholderAssignments],
+  );
+
+  const addDraftPhaseStakeholder = useCallback(
+    (phaseId: string, seededStakeholder?: CapabilityStakeholder) => {
+      updateDraftPhaseStakeholders(phaseId, currentStakeholders => [
+        ...currentStakeholders,
+        seededStakeholder
+          ? toDraftPhaseStakeholder(seededStakeholder)
+          : createEmptyWorkItemPhaseStakeholder(),
+      ]);
+    },
+    [updateDraftPhaseStakeholders],
+  );
+
+  const updateDraftPhaseStakeholderField = useCallback(
+    (
+      phaseId: string,
+      index: number,
+      field: 'role' | 'name' | 'email' | 'teamName',
+      value: string,
+    ) => {
+      updateDraftPhaseStakeholders(phaseId, currentStakeholders =>
+        currentStakeholders.map((stakeholder, stakeholderIndex) =>
+          stakeholderIndex === index ? { ...stakeholder, [field]: value } : stakeholder,
+        ),
+      );
+    },
+    [updateDraftPhaseStakeholders],
+  );
+
+  const removeDraftPhaseStakeholder = useCallback(
+    (phaseId: string, index: number) => {
+      updateDraftPhaseStakeholders(phaseId, currentStakeholders =>
+        currentStakeholders.filter((_, stakeholderIndex) => stakeholderIndex !== index),
+      );
+    },
+    [updateDraftPhaseStakeholders],
+  );
+
+  const applyCapabilityStakeholdersToPhase = useCallback(
+    (phaseId: string) => {
+      if (activeCapability.stakeholders.length === 0) {
+        addDraftPhaseStakeholder(phaseId);
+        return;
+      }
+
+      updateDraftPhaseStakeholders(
+        phaseId,
+        () => activeCapability.stakeholders.map(stakeholder => toDraftPhaseStakeholder(stakeholder)),
+      );
+    },
+    [activeCapability.stakeholders, addDraftPhaseStakeholder, updateDraftPhaseStakeholders],
+  );
+
+  const handleDraftAttachmentUpload = useCallback(
+    async (files: FileList | null) => {
+      if (!files || files.length === 0) {
+        return;
+      }
+
+      const uploadedFiles = await Promise.all(
+        Array.from(files).map(async file => {
+          const rawText = await file.text();
+          const trimmed = rawText.trim();
+          if (!trimmed) {
+            return null;
+          }
+
+          const truncated =
+            trimmed.length > MAX_WORK_ITEM_ATTACHMENT_BYTES
+              ? `${trimmed.slice(0, MAX_WORK_ITEM_ATTACHMENT_BYTES)}\n\n[Truncated after ${MAX_WORK_ITEM_ATTACHMENT_BYTES} characters for work-item staging.]`
+              : trimmed;
+
+          return {
+            fileName: file.name,
+            mimeType: file.type || 'text/plain',
+            contentText: truncated,
+            sizeBytes: file.size,
+          } satisfies WorkItemAttachmentUpload;
+        }),
+      );
+
+      const nextFiles = uploadedFiles.filter(Boolean) as WorkItemAttachmentUpload[];
+      if (nextFiles.length === 0) {
+        return;
+      }
+
+      setDraftWorkItem(current => ({
+        ...current,
+        attachments: [...current.attachments, ...nextFiles],
+      }));
+    },
+    [],
+  );
+
+  const removeDraftAttachment = useCallback((index: number) => {
+    setDraftWorkItem(current => ({
+      ...current,
+      attachments: current.attachments.filter((_, attachmentIndex) => attachmentIndex !== index),
+    }));
+  }, []);
+
+  useEffect(() => {
+    setDraftWorkItem(current => ({
+      ...current,
+      phaseStakeholders: sanitizeDraftPhaseStakeholderAssignments(
+        current.phaseStakeholders,
+      ),
+    }));
+  }, [sanitizeDraftPhaseStakeholderAssignments]);
 
   const withAction = async (
     label: string,
@@ -1219,6 +2163,9 @@ const Orchestrator = () => {
           title: draftWorkItem.title.trim(),
           description: draftWorkItem.description.trim() || undefined,
           workflowId: draftWorkItem.workflowId,
+          taskType: draftWorkItem.taskType,
+          phaseStakeholders: draftPhaseStakeholderAssignments,
+          attachments: draftWorkItem.attachments,
           priority: draftWorkItem.priority,
           tags: draftWorkItem.tags
             .split(',')
@@ -1229,11 +2176,14 @@ const Orchestrator = () => {
         await refreshSelection(nextItem.id);
         setSelectedWorkItemId(nextItem.id);
         setIsCreateSheetOpen(false);
-        setDetailTab('overview');
+        setDetailTab('operate');
         setDraftWorkItem({
           title: '',
           description: '',
           workflowId: workspace.workflows[0]?.id || '',
+          taskType: DEFAULT_WORK_ITEM_TASK_TYPE,
+          phaseStakeholders: [],
+          attachments: [],
           priority: 'Med',
           tags: '',
         });
@@ -1320,7 +2270,7 @@ const Orchestrator = () => {
         }
 
         setResolutionNote('');
-        setDetailTab('progress');
+        setDetailTab('attempts');
         await refreshSelection(selectedWorkItem.id);
       },
       {
@@ -1345,6 +2295,9 @@ const Orchestrator = () => {
             resolution,
             resolvedBy: 'Capability Owner',
           });
+          setIsDiffReviewOpen(false);
+          setIsApprovalReviewOpen(false);
+          setIsApprovalReviewHydrated(false);
         } else if (selectedOpenWait.type === 'INPUT') {
           await provideCapabilityWorkflowRunInput(activeCapability.id, currentRun.id, {
             resolution,
@@ -1392,11 +2345,52 @@ const Orchestrator = () => {
         });
         setResolutionNote('');
         setIsDiffReviewOpen(false);
+        setIsApprovalReviewOpen(false);
+        setIsApprovalReviewHydrated(false);
         await refreshSelection(selectedWorkItem.id);
       },
       {
         title: 'Changes requested',
         description: `${selectedWorkItem.title} was sent back to the developer step with your review notes.`,
+      },
+    );
+  };
+
+  const handleGuideAndRestart = async () => {
+    if (!selectedWorkItem || !selectedCanGuideBlockedAgent) {
+      return;
+    }
+
+    const guidance = resolutionNote.trim();
+    if (!guidance) {
+      setActionError('Add clear operator guidance before restarting the blocked work item.');
+      return;
+    }
+
+    await withAction(
+      'guideRestart',
+      async () => {
+        if (currentRun) {
+          await restartCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+            restartFromPhase: selectedWorkItem.phase,
+            guidance,
+            guidedBy: 'Capability Owner',
+          });
+        } else {
+          await startCapabilityWorkflowRun(activeCapability.id, selectedWorkItem.id, {
+            restartFromPhase: selectedWorkItem.phase,
+            guidance,
+            guidedBy: 'Capability Owner',
+          });
+        }
+
+        setResolutionNote('');
+        setDetailTab('attempts');
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Agent guided and restarted',
+        description: `${selectedWorkItem.title} restarted from ${getPhaseMeta(selectedWorkItem.phase).label} with your guidance attached to the next attempt.`,
       },
     );
   };
@@ -1448,6 +2442,215 @@ const Orchestrator = () => {
     await withAction('refresh', async () => {
       await Promise.all([refreshSelection(selectedWorkItemId), loadRuntime()]);
     });
+  };
+
+  const handleStageControlRefresh = async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    setDetailTab('attempts');
+    await refreshSelection(selectedWorkItem.id);
+  };
+
+  const updateStageChatMessages = useCallback(
+    (scopeKey: string, updater: (current: StageChatMessage[]) => StageChatMessage[]) => {
+      setStageChatByScope(current => ({
+        ...current,
+        [scopeKey]: updater(current[scopeKey] || []),
+      }));
+    },
+    [],
+  );
+
+  const handleOpenFullChat = async () => {
+    if (!selectedAgent) {
+      return;
+    }
+
+    try {
+      await setActiveChatAgent(activeCapability.id, selectedAgent.id);
+      navigate('/chat');
+    } catch (error) {
+      showError(
+        'Unable to open chat',
+        error instanceof Error ? error.message : 'Unable to switch the active chat agent.',
+      );
+    }
+  };
+
+  const handleOpenApprovalReview = useCallback(() => {
+    if (selectedOpenWait?.type !== 'APPROVAL' || !selectedWorkItem) {
+      return;
+    }
+
+    setApprovalReviewWaitSnapshot(selectedOpenWait);
+    setSelectedApprovalArtifactId(null);
+    setIsApprovalReviewHydrated(false);
+    setIsApprovalReviewOpen(true);
+  }, [
+    selectedOpenWait,
+    selectedWorkItem,
+  ]);
+
+  const handleApprovalReviewMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      if (event.button !== 0) {
+        return;
+      }
+
+      event.preventDefault();
+      handleOpenApprovalReview();
+    },
+    [handleOpenApprovalReview],
+  );
+
+  useEffect(() => {
+    if (!isApprovalReviewOpen) {
+      setIsApprovalReviewHydrated(false);
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      setIsApprovalReviewHydrated(true);
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [isApprovalReviewOpen]);
+
+  const handleStageChatSend = async (event?: React.FormEvent) => {
+    event?.preventDefault();
+
+    if (
+      !selectedAgent ||
+      !selectedWorkItem ||
+      !stageChatScopeKey ||
+      !runtimeReady ||
+      isStageChatSending
+    ) {
+      return;
+    }
+
+    const nextMessage = stageChatInput.trim();
+    if (!nextMessage) {
+      return;
+    }
+
+    const userMessage: StageChatMessage = {
+      id: `${Date.now()}-stage-user`,
+      role: 'user',
+      content: nextMessage,
+      timestamp: formatTimestamp(),
+    };
+
+    const history = [
+      ...selectedStageChatMessages,
+      userMessage,
+    ].map(message => ({
+      id: message.id,
+      capabilityId: activeCapability.id,
+      role: message.role,
+      content: message.content,
+      timestamp: message.timestamp,
+      ...(message.role === 'agent'
+        ? {
+            agentId: selectedAgent.id,
+            agentName: selectedAgent.name,
+          }
+        : {}),
+    }));
+
+    updateStageChatMessages(stageChatScopeKey, current => [...current, userMessage]);
+    setStageChatInput('');
+    setStageChatDraft('');
+    setStageChatError('');
+    setIsStageChatSending(true);
+    const requestToken = ++stageChatRequestRef.current;
+
+    try {
+      await setActiveChatAgent(activeCapability.id, selectedAgent.id);
+      const streamResult = await streamCapabilityChat(
+        {
+          capability: activeCapability,
+          agent: selectedAgent,
+          history,
+          message: nextMessage,
+          sessionMode: 'resume',
+          sessionScope: 'WORK_ITEM',
+          sessionScopeId: selectedWorkItem.id,
+          contextMode: 'WORK_ITEM_STAGE',
+          workItemId: selectedWorkItem.id,
+          runId: currentRun?.id,
+          workflowStepId: selectedCurrentStep?.id,
+        },
+        {
+          onEvent: streamEvent => {
+            if (stageChatRequestRef.current !== requestToken) {
+              return;
+            }
+
+            if (streamEvent.type === 'delta' && streamEvent.content) {
+              setStageChatDraft(current => current + streamEvent.content);
+            }
+
+            if (streamEvent.type === 'error' && streamEvent.error) {
+              setStageChatError(streamEvent.error);
+            }
+          },
+        },
+      );
+
+      if (stageChatRequestRef.current !== requestToken) {
+        return;
+      }
+
+      const assistantContent =
+        streamResult.completeEvent?.content || streamResult.draftContent;
+
+      if (!assistantContent.trim()) {
+        throw new Error(
+          streamResult.error || 'The stage agent did not return a response.',
+        );
+      }
+
+      updateStageChatMessages(stageChatScopeKey, current => [
+        ...current,
+        {
+          id: `${Date.now()}-stage-agent`,
+          role: 'agent',
+          content: assistantContent,
+          timestamp: formatTimestamp(
+            streamResult.completeEvent?.createdAt
+              ? new Date(streamResult.completeEvent.createdAt)
+              : new Date(),
+          ),
+          deliveryState:
+            streamResult.termination === 'complete'
+              ? 'clean'
+              : streamResult.termination === 'recovered'
+              ? 'recovered'
+              : 'interrupted',
+          error: streamResult.error,
+        },
+      ]);
+      setStageChatDraft('');
+      await refreshCapabilityBundle(activeCapability.id);
+    } catch (error) {
+      if (stageChatRequestRef.current !== requestToken) {
+        return;
+      }
+
+      const nextError =
+        error instanceof Error
+          ? error.message
+          : 'The stage agent could not complete this request.';
+      setStageChatDraft('');
+      setStageChatError(nextError);
+    } finally {
+      if (stageChatRequestRef.current === requestToken) {
+        setIsStageChatSending(false);
+      }
+    }
   };
 
   return (
@@ -1673,9 +2876,7 @@ const Orchestrator = () => {
               <button
                 key={attention.item.id}
                 type="button"
-                onClick={() =>
-                  selectWorkItem(attention.item.id, { focusBoard: true, openControl: true })
-                }
+                onClick={() => selectWorkItem(attention.item.id, { openControl: true })}
                 className={cn(
                   'orchestrator-attention-card min-w-[18rem] text-left',
                   selectedWorkItemId === attention.item.id &&
@@ -1721,7 +2922,10 @@ const Orchestrator = () => {
       </section>
 
       <div className="orchestrator-workspace-grid">
-        <section className="workspace-surface orchestrator-board-shell">
+        <section
+          id="orchestrator-flow-map"
+          className="workspace-surface orchestrator-board-shell"
+        >
           <div className="orchestrator-surface-header">
             <div>
               <p className="form-kicker">Phase Board</p>
@@ -1730,8 +2934,8 @@ const Orchestrator = () => {
               </h2>
               <p className="mt-1 text-sm text-secondary">
                 {view === 'board'
-                  ? 'Scan movement across SDLC phases in two compact rows while the control rail stays focused on one item.'
-                  : 'Use the operational table for tighter triage without leaving the orchestration surface.'}
+                  ? 'Use the lane map below as the flow view after you finish operating the selected work item above.'
+                  : 'Use the operational table below for broader triage once the focused workbench is set.'}
               </p>
             </div>
             <div className="orchestrator-board-meta">
@@ -1831,6 +3035,11 @@ const Orchestrator = () => {
                               <StatusBadge tone={getStatusTone(item.status)}>
                                 {WORK_ITEM_STATUS_META[item.status].label}
                               </StatusBadge>
+                              {item.taskType && item.taskType !== DEFAULT_WORK_ITEM_TASK_TYPE && (
+                                <StatusBadge tone="neutral">
+                                  {getWorkItemTaskTypeLabel(item.taskType)}
+                                </StatusBadge>
+                              )}
                               {item.activeRunId && <StatusBadge tone="brand">Running</StatusBadge>}
                               {hasConflictReview && (
                                 <StatusBadge tone="danger">Contrarian pass</StatusBadge>
@@ -2000,21 +3209,107 @@ const Orchestrator = () => {
 
         <aside className="orchestrator-detail-rail">
           <div className="workspace-surface orchestrator-detail-panel">
-            {!selectedWorkItem ? (
-              <EmptyState
-                title="Select a work item"
-                description="Choose a story from the board, list, or attention queue to inspect execution state, handle waits, and review outputs."
-                icon={WorkflowIcon}
-                className="h-full min-h-[45rem]"
-              />
-            ) : (
-              <div className="flex h-full flex-col">
+            <div className="orchestrator-workbench-grid">
+              <aside className="orchestrator-navigator-rail">
+                <div className="orchestrator-navigator-shell">
+                  <div className="orchestrator-navigator-header">
+                    <div>
+                      <p className="form-kicker">Workbench</p>
+                      <h2 className="mt-1 text-lg font-bold text-on-surface">
+                        Work navigator
+                      </h2>
+                      <p className="mt-1 text-sm text-secondary">
+                        Move through urgent, active, and completed work without losing the focused operator workspace.
+                      </p>
+                    </div>
+                    <StatusBadge tone="info">{filteredWorkItems.length} items</StatusBadge>
+                  </div>
+
+                  <div className="orchestrator-navigator-groups">
+                    {navigatorSections.map(section => (
+                      <section key={section.id} className="orchestrator-navigator-group">
+                        <div className="orchestrator-navigator-group-header">
+                          <div>
+                            <p className="text-sm font-semibold text-on-surface">
+                              {section.title}
+                            </p>
+                            <p className="mt-1 text-xs leading-relaxed text-secondary">
+                              {section.helper}
+                            </p>
+                          </div>
+                          <StatusBadge tone="neutral">{section.items.length}</StatusBadge>
+                        </div>
+
+                        {section.items.length === 0 ? (
+                          <div className="orchestrator-navigator-empty">
+                            Nothing to show in this section right now.
+                          </div>
+                        ) : (
+                          <div className="orchestrator-navigator-list">
+                            {section.items.map(entry => (
+                              <button
+                                key={entry.item.id}
+                                type="button"
+                                onClick={() => selectWorkItem(entry.item.id)}
+                                className={cn(
+                                  'orchestrator-navigator-item',
+                                  selectedWorkItemId === entry.item.id &&
+                                    'orchestrator-navigator-item-active',
+                                )}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="form-kicker">{entry.item.id}</p>
+                                    <p className="mt-1 line-clamp-2 text-sm font-semibold text-on-surface">
+                                      {entry.item.title}
+                                    </p>
+                                  </div>
+                                  <StatusBadge tone={getStatusTone(entry.item.status)}>
+                                    {WORK_ITEM_STATUS_META[entry.item.status].label}
+                                  </StatusBadge>
+                                </div>
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  <StatusBadge tone="neutral">
+                                    {getPhaseMeta(entry.item.phase).label}
+                                  </StatusBadge>
+                                  {entry.attentionLabel ? (
+                                    <StatusBadge tone="warning">{entry.attentionLabel}</StatusBadge>
+                                  ) : null}
+                                </div>
+                                <div className="mt-3 space-y-1 text-xs leading-relaxed text-secondary">
+                                  <p>{entry.currentStepName}</p>
+                                  <p>{entry.agentName}</p>
+                                  <p>{entry.ageLabel}</p>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </section>
+                    ))}
+                  </div>
+                </div>
+              </aside>
+
+              <div className="orchestrator-workbench-canvas">
+                {!selectedWorkItem ? (
+                  <EmptyState
+                    title="Select a work item"
+                    description="Choose a story from the navigator, attention strip, or flow map to open the focused delivery workbench."
+                    icon={WorkflowIcon}
+                    className="h-full min-h-[45rem]"
+                  />
+                ) : (
+                  <div className="flex h-full flex-col">
                 <div className="orchestrator-detail-header">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <p className="form-kicker">{selectedWorkItem.id}</p>
                     <div className="flex flex-wrap gap-2">
                       <StatusBadge tone={getStatusTone(selectedWorkItem.phase)}>
                         {getPhaseMeta(selectedWorkItem.phase).label}
+                      </StatusBadge>
+                      <StatusBadge tone="neutral">
+                        {getWorkItemTaskTypeLabel(selectedWorkItem.taskType)}
                       </StatusBadge>
                       <StatusBadge tone={getStatusTone(selectedWorkItem.status)}>
                         {WORK_ITEM_STATUS_META[selectedWorkItem.status].label}
@@ -2035,14 +3330,149 @@ const Orchestrator = () => {
                       {selectedWorkItem.description ||
                         'No description was captured when this work item was staged into execution.'}
                     </p>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => clearSelectedWorkItem({ focusBoard: true })}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        <ArrowRight size={16} className="rotate-180" />
+                        Back to flow map
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsExplainOpen(true)}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        Explain
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleOpenFullChat()}
+                        disabled={!selectedAgent}
+                        className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <MessageSquareText size={16} />
+                        Open full chat
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsStageControlOpen(true)}
+                        disabled={!selectedCanTakeControl}
+                        className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <MessageSquareText size={16} />
+                        Take control
+                      </button>
+                    </div>
+
+                    <div className="mt-4 rounded-[1.5rem] border border-outline-variant/25 bg-surface-container-low/60 px-4 py-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="workspace-meta-label">Top controls</p>
+                          <p className="mt-2 text-sm leading-relaxed text-secondary">
+                            Keep the primary run actions close to the title so you can start,
+                            restart, review approvals, or guide blocked work without hunting
+                            through the page.
+                          </p>
+                        </div>
+                        {selectedCanGuideBlockedAgent ? (
+                          <StatusBadge tone="warning">Blocked work needs guidance</StatusBadge>
+                        ) : selectedOpenWait?.type === 'APPROVAL' ? (
+                          <StatusBadge tone="warning">Approval review waiting</StatusBadge>
+                        ) : null}
+                      </div>
+
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {selectedOpenWait?.type === 'APPROVAL' && (
+                          <button
+                            type="button"
+                            onMouseDown={handleApprovalReviewMouseDown}
+                            onClick={handleOpenApprovalReview}
+                            className="enterprise-button enterprise-button-primary"
+                          >
+                            <ShieldCheck size={16} />
+                            Review approval gate
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => void handleStartExecution()}
+                          disabled={!canStartExecution || busyAction !== null}
+                          className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {busyAction === 'start' ? (
+                            <LoaderCircle size={16} className="animate-spin" />
+                          ) : (
+                            <Play size={16} />
+                          )}
+                          {selectedRunHistory.length > 0
+                            ? 'Start current phase'
+                            : 'Start execution'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => void handleRestartExecution()}
+                          disabled={!canRestartFromPhase || busyAction !== null}
+                          className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {busyAction === 'restart' ? (
+                            <LoaderCircle size={16} className="animate-spin" />
+                          ) : (
+                            <RefreshCw size={16} />
+                          )}
+                          Restart run
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => void handleResetAndRestart()}
+                          disabled={!canResetAndRestart || busyAction !== null}
+                          className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {busyAction === 'reset' ? (
+                            <LoaderCircle size={16} className="animate-spin" />
+                          ) : (
+                            <RefreshCw size={16} />
+                          )}
+                          Reset and restart
+                        </button>
+
+                        {selectedCanGuideBlockedAgent && (
+                          <button
+                            type="button"
+                            onClick={focusGuidanceComposer}
+                            className="enterprise-button enterprise-button-brand-muted"
+                          >
+                            <ArrowRight size={16} />
+                            Guide blocked agent
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => void handleCancelRun()}
+                          disabled={!currentRunIsActive || busyAction !== null}
+                          className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {busyAction === 'cancel' ? (
+                            <LoaderCircle size={16} className="animate-spin" />
+                          ) : (
+                            <Square size={16} />
+                          )}
+                          Cancel run
+                        </button>
+                      </div>
+                    </div>
                   </div>
 
                   <div className="orchestrator-detail-tabs">
                     {([
-                      ['overview', 'Overview'],
-                      ['control', 'Control'],
-                      ['progress', 'Progress'],
-                      ['outputs', 'Outputs'],
+                      ['operate', 'Operate'],
+                      ['artifacts', 'Artifacts'],
+                      ['attempts', 'Attempts'],
                     ] as const).map(([id, label]) => (
                       <button
                         key={id}
@@ -2060,8 +3490,29 @@ const Orchestrator = () => {
                 </div>
 
                 <div className="orchestrator-detail-body">
-                {detailTab === 'overview' && (
+                {detailTab === 'operate' && (
                   <div className="space-y-4">
+                    <div className="grid gap-3 lg:grid-cols-3">
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">What is happening</p>
+                        <p className="mt-2 text-sm leading-relaxed text-on-surface">
+                          {selectedStateSummary}
+                        </p>
+                      </div>
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">What is blocked</p>
+                        <p className="mt-2 text-sm leading-relaxed text-on-surface">
+                          {selectedBlockerSummary}
+                        </p>
+                      </div>
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">What is next</p>
+                        <p className="mt-2 text-sm leading-relaxed text-on-surface">
+                          {selectedNextActionSummary}
+                        </p>
+                      </div>
+                    </div>
+
                     {selectedAttentionReason && (
                       <div className="workspace-inline-alert workspace-inline-alert-warning">
                         <AlertCircle size={18} className="mt-0.5 shrink-0" />
@@ -2086,6 +3537,149 @@ const Orchestrator = () => {
                             </span>
                           </div>
                         </div>
+                      </div>
+                    )}
+
+                    {(selectedCanGuideBlockedAgent || selectedOpenWait || requestChangesIsAvailable) && (
+                      <div className="workspace-meta-card border-outline-variant/30 bg-white/90">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Agent guidance</p>
+                            <p className="mt-2 text-sm leading-relaxed text-secondary">
+                              {selectedOpenWait
+                                ? 'Use this note to guide the agent before the run continues. Approval, human input, and conflict decisions all carry this guidance forward.'
+                                : selectedCanGuideBlockedAgent
+                                  ? 'The item is blocked. Add what changed and how the agent should retry, then restart from the current phase.'
+                                  : 'Use this note field for approvals, human input, restart notes, or cancellation reasons.'}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {selectedCanGuideBlockedAgent ? (
+                              <button
+                                type="button"
+                                onClick={() => void handleGuideAndRestart()}
+                                disabled={!canGuideAndRestart || busyAction !== null}
+                                className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                {busyAction === 'guideRestart' ? (
+                                  <LoaderCircle size={16} className="animate-spin" />
+                                ) : (
+                                  <ArrowRight size={16} />
+                                )}
+                                Guide agent and restart
+                              </button>
+                            ) : null}
+                            {selectedOpenWait?.type === 'APPROVAL' ? (
+                              <button
+                                type="button"
+                                onMouseDown={handleApprovalReviewMouseDown}
+                                onClick={handleOpenApprovalReview}
+                                className="enterprise-button enterprise-button-secondary"
+                              >
+                                <ShieldCheck size={16} />
+                                Open approval review
+                              </button>
+                            ) : null}
+                            {selectedOpenWait && selectedOpenWait.type !== 'APPROVAL' ? (
+                              <button
+                                type="button"
+                                onClick={() => void handleResolveWait()}
+                                disabled={!canResolveSelectedWait || busyAction !== null}
+                                className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                {busyAction === 'resolve' ? (
+                                  <LoaderCircle size={16} className="animate-spin" />
+                                ) : (
+                                  <ShieldCheck size={16} />
+                                )}
+                                {actionButtonLabel}
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                        {selectedFailureReason &&
+                        selectedWorkItem?.status === 'BLOCKED' &&
+                        !selectedOpenWait ? (
+                          <div className="mt-3 rounded-2xl border border-red-200/80 bg-red-50/60 px-4 py-3">
+                            <p className="workspace-meta-label">Latest failure from engine</p>
+                            <p className="mt-2 text-sm leading-relaxed text-on-surface">
+                              {selectedFailureReason}
+                            </p>
+                          </div>
+                        ) : null}
+                        {selectedCanGuideBlockedAgent && selectedAttentionReason && (
+                          <div className="mt-3 rounded-2xl border border-amber-200/80 bg-amber-50/60 px-4 py-3">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div>
+                                <p className="workspace-meta-label">Current blocker from agent</p>
+                                <p className="mt-2 text-sm leading-relaxed text-on-surface">
+                                  {selectedAttentionReason}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setResolutionNote(current =>
+                                    current.trim()
+                                      ? `${buildBlockedGuidanceSeed(selectedAttentionReason)}${current.trim()}`
+                                      : buildBlockedGuidanceSeed(selectedAttentionReason),
+                                  )
+                                }
+                                className="enterprise-button enterprise-button-secondary"
+                              >
+                                <ArrowRight size={14} />
+                                Use blocker in guidance
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        <textarea
+                          ref={resolutionNoteRef}
+                          value={resolutionNote}
+                          onChange={event => setResolutionNote(event.target.value)}
+                          placeholder={resolutionPlaceholder}
+                          className="field-textarea mt-3 h-28 bg-white"
+                        />
+                        {guidanceSuggestions.length > 0 && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {guidanceSuggestions.map(suggestion => (
+                              <button
+                                key={suggestion}
+                                type="button"
+                                onClick={() =>
+                                  setResolutionNote(current =>
+                                    current.trim()
+                                      ? `${current.trim()}\n- ${suggestion}`
+                                      : `- ${suggestion}`,
+                                  )
+                                }
+                                className="rounded-full border border-outline-variant/30 bg-surface-container-low px-3 py-1.5 text-xs font-medium text-secondary transition-colors hover:border-primary/20 hover:text-primary"
+                              >
+                                {suggestion}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {requestChangesIsAvailable && (
+                          <p className="mt-2 text-xs text-secondary">
+                            Review notes entered here also carry into the approval review window.
+                          </p>
+                        )}
+                        {selectedCanGuideBlockedAgent && !resolutionNote.trim() && (
+                          <p className="mt-2 text-xs font-medium text-amber-700">
+                            Add operator guidance above before restarting the blocked work item.
+                          </p>
+                        )}
+                        {resolutionIsRequired && !resolutionNote.trim() && selectedOpenWait && (
+                          <p className="mt-2 text-xs font-medium text-amber-700">
+                            Add the missing detail above to unblock this work item and continue execution.
+                          </p>
+                        )}
+                        {requestChangesIsAvailable && !resolutionNote.trim() && (
+                          <p className="mt-2 text-xs font-medium text-amber-700">
+                            Requesting changes requires review notes.
+                          </p>
+                        )}
                       </div>
                     )}
 
@@ -2248,6 +3842,34 @@ const Orchestrator = () => {
 
                         <div className="grid gap-3 sm:grid-cols-2">
                           <div className="workspace-meta-card">
+                            <p className="workspace-meta-label">Agent suggested inputs</p>
+                            <p className="mt-2 text-xs leading-relaxed text-secondary">
+                              Advisory defaults from the assigned agent contract. These do not
+                              block execution unless the workflow step explicitly requires them.
+                            </p>
+                            {renderAgentArtifactExpectations(
+                              selectedCompiledStepContext.agentSuggestedInputs,
+                              'No advisory input suggestions are attached to this agent.',
+                              'neutral',
+                            )}
+                          </div>
+
+                          <div className="workspace-meta-card">
+                            <p className="workspace-meta-label">Agent expected outputs</p>
+                            <p className="mt-2 text-xs leading-relaxed text-secondary">
+                              Default outputs the assigned agent is shaped to produce. Workflow
+                              artifact contracts still remain the execution source of truth.
+                            </p>
+                            {renderAgentArtifactExpectations(
+                              selectedCompiledStepContext.agentExpectedOutputs,
+                              'No default output expectations are attached to this agent.',
+                              'brand',
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="workspace-meta-card">
                             <p className="workspace-meta-label">Completion checklist</p>
                             {selectedCompiledStepContext.completionChecklist.length > 0 ? (
                               <ul className="mt-3 space-y-1 text-xs leading-relaxed text-secondary">
@@ -2303,25 +3925,153 @@ const Orchestrator = () => {
                     )}
 
                     <div className="workspace-meta-card">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="workspace-meta-label">Recent artifacts</p>
+                          <p className="mt-2 text-sm leading-relaxed text-secondary">
+                            Keep the latest working documents close while you operate the step.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setDetailTab('artifacts')}
+                          className="enterprise-button enterprise-button-secondary"
+                        >
+                          Open artifacts
+                        </button>
+                      </div>
+
+                      {selectedArtifacts.length === 0 ? (
+                        <p className="mt-3 text-sm leading-relaxed text-secondary">
+                          No run artifacts are attached to this work item yet.
+                        </p>
+                      ) : (
+                        <div className="mt-4 grid gap-3 lg:grid-cols-3">
+                          {selectedArtifacts.slice(0, 3).map(artifact => (
+                            <button
+                              key={artifact.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedArtifactId(artifact.id);
+                                setDetailTab('artifacts');
+                              }}
+                              className={cn(
+                                'rounded-[1.35rem] border border-outline-variant/30 bg-white px-4 py-4 text-left transition-colors hover:border-primary/30 hover:bg-primary/5',
+                                selectedArtifact?.id === artifact.id &&
+                                  'border-primary/35 bg-primary/5',
+                              )}
+                            >
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="text-sm font-semibold text-on-surface">
+                                  {artifact.name}
+                                </p>
+                                <StatusBadge tone="brand">
+                                  {artifact.direction || 'OUTPUT'}
+                                </StatusBadge>
+                              </div>
+                              <p className="mt-2 text-xs leading-relaxed text-secondary">
+                                {compactMarkdownPreview(
+                                  artifact.summary ||
+                                    artifact.description ||
+                                    `${artifact.type} · ${artifact.version}`,
+                                  150,
+                                )}
+                              </p>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="workspace-meta-card">
                       <p className="workspace-meta-label">Tags and routing</p>
                       <div className="mt-3 flex flex-wrap gap-2">
-                        {selectedWorkItem.tags.length > 0 ? (
-                          selectedWorkItem.tags.map(tag => (
-                            <span key={tag}>
-                              <StatusBadge tone="neutral">{tag}</StatusBadge>
-                            </span>
-                          ))
-                        ) : (
+                        <StatusBadge tone="neutral">
+                          {getWorkItemTaskTypeLabel(selectedWorkItem.taskType)}
+                        </StatusBadge>
+                        {selectedWorkItem.tags.map(tag => (
+                          <span key={tag}>
+                            <StatusBadge tone="neutral">{tag}</StatusBadge>
+                          </span>
+                        ))}
+                        {selectedWorkItem.tags.length === 0 && (
                           <span className="text-sm text-secondary">
-                            No tags were attached to this work item.
+                            No extra tags were attached to this work item.
                           </span>
                         )}
                       </div>
+                      <p className="mt-3 text-xs leading-relaxed text-secondary">
+                        {getWorkItemTaskTypeDescription(selectedWorkItem.taskType)}
+                      </p>
+                    </div>
+
+                    <div className="workspace-meta-card">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="workspace-meta-label">Phase stakeholders & sign-off</p>
+                          <p className="mt-2 text-sm leading-relaxed text-secondary">
+                            These stakeholders are carried into phase-specific human documents and
+                            sign-off records for this work item.
+                          </p>
+                        </div>
+                        <StatusBadge tone={selectedCurrentPhaseStakeholders.length > 0 ? 'info' : 'neutral'}>
+                          {selectedPhaseStakeholderAssignments.length > 0
+                            ? `${selectedPhaseStakeholderAssignments.length} phases configured`
+                            : 'No phase stakeholders'}
+                        </StatusBadge>
+                      </div>
+
+                      <div className="mt-4 rounded-[1.25rem] border border-outline-variant/30 bg-white/80 px-4 py-3">
+                        <p className="workspace-meta-label">
+                          Current phase · {getLifecyclePhaseLabel(activeCapability, selectedWorkItem.phase)}
+                        </p>
+                        {selectedCurrentPhaseStakeholders.length > 0 ? (
+                          <ul className="mt-3 space-y-2 text-xs leading-relaxed text-secondary">
+                            {selectedCurrentPhaseStakeholders.map((stakeholder, index) => (
+                              <li
+                                key={`${selectedWorkItem.phase}-${stakeholder.email || stakeholder.name}-${index}`}
+                                className="flex gap-2"
+                              >
+                                <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />
+                                <span>{formatWorkItemPhaseStakeholderLine(stakeholder)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="mt-3 text-xs leading-relaxed text-secondary">
+                            No specific stakeholders were assigned for the current phase.
+                          </p>
+                        )}
+                      </div>
+
+                      {selectedPhaseStakeholderAssignments.length > 0 && (
+                        <div className="mt-4 grid gap-3">
+                          {selectedPhaseStakeholderAssignments.map(assignment => (
+                            <div
+                              key={assignment.phaseId}
+                              className="rounded-[1.25rem] border border-outline-variant/20 bg-surface-container-low/35 px-4 py-3"
+                            >
+                              <p className="text-sm font-semibold text-on-surface">
+                                {getLifecyclePhaseLabel(activeCapability, assignment.phaseId)}
+                              </p>
+                              <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
+                                {assignment.stakeholders.map((stakeholder, index) => (
+                                  <li
+                                    key={`${assignment.phaseId}-${stakeholder.email || stakeholder.name}-${index}`}
+                                  >
+                                    {formatWorkItemPhaseStakeholderLine(stakeholder)}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
 
-                {detailTab === 'control' && (
+                {detailTab === 'operate' && (
                   <div className="space-y-4">
                     {!runtimeReady && (
                       <div className="workspace-inline-alert workspace-inline-alert-warning">
@@ -2570,93 +4320,212 @@ const Orchestrator = () => {
                       </div>
                     )}
 
-                    <div className="orchestrator-action-grid">
-                      <button
-                        type="button"
-                        onClick={() => void handleStartExecution()}
-                        disabled={!canStartExecution || busyAction !== null}
-                        className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        {busyAction === 'start' ? (
-                          <LoaderCircle size={16} className="animate-spin" />
-                        ) : (
-                          <Play size={16} />
-                        )}
-                        {selectedRunHistory.length > 0 ? 'Start from current phase' : 'Start execution'}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => void handleRestartExecution()}
-                        disabled={!canRestartFromPhase || busyAction !== null}
-                        className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        {busyAction === 'restart' ? (
-                          <LoaderCircle size={16} className="animate-spin" />
-                        ) : (
-                          <RefreshCw size={16} />
-                        )}
-                        Restart run
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => void handleResetAndRestart()}
-                        disabled={!canResetAndRestart || busyAction !== null}
-                        className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        {busyAction === 'reset' ? (
-                          <LoaderCircle size={16} className="animate-spin" />
-                        ) : (
-                          <RefreshCw size={16} />
-                        )}
-                        Reset progress and restart
-                      </button>
-
-                      {requestChangesIsAvailable && (
+                    <div className="workspace-meta-card">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="workspace-meta-label">Direct stage control</p>
+                          <p className="mt-2 text-sm leading-relaxed text-secondary">
+                            Open a focused Codex-style work window for this stage, chat directly with the assigned agent, and continue the workflow once you are satisfied with the stage guidance or output direction.
+                          </p>
+                        </div>
                         <button
                           type="button"
-                          onClick={() => void handleRequestChanges()}
-                          disabled={!canRequestChanges || busyAction !== null}
-                          className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                          onClick={() => setIsStageControlOpen(true)}
+                          disabled={!selectedCanTakeControl}
+                          className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
                         >
-                          {busyAction === 'requestChanges' ? (
-                            <LoaderCircle size={16} className="animate-spin" />
-                          ) : (
-                            <RefreshCw size={16} />
-                          )}
-                          Request changes
+                          <MessageSquareText size={16} />
+                          Take control
                         </button>
+                      </div>
+                      {!selectedAgent && (
+                        <p className="mt-3 text-xs text-secondary">
+                          This work item does not currently have a resolved stage agent to chat with.
+                        </p>
                       )}
-
-                      <button
-                        type="button"
-                        onClick={() => void handleResolveWait()}
-                        disabled={!canResolveSelectedWait || busyAction !== null}
-                        className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        {busyAction === 'resolve' ? (
-                          <LoaderCircle size={16} className="animate-spin" />
-                        ) : (
-                          <ShieldCheck size={16} />
-                        )}
-                        {actionButtonLabel}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => void handleCancelRun()}
-                        disabled={!currentRunIsActive || busyAction !== null}
-                        className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        {busyAction === 'cancel' ? (
-                          <LoaderCircle size={16} className="animate-spin" />
-                        ) : (
-                          <Square size={16} />
-                        )}
-                        Cancel run
-                      </button>
+                      {selectedAgent && (
+                        <p className="mt-3 text-xs text-secondary">
+                          Direct control will stay scoped to <strong>{selectedAgent.name}</strong> and the current work item stage.
+                        </p>
+                      )}
                     </div>
+
+                    <ErrorBoundary
+                      resetKey={`${selectedWorkItem.id}:${selectedAgent?.id || 'none'}:${selectedCurrentStep?.id || 'stage'}:${detailTab}`}
+                      title="Direct agent chat could not render"
+                      description="The inline stage chat hit an unexpected UI problem. The rest of the workbench stays available, and you can still use Full Chat or Take control while we keep this route stable."
+                    >
+                      <div className="workspace-meta-card orchestrator-stage-chat-card">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Direct agent chat</p>
+                            <p className="mt-2 text-sm leading-relaxed text-secondary">
+                              Work with the current stage agent right here, ask what it plans to do,
+                              clarify blockers, or steer the next attempt before you continue.
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleOpenFullChat()}
+                              disabled={!selectedAgent}
+                              className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              Full Chat
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setIsStageControlOpen(true)}
+                              disabled={!selectedCanTakeControl}
+                              className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              Take control
+                            </button>
+                          </div>
+                        </div>
+
+                        {!runtimeReady ? (
+                          <p className="mt-4 text-sm leading-relaxed text-secondary">
+                            Agent chat will unlock once the runtime connection is ready.
+                          </p>
+                        ) : !selectedAgent ? (
+                          <p className="mt-4 text-sm leading-relaxed text-secondary">
+                            This step does not have an assigned agent to chat with yet.
+                          </p>
+                        ) : (
+                          <>
+                            {stageChatSuggestedPrompts.length > 0 && (
+                              <div className="mt-4 flex flex-wrap gap-2">
+                                {stageChatSuggestedPrompts.map(prompt => (
+                                  <button
+                                    key={prompt}
+                                    type="button"
+                                    onClick={() => setStageChatInput(prompt)}
+                                    className="rounded-full border border-outline-variant/30 bg-surface-container-low px-3 py-1.5 text-xs font-medium text-secondary transition-colors hover:border-primary/20 hover:text-primary"
+                                  >
+                                    {prompt}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+
+                            <div
+                              ref={stageChatThreadRef}
+                              className="orchestrator-stage-chat-thread"
+                              onScroll={event => {
+                                const target = event.currentTarget;
+                                const distanceFromBottom =
+                                  target.scrollHeight - target.scrollTop - target.clientHeight;
+                                stageChatStickToBottomRef.current = distanceFromBottom < 48;
+                              }}
+                            >
+                              {selectedStageChatMessages.length === 0 && !stageChatDraft ? (
+                                <div className="orchestrator-stage-chat-empty">
+                                  Ask <strong>{selectedAgent.name}</strong> what is happening in{' '}
+                                  <strong>{selectedCurrentStep?.name || 'this stage'}</strong>, what
+                                  it needs, or which files and artifacts it plans to change.
+                                </div>
+                              ) : (
+                                <>
+                                  {selectedStageChatMessages.map(message => (
+                                    <div
+                                      key={message.id}
+                                      className={cn(
+                                        'orchestrator-stage-chat-message',
+                                        message.role === 'user'
+                                          ? 'orchestrator-stage-chat-message-user'
+                                          : 'orchestrator-stage-chat-message-agent',
+                                      )}
+                                    >
+                                      <div className="orchestrator-stage-chat-message-meta">
+                                        <span className="inline-flex items-center gap-2">
+                                          {message.role === 'user' ? (
+                                            <User size={14} />
+                                          ) : (
+                                            <Bot size={14} />
+                                          )}
+                                          {message.role === 'user' ? 'You' : selectedAgent.name}
+                                        </span>
+                                        <span>{message.timestamp}</span>
+                                      </div>
+                                      <p
+                                        className={cn(
+                                          'mt-2 whitespace-pre-wrap text-sm leading-7',
+                                          message.role === 'user'
+                                            ? 'text-white'
+                                            : 'text-on-surface',
+                                        )}
+                                      >
+                                        {message.content}
+                                      </p>
+                                      {message.deliveryState &&
+                                      message.deliveryState !== 'clean' ? (
+                                        <p className="mt-2 text-xs text-secondary">
+                                          {message.deliveryState === 'recovered'
+                                            ? 'Recovered draft'
+                                            : 'Partial response'}
+                                          {message.error ? ` · ${message.error}` : ''}
+                                        </p>
+                                      ) : null}
+                                    </div>
+                                  ))}
+                                  {stageChatDraft && (
+                                    <div className="orchestrator-stage-chat-message orchestrator-stage-chat-message-agent">
+                                      <div className="orchestrator-stage-chat-message-meta">
+                                        <span className="inline-flex items-center gap-2">
+                                          <Bot size={14} />
+                                          {selectedAgent.name}
+                                        </span>
+                                        <span>Typing…</span>
+                                      </div>
+                                      <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-on-surface">
+                                        {stageChatDraft}
+                                      </p>
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                            </div>
+
+                            {stageChatError && (
+                              <div className="mt-4 rounded-2xl border border-red-200/70 bg-red-50/70 px-4 py-3 text-sm text-red-900">
+                                {stageChatError}
+                              </div>
+                            )}
+
+                            <form
+                              onSubmit={handleStageChatSend}
+                              className="mt-4 space-y-3"
+                            >
+                              <textarea
+                                value={stageChatInput}
+                                onChange={event => setStageChatInput(event.target.value)}
+                                placeholder={`Ask ${selectedAgent.name} about this stage, blockers, files, artifacts, or next steps.`}
+                                className="field-textarea h-28 bg-white"
+                              />
+                              <div className="flex flex-wrap items-center justify-between gap-3">
+                                <p className="text-xs leading-relaxed text-secondary">
+                                  Scoped to <strong>{selectedWorkItem.id}</strong> and{' '}
+                                  <strong>{selectedCurrentStep?.name || 'the active stage'}</strong>.
+                                </p>
+                                <button
+                                  type="submit"
+                                  disabled={!stageChatInput.trim() || isStageChatSending}
+                                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  {isStageChatSending ? (
+                                    <RefreshCw size={16} className="animate-spin" />
+                                  ) : (
+                                    <Send size={16} />
+                                  )}
+                                  Send to agent
+                                </button>
+                              </div>
+                            </form>
+                          </>
+                        )}
+                      </div>
+                    </ErrorBoundary>
 
                     <div className="workspace-meta-card">
                       <p className="workspace-meta-label">Reset target</p>
@@ -2673,36 +4542,10 @@ const Orchestrator = () => {
                             : '.'}
                       </p>
                     </div>
-
-                    <div className="workspace-meta-card">
-                      <p className="workspace-meta-label">Resolution composer</p>
-                      <textarea
-                        value={resolutionNote}
-                        onChange={event => setResolutionNote(event.target.value)}
-                        placeholder={resolutionPlaceholder}
-                        className="field-textarea mt-3 h-28 bg-white"
-                      />
-                      {requestChangesIsAvailable && (
-                        <p className="mt-2 text-xs text-secondary">
-                          Add review notes here when requesting changes so the developer step
-                          can resume with clear direction.
-                        </p>
-                      )}
-                      {resolutionIsRequired && !resolutionNote.trim() && selectedOpenWait && (
-                        <p className="mt-2 text-xs font-medium text-amber-700">
-                          Add the missing detail above to unblock this work item and continue execution.
-                        </p>
-                      )}
-                      {requestChangesIsAvailable && !resolutionNote.trim() && (
-                        <p className="mt-2 text-xs font-medium text-amber-700">
-                          Requesting changes requires review notes.
-                        </p>
-                      )}
-                    </div>
                   </div>
                 )}
 
-                {detailTab === 'progress' && (
+                {detailTab === 'attempts' && (
                   <div className="space-y-4">
                     <div className="grid gap-3 sm:grid-cols-2">
                       <div className="workspace-meta-card">
@@ -2729,10 +4572,41 @@ const Orchestrator = () => {
                       </div>
                     </div>
 
+                    <div className="workspace-meta-card">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="workspace-meta-label">What changed since last attempt?</p>
+                          <p className="mt-2 text-sm leading-relaxed text-secondary">
+                            Compare the current run with the previous attempt before restarting or approving.
+                          </p>
+                        </div>
+                        <StatusBadge tone={previousRunSummary ? 'info' : 'neutral'}>
+                          {previousRunSummary ? 'Comparison ready' : 'First attempt'}
+                        </StatusBadge>
+                      </div>
+
+                      {attemptComparisonLines.length > 0 ? (
+                        <ul className="mt-4 space-y-2 text-sm leading-relaxed text-secondary">
+                          {attemptComparisonLines.map(line => (
+                            <li key={line} className="flex gap-2">
+                              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />
+                              <span>{line}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-4 text-sm leading-relaxed text-secondary">
+                          {previousRunSummary
+                            ? 'No major delta was detected yet between the latest two attempts.'
+                            : 'This work item has only one attempt so far.'}
+                        </p>
+                      )}
+                    </div>
+
                     <div className="space-y-3">
                       {(selectedWorkflow?.steps || []).map(step => {
                         const runStep =
-                          selectedRunDetail?.steps.find(
+                          selectedRunSteps.find(
                             current => current.workflowStepId === step.id,
                           ) || null;
 
@@ -2858,12 +4732,12 @@ const Orchestrator = () => {
                   </div>
                 )}
 
-                {detailTab === 'outputs' && (
+                {detailTab === 'artifacts' && (
                   <div className="space-y-4">
                     <div className="grid gap-3 sm:grid-cols-3">
                       <div className="workspace-meta-card">
                         <p className="workspace-meta-label">Artifacts</p>
-                        <p className="workspace-meta-value">{selectedArtifacts.length}</p>
+                        <p className="workspace-meta-value">{filteredArtifacts.length}</p>
                         <p className="mt-1 text-xs text-secondary">Captured for the latest run</p>
                       </div>
                       <div className="workspace-meta-card">
@@ -2888,65 +4762,187 @@ const Orchestrator = () => {
                       </div>
                     </div>
 
-                    <div className="space-y-3">
-                      {selectedArtifacts.length === 0 ? (
-                        <div className="rounded-3xl border border-outline-variant/35 bg-surface-container-low px-4 py-4 text-sm text-secondary">
-                          No artifacts were recorded for the latest run yet.
-                        </div>
-                      ) : (
-                        selectedArtifacts.slice(0, 5).map(artifact => (
-                          <div key={artifact.id} className="orchestrator-step-row">
-                            <div className="min-w-0 flex-1">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <p className="text-sm font-semibold text-on-surface">
-                                  {artifact.name}
-                                </p>
-                                <StatusBadge tone="brand">
-                                  {artifact.direction || 'OUTPUT'}
-                                </StatusBadge>
-                              </div>
-                              <p className="mt-1 text-xs leading-relaxed text-secondary">
-                                {compactMarkdownPreview(
-                                  artifact.summary ||
-                                    artifact.description ||
-                                    `${artifact.type} · ${artifact.version}`,
-                                  180,
-                                )}
-                              </p>
-                            </div>
-                            <span className="text-xs text-secondary">
-                              {formatTimestamp(artifact.created)}
-                            </span>
+                    <div className="orchestrator-artifact-browser">
+                      <div className="workspace-meta-card">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Run artifacts</p>
+                            <p className="mt-2 text-sm leading-relaxed text-secondary">
+                              Browse every document created for this work item without leaving
+                              Work.
+                            </p>
                           </div>
-                        ))
-                      )}
-                    </div>
-
-                    <div className="workspace-meta-card orchestrator-preview-panel">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <p className="workspace-meta-label">Latest document preview</p>
-                          <p className="mt-2 text-sm font-semibold text-on-surface">
-                            {latestArtifact?.name || 'No document selected'}
-                          </p>
+                          <StatusBadge tone="info">{filteredArtifacts.length} items</StatusBadge>
                         </div>
-                        {latestArtifact ? (
-                          <StatusBadge tone="info">
-                            {latestArtifact.contentFormat || 'TEXT'}
-                          </StatusBadge>
-                        ) : null}
+
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          {([
+                            ['ALL', 'All'],
+                            ['INPUTS', 'Inputs'],
+                            ['OUTPUTS', 'Outputs'],
+                            ['DIFFS', 'Diffs'],
+                            ['APPROVALS', 'Approvals'],
+                            ['HANDOFFS', 'Handoffs'],
+                          ] as const).map(([value, label]) => (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => setArtifactFilter(value)}
+                              className={cn(
+                                'rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors',
+                                artifactFilter === value
+                                  ? 'border-primary/30 bg-primary text-white'
+                                  : 'border-outline-variant/30 bg-surface-container-low text-secondary hover:border-primary/20 hover:text-primary',
+                              )}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+
+                        {filteredArtifacts.length === 0 ? (
+                          <div className="mt-4 rounded-3xl border border-outline-variant/35 bg-surface-container-low px-4 py-4 text-sm text-secondary">
+                            No artifacts match the selected filter for this run yet.
+                          </div>
+                        ) : (
+                          <div className="orchestrator-artifact-list">
+                            {filteredArtifacts.map(artifact => (
+                              <button
+                                key={artifact.id}
+                                type="button"
+                                onClick={() => setSelectedArtifactId(artifact.id)}
+                                className={cn(
+                                  'orchestrator-artifact-list-item',
+                                  selectedArtifact?.id === artifact.id &&
+                                    'orchestrator-artifact-list-item-active',
+                                )}
+                              >
+                                <div className="flex min-w-0 items-start gap-3">
+                                  <div className="mt-0.5 rounded-2xl bg-primary/10 p-2 text-primary">
+                                    {artifact.contentFormat === 'MARKDOWN' ||
+                                    artifact.contentFormat === 'TEXT' ? (
+                                      <FileText size={16} />
+                                    ) : (
+                                      <FileCode size={16} />
+                                    )}
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <p className="truncate text-sm font-semibold text-on-surface">
+                                        {artifact.name}
+                                      </p>
+                                      <StatusBadge tone="brand">
+                                        {artifact.direction || 'OUTPUT'}
+                                      </StatusBadge>
+                                    </div>
+                                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                                      {compactMarkdownPreview(
+                                        artifact.summary ||
+                                          artifact.description ||
+                                          `${artifact.type} · ${artifact.version}`,
+                                        140,
+                                      )}
+                                    </p>
+                                  </div>
+                                </div>
+                                <span className="text-[0.72rem] font-medium text-secondary">
+                                  {formatTimestamp(artifact.created)}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
-                      <div className="mt-4 rounded-2xl border border-outline-variant/35 bg-white px-5 py-4">
-                        {latestArtifactDocument ? (
-                          <ArtifactPreview
-                            format={latestArtifact?.contentFormat}
-                            content={latestArtifactDocument}
-                          />
-                        ) : (
-                          <p className="text-sm leading-relaxed text-secondary">
-                            The latest artifact does not have a previewable text body yet.
+                      <div className="workspace-meta-card orchestrator-preview-panel">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Artifact preview</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              {selectedArtifact?.name || 'No document selected'}
+                            </p>
+                            <p className="mt-1 text-xs text-secondary">
+                              {selectedArtifact
+                                ? compactMarkdownPreview(
+                                    selectedArtifact.summary ||
+                                      selectedArtifact.description ||
+                                      `${selectedArtifact.type} · ${selectedArtifact.version}`,
+                                    160,
+                                  )
+                                : 'Select an artifact to inspect its body and summary.'}
+                            </p>
+                          </div>
+                          {selectedArtifact ? (
+                            <StatusBadge tone="info">
+                              {selectedArtifact.contentFormat || 'TEXT'}
+                            </StatusBadge>
+                          ) : null}
+                        </div>
+
+                        <div className="mt-4 rounded-2xl border border-outline-variant/35 bg-white px-5 py-4">
+                          {latestArtifactDocument ? (
+                            <ArtifactPreview
+                              format={selectedArtifact?.contentFormat}
+                              content={latestArtifactDocument}
+                            />
+                          ) : (
+                            <p className="text-sm leading-relaxed text-secondary">
+                              The selected artifact does not have a previewable text body yet.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Workflow-managed tasks</p>
+                        {selectedTasks.length === 0 ? (
+                          <p className="mt-3 text-sm leading-relaxed text-secondary">
+                            No workflow-managed tasks are linked to this work item yet.
                           </p>
+                        ) : (
+                          <div className="mt-3 space-y-3">
+                            {selectedTasks.map(task => (
+                              <div key={task.id} className="orchestrator-step-row">
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-semibold text-on-surface">
+                                    {task.title}
+                                  </p>
+                                  <p className="mt-1 text-xs text-secondary">
+                                    {task.agent} · {formatEnumLabel(task.status)}
+                                  </p>
+                                </div>
+                                <StatusBadge tone={getStatusTone(task.status)}>
+                                  {formatEnumLabel(task.status)}
+                                </StatusBadge>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="workspace-meta-card">
+                        <p className="workspace-meta-label">Recent execution output</p>
+                        {selectedLogs.length === 0 ? (
+                          <p className="mt-3 text-sm leading-relaxed text-secondary">
+                            Execution logs will appear here once the step advances.
+                          </p>
+                        ) : (
+                          <div className="mt-3 space-y-3">
+                            {selectedLogs.slice(-5).reverse().map(log => (
+                              <div key={log.id} className="orchestrator-step-row">
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-semibold text-on-surface">
+                                    {log.message}
+                                  </p>
+                                  <p className="mt-1 text-xs text-secondary">
+                                    {formatTimestamp(log.timestamp)}
+                                  </p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -2986,8 +4982,294 @@ const Orchestrator = () => {
               </div>
             )}
           </div>
+          </div>
+          </div>
         </aside>
       </div>
+
+      {isApprovalReviewOpen && selectedWorkItem && approvalReviewWait?.type === 'APPROVAL' && (
+        <div className="fixed inset-0 z-[91] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-10 backdrop-blur-sm">
+          <button
+            type="button"
+            aria-label="Close approval review"
+            onClick={() => {
+              setIsApprovalReviewOpen(false);
+              setIsApprovalReviewHydrated(false);
+              if (selectedOpenWait?.type !== 'APPROVAL') {
+                setApprovalReviewWaitSnapshot(null);
+              }
+            }}
+            className="absolute inset-0"
+          />
+          <ModalShell
+            title={`Approval review · ${selectedWorkItem.title}`}
+            description="Review all work-item documents captured so far before you approve continuation or send the work back for changes."
+            eyebrow="Human Approval Gate"
+            className="relative z-[1] max-w-7xl"
+            actions={
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusBadge tone="warning">Approval required</StatusBadge>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsApprovalReviewOpen(false);
+                    setIsApprovalReviewHydrated(false);
+                    if (selectedOpenWait?.type !== 'APPROVAL') {
+                      setApprovalReviewWaitSnapshot(null);
+                    }
+                  }}
+                  className="workspace-list-action"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            }
+          >
+            <ErrorBoundary
+              resetKey={`${selectedWorkItem.id}:${approvalReviewWait.id}:${selectedApprovalArtifact?.id || 'none'}`}
+              title="Approval review could not render"
+              description="One of the approval documents could not be previewed safely. The route stays intact, and you can close this window or try a different document."
+            >
+              {!isApprovalReviewHydrated ? (
+                <div className="flex min-h-[18rem] items-center justify-center">
+                  <div className="flex items-center gap-3 rounded-2xl border border-outline-variant/30 bg-surface-container-low px-4 py-3 text-sm text-secondary">
+                    <LoaderCircle size={16} className="animate-spin" />
+                    Preparing approval documents...
+                  </div>
+                </div>
+              ) : (
+              <div className="grid gap-4 xl:grid-cols-[18rem_minmax(0,24rem)_minmax(0,1fr)]">
+                <div className="space-y-4">
+                  <div className="workspace-meta-card">
+                    <p className="workspace-meta-label">Approval summary</p>
+                    <p className="mt-2 text-sm leading-relaxed text-secondary">
+                      {approvalReviewWait.message}
+                    </p>
+                  </div>
+                  <div className="workspace-meta-card">
+                    <p className="workspace-meta-label">Review facts</p>
+                    <div className="mt-3 space-y-2 text-sm text-secondary">
+                      <p>
+                        Requested by:{' '}
+                        <strong className="text-on-surface">
+                          {agentsById.get(selectedAttentionRequestedBy || '')?.name ||
+                            selectedAttentionRequestedBy ||
+                            'System'}
+                        </strong>
+                      </p>
+                      <p>
+                        Since:{' '}
+                        <strong className="text-on-surface">
+                          {formatTimestamp(selectedAttentionTimestamp)}
+                        </strong>
+                      </p>
+                      <p>
+                        Documents so far:{' '}
+                        <strong className="text-on-surface">
+                          {selectedWorkItemArtifacts.length}
+                        </strong>
+                      </p>
+                      <p>
+                        Code diff attached:{' '}
+                        <strong className="text-on-surface">
+                          {selectedHasCodeDiffApproval ? 'Yes' : 'No'}
+                        </strong>
+                      </p>
+                    </div>
+                  </div>
+                  {selectedHasCodeDiffApproval && (
+                    <button
+                      type="button"
+                      onClick={() => setIsDiffReviewOpen(true)}
+                      className="enterprise-button enterprise-button-secondary w-full justify-between"
+                    >
+                      <span>Open code diff review</span>
+                      <ExternalLink size={16} />
+                    </button>
+                  )}
+                </div>
+
+                <div className="workspace-meta-card">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="workspace-meta-label">Documents so far</p>
+                      <p className="mt-2 text-sm leading-relaxed text-secondary">
+                        Inputs, outputs, handoffs, approvals, and diffs attached to this work item.
+                      </p>
+                    </div>
+                    <StatusBadge tone="info">
+                      {filteredApprovalArtifacts.length} items
+                    </StatusBadge>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {([
+                      ['ALL', 'All'],
+                      ['INPUTS', 'Inputs'],
+                      ['OUTPUTS', 'Outputs'],
+                      ['DIFFS', 'Diffs'],
+                      ['APPROVALS', 'Approvals'],
+                      ['HANDOFFS', 'Handoffs'],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setApprovalArtifactFilter(value)}
+                        className={cn(
+                          'rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors',
+                          approvalArtifactFilter === value
+                            ? 'border-primary/30 bg-primary text-white'
+                            : 'border-outline-variant/30 bg-surface-container-low text-secondary hover:border-primary/20 hover:text-primary',
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {filteredApprovalArtifacts.length === 0 ? (
+                    <div className="mt-4 rounded-3xl border border-outline-variant/35 bg-surface-container-low px-4 py-4 text-sm text-secondary">
+                      No documents match the selected filter yet for this approval review.
+                    </div>
+                  ) : (
+                    <div className="orchestrator-artifact-list max-h-[65vh] overflow-y-auto pr-1">
+                      {filteredApprovalArtifacts.map(artifact => (
+                        <button
+                          key={artifact.id}
+                          type="button"
+                          onClick={() => setSelectedApprovalArtifactId(artifact.id)}
+                          className={cn(
+                            'orchestrator-artifact-list-item',
+                            selectedApprovalArtifact?.id === artifact.id &&
+                              'orchestrator-artifact-list-item-active',
+                          )}
+                        >
+                          <div className="flex min-w-0 items-start gap-3">
+                            <div className="mt-0.5 rounded-2xl bg-primary/10 p-2 text-primary">
+                              {artifact.contentFormat === 'MARKDOWN' ||
+                              artifact.contentFormat === 'TEXT' ? (
+                                <FileText size={16} />
+                              ) : (
+                                <FileCode size={16} />
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="truncate text-sm font-semibold text-on-surface">
+                                  {artifact.name}
+                                </p>
+                                <StatusBadge tone="brand">
+                                  {artifact.direction || 'OUTPUT'}
+                                </StatusBadge>
+                              </div>
+                              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                                {compactMarkdownPreview(
+                                  artifact.summary ||
+                                    artifact.description ||
+                                    `${artifact.type} · ${artifact.version}`,
+                                  120,
+                                )}
+                              </p>
+                            </div>
+                          </div>
+                          <span className="text-[0.72rem] font-medium text-secondary">
+                            {formatTimestamp(artifact.created)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="workspace-meta-card orchestrator-preview-panel">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="workspace-meta-label">Document preview</p>
+                      <p className="mt-2 text-sm font-semibold text-on-surface">
+                        {selectedApprovalArtifact?.name || 'No document selected'}
+                      </p>
+                      <p className="mt-1 text-xs text-secondary">
+                        {selectedApprovalArtifact
+                          ? compactMarkdownPreview(
+                              selectedApprovalArtifact.summary ||
+                                selectedApprovalArtifact.description ||
+                                `${selectedApprovalArtifact.type} · ${selectedApprovalArtifact.version}`,
+                              160,
+                            )
+                          : 'Select a document to inspect the approval packet body.'}
+                      </p>
+                    </div>
+                    {selectedApprovalArtifact ? (
+                      <StatusBadge tone="info">
+                        {selectedApprovalArtifact.contentFormat || 'TEXT'}
+                      </StatusBadge>
+                    ) : null}
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border border-outline-variant/35 bg-white px-5 py-4">
+                    {selectedApprovalArtifactDocument ? (
+                      <div className="max-h-[42vh] overflow-y-auto pr-1">
+                        <ArtifactPreview
+                          format={selectedApprovalArtifact?.contentFormat}
+                          content={selectedApprovalArtifactDocument}
+                        />
+                      </div>
+                    ) : (
+                      <p className="text-sm leading-relaxed text-secondary">
+                        The selected document does not have a previewable text body yet.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-surface-container-low px-4 py-4">
+                    <p className="workspace-meta-label">Approval / change note</p>
+                    <p className="mt-2 text-sm leading-relaxed text-secondary">
+                      Capture sign-off conditions, review comments, or the exact changes you want before the workflow continues.
+                    </p>
+                    <textarea
+                      value={resolutionNote}
+                      onChange={event => setResolutionNote(event.target.value)}
+                      placeholder={resolutionPlaceholder}
+                      className="field-textarea mt-3 h-28 bg-white"
+                    />
+                    <div className="mt-4 flex flex-wrap justify-end gap-2">
+                      {requestChangesIsAvailable && (
+                        <button
+                          type="button"
+                          onClick={() => void handleRequestChanges()}
+                          disabled={!canRequestChanges || busyAction !== null}
+                          className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {busyAction === 'requestChanges' ? (
+                            <LoaderCircle size={16} className="animate-spin" />
+                          ) : (
+                            <RefreshCw size={16} />
+                          )}
+                          Request changes
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void handleResolveWait()}
+                        disabled={!canResolveSelectedWait || busyAction !== null}
+                        className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busyAction === 'resolve' ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <ShieldCheck size={16} />
+                        )}
+                        {actionButtonLabel}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              )}
+            </ErrorBoundary>
+          </ModalShell>
+        </div>
+      )}
 
       {isDiffReviewOpen && selectedHasCodeDiffApproval && (
         <div className="fixed inset-0 z-[92] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-16 backdrop-blur-sm">
@@ -3150,6 +5432,29 @@ const Orchestrator = () => {
                     </select>
                   </label>
 
+                  <label className="space-y-2">
+                    <span className="field-label">Task type</span>
+                    <select
+                      value={draftWorkItem.taskType}
+                      onChange={event =>
+                        setDraftWorkItem(prev => ({
+                          ...prev,
+                          taskType: event.target.value as WorkItemTaskType,
+                        }))
+                      }
+                      className="field-select"
+                    >
+                      {WORK_ITEM_TASK_TYPE_OPTIONS.map(option => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs leading-relaxed text-secondary">
+                      {getWorkItemTaskTypeDescription(draftWorkItem.taskType)}
+                    </p>
+                  </label>
+
                   <div className="workspace-meta-card orchestrator-quick-sheet-summary">
                     <p className="workspace-meta-label">Workflow launch summary</p>
                     <p className="workspace-meta-value">
@@ -3157,13 +5462,23 @@ const Orchestrator = () => {
                     </p>
                     <div className="mt-3 grid gap-2 text-sm text-secondary">
                       <p>
-                        First phase:{' '}
+                        Entry point:{' '}
                         <strong className="text-on-surface">
-                          {draftFirstStep ? getPhaseMeta(draftFirstStep.phase).label : 'Not defined'}
+                          {getWorkItemTaskTypeLabel(draftWorkItem.taskType)}
                         </strong>
                       </p>
                       <p>
-                        First agent:{' '}
+                        Routed phase:{' '}
+                        <strong className="text-on-surface">
+                          {draftFirstStep
+                            ? getPhaseMeta(draftFirstStep.phase).label
+                            : draftTaskTypeEntryPhase
+                            ? getPhaseMeta(draftTaskTypeEntryPhase).label
+                            : 'Not defined'}
+                        </strong>
+                      </p>
+                      <p>
+                        Entry agent:{' '}
                         <strong className="text-on-surface">
                           {draftFirstAgent?.name ||
                             (draftFirstStep ? draftFirstStep.agentId : 'Unassigned')}
@@ -3175,6 +5490,33 @@ const Orchestrator = () => {
                           {draftWorkflow?.steps.length || 0}
                         </strong>
                       </p>
+                      <p>
+                        Phase sign-off:{' '}
+                        <strong className="text-on-surface">
+                          {draftPhaseStakeholderAssignments.length > 0
+                            ? `${draftPhaseStakeholderAssignments.length} phases configured`
+                            : 'No phase stakeholders yet'}
+                        </strong>
+                      </p>
+                      <p>
+                        Input files:{' '}
+                        <strong className="text-on-surface">
+                          {draftWorkItem.attachments.length > 0
+                            ? `${draftWorkItem.attachments.length} attached`
+                            : 'No files attached'}
+                        </strong>
+                      </p>
+                      {draftTaskTypeEntryPhase &&
+                        draftFirstStep?.phase !== draftTaskTypeEntryPhase && (
+                          <p>
+                            Routing note:{' '}
+                            <strong className="text-on-surface">
+                              This workflow does not define a separate{' '}
+                              {getPhaseMeta(draftTaskTypeEntryPhase).label} entry step, so it will
+                              use the workflow default.
+                            </strong>
+                          </p>
+                        )}
                     </div>
                   </div>
 
@@ -3210,6 +5552,214 @@ const Orchestrator = () => {
                       className="field-textarea h-28"
                     />
                   </label>
+
+                  <div className="workspace-meta-card">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="workspace-meta-label">Phase stakeholders & sign-off</p>
+                        <p className="mt-2 text-sm leading-relaxed text-secondary">
+                          Add the stakeholders who should be represented in each phase. Human
+                          interaction and sign-off documents for that phase will carry these names
+                          and email ids.
+                        </p>
+                      </div>
+                      {activeCapability.stakeholders.length > 0 && (
+                        <StatusBadge tone="info">
+                          {activeCapability.stakeholders.length} capability stakeholders available
+                        </StatusBadge>
+                      )}
+                    </div>
+
+                    <div className="mt-4 grid gap-4">
+                      {visibleLifecyclePhases.map(phase => {
+                        const phaseStakeholders = getDraftPhaseStakeholders(phase.id);
+
+                        return (
+                          <div
+                            key={phase.id}
+                            className="rounded-[1.5rem] border border-outline-variant/30 bg-white/80 px-4 py-4"
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div>
+                                <p className="text-sm font-semibold text-on-surface">
+                                  {phase.label}
+                                </p>
+                                <p className="mt-1 text-xs leading-relaxed text-secondary">
+                                  {phase.description ||
+                                    'Stakeholders listed here will appear in phase-specific sign-off records.'}
+                                </p>
+                              </div>
+                              <div className="flex flex-wrap gap-2">
+                                {activeCapability.stakeholders.length > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => applyCapabilityStakeholdersToPhase(phase.id)}
+                                    className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem]"
+                                  >
+                                    Use capability stakeholders
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => addDraftPhaseStakeholder(phase.id)}
+                                  className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem]"
+                                >
+                                  <Plus size={14} />
+                                  Add stakeholder
+                                </button>
+                              </div>
+                            </div>
+
+                            {phaseStakeholders.length > 0 ? (
+                              <div className="mt-4 space-y-3">
+                                {phaseStakeholders.map((stakeholder, index) => (
+                                  <div
+                                    key={`${phase.id}-${index}`}
+                                    className="rounded-[1.25rem] border border-outline-variant/25 bg-surface-container-low/40 p-3"
+                                  >
+                                    <div className="grid gap-3 md:grid-cols-2">
+                                      <input
+                                        value={stakeholder.role}
+                                        onChange={event =>
+                                          updateDraftPhaseStakeholderField(
+                                            phase.id,
+                                            index,
+                                            'role',
+                                            event.target.value,
+                                          )
+                                        }
+                                        placeholder="Role"
+                                        className="field-input"
+                                      />
+                                      <input
+                                        value={stakeholder.name}
+                                        onChange={event =>
+                                          updateDraftPhaseStakeholderField(
+                                            phase.id,
+                                            index,
+                                            'name',
+                                            event.target.value,
+                                          )
+                                        }
+                                        placeholder="Stakeholder name"
+                                        className="field-input"
+                                      />
+                                      <input
+                                        value={stakeholder.email}
+                                        onChange={event =>
+                                          updateDraftPhaseStakeholderField(
+                                            phase.id,
+                                            index,
+                                            'email',
+                                            event.target.value,
+                                          )
+                                        }
+                                        placeholder="name@company.com"
+                                        className="field-input"
+                                      />
+                                      <div className="flex gap-2">
+                                        <input
+                                          value={stakeholder.teamName || ''}
+                                          onChange={event =>
+                                            updateDraftPhaseStakeholderField(
+                                              phase.id,
+                                              index,
+                                              'teamName',
+                                              event.target.value,
+                                            )
+                                          }
+                                          placeholder="Team"
+                                          className="field-input"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => removeDraftPhaseStakeholder(phase.id, index)}
+                                          className="workspace-list-action shrink-0 self-center"
+                                        >
+                                          <X size={14} />
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="mt-4 text-xs leading-relaxed text-secondary">
+                                No phase stakeholders assigned yet.
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="workspace-meta-card">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="workspace-meta-label">Supporting files for the agent</p>
+                        <p className="mt-2 text-sm leading-relaxed text-secondary">
+                          Upload text-based files like requirements, design notes, samples, or
+                          decision docs. They will be stored as work-item input artifacts and
+                          included in agent context for this work item.
+                        </p>
+                      </div>
+                      <label className="enterprise-button enterprise-button-secondary cursor-pointer px-3 py-2 text-[0.68rem]">
+                        <Plus size={14} />
+                        Upload files
+                        <input
+                          type="file"
+                          multiple
+                          className="hidden"
+                          onChange={event => {
+                            void handleDraftAttachmentUpload(event.target.files);
+                            event.currentTarget.value = '';
+                          }}
+                        />
+                      </label>
+                    </div>
+
+                    {draftWorkItem.attachments.length > 0 ? (
+                      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                        {draftWorkItem.attachments.map((attachment, index) => (
+                          <div
+                            key={`${attachment.fileName}-${index}`}
+                            className="flex items-center justify-between gap-3 rounded-[1.25rem] border border-outline-variant/20 bg-surface-container-low/35 px-4 py-3"
+                          >
+                            <div className="flex min-w-0 items-center gap-3">
+                              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-primary/10">
+                                {renderAttachmentIcon(attachment)}
+                              </div>
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-semibold text-on-surface">
+                                  {attachment.fileName}
+                                </p>
+                                <p className="mt-1 truncate text-xs leading-relaxed text-secondary">
+                                  {[attachment.mimeType || 'text/plain', formatAttachmentSizeLabel(attachment.sizeBytes)]
+                                    .filter(Boolean)
+                                    .join(' • ')}
+                                </p>
+                                <p className="mt-1 text-[0.68rem] uppercase tracking-[0.2em] text-secondary/80">
+                                  Stored on create
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removeDraftAttachment(index)}
+                              className="workspace-list-action shrink-0"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-4 text-xs leading-relaxed text-secondary">
+                        No files uploaded yet.
+                      </p>
+                    )}
+                  </div>
 
                   <label className="space-y-2">
                     <span className="field-label">Tags</span>
@@ -3255,6 +5805,37 @@ const Orchestrator = () => {
           </motion.aside>
         </div>
       )}
+
+      {selectedWorkItem && (
+        <ErrorBoundary
+          resetKey={`${selectedWorkItem.id}:${selectedAgent?.id || 'none'}:${selectedCurrentStep?.id || 'stage'}:${isStageControlOpen ? 'open' : 'closed'}`}
+          title="Stage control could not render"
+          description="The takeover window hit an unexpected UI problem. The workbench is still available, and you can reopen stage control or use Full Chat while we keep the route alive."
+        >
+          <StageControlModal
+            isOpen={isStageControlOpen}
+            capability={activeCapability}
+            workItem={selectedWorkItem}
+            agent={selectedAgent}
+            currentRun={currentRun}
+            currentStep={selectedCurrentStep}
+            openWait={selectedOpenWait}
+            compiledStepContext={selectedCompiledStepContext}
+            failureReason={selectedFailureReason || undefined}
+            runtimeReady={runtimeReady}
+            runtimeError={runtimeError}
+            onClose={() => setIsStageControlOpen(false)}
+            onRefresh={handleStageControlRefresh}
+          />
+        </ErrorBoundary>
+      )}
+
+      <ExplainWorkItemDrawer
+        capability={activeCapability}
+        workItem={selectedWorkItem}
+        isOpen={isExplainOpen}
+        onClose={() => setIsExplainOpen(false)}
+      />
     </div>
   );
 };

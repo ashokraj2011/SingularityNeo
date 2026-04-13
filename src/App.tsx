@@ -1,5 +1,5 @@
-import { Suspense, lazy } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { Suspense, lazy, type ReactNode } from 'react';
+import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import { CapabilityProvider } from './context/CapabilityContext';
@@ -18,6 +18,7 @@ const ArtifactDesigner = lazy(() => import('./pages/ArtifactDesigner'));
 const CapabilitySetup = lazy(() => import('./pages/CapabilitySetup'));
 const CapabilityMetadata = lazy(() => import('./pages/CapabilityMetadata'));
 const CapabilityDatabases = lazy(() => import('./pages/CapabilityDatabases'));
+const ToolAccess = lazy(() => import('./pages/ToolAccess'));
 const RunConsole = lazy(() => import('./pages/RunConsole'));
 const MemoryExplorer = lazy(() => import('./pages/MemoryExplorer'));
 const EvalCenter = lazy(() => import('./pages/EvalCenter'));
@@ -43,13 +44,19 @@ const RouteLoader = () => (
   </div>
 );
 
+const RouteErrorBoundary = ({ children }: { children: ReactNode }) => {
+  const location = useLocation();
+
+  return <ErrorBoundary resetKey={location.pathname}>{children}</ErrorBoundary>;
+};
+
 export default function App() {
   return (
     <ToastProvider>
       <CapabilityProvider>
         <Router>
           <Layout>
-            <ErrorBoundary>
+            <RouteErrorBoundary>
               <Suspense fallback={<RouteLoader />}>
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
@@ -67,13 +74,14 @@ export default function App() {
                   <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
                   <Route path="/capabilities/databases" element={<CapabilityDatabases />} />
                   <Route path="/workspace/databases" element={<CapabilityDatabases />} />
+                  <Route path="/tool-access" element={<ToolAccess />} />
                   <Route path="/run-console" element={<RunConsole />} />
                   <Route path="/memory" element={<MemoryExplorer />} />
                   <Route path="/evals" element={<EvalCenter />} />
                   <Route path="*" element={<Dashboard />} />
                 </Routes>
               </Suspense>
-            </ErrorBoundary>
+            </RouteErrorBoundary>
           </Layout>
         </Router>
       </CapabilityProvider>

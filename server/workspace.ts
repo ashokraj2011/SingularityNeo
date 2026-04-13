@@ -7,6 +7,7 @@ import {
   LEARNING_UPDATES,
   WORKFLOWS,
   WORK_ITEMS,
+  getStandardAgentContract,
 } from '../src/constants';
 import {
   AgentOutputRecord,
@@ -21,6 +22,15 @@ import {
   WorkItem,
   Workflow,
 } from '../src/types';
+import {
+  getLegacyArtifactListsFromContract,
+  normalizeAgentOperatingContract,
+  normalizeAgentLearningProfile,
+  normalizeAgentRoleStarterKey,
+  normalizeAgentSessionSummary,
+  normalizeLearningUpdate,
+} from '../src/lib/agentRuntime';
+import { WORKSPACE_AGENT_TEMPLATES } from '../src/lib/workspaceFoundations';
 
 const DEFAULT_AGENT_PROVIDER = 'GitHub Copilot SDK' as const;
 const DEFAULT_AGENT_MODEL = COPILOT_MODEL_OPTIONS[0].id;
@@ -54,8 +64,27 @@ const toAgentLabel = (value: string) =>
     .replace(/[_-]+/g, ' ')
     .replace(/\b\w/g, char => char.toUpperCase());
 
-const getDefaultSkillIds = (capability: Capability) =>
-  capability.skillLibrary.map(skill => skill.id);
+const getAgentTemplate = (key: string) =>
+  WORKSPACE_AGENT_TEMPLATES.find(template => template.key === key);
+
+const getAvailableCapabilitySkillIds = (capability: Capability) =>
+  new Set(capability.skillLibrary.map(skill => skill.id));
+
+const getDefaultSkillIds = (capability: Capability, templateKey?: string) => {
+  const availableSkills = getAvailableCapabilitySkillIds(capability);
+  const template = getAgentTemplate(templateKey || 'OWNER');
+  const preferred = (template?.defaultSkillIds || []).filter(skillId =>
+    availableSkills.has(skillId),
+  );
+
+  return preferred.length > 0
+    ? preferred
+    : capability.skillLibrary.map(skill => skill.id);
+};
+
+const getPreferredToolIds = (templateKey: string = 'OWNER') => [
+  ...(getAgentTemplate(templateKey || 'OWNER')?.preferredToolIds || []),
+];
 
 const createBuiltInAgentId = (capabilityId: string, key: string) =>
   `AGENT-${slugify(capabilityId)}-${key}`;
@@ -181,12 +210,38 @@ export const applyWorkspaceRuntime = (
   agents.map(agent => ({
     ...agent,
     capabilityId: capability.id,
-    skillIds: agent.skillIds?.length ? agent.skillIds : getDefaultSkillIds(capability),
+    roleStarterKey:
+      normalizeAgentRoleStarterKey(agent.roleStarterKey) ||
+      normalizeAgentRoleStarterKey(agent.isOwner ? 'OWNER' : agent.standardTemplateKey),
+    contract: normalizeAgentOperatingContract(agent.contract, {
+      description: agent.objective || agent.role,
+      suggestedInputArtifacts: agent.inputArtifacts,
+      expectedOutputArtifacts: agent.outputArtifacts,
+    }),
+    ...getLegacyArtifactListsFromContract(
+      normalizeAgentOperatingContract(agent.contract, {
+        description: agent.objective || agent.role,
+        suggestedInputArtifacts: agent.inputArtifacts,
+        expectedOutputArtifacts: agent.outputArtifacts,
+      }),
+    ),
+    skillIds:
+      agent.skillIds?.length
+        ? agent.skillIds
+        : getDefaultSkillIds(capability, agent.isOwner ? 'OWNER' : agent.standardTemplateKey),
+    preferredToolIds:
+      agent.preferredToolIds?.length
+        ? agent.preferredToolIds
+        : getPreferredToolIds(agent.isOwner ? 'OWNER' : agent.standardTemplateKey),
     provider: agent.provider || DEFAULT_AGENT_PROVIDER,
     model: agent.model || DEFAULT_AGENT_MODEL,
     tokenLimit: agent.tokenLimit || DEFAULT_AGENT_TOKEN_LIMIT,
-    learningProfile: agent.learningProfile || createDefaultAgentLearningProfile(),
-    sessionSummaries: agent.sessionSummaries || [],
+    learningProfile: normalizeAgentLearningProfile(
+      agent.learningProfile || createDefaultAgentLearningProfile(),
+    ),
+    sessionSummaries: (agent.sessionSummaries || []).map(summary =>
+      normalizeAgentSessionSummary(summary),
+    ),
     usage: buildAgentUsage(capability.id, agent.id, tasks, logs),
     previousOutputs: buildPreviousOutputs(capability.id, agent.id, tasks, logs),
   }));
@@ -201,18 +256,20 @@ export const buildOwnerAgent = (capability: Capability): CapabilityAgent => {
     capabilityId: capability.id,
     name: 'Capability Owning Agent',
     role: 'Capability Owner',
+    roleStarterKey: 'OWNER',
     objective: `Own the end-to-end delivery context for ${capability.name} and coordinate all downstream agents within this capability.`,
     systemPrompt: `You are the capability owner for ${capability.name}. Ground every decision, workflow, and team action in the capability's domain, documentation, and governance context.`,
+    contract: getStandardAgentContract('OWNER'),
     initializationStatus: 'READY',
     documentationSources: getCapabilityDocumentationSources(capability),
-    inputArtifacts: ['Capability charter'],
-    outputArtifacts: ['Capability operating model'],
+    ...getLegacyArtifactListsFromContract(getStandardAgentContract('OWNER')),
     isOwner: true,
     learningNotes: [
       `${capability.name} team context is isolated to this capability.`,
       `All downstream chats, agents, and workflows should remain aligned to ${capability.domain || capability.name}.`,
     ],
-    skillIds: getDefaultSkillIds(capability),
+    skillIds: getDefaultSkillIds(capability, 'OWNER'),
+    preferredToolIds: getPreferredToolIds('OWNER'),
     provider: DEFAULT_AGENT_PROVIDER,
     model: DEFAULT_AGENT_MODEL,
     tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
@@ -232,19 +289,21 @@ export const buildBuiltInAgents = (capability: Capability): CapabilityAgent[] =>
       capabilityId: capability.id,
       name: template.name,
       role: template.role,
+      roleStarterKey: template.roleStarterKey,
       objective: resolveCapabilityText(template.objective, capability),
       systemPrompt: resolveCapabilityText(template.systemPrompt, capability),
+      contract: template.contract,
       initializationStatus: 'READY',
       documentationSources: getCapabilityDocumentationSources(capability),
-      inputArtifacts: [...template.inputArtifacts],
-      outputArtifacts: [...template.outputArtifacts],
+      ...getLegacyArtifactListsFromContract(template.contract),
       isBuiltIn: true,
       standardTemplateKey: template.key,
       learningNotes: [
         `${template.name} is a built-in agent for ${capability.name}.`,
         `Keep all outputs aligned to ${capability.domain || capability.name} capability context.`,
       ],
-      skillIds: getDefaultSkillIds(capability),
+      skillIds: getDefaultSkillIds(capability, template.key),
+      preferredToolIds: getPreferredToolIds(template.key),
       provider: DEFAULT_AGENT_PROVIDER,
       model: DEFAULT_AGENT_MODEL,
       tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
@@ -338,20 +397,28 @@ export const buildSeededAgents = (
         artifact.capabilityId === capability.id &&
         (artifact.connectedAgentId === agentId || artifact.agent === agentId),
     ).map(artifact => artifact.name);
+    const contract = normalizeAgentOperatingContract(undefined, {
+      description: `Execute ${capability.name} work inside this capability context and hand off outputs to the next workflow stage.`,
+      expectedOutputArtifacts: outputArtifacts,
+    });
+    const legacyArtifacts = getLegacyArtifactListsFromContract(contract);
 
     nextAgents.set(agentId, {
       id: agentId,
       capabilityId: capability.id,
       name: toAgentLabel(agentId),
       role,
+      roleStarterKey: 'EXECUTION-OPS',
       objective: `Execute ${capability.name} work inside this capability context and hand off outputs to the next workflow stage.`,
       systemPrompt: `You are a ${role.toLowerCase()} for ${capability.name}. Stay inside this capability's metadata, documentation, workflows, and learning context.`,
+      contract,
       initializationStatus: 'READY',
       documentationSources: getCapabilityDocumentationSources(capability),
-      inputArtifacts: [],
-      outputArtifacts,
+      inputArtifacts: legacyArtifacts.inputArtifacts,
+      outputArtifacts: legacyArtifacts.outputArtifacts,
       learningNotes: learningByAgent[agentId] || [],
       skillIds: getDefaultSkillIds(capability),
+      preferredToolIds: [],
       provider: DEFAULT_AGENT_PROVIDER,
       model: DEFAULT_AGENT_MODEL,
       tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
@@ -414,7 +481,9 @@ export const materializeWorkspace = (
     artifacts: workspace.artifacts,
     tasks: workspace.tasks,
     executionLogs: workspace.executionLogs,
-    learningUpdates: workspace.learningUpdates,
+    learningUpdates: workspace.learningUpdates.map(update =>
+      normalizeLearningUpdate(update),
+    ),
     workItems: workspace.workItems,
     messages:
       workspace.messages.length > 0

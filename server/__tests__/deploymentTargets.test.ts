@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { Capability, CapabilityAgent } from '../../src/types';
+import { getStandardAgentContract } from '../../src/constants';
 import { createDefaultCapabilityLifecycle } from '../../src/lib/capabilityLifecycle';
 import { executeTool, resolveDeploymentTarget } from '../execution/tools';
 
@@ -56,6 +57,7 @@ const buildAgent = (): CapabilityAgent => ({
   role: 'Release Manager',
   objective: 'Handle deployment verification.',
   systemPrompt: '',
+  contract: getStandardAgentContract('DEVOPS'),
   initializationStatus: 'READY',
   documentationSources: [],
   inputArtifacts: [],

@@ -6,6 +6,10 @@ import type {
   Capability,
   CapabilityAgent,
   CapabilityWorkspace,
+  CompiledArtifactChecklistItem,
+  CompiledRequiredInputField,
+  CompiledStepContext,
+  CompiledWorkItemPlan,
   WorkItem,
   WorkItemPhase,
   WorkflowRunDetail,
@@ -21,6 +25,8 @@ import {
   restartWorkflowRun,
   startWorkflowExecution,
 } from './execution/service';
+import { buildWorkItemExplainDetail } from './workItemExplain';
+import { detectCapabilityWorkspaceProfile } from './workspaceProfile';
 
 type CapabilityBundle = {
   capability: Capability;
@@ -34,6 +40,7 @@ type ChatWorkspaceActionType =
   | 'REQUEST_CHANGES'
   | 'PROVIDE_INPUT'
   | 'RESOLVE_CONFLICT'
+  | 'GUIDE_AGENT'
   | 'UNBLOCK'
   | 'START'
   | 'RESTART'
@@ -62,6 +69,18 @@ const normalizeText = (value: string) =>
 
 const formatWorkItemHeading = (workItem: WorkItem) =>
   `${workItem.id} - ${workItem.title}`;
+
+const isExecutionAgent = (agent: Partial<CapabilityAgent>) => {
+  const templateKey = String(agent.standardTemplateKey || '')
+    .trim()
+    .toUpperCase();
+  const combinedLabel = `${agent.name || ''} ${agent.role || ''}`.toLowerCase();
+
+  return (
+    templateKey === 'EXECUTION-OPS' ||
+    combinedLabel.includes('execution agent')
+  );
+};
 
 const extractId = (message: string, prefix: 'WI' | 'RUN') =>
   message.match(new RegExp(`\\b${prefix}-[A-Z0-9-]+\\b`, 'i'))?.[0]?.toUpperCase();
@@ -144,6 +163,105 @@ const resolveTargetWorkItem = (
 const getOpenWait = (detail?: WorkflowRunDetail | null) =>
   detail?.waits.find(wait => wait.status === 'OPEN');
 
+const asCompiledStepContext = (value: unknown): CompiledStepContext | undefined =>
+  value && typeof value === 'object' ? (value as CompiledStepContext) : undefined;
+
+const asCompiledWorkItemPlan = (value: unknown): CompiledWorkItemPlan | undefined =>
+  value && typeof value === 'object' ? (value as CompiledWorkItemPlan) : undefined;
+
+const asCompiledInputFields = (value: unknown): CompiledRequiredInputField[] =>
+  Array.isArray(value) ? (value as CompiledRequiredInputField[]) : [];
+
+const formatChecklistSummary = (items: CompiledArtifactChecklistItem[] = []) =>
+  items.length > 0
+    ? items
+        .map(item => `${item.label} (${item.direction.toLowerCase()} / ${item.status.toLowerCase()})`)
+        .join('; ')
+    : 'No explicit artifact checklist is attached to this step.';
+
+const formatInputSummary = (items: CompiledRequiredInputField[] = []) =>
+  items.length > 0
+    ? items
+        .map(
+          item =>
+            `${item.label} (${item.status.toLowerCase()}${item.valueSummary ? `: ${item.valueSummary}` : ''})`,
+        )
+        .join('; ')
+    : 'No structured input contract is attached to this step.';
+
+const buildSuggestedExecutionActions = ({
+  bundle,
+  workItem,
+  runDetail,
+  fallbackRunId,
+  fallbackRunStatus,
+  fallbackBlockingState,
+}: {
+  bundle: CapabilityBundle;
+  workItem: WorkItem;
+  runDetail?: WorkflowRunDetail | null;
+  fallbackRunId?: string;
+  fallbackRunStatus?: string;
+  fallbackBlockingState?: string;
+}) => {
+  const suggestions: string[] = [];
+  const runId =
+    runDetail?.run.id || fallbackRunId || workItem.activeRunId || workItem.lastRunId;
+  const openWait = getOpenWait(runDetail);
+
+  if (openWait?.type === 'APPROVAL' && runId) {
+    suggestions.push(`approve ${runId}: approve and continue`);
+    suggestions.push(`request changes ${runId}: <what should change before continuation>`);
+  } else if (openWait?.type === 'INPUT') {
+    suggestions.push(`provide input for ${workItem.id}: <the missing detail>`);
+  } else if (openWait?.type === 'CONFLICT_RESOLUTION') {
+    suggestions.push(`resolve conflict for ${workItem.id}: <the authoritative decision>`);
+  } else if (
+    workItem.status === 'BLOCKED' ||
+    fallbackRunStatus === 'FAILED' ||
+    /blocked|failed|guidance/i.test(String(fallbackBlockingState || ''))
+  ) {
+    suggestions.push(
+      `guide agent for ${workItem.id}: <the missing business or technical direction>`,
+    );
+    if (runId) {
+      suggestions.push(`restart ${workItem.id}`);
+    }
+  } else if (runId && fallbackRunStatus === 'RUNNING') {
+    suggestions.push(`show the live status of ${workItem.id}`);
+    suggestions.push(`cancel ${runId}: <reason to stop this attempt>`);
+  } else if (workItem.status === 'ACTIVE') {
+    suggestions.push(`show the live status of ${workItem.id}`);
+  }
+
+  return Array.from(new Set(suggestions)).slice(0, 4);
+};
+
+const buildExecutionOverviewSummary = (bundle: CapabilityBundle) => {
+  const workSummary = buildOverallStatusSummary(bundle);
+  const attentionItems = getAttentionWorkItems(bundle).slice(0, 5);
+  const detection = detectCapabilityWorkspaceProfile(bundle.capability);
+  const workspaceSummary =
+    detection.profile.stack !== 'GENERIC'
+      ? `Workspace profile: ${detection.profile.summary}`
+      : detection.normalizedPath
+      ? `Workspace detection: ${detection.profile.summary}`
+      : null;
+
+  return [
+    `Execution Agent view for ${bundle.capability.name}`,
+    workspaceSummary,
+    workSummary,
+    attentionItems.length > 0 ? 'Suggested next chats:' : 'No urgent execution blockers are open right now.',
+    ...attentionItems.slice(0, 3).flatMap(item => [
+      `- Show the live status of ${item.id}.`,
+      `- Explain what is needed to move "${item.title}" forward.`,
+    ]),
+  ]
+    .filter(Boolean)
+    .join('\n');
+};
+
 const buildWorkItemStatusSummary = async (
   bundle: CapabilityBundle,
   workItem: WorkItem,
@@ -164,28 +282,196 @@ const buildWorkItemStatusSummary = async (
         .find(workflow => workflow.id === workItem.workflowId)
         ?.steps.find(step => step.id === workItem.currentStepId)
     : undefined;
+  try {
+    const explain = await buildWorkItemExplainDetail(bundle.capability.id, workItem.id);
+    const suggestions = buildSuggestedExecutionActions({
+      bundle,
+      workItem,
+      runDetail,
+      fallbackRunId: explain.latestRun?.id,
+      fallbackRunStatus: explain.latestRun?.status,
+      fallbackBlockingState: explain.summary.blockingState,
+    });
+    const approvedRoots = [
+      bundle.capability.executionConfig.defaultWorkspacePath,
+      ...bundle.capability.executionConfig.allowedWorkspacePaths,
+    ]
+      .filter(Boolean)
+      .slice(0, 3);
+    const repositories = bundle.capability.gitRepositories.slice(0, 3);
+    const databases = (bundle.capability.databaseConfigs || [])
+      .map(config => `${config.label} (${config.engine})`)
+      .slice(0, 3);
+    const detection = detectCapabilityWorkspaceProfile(bundle.capability);
+
+    return [
+      `Execution view: ${formatWorkItemHeading(workItem)}`,
+      explain.summary.headline,
+      detection.profile.stack !== 'GENERIC'
+        ? `Workspace profile: ${detection.profile.summary}`
+        : null,
+      detection.evidenceFiles.length > 0
+        ? `Workspace evidence: ${detection.evidenceFiles.join(', ')}`
+        : null,
+      detection.recommendedCommandTemplates.length > 0
+        ? `Suggested execution commands: ${detection.recommendedCommandTemplates
+            .map(template => `${template.id} => ${template.command.join(' ')}`)
+            .join('; ')}`
+        : null,
+      `Phase: ${getLifecyclePhaseLabel(bundle.capability, workItem.phase)}`,
+      `Status: ${workItem.status}`,
+      currentStep ? `Current step: ${currentStep.name}` : null,
+      workItem.assignedAgentId ? `Assigned agent: ${workItem.assignedAgentId}` : null,
+      explain.latestRun
+        ? `Latest run: ${explain.latestRun.id} (${explain.latestRun.status})`
+        : runDetail
+        ? `Latest run: ${runDetail.run.id} (${runDetail.run.status})`
+        : null,
+      openWait
+        ? `Open wait: ${openWait.type} - ${openWait.message}`
+        : explain.summary.blockingState
+        ? `Why it matters: ${explain.summary.blockingState}`
+        : workItem.pendingRequest
+        ? `Pending request: ${workItem.pendingRequest.type} - ${workItem.pendingRequest.message}`
+        : null,
+      explain.latestRun?.terminalOutcome
+        ? `Latest outcome: ${explain.latestRun.terminalOutcome}`
+        : null,
+      `Next action: ${explain.summary.nextAction}`,
+      `Release readiness: ${explain.releaseReadiness.status} (${explain.releaseReadiness.score}%)`,
+      explain.attemptDiff.summary
+        ? `What changed since last attempt: ${explain.attemptDiff.summary}`
+        : null,
+      repositories.length > 0 ? `Repositories: ${repositories.join(', ')}` : null,
+      approvedRoots.length > 0 ? `Approved workspaces: ${approvedRoots.join(', ')}` : null,
+      databases.length > 0 ? `Databases: ${databases.join(', ')}` : null,
+      workItem.history.length > 0
+        ? `Latest history: ${
+            workItem.history[workItem.history.length - 1]?.detail ||
+            workItem.history[workItem.history.length - 1]?.action
+          }`
+        : null,
+      suggestions.length > 0 ? 'Suggested chat options:' : null,
+      ...suggestions.map(item => `- ${item}`),
+    ]
+      .filter(Boolean)
+      .join('\n');
+  } catch {
+    return [
+      `Work item: ${formatWorkItemHeading(workItem)}`,
+      `Phase: ${getLifecyclePhaseLabel(bundle.capability, workItem.phase)}`,
+      `Status: ${workItem.status}`,
+      currentStep ? `Current step: ${currentStep.name}` : null,
+      workItem.assignedAgentId ? `Assigned agent: ${workItem.assignedAgentId}` : null,
+      runDetail ? `Run: ${runDetail.run.id} (${runDetail.run.status})` : null,
+      openWait
+        ? `Open wait: ${openWait.type} - ${openWait.message}`
+        : workItem.pendingRequest
+        ? `Pending request: ${workItem.pendingRequest.type} - ${workItem.pendingRequest.message}`
+        : null,
+      workItem.blocker
+        ? `Blocker: ${workItem.blocker.type} - ${workItem.blocker.message}`
+        : null,
+      workItem.history.length > 0
+        ? `Latest history: ${
+            workItem.history[workItem.history.length - 1]?.detail ||
+            workItem.history[workItem.history.length - 1]?.action
+          }`
+        : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+};
+
+export const buildWorkItemStageControlBriefing = async ({
+  bundle,
+  workItemId,
+}: {
+  bundle: CapabilityBundle;
+  workItemId: string;
+}) => {
+  const workItem = bundle.workspace.workItems.find(item => item.id === workItemId);
+  if (!workItem) {
+    throw new Error(`Work item ${workItemId} was not found.`);
+  }
+
+  const workflow = bundle.workspace.workflows.find(item => item.id === workItem.workflowId);
+  const runId = workItem.activeRunId || workItem.lastRunId;
+  let runDetail: WorkflowRunDetail | null = null;
+
+  if (runId) {
+    try {
+      runDetail = await getWorkflowRunDetail(bundle.capability.id, runId);
+    } catch {
+      runDetail = null;
+    }
+  }
+
+  const openWait = getOpenWait(runDetail);
+  const currentStep = runDetail?.run.currentStepId
+    ? workflow?.steps.find(step => step.id === runDetail?.run.currentStepId)
+    : workItem.currentStepId
+    ? workflow?.steps.find(step => step.id === workItem.currentStepId)
+    : undefined;
+  const currentRunStep =
+    runDetail?.steps.find(
+      step =>
+        step.workflowStepId === runDetail.run.currentStepId ||
+        step.workflowNodeId === runDetail.run.currentNodeId,
+    ) || null;
+  const compiledStepContext =
+    asCompiledStepContext(currentRunStep?.metadata?.compiledStepContext) ||
+    asCompiledStepContext(openWait?.payload?.compiledStepContext);
+  const compiledWorkItemPlan =
+    asCompiledWorkItemPlan(currentRunStep?.metadata?.compiledWorkItemPlan) ||
+    asCompiledWorkItemPlan(openWait?.payload?.compiledWorkItemPlan);
+  const requestedInputFields = asCompiledInputFields(openWait?.payload?.requestedInputFields);
+  const explain = await buildWorkItemExplainDetail(bundle.capability.id, workItem.id);
+  const agentId =
+    runDetail?.run.assignedAgentId || currentStep?.agentId || workItem.assignedAgentId;
+  const approvedRoots = [
+    bundle.capability.executionConfig.defaultWorkspacePath,
+    ...bundle.capability.executionConfig.allowedWorkspacePaths,
+  ].filter(Boolean);
 
   return [
-    `Work item: ${formatWorkItemHeading(workItem)}`,
+    `Stage control context for ${formatWorkItemHeading(workItem)}`,
+    explain.summary.headline,
     `Phase: ${getLifecyclePhaseLabel(bundle.capability, workItem.phase)}`,
     `Status: ${workItem.status}`,
-    currentStep ? `Current step: ${currentStep.name}` : null,
-    workItem.assignedAgentId ? `Assigned agent: ${workItem.assignedAgentId}` : null,
+    currentStep ? `Current step: ${currentStep.name}` : 'Current step: Awaiting orchestration',
+    agentId ? `Assigned stage agent: ${agentId}` : null,
     runDetail ? `Run: ${runDetail.run.id} (${runDetail.run.status})` : null,
-    openWait
-      ? `Open wait: ${openWait.type} - ${openWait.message}`
-      : workItem.pendingRequest
-      ? `Pending request: ${workItem.pendingRequest.type} - ${workItem.pendingRequest.message}`
+    openWait ? `Open wait: ${openWait.type} - ${openWait.message}` : null,
+    compiledWorkItemPlan ? `Work plan: ${compiledWorkItemPlan.planSummary}` : null,
+    compiledStepContext?.objective
+      ? `Stage objective: ${compiledStepContext.objective}`
+      : currentStep?.action
+      ? `Stage objective: ${currentStep.action}`
       : null,
-    workItem.blocker
-      ? `Blocker: ${workItem.blocker.type} - ${workItem.blocker.message}`
+    compiledStepContext?.description
+      ? `Stage guidance: ${compiledStepContext.description}`
+      : currentStep?.description
+      ? `Stage guidance: ${currentStep.description}`
       : null,
-    workItem.history.length > 0
-      ? `Latest history: ${
-          workItem.history[workItem.history.length - 1]?.detail ||
-          workItem.history[workItem.history.length - 1]?.action
-        }`
+    compiledStepContext
+      ? `Required inputs: ${formatInputSummary(compiledStepContext.requiredInputs)}`
+      : requestedInputFields.length > 0
+      ? `Requested inputs: ${formatInputSummary(requestedInputFields)}`
       : null,
+    compiledStepContext
+      ? `Artifact checklist: ${formatChecklistSummary(compiledStepContext.artifactChecklist)}`
+      : null,
+    compiledStepContext?.completionChecklist?.length
+      ? `Completion checklist: ${compiledStepContext.completionChecklist.join('; ')}`
+      : null,
+    compiledStepContext?.nextActions?.length
+      ? `Next allowed actions: ${compiledStepContext.nextActions.join('; ')}`
+      : null,
+    approvedRoots.length > 0 ? `Approved workspaces: ${approvedRoots.join(', ')}` : null,
+    `Release readiness: ${explain.releaseReadiness.status} (${explain.releaseReadiness.score}%)`,
+    `Operator goal: help the user understand and complete only the current stage. Stay focused on this work item and current step, and produce concrete stage-ready guidance.`,
   ]
     .filter(Boolean)
     .join('\n');
@@ -243,15 +529,24 @@ const parseWorkspaceAction = (
   const hasExplicitTarget = Boolean(workItemId || runId || extractQuotedTitle(message));
   const mentionsDeliveryObject =
     hasExplicitTarget ||
-    /\b(work item|workflow|run|execution|phase|approval|input|conflict|blocked|stuck)\b/.test(
+    /\b(work item|run|execution|phase|approval|input|conflict|blocked|stuck|waiting|failed)\b/.test(
       normalized,
     );
-
-  if (
+  const asksForExecutionStatus =
     /\b(status|progress|what needs attention|what is blocked|what is stuck|show work|delivery summary)\b/.test(
       normalized,
-    )
-  ) {
+    ) ||
+    (
+      mentionsDeliveryObject &&
+      (
+        /\b(what happened|explain|next step|next action|option|options|suggested action|suggested actions)\b/.test(
+          normalized,
+        ) ||
+        (/\bwhy\b/.test(normalized) && /\b(blocked|waiting|stuck|failed)\b/.test(normalized))
+      )
+    );
+
+  if (asksForExecutionStatus) {
     return { type: 'STATUS', workItemId, runId };
   }
 
@@ -269,6 +564,10 @@ const parseWorkspaceAction = (
 
   if (/\bresolve conflict\b|\bsettle conflict\b/.test(normalized)) {
     return { type: 'RESOLVE_CONFLICT', workItemId, runId, note };
+  }
+
+  if (/\bguide (the )?agent\b|\bgive guidance\b|\bcoach\b/.test(normalized)) {
+    return { type: 'GUIDE_AGENT', workItemId, runId, note, targetPhase };
   }
 
   if (/\bunblock\b|\bcontinue it\b|\bmove it forward\b/.test(normalized)) {
@@ -430,15 +729,57 @@ export const maybeHandleCapabilityChatAction = async ({
   agent: Partial<CapabilityAgent>;
   message: string;
 }): Promise<ChatWorkspaceActionResult> => {
-  const action = parseWorkspaceAction(bundle, message);
+  const normalizedMessage = normalizeText(message);
+  let action = parseWorkspaceAction(bundle, message);
   if (!action) {
+    if (isExecutionAgent(agent)) {
+      const resolved = resolveTargetWorkItem(bundle, message);
+      const looksLikeSkipGuidance =
+        /\bskip\b/.test(normalizedMessage) &&
+        /\b(build|test|docs|validation|step|it|this)\b/.test(normalizedMessage);
+      if (looksLikeSkipGuidance && resolved.workItem) {
+        action = {
+          type: 'GUIDE_AGENT',
+          workItemId: resolved.workItem.id,
+          note: message.trim(),
+        };
+      }
+    }
+  }
+
+  if (!action) {
+    if (isExecutionAgent(agent)) {
+      const resolved = resolveTargetWorkItem(bundle, message);
+      if (resolved.ambiguous?.length) {
+        return {
+          handled: true,
+          content: buildAmbiguousTargetMessage(resolved.ambiguous),
+        };
+      }
+      if (resolved.workItem) {
+        return {
+          handled: true,
+          content: await buildWorkItemStatusSummary(bundle, resolved.workItem),
+        };
+      }
+
+      if (/\b(status|progress|blocked|stuck|run|execution|approval|input|conflict|attention|overview|summary)\b/.test(normalizedMessage)) {
+        return {
+          handled: true,
+          content: buildExecutionOverviewSummary(bundle),
+        };
+      }
+    }
+
     return { handled: false };
   }
 
   if (action.type === 'STATUS' && !action.workItemId && !action.runId) {
     return {
       handled: true,
-      content: buildOverallStatusSummary(bundle),
+      content: isExecutionAgent(agent)
+        ? buildExecutionOverviewSummary(bundle)
+        : buildOverallStatusSummary(bundle),
     };
   }
 
@@ -471,6 +812,8 @@ export const maybeHandleCapabilityChatAction = async ({
     };
   }
 
+  const resolutionActor = `${agent.name || agent.role || 'Capability Owner'} via chat`;
+
   if (action.type === 'MOVE_PHASE') {
     if (!action.targetPhase) {
       return {
@@ -502,6 +845,8 @@ export const maybeHandleCapabilityChatAction = async ({
     const detail = await startWorkflowExecution({
       capabilityId: bundle.capability.id,
       workItemId: workItem.id,
+      guidance: action.note,
+      guidedBy: resolutionActor,
     });
     return {
       handled: true,
@@ -521,6 +866,26 @@ export const maybeHandleCapabilityChatAction = async ({
   );
 
   if (!runDetail) {
+    if (
+      (action.type === 'GUIDE_AGENT' || action.type === 'UNBLOCK') &&
+      workItem.status === 'BLOCKED' &&
+      action.note?.trim()
+    ) {
+      const detail = await startWorkflowExecution({
+        capabilityId: bundle.capability.id,
+        workItemId: workItem.id,
+        restartFromPhase: action.targetPhase || workItem.phase,
+        guidance: action.note,
+        guidedBy: resolutionActor,
+      });
+      return {
+        handled: true,
+        changedState: true,
+        wakeWorker: true,
+        content: `Guided ${formatWorkItemHeading(workItem)} into a fresh run. Run ${detail.run.id} is now ${detail.run.status}.`,
+      };
+    }
+
     return {
       handled: true,
       content: `I could not find an active run for ${formatWorkItemHeading(workItem)}.`,
@@ -532,6 +897,8 @@ export const maybeHandleCapabilityChatAction = async ({
       capabilityId: bundle.capability.id,
       runId: runDetail.run.id,
       restartFromPhase: action.targetPhase || workItem.phase,
+      guidance: action.note,
+      guidedBy: resolutionActor,
     });
     return {
       handled: true,
@@ -540,6 +907,63 @@ export const maybeHandleCapabilityChatAction = async ({
       content: [
         `Restarted ${formatWorkItemHeading(workItem)} from ${getLifecyclePhaseLabel(bundle.capability, detail.run.currentPhase || workItem.phase)}.`,
         `New run ${detail.run.id} is ${detail.run.status}.`,
+      ].join('\n'),
+    };
+  }
+
+  if (action.type === 'GUIDE_AGENT') {
+    if (!action.note?.trim()) {
+      return {
+        handled: true,
+        content: `Add the guidance after a colon, for example: guide agent for ${workItem.id}: use the approved workspace path /repo/app and keep the API surface unchanged`,
+      };
+    }
+
+    const openWait = getOpenWait(runDetail);
+    if (openWait?.type === 'INPUT') {
+      const detail = await provideWorkflowRunInput({
+        capabilityId: bundle.capability.id,
+        runId: runDetail.run.id,
+        resolution: action.note,
+        resolvedBy: resolutionActor,
+      });
+      return {
+        handled: true,
+        changedState: true,
+        wakeWorker: true,
+        content: `Guidance submitted for ${formatWorkItemHeading(workItem)}. Run ${detail.run.id} is now ${detail.run.status}.`,
+      };
+    }
+
+    if (openWait?.type === 'CONFLICT_RESOLUTION') {
+      const detail = await resolveWorkflowRunConflict({
+        capabilityId: bundle.capability.id,
+        runId: runDetail.run.id,
+        resolution: action.note,
+        resolvedBy: resolutionActor,
+      });
+      return {
+        handled: true,
+        changedState: true,
+        wakeWorker: true,
+        content: `Conflict guidance submitted for ${formatWorkItemHeading(workItem)}. Run ${detail.run.id} is now ${detail.run.status}.`,
+      };
+    }
+
+    const detail = await restartWorkflowRun({
+      capabilityId: bundle.capability.id,
+      runId: runDetail.run.id,
+      restartFromPhase: action.targetPhase || workItem.phase,
+      guidance: action.note,
+      guidedBy: resolutionActor,
+    });
+    return {
+      handled: true,
+      changedState: true,
+      wakeWorker: true,
+      content: [
+        `Guided ${formatWorkItemHeading(workItem)} with fresh operator context.`,
+        `Run ${detail.run.id} restarted from ${getLifecyclePhaseLabel(bundle.capability, detail.run.currentPhase || workItem.phase)}.`,
       ].join('\n'),
     };
   }
@@ -564,13 +988,34 @@ export const maybeHandleCapabilityChatAction = async ({
 
   const openWait = getOpenWait(runDetail);
   if (!openWait) {
+    if (
+      action.type === 'UNBLOCK' &&
+      workItem.status === 'BLOCKED' &&
+      action.note?.trim()
+    ) {
+      const detail = await restartWorkflowRun({
+        capabilityId: bundle.capability.id,
+        runId: runDetail.run.id,
+        restartFromPhase: action.targetPhase || workItem.phase,
+        guidance: action.note,
+        guidedBy: resolutionActor,
+      });
+      return {
+        handled: true,
+        changedState: true,
+        wakeWorker: true,
+        content: `Unblocked ${formatWorkItemHeading(workItem)} with new operator guidance. Run ${detail.run.id} is now ${detail.run.status}.`,
+      };
+    }
+
     return {
       handled: true,
-      content: `${formatWorkItemHeading(workItem)} does not currently have an open wait to resolve.`,
+      content:
+        action.type === 'UNBLOCK' && workItem.status === 'BLOCKED'
+          ? `${formatWorkItemHeading(workItem)} is blocked without an open wait. Add guidance after a colon, for example: unblock ${workItem.id}: use the approved workspace path /repo/app and retry from the current phase`
+          : `${formatWorkItemHeading(workItem)} does not currently have an open wait to resolve.`,
     };
   }
-
-  const resolutionActor = `${agent.name || agent.role || 'Capability Owner'} via chat`;
 
   if (action.type === 'APPROVE') {
     const detail = await approveWorkflowRun({

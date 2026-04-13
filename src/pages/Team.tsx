@@ -12,17 +12,33 @@ import {
   RefreshCw,
   Search,
   Users,
+  Wrench,
   X,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { COPILOT_MODEL_OPTIONS, SKILL_LIBRARY } from '../constants';
+import { COPILOT_MODEL_OPTIONS, SKILL_LIBRARY, getStandardAgentContract } from '../constants';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { fetchRuntimeStatus, refreshAgentLearningProfile, type RuntimeStatus } from '../lib/api';
+import {
+  getLegacyArtifactListsFromContract,
+  normalizeAgentOperatingContract,
+  normalizeAgentRoleStarterKey,
+  normalizeSkill,
+} from '../lib/agentRuntime';
 import { getAgentHealth } from '../lib/capabilityExperience';
+import { formatEnumLabel } from '../lib/enterprise';
+import { WORKSPACE_AGENT_TEMPLATES } from '../lib/workspaceFoundations';
 import { cn } from '../lib/utils';
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
-import { AgentLearningStatus, CapabilityAgent, Skill } from '../types';
+import {
+  AgentArtifactExpectation,
+  AgentLearningStatus,
+  AgentRoleStarterKey,
+  CapabilityAgent,
+  Skill,
+  ToolAdapterId,
+} from '../types';
 import {
   DrawerShell,
   EmptyState,
@@ -31,7 +47,7 @@ import {
 } from '../components/EnterpriseUI';
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
-type AgentDetailTab = 'overview' | 'learning' | 'skills' | 'sessions' | 'usage';
+type AgentDetailTab = 'overview' | 'learning' | 'skills' | 'tools' | 'sessions' | 'usage';
 
 const TEAM_DETAIL_TAB_KEY = 'singularity.team.detail-tab';
 const getTeamSelectionKey = (capabilityId: string) =>
@@ -60,6 +76,8 @@ const formatTimestamp = (value?: string) => {
     minute: '2-digit',
   });
 };
+
+const formatToolLabel = (toolId: string) => formatEnumLabel(toolId);
 
 const getLearningTone = (status: AgentLearningStatus) => {
   switch (status) {
@@ -95,50 +113,229 @@ const getLearningSummaryText = (agent: CapabilityAgent) => {
 const getAvailableSkills = (capabilitySkills: Skill[]) => {
   const uniqueSkills = new Map<string, Skill>();
   [...capabilitySkills, ...SKILL_LIBRARY].forEach(skill => {
-    uniqueSkills.set(skill.id, skill);
+    uniqueSkills.set(skill.id, normalizeSkill(skill));
   });
   return [...uniqueSkills.values()];
 };
 
 const defaultInspectorTab = (): AgentDetailTab => {
   return readViewPreference<AgentDetailTab>(TEAM_DETAIL_TAB_KEY, 'overview', {
-    allowed: ['overview', 'learning', 'skills', 'sessions', 'usage'] as const,
+    allowed: ['overview', 'learning', 'skills', 'tools', 'sessions', 'usage'] as const,
   });
 };
 
-const createAgentForm = (skills: Skill[], defaultModel: string) => ({
-  name: '',
-  role: 'Capability Specialist',
-  objective: '',
-  systemPrompt: '',
-  documentationSources: '',
-  learningNotes: '',
-  skillIds: skills.map(skill => skill.id),
-  model: defaultModel,
-  tokenLimit: '12000',
-});
+type AgentFormState = {
+  name: string;
+  roleStarterKey: AgentRoleStarterKey;
+  role: string;
+  objective: string;
+  systemPrompt: string;
+  documentationSources: string;
+  learningNotes: string;
+  contractDescription: string;
+  primaryResponsibilities: string;
+  workingApproach: string;
+  preferredOutputs: string;
+  guardrails: string;
+  conflictResolution: string;
+  definitionOfDone: string;
+  suggestedInputArtifacts: string;
+  expectedOutputArtifacts: string;
+  skillIds: string[];
+  preferredToolIds: ToolAdapterId[];
+  model: string;
+  tokenLimit: string;
+};
 
-const agentToForm = (agent: CapabilityAgent) => ({
-  name: agent.name,
-  role: agent.role,
-  objective: agent.objective,
-  systemPrompt: agent.systemPrompt,
-  documentationSources: agent.documentationSources.join('\n'),
-  learningNotes: (agent.learningNotes || []).join('\n'),
-  skillIds: agent.skillIds,
-  model: agent.model,
-  tokenLimit: agent.tokenLimit.toString(),
-});
+const CUSTOM_AGENT_DEFAULT_STARTER: AgentRoleStarterKey = 'SOFTWARE-DEVELOPER';
 
-const normalizeFormSnapshot = (form: ReturnType<typeof createAgentForm>) =>
+const getRoleStarterTemplate = (roleStarterKey: AgentRoleStarterKey) =>
+  WORKSPACE_AGENT_TEMPLATES.find(template => template.roleStarterKey === roleStarterKey);
+
+const resolveStarterText = (value: string, capabilityName: string) =>
+  value.replace(/\{capabilityName\}/g, capabilityName);
+
+const formatArtifactExpectations = (expectations: AgentArtifactExpectation[] = []) =>
+  expectations.map(expectation => expectation.artifactName).join('\n');
+
+const parseArtifactExpectations = (
+  value: string,
+  direction: AgentArtifactExpectation['direction'],
+  requiredByDefault: boolean,
+): AgentArtifactExpectation[] =>
+  value
+    .split('\n')
+    .map(item => item.trim())
+    .filter(Boolean)
+    .map(artifactName => ({
+      artifactName,
+      direction,
+      requiredByDefault,
+    }));
+
+const createAgentForm = (
+  capabilityName: string,
+  availableSkills: Skill[],
+  defaultModel: string,
+  roleStarterKey: AgentRoleStarterKey = CUSTOM_AGENT_DEFAULT_STARTER,
+): AgentFormState => {
+  const template = getRoleStarterTemplate(roleStarterKey);
+  const contract = normalizeAgentOperatingContract(
+    template?.contract || getStandardAgentContract(roleStarterKey),
+  );
+  const availableSkillIds = new Set(availableSkills.map(skill => skill.id));
+  const defaultSkillIds = (template?.defaultSkillIds || []).filter(skillId =>
+    availableSkillIds.has(skillId),
+  );
+
+  return {
+    name: '',
+    roleStarterKey,
+    role: template?.role || 'Capability Specialist',
+    objective: template ? resolveStarterText(template.objective, capabilityName) : '',
+    systemPrompt: template ? resolveStarterText(template.systemPrompt, capabilityName) : '',
+    documentationSources: '',
+    learningNotes: '',
+    contractDescription: contract.description,
+    primaryResponsibilities: contract.primaryResponsibilities.join('\n'),
+    workingApproach: contract.workingApproach.join('\n'),
+    preferredOutputs: contract.preferredOutputs.join('\n'),
+    guardrails: contract.guardrails.join('\n'),
+    conflictResolution: contract.conflictResolution.join('\n'),
+    definitionOfDone: contract.definitionOfDone,
+    suggestedInputArtifacts: formatArtifactExpectations(contract.suggestedInputArtifacts),
+    expectedOutputArtifacts: formatArtifactExpectations(contract.expectedOutputArtifacts),
+    skillIds: defaultSkillIds,
+    preferredToolIds: template?.preferredToolIds || [],
+    model: defaultModel,
+    tokenLimit: '12000',
+  };
+};
+
+const agentToForm = (agent: CapabilityAgent): AgentFormState => {
+  const contract = normalizeAgentOperatingContract(agent.contract, {
+    description: agent.objective || agent.role,
+    suggestedInputArtifacts: agent.inputArtifacts,
+    expectedOutputArtifacts: agent.outputArtifacts,
+  });
+
+  return {
+    name: agent.name,
+    roleStarterKey:
+      normalizeAgentRoleStarterKey(agent.roleStarterKey) ||
+      normalizeAgentRoleStarterKey(agent.isOwner ? 'OWNER' : agent.standardTemplateKey) ||
+      CUSTOM_AGENT_DEFAULT_STARTER,
+    role: agent.role,
+    objective: agent.objective,
+    systemPrompt: agent.systemPrompt,
+    documentationSources: agent.documentationSources.join('\n'),
+    learningNotes: (agent.learningNotes || []).join('\n'),
+    contractDescription: contract.description,
+    primaryResponsibilities: contract.primaryResponsibilities.join('\n'),
+    workingApproach: contract.workingApproach.join('\n'),
+    preferredOutputs: contract.preferredOutputs.join('\n'),
+    guardrails: contract.guardrails.join('\n'),
+    conflictResolution: contract.conflictResolution.join('\n'),
+    definitionOfDone: contract.definitionOfDone,
+    suggestedInputArtifacts: formatArtifactExpectations(contract.suggestedInputArtifacts),
+    expectedOutputArtifacts: formatArtifactExpectations(contract.expectedOutputArtifacts),
+    skillIds: agent.skillIds,
+    preferredToolIds: agent.preferredToolIds || [],
+    model: agent.model,
+    tokenLimit: agent.tokenLimit.toString(),
+  };
+};
+
+const buildAgentContractFromForm = (form: AgentFormState) =>
+  normalizeAgentOperatingContract(
+    {
+      description: form.contractDescription,
+      primaryResponsibilities: splitLines(form.primaryResponsibilities),
+      workingApproach: splitLines(form.workingApproach),
+      preferredOutputs: splitLines(form.preferredOutputs),
+      guardrails: splitLines(form.guardrails),
+      conflictResolution: splitLines(form.conflictResolution),
+      definitionOfDone: form.definitionOfDone,
+      suggestedInputArtifacts: parseArtifactExpectations(
+        form.suggestedInputArtifacts,
+        'INPUT',
+        false,
+      ),
+      expectedOutputArtifacts: parseArtifactExpectations(
+        form.expectedOutputArtifacts,
+        'OUTPUT',
+        true,
+      ),
+    },
+    {
+      description: form.objective || form.role,
+    },
+  );
+
+const applyRoleStarterToForm = (
+  form: AgentFormState,
+  capabilityName: string,
+  availableSkills: Skill[],
+  roleStarterKey: AgentRoleStarterKey,
+): AgentFormState => {
+  const template = getRoleStarterTemplate(roleStarterKey);
+  const starterForm = createAgentForm(
+    capabilityName,
+    availableSkills,
+    form.model,
+    roleStarterKey,
+  );
+
+  return {
+    ...form,
+    roleStarterKey,
+    role: template?.role || starterForm.role,
+    objective: template ? resolveStarterText(template.objective, capabilityName) : form.objective,
+    systemPrompt: template
+      ? resolveStarterText(template.systemPrompt, capabilityName)
+      : form.systemPrompt,
+    contractDescription: starterForm.contractDescription,
+    primaryResponsibilities: starterForm.primaryResponsibilities,
+    workingApproach: starterForm.workingApproach,
+    preferredOutputs: starterForm.preferredOutputs,
+    guardrails: starterForm.guardrails,
+    conflictResolution: starterForm.conflictResolution,
+    definitionOfDone: starterForm.definitionOfDone,
+    suggestedInputArtifacts: starterForm.suggestedInputArtifacts,
+    expectedOutputArtifacts: starterForm.expectedOutputArtifacts,
+    skillIds: starterForm.skillIds,
+    preferredToolIds: starterForm.preferredToolIds,
+  };
+};
+
+const normalizeFormSnapshot = (form: AgentFormState) =>
   JSON.stringify({
     name: form.name.trim(),
+    roleStarterKey: form.roleStarterKey,
     role: form.role.trim(),
     objective: form.objective.trim(),
     systemPrompt: form.systemPrompt.trim(),
     documentationSources: splitLines(form.documentationSources),
     learningNotes: splitLines(form.learningNotes),
+    contractDescription: form.contractDescription.trim(),
+    primaryResponsibilities: splitLines(form.primaryResponsibilities),
+    workingApproach: splitLines(form.workingApproach),
+    preferredOutputs: splitLines(form.preferredOutputs),
+    guardrails: splitLines(form.guardrails),
+    conflictResolution: splitLines(form.conflictResolution),
+    definitionOfDone: form.definitionOfDone.trim(),
+    suggestedInputArtifacts: parseArtifactExpectations(
+      form.suggestedInputArtifacts,
+      'INPUT',
+      false,
+    ),
+    expectedOutputArtifacts: parseArtifactExpectations(
+      form.expectedOutputArtifacts,
+      'OUTPUT',
+      true,
+    ),
     skillIds: [...new Set(form.skillIds)].sort(),
+    preferredToolIds: [...new Set(form.preferredToolIds)].sort(),
     model: form.model.trim(),
     tokenLimit: Math.max(1000, Number.parseInt(form.tokenLimit, 10) || 12000),
   });
@@ -154,31 +351,42 @@ const createDefaultLearningProfile = () => ({
 });
 
 const buildAgentPayload = (
-  form: ReturnType<typeof createAgentForm>,
+  form: AgentFormState,
   capabilityName: string,
-) => ({
-  name: form.name.trim(),
-  role: form.role.trim(),
-  objective: form.objective.trim(),
-  systemPrompt:
-    form.systemPrompt.trim() ||
-    `Operate only within ${capabilityName}. Use the capability metadata, documentation, skills, and team learning already attached to this capability.`,
-  initializationStatus: 'READY' as const,
-  documentationSources: splitLines(form.documentationSources),
-  learningNotes: splitLines(form.learningNotes),
-  skillIds: [...new Set(form.skillIds)],
-  provider: 'GitHub Copilot SDK' as const,
-  model: form.model,
-  tokenLimit: Math.max(1000, Number.parseInt(form.tokenLimit, 10) || 12000),
-});
+) => {
+  const contract = buildAgentContractFromForm(form);
+  const legacyArtifacts = getLegacyArtifactListsFromContract(contract);
+
+  return {
+    name: form.name.trim(),
+    roleStarterKey: form.roleStarterKey,
+    role: form.role.trim(),
+    objective: form.objective.trim(),
+    systemPrompt:
+      form.systemPrompt.trim() ||
+      `Operate only within ${capabilityName}. Use the capability metadata, documentation, skills, and team learning already attached to this capability.`,
+    initializationStatus: 'READY' as const,
+    documentationSources: splitLines(form.documentationSources),
+    learningNotes: splitLines(form.learningNotes),
+    contract,
+    inputArtifacts: legacyArtifacts.inputArtifacts,
+    outputArtifacts: legacyArtifacts.outputArtifacts,
+    skillIds: [...new Set(form.skillIds)],
+    preferredToolIds: [...new Set(form.preferredToolIds)],
+    provider: 'GitHub Copilot SDK' as const,
+    model: form.model,
+    tokenLimit: Math.max(1000, Number.parseInt(form.tokenLimit, 10) || 12000),
+  };
+};
 
 const getComparableSelectedAgent = (
   agent: CapabilityAgent | null,
+  capabilityName: string,
   fallbackSkills: Skill[],
   fallbackModel: string,
 ) =>
   normalizeFormSnapshot(
-    agent ? agentToForm(agent) : createAgentForm(fallbackSkills, fallbackModel),
+    agent ? agentToForm(agent) : createAgentForm(capabilityName, fallbackSkills, fallbackModel),
   );
 
 export default function Team() {
@@ -191,6 +399,7 @@ export default function Team() {
     addCapabilityAgent,
     refreshCapabilityBundle,
     updateCapabilityAgent,
+    updateCapabilityAgentModels,
     setActiveChatAgent,
   } = useCapability();
   const { success, error: showError } = useToast();
@@ -213,17 +422,30 @@ export default function Team() {
   const [selectedAgentId, setSelectedAgentId] = useState('');
   const [detailTab, setDetailTab] = useState<AgentDetailTab>(defaultInspectorTab);
   const [detailForm, setDetailForm] = useState(() =>
-    createAgentForm(availableSkills, fallbackModelOptions[0]?.apiModelId || 'gpt-4.1-mini'),
+    createAgentForm(
+      activeCapability.name,
+      availableSkills,
+      fallbackModelOptions[0]?.apiModelId || 'gpt-4.1-mini',
+    ),
   );
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [bulkModelModalOpen, setBulkModelModalOpen] = useState(false);
   const [createForm, setCreateForm] = useState(() =>
-    createAgentForm(availableSkills, fallbackModelOptions[0]?.apiModelId || 'gpt-4.1-mini'),
+    createAgentForm(
+      activeCapability.name,
+      availableSkills,
+      fallbackModelOptions[0]?.apiModelId || 'gpt-4.1-mini',
+    ),
+  );
+  const [bulkModelValue, setBulkModelValue] = useState<string>(
+    fallbackModelOptions[0]?.apiModelId || 'gpt-4.1-mini',
   );
   const [createAdvancedOpen, setCreateAdvancedOpen] = useState(false);
   const [isEditingSelectedAgent, setIsEditingSelectedAgent] = useState(false);
   const [refreshingAgentId, setRefreshingAgentId] = useState('');
   const [isCreatingAgent, setIsCreatingAgent] = useState(false);
   const [isSavingAgent, setIsSavingAgent] = useState(false);
+  const [isApplyingBulkModel, setIsApplyingBulkModel] = useState(false);
 
   const mutationState = mutationStatusByCapability[activeCapability.id];
   const ownerAgent = workspace.agents.find(agent => agent.isOwner) || workspace.agents[0] || null;
@@ -290,8 +512,13 @@ export default function Team() {
   const detailFormIsDirty = useMemo(
     () =>
       normalizeFormSnapshot(detailForm) !==
-      getComparableSelectedAgent(selectedAgent, availableSkills, runtimeDefaultModel),
-    [availableSkills, detailForm, runtimeDefaultModel, selectedAgent],
+      getComparableSelectedAgent(
+        selectedAgent,
+        activeCapability.name,
+        availableSkills,
+        runtimeDefaultModel,
+      ),
+    [activeCapability.name, availableSkills, detailForm, runtimeDefaultModel, selectedAgent],
   );
 
   const detailCanSave = Boolean(
@@ -333,6 +560,24 @@ export default function Team() {
   const createModelUnavailable = !availableModelOptions.some(
     model => model.id === createForm.model || model.apiModelId === createForm.model,
   );
+  const bulkModelOptions = getModelOptionsForValue(bulkModelValue);
+  const bulkModelUnavailable = !availableModelOptions.some(
+    model => model.id === bulkModelValue || model.apiModelId === bulkModelValue,
+  );
+  const bulkModelChangeCount = useMemo(
+    () => workspace.agents.filter(agent => agent.model !== bulkModelValue).length,
+    [bulkModelValue, workspace.agents],
+  );
+  const preferredBulkModel = useMemo(() => {
+    const modelCounts = new Map<string, number>();
+    for (const agent of workspace.agents) {
+      modelCounts.set(agent.model, (modelCounts.get(agent.model) || 0) + 1);
+    }
+
+    const [topModel] =
+      [...modelCounts.entries()].sort((left, right) => right[1] - left[1])[0] || [];
+    return topModel || runtimeDefaultModel;
+  }, [runtimeDefaultModel, workspace.agents]);
 
   useEffect(() => {
     let isMounted = true;
@@ -436,9 +681,14 @@ export default function Team() {
   };
 
   const openCreateModal = () => {
-    setCreateForm(createAgentForm(availableSkills, runtimeDefaultModel));
+    setCreateForm(createAgentForm(activeCapability.name, availableSkills, runtimeDefaultModel));
     setCreateAdvancedOpen(false);
     setCreateModalOpen(true);
+  };
+
+  const openBulkModelModal = () => {
+    setBulkModelValue(preferredBulkModel);
+    setBulkModelModalOpen(true);
   };
 
   const openAgentInChat = async (agent: CapabilityAgent) => {
@@ -491,8 +741,6 @@ export default function Team() {
       const payload = buildAgentPayload(createForm, activeCapability.name);
       const bundle = await addCapabilityAgent(activeCapability.id, {
         ...payload,
-        inputArtifacts: ['Capability operating context'],
-        outputArtifacts: ['Agent contribution'],
         usage: {
           requestCount: 0,
           promptTokens: 0,
@@ -528,6 +776,35 @@ export default function Team() {
     }
   };
 
+  const handleApplyBulkModel = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (bootStatus !== 'ready' || isApplyingBulkModel || !bulkModelValue.trim()) {
+      return;
+    }
+
+    setIsApplyingBulkModel(true);
+
+    try {
+      await updateCapabilityAgentModels(activeCapability.id, bulkModelValue.trim());
+      setBulkModelModalOpen(false);
+      success(
+        'All collaborator models updated',
+        bulkModelChangeCount > 0
+          ? `${bulkModelChangeCount} agent${bulkModelChangeCount === 1 ? '' : 's'} now use ${bulkModelValue}. Resumable sessions were cleared so new chats reopen on the new model.`
+          : `All collaborators in ${activeCapability.name} were already on ${bulkModelValue}.`,
+      );
+    } catch (error) {
+      showError(
+        'Bulk model update failed',
+        error instanceof Error
+          ? error.message
+          : 'Unable to change the agent models right now.',
+      );
+    } finally {
+      setIsApplyingBulkModel(false);
+    }
+  };
+
   const handleSaveSelectedAgent = async () => {
     if (!selectedAgent || !detailCanSave || bootStatus !== 'ready' || isSavingAgent) {
       return;
@@ -554,7 +831,7 @@ export default function Team() {
   };
 
   const toggleSkill = (
-    setter: React.Dispatch<React.SetStateAction<ReturnType<typeof createAgentForm>>>,
+    setter: React.Dispatch<React.SetStateAction<AgentFormState>>,
     skillId: string,
   ) => {
     setter(prev => ({
@@ -700,9 +977,15 @@ export default function Team() {
     if (detailTab === 'overview') {
       if (!isEditingSelectedAgent) {
         const agentHealth = getAgentHealth(selectedAgent);
+        const selectedContract = normalizeAgentOperatingContract(selectedAgent.contract, {
+          description: selectedAgent.objective || selectedAgent.role,
+          suggestedInputArtifacts: selectedAgent.inputArtifacts,
+          expectedOutputArtifacts: selectedAgent.outputArtifacts,
+        });
         const attachedSkills = availableSkills.filter(skill =>
           selectedAgent.skillIds.includes(skill.id),
         );
+        const preferredTools = selectedAgent.preferredToolIds || [];
         const recentSessions = selectedAgent.sessionSummaries.slice(0, 3);
 
         return (
@@ -791,7 +1074,108 @@ export default function Team() {
               </p>
             </section>
 
-            <div className="grid gap-4 xl:grid-cols-2">
+            <section className="workspace-surface space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="workspace-section-title">Operating contract</p>
+                  <p className="workspace-section-copy">
+                    The shared agent setup this collaborator follows across skills, guardrails, and artifact expectations.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <StatusBadge tone="info">
+                    Starter {selectedAgent.roleStarterKey || selectedAgent.standardTemplateKey || 'Custom'}
+                  </StatusBadge>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingSelectedAgent(true)}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    <Edit3 size={16} />
+                    Edit contract
+                  </button>
+                </div>
+              </div>
+
+              <p className="text-sm leading-7 text-secondary">
+                {selectedContract.description}
+              </p>
+
+              <div className="grid gap-4 xl:grid-cols-2">
+                {[
+                  {
+                    label: 'Primary responsibilities',
+                    items: selectedContract.primaryResponsibilities,
+                  },
+                  { label: 'Working approach', items: selectedContract.workingApproach },
+                  { label: 'Preferred outputs', items: selectedContract.preferredOutputs },
+                  { label: 'Guardrails', items: selectedContract.guardrails },
+                  {
+                    label: 'Conflict resolution',
+                    items: selectedContract.conflictResolution,
+                  },
+                ].map(section => (
+                  <div
+                    key={section.label}
+                    className="rounded-2xl border border-outline-variant/30 bg-surface-container-low px-4 py-4"
+                  >
+                    <p className="workspace-meta-label">{section.label}</p>
+                    {section.items.length > 0 ? (
+                      <ul className="mt-3 space-y-2 text-sm leading-relaxed text-secondary">
+                        {section.items.map(item => (
+                          <li key={item} className="flex gap-2">
+                            <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-sm text-secondary">No items captured yet.</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-2">
+                <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-low px-4 py-4">
+                  <p className="workspace-meta-label">Suggested input artifacts</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {selectedContract.suggestedInputArtifacts.length > 0 ? (
+                      selectedContract.suggestedInputArtifacts.map(expectation => (
+                        <StatusBadge key={expectation.artifactName} tone="neutral">
+                          {expectation.artifactName}
+                        </StatusBadge>
+                      ))
+                    ) : (
+                      <span className="text-sm text-secondary">No default input suggestions.</span>
+                    )}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-low px-4 py-4">
+                  <p className="workspace-meta-label">Expected output artifacts</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {selectedContract.expectedOutputArtifacts.length > 0 ? (
+                      selectedContract.expectedOutputArtifacts.map(expectation => (
+                        <StatusBadge key={expectation.artifactName} tone="brand">
+                          {expectation.artifactName}
+                        </StatusBadge>
+                      ))
+                    ) : (
+                      <span className="text-sm text-secondary">No default output expectations.</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-outline-variant/30 bg-white px-4 py-4">
+                <p className="workspace-meta-label">Definition of done</p>
+                <p className="mt-2 text-sm leading-7 text-secondary">
+                  {selectedContract.definitionOfDone}
+                </p>
+              </div>
+            </section>
+
+            <div className="grid gap-4 xl:grid-cols-3">
               <section className="workspace-surface">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
@@ -823,6 +1207,42 @@ export default function Team() {
                   {attachedSkills.length > 6 ? (
                     <span className="rounded-full bg-surface-container-low px-3 py-1.5 text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-outline">
                       +{attachedSkills.length - 6}
+                    </span>
+                  ) : null}
+                </div>
+              </section>
+
+              <section className="workspace-surface">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="workspace-section-title">Tool profile</p>
+                    <p className="workspace-section-copy">
+                      Preferred tool profile for this agent. Workflow steps still decide actual execution access.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDetailTab('tools')}
+                    className="text-sm font-bold text-primary"
+                  >
+                    View tools
+                  </button>
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {preferredTools.slice(0, 6).map(toolId => (
+                    <span
+                      key={toolId}
+                      className="rounded-full bg-surface-container-low px-3 py-1.5 text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-outline"
+                    >
+                      {formatToolLabel(toolId)}
+                    </span>
+                  ))}
+                  {preferredTools.length === 0 ? (
+                    <p className="text-sm text-secondary">No preferred tools defined yet.</p>
+                  ) : null}
+                  {preferredTools.length > 6 ? (
+                    <span className="rounded-full bg-surface-container-low px-3 py-1.5 text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-outline">
+                      +{preferredTools.length - 6}
                     </span>
                   ) : null}
                 </div>
@@ -898,6 +1318,37 @@ export default function Team() {
               />
             </label>
             <label className="space-y-2">
+              <span className="field-label">Base role starter</span>
+              <select
+                value={detailForm.roleStarterKey}
+                onChange={event =>
+                  setDetailForm(prev =>
+                    applyRoleStarterToForm(
+                      prev,
+                      activeCapability.name,
+                      availableSkills,
+                      event.target.value as AgentRoleStarterKey,
+                    ),
+                  )
+                }
+                disabled={Boolean(selectedAgent.isBuiltIn || selectedAgent.isOwner)}
+                className="field-select"
+              >
+                {WORKSPACE_AGENT_TEMPLATES.filter(template => template.key !== 'OWNER').map(
+                  template => (
+                    <option key={template.roleStarterKey} value={template.roleStarterKey}>
+                      {template.name}
+                    </option>
+                  ),
+                )}
+              </select>
+              <p className="field-help">
+                {selectedAgent.isBuiltIn || selectedAgent.isOwner
+                  ? 'Shared standard agents keep their starter contract fixed.'
+                  : 'Changing the starter refreshes the structured contract, default skills, and preferred tool profile.'}
+              </p>
+            </label>
+            <label className="space-y-2">
               <span className="field-label">Copilot model</span>
               <select
                 value={detailForm.model}
@@ -940,6 +1391,19 @@ export default function Team() {
               />
             </label>
             <label className="space-y-2 md:col-span-2">
+              <span className="field-label">Contract description</span>
+              <textarea
+                value={detailForm.contractDescription}
+                onChange={event =>
+                  setDetailForm(prev => ({
+                    ...prev,
+                    contractDescription: event.target.value,
+                  }))
+                }
+                className="field-textarea"
+              />
+            </label>
+            <label className="space-y-2 md:col-span-2">
               <span className="field-label">System prompt</span>
               <textarea
                 value={detailForm.systemPrompt}
@@ -974,6 +1438,145 @@ export default function Team() {
               />
               <p className="field-help">Priority topics the agent should keep learning from.</p>
             </label>
+            <div className="rounded-3xl border border-outline-variant/20 bg-surface-container-low p-5 md:col-span-2">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="workspace-section-title">Preferred tool profile</p>
+                  <p className="workspace-section-copy">
+                    Starter-level defaults only. Workflow step allowlists still control real execution access.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => navigate('/tool-access')}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  <Wrench size={16} />
+                  Open tool policy
+                </button>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {detailForm.preferredToolIds.length > 0 ? (
+                  detailForm.preferredToolIds.map(toolId => (
+                    <StatusBadge key={toolId} tone="info">
+                      {formatToolLabel(toolId)}
+                    </StatusBadge>
+                  ))
+                ) : (
+                  <p className="text-sm text-secondary">No preferred tool profile is attached.</p>
+                )}
+              </div>
+            </div>
+            <div className="grid gap-4 rounded-3xl border border-outline-variant/20 bg-surface-container-low p-5 md:col-span-2 md:grid-cols-2">
+              <label className="space-y-2">
+                <span className="field-label">Primary responsibilities</span>
+                <textarea
+                  value={detailForm.primaryResponsibilities}
+                  onChange={event =>
+                    setDetailForm(prev => ({
+                      ...prev,
+                      primaryResponsibilities: event.target.value,
+                    }))
+                  }
+                  className="field-textarea"
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="field-label">Working approach</span>
+                <textarea
+                  value={detailForm.workingApproach}
+                  onChange={event =>
+                    setDetailForm(prev => ({
+                      ...prev,
+                      workingApproach: event.target.value,
+                    }))
+                  }
+                  className="field-textarea"
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="field-label">Preferred outputs</span>
+                <textarea
+                  value={detailForm.preferredOutputs}
+                  onChange={event =>
+                    setDetailForm(prev => ({
+                      ...prev,
+                      preferredOutputs: event.target.value,
+                    }))
+                  }
+                  className="field-textarea"
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="field-label">Guardrails</span>
+                <textarea
+                  value={detailForm.guardrails}
+                  onChange={event =>
+                    setDetailForm(prev => ({
+                      ...prev,
+                      guardrails: event.target.value,
+                    }))
+                  }
+                  className="field-textarea"
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="field-label">Conflict resolution guidance</span>
+                <textarea
+                  value={detailForm.conflictResolution}
+                  onChange={event =>
+                    setDetailForm(prev => ({
+                      ...prev,
+                      conflictResolution: event.target.value,
+                    }))
+                  }
+                  className="field-textarea"
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="field-label">Definition of done</span>
+                <textarea
+                  value={detailForm.definitionOfDone}
+                  onChange={event =>
+                    setDetailForm(prev => ({
+                      ...prev,
+                      definitionOfDone: event.target.value,
+                    }))
+                  }
+                  className="field-textarea"
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="field-label">Suggested input artifacts</span>
+                <textarea
+                  value={detailForm.suggestedInputArtifacts}
+                  onChange={event =>
+                    setDetailForm(prev => ({
+                      ...prev,
+                      suggestedInputArtifacts: event.target.value,
+                    }))
+                  }
+                  className="field-textarea"
+                />
+                <p className="field-help">One artifact name per line. Inputs stay advisory by default.</p>
+              </label>
+              <label className="space-y-2">
+                <span className="field-label">Expected output artifacts</span>
+                <textarea
+                  value={detailForm.expectedOutputArtifacts}
+                  onChange={event =>
+                    setDetailForm(prev => ({
+                      ...prev,
+                      expectedOutputArtifacts: event.target.value,
+                    }))
+                  }
+                  className="field-textarea"
+                />
+                <p className="field-help">
+                  One artifact name per line. Outputs stay expected by default unless the workflow step overrides them.
+                </p>
+              </label>
+            </div>
           </div>
         </div>
       );
@@ -1199,6 +1802,57 @@ export default function Team() {
       );
     }
 
+    if (detailTab === 'tools') {
+      const preferredTools = selectedAgent.preferredToolIds || [];
+
+      return (
+        <div className="space-y-4">
+          <div className="workspace-surface">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="workspace-section-title">Preferred tool profile</p>
+                <p className="workspace-section-copy">
+                  These are this agent’s default tool preferences. Workflow step allowlists remain the real execution gate.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate('/tool-access')}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                <Wrench size={16} />
+                Open tool policy
+              </button>
+            </div>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            {preferredTools.length > 0 ? (
+              preferredTools.map(toolId => (
+                <div key={toolId} className="team-skill-card">
+                  <p className="text-sm font-bold text-on-surface">
+                    {formatToolLabel(toolId)}
+                  </p>
+                  <p className="mt-1 text-sm leading-relaxed text-secondary">
+                    Preferred by this agent when an eligible workflow step grants the tool.
+                  </p>
+                  <p className="mt-3 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                    {toolId}
+                  </p>
+                </div>
+              ))
+            ) : (
+              <EmptyState
+                title="No preferred tools"
+                description="This collaborator currently relies on workflow step access only."
+                icon={Wrench}
+              />
+            )}
+          </div>
+        </div>
+      );
+    }
+
     if (detailTab === 'sessions') {
       return (
         <div className="space-y-4">
@@ -1381,6 +2035,15 @@ export default function Team() {
           </button>
           <button
             type="button"
+            onClick={openBulkModelModal}
+            disabled={bootStatus !== 'ready' || workspace.agents.length === 0}
+            className="enterprise-button enterprise-button-secondary"
+          >
+            <Bot size={16} />
+            Change all models
+          </button>
+          <button
+            type="button"
             onClick={openCreateModal}
             disabled={bootStatus !== 'ready'}
             className="enterprise-button enterprise-button-primary"
@@ -1519,13 +2182,14 @@ export default function Team() {
                 </div>
 
                 <div className="mt-5 flex flex-wrap gap-2">
-                  {[
-                    ['overview', 'Overview'],
-                    ['learning', 'Learning'],
-                    ['skills', 'Skills'],
-                    ['sessions', 'Sessions'],
-                    ['usage', 'Usage'],
-                  ].map(([id, label]) => (
+                    {[
+                      ['overview', 'Overview'],
+                      ['learning', 'Learning'],
+                      ['skills', 'Skills'],
+                      ['tools', 'Tools'],
+                      ['sessions', 'Sessions'],
+                      ['usage', 'Usage'],
+                    ].map(([id, label]) => (
                     <button
                       key={id}
                       type="button"
@@ -1600,6 +2264,92 @@ export default function Team() {
         </DrawerShell>
       </div>
 
+      {bulkModelModalOpen ? (
+        <div className="workspace-modal-backdrop">
+          <div className="absolute inset-0 bg-slate-950/45 backdrop-blur-sm" />
+          <ModalShell
+            eyebrow="Bulk Model Update"
+            title={`Change all collaborator models in ${activeCapability.name}`}
+            description="Apply one runtime model across the full capability team instead of editing each agent individually."
+            actions={
+              <button
+                type="button"
+                onClick={() => setBulkModelModalOpen(false)}
+                className="workspace-list-action"
+              >
+                <X size={16} />
+              </button>
+            }
+            className="relative z-10 max-w-3xl"
+          >
+            <form onSubmit={handleApplyBulkModel} className="space-y-6 pt-6">
+              {renderRuntimeNotice(bulkModelUnavailable)}
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="space-y-2 md:col-span-2">
+                  <span className="field-label">Target Copilot model</span>
+                  <select
+                    value={bulkModelValue}
+                    onChange={event => setBulkModelValue(event.target.value)}
+                    className="field-select"
+                  >
+                    {bulkModelOptions.map(model => (
+                      <option key={model.apiModelId} value={model.apiModelId}>
+                        {model.label} · {model.profile}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="workspace-meta-card">
+                  <p className="workspace-meta-label">Collaborators</p>
+                  <p className="workspace-meta-value">{workspace.agents.length}</p>
+                </div>
+                <div className="workspace-meta-card">
+                  <p className="workspace-meta-label">Agents changing</p>
+                  <p className="workspace-meta-value">{bulkModelChangeCount}</p>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-outline-variant/20 bg-surface-container-low p-5">
+                <p className="workspace-section-title">What this changes</p>
+                <ul className="mt-3 space-y-2 text-sm leading-7 text-secondary">
+                  <li>All owner, standard, and custom agents in this capability will use the selected model.</li>
+                  <li>Saved resumable chat sessions are cleared so future chats reopen on the new model cleanly.</li>
+                  <li>Learning profiles stay intact; this only changes the runtime model selection.</li>
+                </ul>
+              </div>
+
+              <div className="flex flex-col gap-3 border-t border-outline-variant/40 pt-6 lg:flex-row lg:items-center lg:justify-between">
+                <p className="text-sm text-secondary">
+                  Bulk updates keep the capability consistent when you want the whole team on the same lower-cost or higher-quality model.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setBulkModelModalOpen(false)}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={bootStatus !== 'ready' || isApplyingBulkModel}
+                    className="enterprise-button enterprise-button-primary"
+                  >
+                    {isApplyingBulkModel ? (
+                      <RefreshCw size={16} className="animate-spin" />
+                    ) : (
+                      <CheckCircle2 size={16} />
+                    )}
+                    Apply to all agents
+                  </button>
+                </div>
+              </div>
+            </form>
+          </ModalShell>
+        </div>
+      ) : null}
+
       {createModalOpen ? (
         <div className="workspace-modal-backdrop">
           <div className="absolute inset-0 bg-slate-950/45 backdrop-blur-sm" />
@@ -1632,6 +2382,34 @@ export default function Team() {
                     placeholder="Compliance Reviewer"
                     className="field-input"
                   />
+                </label>
+                <label className="space-y-2">
+                  <span className="field-label">Base role starter</span>
+                  <select
+                    value={createForm.roleStarterKey}
+                    onChange={event =>
+                      setCreateForm(prev =>
+                        applyRoleStarterToForm(
+                          prev,
+                          activeCapability.name,
+                          availableSkills,
+                          event.target.value as AgentRoleStarterKey,
+                        ),
+                      )
+                    }
+                    className="field-select"
+                  >
+                    {WORKSPACE_AGENT_TEMPLATES.filter(template => template.key !== 'OWNER').map(
+                      template => (
+                        <option key={template.roleStarterKey} value={template.roleStarterKey}>
+                          {template.name}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                  <p className="field-help">
+                    Every custom agent starts from one structured starter contract, then you can tailor it for this capability.
+                  </p>
                 </label>
                 <label className="space-y-2">
                   <span className="field-label">Role</span>
@@ -1668,6 +2446,20 @@ export default function Team() {
                       setCreateForm(prev => ({ ...prev, objective: event.target.value }))
                     }
                     placeholder="Describe what this agent owns within the capability."
+                    className="field-textarea"
+                  />
+                </label>
+                <label className="space-y-2 md:col-span-2">
+                  <span className="field-label">Contract description</span>
+                  <textarea
+                    value={createForm.contractDescription}
+                    onChange={event =>
+                      setCreateForm(prev => ({
+                        ...prev,
+                        contractDescription: event.target.value,
+                      }))
+                    }
+                    placeholder="Summarize what this agent is responsible for inside the capability."
                     className="field-textarea"
                   />
                 </label>
@@ -1732,6 +2524,131 @@ export default function Team() {
                         placeholder={'Pricing policy changes\nAPI governance updates'}
                         className="field-textarea"
                       />
+                    </label>
+                    <div className="rounded-3xl border border-outline-variant/20 bg-white p-5 md:col-span-2">
+                      <p className="workspace-section-title">Preferred tool profile</p>
+                      <p className="workspace-section-copy">
+                        Inherited from the chosen starter. Workflow steps still decide actual execution access.
+                      </p>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {createForm.preferredToolIds.length > 0 ? (
+                          createForm.preferredToolIds.map(toolId => (
+                            <StatusBadge key={toolId} tone="info">
+                              {formatToolLabel(toolId)}
+                            </StatusBadge>
+                          ))
+                        ) : (
+                          <p className="text-sm text-secondary">No preferred tool profile is attached.</p>
+                        )}
+                      </div>
+                    </div>
+                    <label className="space-y-2">
+                      <span className="field-label">Primary responsibilities</span>
+                      <textarea
+                        value={createForm.primaryResponsibilities}
+                        onChange={event =>
+                          setCreateForm(prev => ({
+                            ...prev,
+                            primaryResponsibilities: event.target.value,
+                          }))
+                        }
+                        className="field-textarea"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">Working approach</span>
+                      <textarea
+                        value={createForm.workingApproach}
+                        onChange={event =>
+                          setCreateForm(prev => ({
+                            ...prev,
+                            workingApproach: event.target.value,
+                          }))
+                        }
+                        className="field-textarea"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">Preferred outputs</span>
+                      <textarea
+                        value={createForm.preferredOutputs}
+                        onChange={event =>
+                          setCreateForm(prev => ({
+                            ...prev,
+                            preferredOutputs: event.target.value,
+                          }))
+                        }
+                        className="field-textarea"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">Guardrails</span>
+                      <textarea
+                        value={createForm.guardrails}
+                        onChange={event =>
+                          setCreateForm(prev => ({
+                            ...prev,
+                            guardrails: event.target.value,
+                          }))
+                        }
+                        className="field-textarea"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">Conflict resolution guidance</span>
+                      <textarea
+                        value={createForm.conflictResolution}
+                        onChange={event =>
+                          setCreateForm(prev => ({
+                            ...prev,
+                            conflictResolution: event.target.value,
+                          }))
+                        }
+                        className="field-textarea"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">Definition of done</span>
+                      <textarea
+                        value={createForm.definitionOfDone}
+                        onChange={event =>
+                          setCreateForm(prev => ({
+                            ...prev,
+                            definitionOfDone: event.target.value,
+                          }))
+                        }
+                        className="field-textarea"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">Suggested input artifacts</span>
+                      <textarea
+                        value={createForm.suggestedInputArtifacts}
+                        onChange={event =>
+                          setCreateForm(prev => ({
+                            ...prev,
+                            suggestedInputArtifacts: event.target.value,
+                          }))
+                        }
+                        className="field-textarea"
+                      />
+                      <p className="field-help">One artifact name per line. Inputs stay advisory by default.</p>
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">Expected output artifacts</span>
+                      <textarea
+                        value={createForm.expectedOutputArtifacts}
+                        onChange={event =>
+                          setCreateForm(prev => ({
+                            ...prev,
+                            expectedOutputArtifacts: event.target.value,
+                          }))
+                        }
+                        className="field-textarea"
+                      />
+                      <p className="field-help">
+                        One artifact name per line. Outputs stay expected by default unless a workflow step overrides them.
+                      </p>
                     </label>
                   </div>
 

@@ -1,6 +1,8 @@
 import type {
+  AgentArtifactExpectation,
   Artifact,
   Capability,
+  CapabilityAgent,
   CompiledArtifactChecklistItem,
   CompiledRequiredInputField,
   CompiledStepContext,
@@ -19,6 +21,7 @@ type CompileStepContextArgs = {
   workItem: WorkItem;
   workflow: Workflow;
   step: WorkflowStep;
+  agent?: CapabilityAgent | null;
   handoffContext?: string;
   resolvedWaitContext?: string;
   artifacts?: Artifact[];
@@ -60,7 +63,7 @@ const dedupeById = <T extends { id: string }>(items: T[]) => {
   });
 };
 
-const buildExecutionBoundary = (
+export const deriveExecutionBoundary = (
   capability: Capability,
   step: WorkflowStep,
 ): ExecutionBoundary => {
@@ -97,6 +100,22 @@ const buildExecutionBoundary = (
     escalationTriggers,
   };
 };
+
+export const normalizeExecutionBoundary = (
+  value?: Partial<ExecutionBoundary> | null,
+): ExecutionBoundary => ({
+  allowedToolIds: Array.isArray(value?.allowedToolIds) ? value.allowedToolIds : [],
+  workspaceMode:
+    value?.workspaceMode === 'READ_ONLY' ||
+    value?.workspaceMode === 'APPROVED_WRITE' ||
+    value?.workspaceMode === 'NONE'
+      ? value.workspaceMode
+      : 'NONE',
+  requiresHumanApproval: Boolean(value?.requiresHumanApproval),
+  escalationTriggers: Array.isArray(value?.escalationTriggers)
+    ? value.escalationTriggers.filter(trigger => typeof trigger === 'string')
+    : [],
+});
 
 const buildDefaultRequiredInputs = ({
   capability,
@@ -256,17 +275,31 @@ const buildArtifactChecklist = ({
   return [...requiredInputs, ...expectedOutputs];
 };
 
+const cloneAgentArtifactExpectations = (
+  expectations: AgentArtifactExpectation[] = [],
+  direction: AgentArtifactExpectation['direction'],
+) =>
+  expectations
+    .filter(expectation => expectation.direction === direction && expectation.artifactName.trim())
+    .map(expectation => ({
+      artifactName: expectation.artifactName,
+      direction: expectation.direction,
+      requiredByDefault: expectation.requiredByDefault,
+      description: expectation.description,
+    }));
+
 export const compileStepContext = ({
   capability,
   workItem,
   workflow,
   step,
+  agent,
   handoffContext,
   resolvedWaitContext,
   artifacts = [],
 }: CompileStepContextArgs): CompiledStepContext => {
   const compiledAt = new Date().toISOString();
-  const executionBoundary = buildExecutionBoundary(capability, step);
+  const executionBoundary = deriveExecutionBoundary(capability, step);
   const requiredInputs = dedupeById([
     ...buildDefaultRequiredInputs({ capability, workflow, step }),
     ...(step.requiredInputs || []),
@@ -330,6 +363,14 @@ export const compileStepContext = ({
     requiredInputs: compiledInputs,
     missingInputs,
     artifactChecklist: buildArtifactChecklist({ step, handoffContext }),
+    agentSuggestedInputs: cloneAgentArtifactExpectations(
+      agent?.contract?.suggestedInputArtifacts,
+      'INPUT',
+    ),
+    agentExpectedOutputs: cloneAgentArtifactExpectations(
+      agent?.contract?.expectedOutputArtifacts,
+      'OUTPUT',
+    ),
     completionChecklist,
     memoryBoundary,
     nextActions,
@@ -337,6 +378,58 @@ export const compileStepContext = ({
     resolvedWaitContext: hasText(resolvedWaitContext)
       ? resolvedWaitContext
       : undefined,
+  };
+};
+
+export const normalizeCompiledStepContext = (
+  value?:
+    | (Omit<Partial<CompiledStepContext>, 'executionBoundary'> & {
+        executionBoundary?: Partial<ExecutionBoundary> | null;
+      })
+    | null,
+): CompiledStepContext | undefined => {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  if (!value.stepId || !value.stepName || !value.phase || !value.stepType || !value.objective) {
+    return undefined;
+  }
+
+  return {
+    compiledAt:
+      typeof value.compiledAt === 'string' && value.compiledAt.trim().length > 0
+        ? value.compiledAt
+        : new Date(0).toISOString(),
+    stepId: value.stepId,
+    stepName: value.stepName,
+    phase: value.phase,
+    stepType: value.stepType,
+    objective: value.objective,
+    description: value.description,
+    executionNotes: value.executionNotes,
+    preferredWorkspacePath: value.preferredWorkspacePath,
+    executionBoundary: normalizeExecutionBoundary(value.executionBoundary),
+    requiredInputs: Array.isArray(value.requiredInputs) ? value.requiredInputs : [],
+    missingInputs: Array.isArray(value.missingInputs) ? value.missingInputs : [],
+    artifactChecklist: Array.isArray(value.artifactChecklist) ? value.artifactChecklist : [],
+    agentSuggestedInputs: Array.isArray(value.agentSuggestedInputs)
+      ? value.agentSuggestedInputs
+      : [],
+    agentExpectedOutputs: Array.isArray(value.agentExpectedOutputs)
+      ? value.agentExpectedOutputs
+      : [],
+    completionChecklist: Array.isArray(value.completionChecklist)
+      ? value.completionChecklist.filter(item => typeof item === 'string')
+      : [],
+    memoryBoundary: Array.isArray(value.memoryBoundary)
+      ? value.memoryBoundary.filter(item => typeof item === 'string')
+      : [],
+    nextActions: Array.isArray(value.nextActions)
+      ? value.nextActions.filter(item => typeof item === 'string')
+      : [],
+    handoffContext: value.handoffContext,
+    resolvedWaitContext: value.resolvedWaitContext,
   };
 };
 

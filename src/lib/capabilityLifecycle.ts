@@ -25,6 +25,29 @@ const DEFAULT_VISIBLE_PHASES: CapabilityLifecyclePhase[] = [
   { id: 'RELEASE', label: 'Release' },
 ];
 
+export const BROKERAGE_VISIBLE_PHASES: CapabilityLifecyclePhase[] = [
+  {
+    id: 'INCEPTION',
+    label: 'Inception',
+    description: 'Define intent, scope, and early proof-of-concept direction.',
+  },
+  {
+    id: 'ELABORATION',
+    label: 'Elaboration',
+    description: 'Shape the solution, architecture, and readiness for build.',
+  },
+  {
+    id: 'CONSTRUCTION',
+    label: 'Construction',
+    description: 'Build, validate, and harden the delivery candidate.',
+  },
+  {
+    id: 'DELIVERY',
+    label: 'Delivery',
+    description: 'Deploy, operate, and stabilize the released outcome.',
+  },
+];
+
 const createPhaseLabelFromId = (phaseId?: string) =>
   String(phaseId || '')
     .trim()
@@ -59,6 +82,12 @@ const cloneRetiredPhase = (
 export const createDefaultCapabilityLifecycle = (): CapabilityLifecycle => ({
   version: 1,
   phases: DEFAULT_VISIBLE_PHASES.map(clonePhase),
+  retiredPhases: [],
+});
+
+export const createBrokerageCapabilityLifecycle = (): CapabilityLifecycle => ({
+  version: 1,
+  phases: BROKERAGE_VISIBLE_PHASES.map(clonePhase),
   retiredPhases: [],
 });
 

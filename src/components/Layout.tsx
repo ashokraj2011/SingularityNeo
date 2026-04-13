@@ -8,6 +8,7 @@ import {
   Box,
   CircleHelp,
   ChevronDown,
+  Database,
   FileText,
   LayoutDashboard,
   MessageSquare,
@@ -15,7 +16,9 @@ import {
   PanelLeftOpen,
   PlusCircle,
   Search,
+  ShieldCheck,
   Sparkles,
+  Star,
   Terminal,
   Trello,
   Users,
@@ -44,7 +47,9 @@ const primaryNavItems = [
 ] as const;
 
 const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
+  databases: Database,
   memory: BrainCircuit,
+  'tool-access': ShieldCheck,
   'run-console': Activity,
   evals: BarChart3,
   skills: BookOpen,
@@ -68,6 +73,7 @@ const routeTitles: Record<string, string> = {
   '/capabilities/metadata': 'Capability Metadata',
   '/capabilities/databases': 'Workspace Databases',
   '/workspace/databases': 'Workspace Databases',
+  '/tool-access': 'Tool Access',
 };
 
 const SIDEBAR_STORAGE_KEY = 'singularity.sidebar.collapsed';
@@ -88,7 +94,9 @@ const Sidebar = ({
   const {
     activeCapability,
     bootStatus,
+    preferredCapabilityId,
     setActiveCapability,
+    setPreferredCapabilityId,
     capabilities,
     updateCapabilityMetadata,
   } = useCapability();
@@ -104,6 +112,7 @@ const Sidebar = ({
     () => capabilities.filter(capability => capability.status === 'ARCHIVED'),
     [capabilities],
   );
+  const isPreferredCapability = preferredCapabilityId === activeCapability.id;
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -148,6 +157,15 @@ const Sidebar = ({
     navigate('/capabilities/metadata');
   };
 
+  const handleSetDefaultCapability = () => {
+    setPreferredCapabilityId(activeCapability.id);
+    success(
+      'Default capability updated',
+      `${activeCapability.name} will open as the default workspace capability.`,
+    );
+    setIsCapabilityMenuOpen(false);
+  };
+
   return (
     <aside
       className={cn(
@@ -168,7 +186,7 @@ const Sidebar = ({
           {!isCollapsed ? (
             <div>
               <h2 className="text-base font-bold tracking-tight text-on-surface">
-                Singularity Neo
+                Singulairy
               </h2>
               <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-secondary">
                 Delivery Console
@@ -273,6 +291,11 @@ const Sidebar = ({
                       .filter(Boolean)
                       .join(' • ') || activeCapability.description}
                   </p>
+                  {isPreferredCapability ? (
+                    <p className="mt-2 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-primary">
+                      Default workspace capability
+                    </p>
+                  ) : null}
                 </div>
                 <StatusBadge
                   tone={activeCapability.status === 'ARCHIVED' ? 'warning' : 'success'}
@@ -375,11 +398,20 @@ const Sidebar = ({
                 <div className="border-t border-outline-variant/40 pt-2">
                   <button
                     type="button"
+                    onClick={handleSetDefaultCapability}
+                    disabled={bootStatus !== 'ready' || isPreferredCapability}
+                    className="enterprise-button enterprise-button-secondary w-full disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Star size={16} />
+                    {isPreferredCapability ? 'Default capability selected' : 'Set as default'}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => {
                       setIsCapabilityMenuOpen(false);
                       navigate('/capabilities/metadata');
                     }}
-                    className="enterprise-button enterprise-button-secondary w-full"
+                    className="enterprise-button enterprise-button-secondary mt-2 w-full"
                   >
                     Edit capability
                   </button>
@@ -609,9 +641,11 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     capabilities,
     getCapabilityWorkspace,
     lastSyncError,
+    preferredCapabilityId,
     retryInitialSync,
     setActiveCapability,
     setActiveChatAgent,
+    setPreferredCapabilityId,
     updateCapabilityMetadata,
   } = useCapability();
   const { success } = useToast();
@@ -645,6 +679,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
 
   const isImmersiveRoute =
     location.pathname === '/workflow-designer-neo' || location.pathname === '/designer';
+  const isPreferredCapability = preferredCapabilityId === activeCapability.id;
   const activeWorkspace = activeCapability.id
     ? getCapabilityWorkspace(activeCapability.id)
     : null;
@@ -724,7 +759,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
       {
         key: 'help:singularity-overview',
         label: 'Help menu',
-        description: 'Understand how Singularity Neo works, what each workspace does, and where to go next.',
+        description: 'Understand how Singulairy works, what each workspace does, and where to go next.',
         section: 'Guides',
         type: 'guide' as const,
         onSelect: () => setIsHelpMenuOpen(true),
@@ -767,8 +802,12 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
       ),
     [commandResults],
   );
+  const isDatabaseSetupRoute =
+    location.pathname === '/workspace/databases' ||
+    location.pathname === '/capabilities/databases';
   const showBlockingSyncState =
-    bootStatus === 'loading' || (bootStatus === 'degraded' && capabilities.length === 0);
+    !isDatabaseSetupRoute &&
+    (bootStatus === 'loading' || (bootStatus === 'degraded' && capabilities.length === 0));
   const showNoCapabilityState =
     !showBlockingSyncState &&
     bootStatus === 'ready' &&
@@ -839,13 +878,20 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                     : lastSyncError || 'Retry after restoring the backend connection.'}
                 </p>
                 {bootStatus !== 'loading' ? (
-                  <div className="flex justify-center">
+                  <div className="flex flex-wrap justify-center gap-3">
                     <button
                       type="button"
                       onClick={() => void retryInitialSync()}
                       className="enterprise-button enterprise-button-primary"
                     >
                       Retry sync
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/workspace/databases')}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      Database setup
                     </button>
                   </div>
                 ) : null}
@@ -859,15 +905,25 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                   Create the first capability workspace
                 </h2>
                 <p className="text-sm leading-relaxed text-secondary">
-                  The backend is connected, but no capabilities have been created yet.
+                  The backend is connected, but no capabilities have been created yet. If you just
+                  initialized a new database, the shared standards are already loaded into the
+                  hidden system foundation capability even though this workspace stays empty until
+                  you create the first business capability.
                 </p>
-                <div className="flex justify-center">
+                <div className="flex flex-wrap justify-center gap-3">
                   <button
                     type="button"
                     onClick={() => navigate('/capabilities/new')}
                     className="enterprise-button enterprise-button-primary"
                   >
                     Create Capability
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => navigate('/workspace/databases')}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    Open Database Setup
                   </button>
                 </div>
               </div>
@@ -919,7 +975,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
           <div className="relative h-full w-[22rem] max-w-[90vw] overflow-y-auto border-r border-outline-variant/60 bg-white px-5 py-5 shadow-[0_20px_60px_rgba(12,23,39,0.2)]">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-base font-bold text-on-surface">Singularity Neo</h2>
+                <h2 className="text-base font-bold text-on-surface">Singulairy</h2>
                 <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-secondary">
                   Delivery Console
                 </p>
@@ -952,6 +1008,11 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                       .filter(Boolean)
                       .join(' • ') || activeCapability.description}
                   </p>
+                  {isPreferredCapability ? (
+                    <p className="mt-2 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-primary">
+                      Default workspace capability
+                    </p>
+                  ) : null}
                 </div>
               </button>
               <div className="mt-3 space-y-2">
@@ -976,6 +1037,22 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                 ))}
               </div>
               <div className="mt-3 grid gap-2">
+                <button
+                  type="button"
+                  disabled={bootStatus !== 'ready' || isPreferredCapability}
+                  onClick={() => {
+                    setPreferredCapabilityId(activeCapability.id);
+                    success(
+                      'Default capability updated',
+                      `${activeCapability.name} will open as the default workspace capability.`,
+                    );
+                    setIsMobileNavOpen(false);
+                  }}
+                  className="enterprise-button enterprise-button-secondary w-full disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Star size={16} />
+                  {isPreferredCapability ? 'Default capability selected' : 'Set as default'}
+                </button>
                 <button
                   type="button"
                   onClick={() => {

@@ -1,5 +1,3 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   AgentTask,
   Artifact,
@@ -10,6 +8,7 @@ import {
   CompiledWorkItemPlan,
   ContrarianConflictReview,
   ExecutionLog,
+  LearningUpdate,
   MemoryReference,
   RunWait,
   RunEvent,
@@ -24,6 +23,7 @@ import {
   WorkflowRunDetail,
   WorkflowRunStep,
   WorkItem,
+  WorkItemAttachmentUpload,
   WorkItemBlocker,
   WorkItemHistoryEntry,
   WorkItemPhase,
@@ -53,7 +53,18 @@ import {
   isWorkflowControlNode,
   isVisibleWorkflowNode,
 } from '../../src/lib/workflowGraph';
+import {
+  getWorkItemTaskTypeLabel,
+  normalizeWorkItemTaskType,
+  resolveWorkItemEntryStep,
+} from '../../src/lib/workItemTaskTypes';
+import {
+  buildWorkItemPhaseSignatureMarkdown,
+  normalizeWorkItemPhaseStakeholders,
+} from '../../src/lib/workItemStakeholders';
 import { invokeScopedCapabilitySession } from '../githubModels';
+import { queueSingleAgentLearningRefresh } from '../agentLearning/service';
+import { wakeAgentLearningWorker } from '../agentLearning/worker';
 import { buildMemoryContext, refreshCapabilityMemory } from '../memory';
 import { evaluateToolPolicy } from '../policy';
 import {
@@ -73,6 +84,7 @@ import {
   updateWorkflowRunStep,
 } from './repository';
 import {
+  classifyToolExecutionError,
   executeTool,
   listToolDescriptions,
 } from './tools';
@@ -88,74 +100,18 @@ import {
   startTelemetrySpan,
 } from '../telemetry';
 import { getCapabilityWorkspaceRoots } from '../workspacePaths';
+import {
+  buildWorkspaceProfilePromptLines,
+  detectWorkspaceProfile,
+} from '../workspaceProfile';
 
 const MAX_AGENT_TOOL_LOOPS = 8;
 
 const createHistoryId = () => `HIST-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createLogId = () => `LOG-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createArtifactId = () => `ART-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
-
-const detectWorkspaceProfile = (workspaceRoots: string[]) => {
-  const sampledFiles: string[] = [];
-  let detectedStack = 'Generic text/code workspace';
-
-  for (const root of workspaceRoots) {
-    if (!root || !fs.existsSync(root)) {
-      continue;
-    }
-
-    const candidates = [
-      'pyproject.toml',
-      'requirements.txt',
-      'setup.py',
-      'Pipfile',
-      'pytest.ini',
-      'tox.ini',
-      'package.json',
-      'README.md',
-      'calculator.py',
-    ];
-
-    for (const relativePath of candidates) {
-      const absolutePath = path.join(root, relativePath);
-      if (fs.existsSync(absolutePath)) {
-        sampledFiles.push(relativePath);
-      }
-    }
-
-    const topLevel = fs.readdirSync(root, { withFileTypes: true }).slice(0, 80);
-    const nestedPythonEntry = topLevel.find(entry => {
-      if (!entry.isDirectory() || entry.name.startsWith('.')) {
-        return false;
-      }
-      return fs.existsSync(path.join(root, entry.name, 'pyproject.toml')) ||
-        fs.existsSync(path.join(root, entry.name, 'requirements.txt')) ||
-        fs.existsSync(path.join(root, entry.name, 'setup.py')) ||
-        fs.existsSync(path.join(root, entry.name, 'calculator.py'));
-    });
-
-    if (nestedPythonEntry) {
-      const nestedRoot = nestedPythonEntry.name;
-      ['pyproject.toml', 'requirements.txt', 'setup.py', 'calculator.py', 'README.md'].forEach(file => {
-        if (fs.existsSync(path.join(root, nestedRoot, file))) {
-          sampledFiles.push(`${nestedRoot}/${file}`);
-        }
-      });
-    }
-  }
-
-  const dedupedFiles = Array.from(new Set(sampledFiles));
-  if (dedupedFiles.some(file => /(^|\/)(pyproject\.toml|requirements\.txt|setup\.py|Pipfile|calculator\.py)$/i.test(file))) {
-    detectedStack = 'Python workspace';
-  } else if (dedupedFiles.some(file => /(^|\/)package\.json$/i.test(file))) {
-    detectedStack = 'Node.js workspace';
-  }
-
-  return {
-    detectedStack,
-    sampledFiles: dedupedFiles.slice(0, 8),
-  };
-};
+const createLearningUpdateId = () =>
+  `LEARN-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 
 type ExecutionDecision =
   | {
@@ -218,12 +174,15 @@ const formatTaskTimestamp = () =>
     minute: '2-digit',
   });
 
-const summarizeOutput = (value: string) =>
-  value.replace(/\s+/g, ' ').trim().slice(0, 280);
+const summarizeOutput = (value?: unknown) =>
+  String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 280);
 
-const compactMarkdownSummary = (value: string) =>
+const compactMarkdownSummary = (value?: unknown) =>
   summarizeOutput(
-    value
+    String(value || '')
       .replace(/```[\s\S]*?```/g, match =>
         match
           .replace(/^```[\w-]*\n?/, '')
@@ -245,9 +204,48 @@ const compactMarkdownSummary = (value: string) =>
   );
 
 const formatToolLabel = (toolId: ToolAdapterId) =>
-  toolId
+  String(toolId || 'tool')
     .replace(/_/g, ' ')
     .replace(/\b\w/g, character => character.toUpperCase());
+
+const TOOL_ID_ALIASES: Record<string, ToolAdapterId> = {
+  workspace_list: 'workspace_list',
+  code_list: 'workspace_list',
+  file_list: 'workspace_list',
+  list_files: 'workspace_list',
+  workspace_read: 'workspace_read',
+  code_read: 'workspace_read',
+  file_read: 'workspace_read',
+  read_file: 'workspace_read',
+  workspace_search: 'workspace_search',
+  code_search: 'workspace_search',
+  file_search: 'workspace_search',
+  search_code: 'workspace_search',
+  workspace_write: 'workspace_write',
+  code_write: 'workspace_write',
+  file_write: 'workspace_write',
+  write_file: 'workspace_write',
+  edit_file: 'workspace_write',
+  git_status: 'git_status',
+  repo_status: 'git_status',
+  run_build: 'run_build',
+  build: 'run_build',
+  run_test: 'run_test',
+  test: 'run_test',
+  run_docs: 'run_docs',
+  docs: 'run_docs',
+  run_deploy: 'run_deploy',
+  deploy: 'run_deploy',
+};
+
+const normalizeToolAdapterId = (value: unknown): ToolAdapterId | null => {
+  const normalized = normalizeString(value).toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  return TOOL_ID_ALIASES[normalized] || null;
+};
 
 const buildDecisionProgressMessage = (decision: ExecutionDecision) => {
   if (decision.action === 'invoke_tool') {
@@ -271,6 +269,150 @@ const buildDecisionProgressMessage = (decision: ExecutionDecision) => {
   }
 
   return 'Prepared a failure outcome for this workflow step.';
+};
+
+const normalizeDecisionSummary = (
+  action: ExecutionDecision['action'],
+  summary: unknown,
+) => {
+  const normalized = normalizeString(summary);
+  if (normalized) {
+    return normalized;
+  }
+
+  switch (action) {
+    case 'invoke_tool':
+      return 'Prepared the next tool action for this workflow step.';
+    case 'complete':
+      return 'Completed the current workflow step.';
+    case 'pause_for_input':
+      return 'Paused the step for structured operator input.';
+    case 'pause_for_approval':
+      return 'Paused the step for human approval.';
+    case 'pause_for_conflict':
+      return 'Paused the step for conflict resolution.';
+    case 'fail':
+      return 'Failed the current workflow step.';
+    default:
+      return 'Updated the workflow step state.';
+  }
+};
+
+export const normalizeExecutionDecision = (
+  value: Record<string, any>,
+): ExecutionDecision => {
+  const action = normalizeString(value.action);
+  const reasoning =
+    normalizeString(value.reasoning) || 'No reasoning was returned by the execution model.';
+
+  if (action === 'invoke_tool') {
+    const toolId = normalizeToolAdapterId(value.toolCall?.toolId);
+    if (!toolId) {
+      return {
+        action: 'fail',
+        reasoning,
+        summary:
+          'Execution model requested a tool action without specifying a valid tool id.',
+      };
+    }
+
+    return {
+      action,
+      reasoning,
+      summary: normalizeDecisionSummary(action, value.summary),
+      toolCall: {
+        toolId,
+        args:
+          value.toolCall?.args && typeof value.toolCall.args === 'object'
+            ? value.toolCall.args
+            : {},
+      },
+    };
+  }
+
+  if (action === 'complete' || action === 'fail') {
+    return {
+      action,
+      reasoning,
+      summary: normalizeDecisionSummary(action, value.summary),
+    };
+  }
+
+  if (
+    action === 'pause_for_input' ||
+    action === 'pause_for_approval' ||
+    action === 'pause_for_conflict'
+  ) {
+    return {
+      action,
+      reasoning,
+      summary: normalizeDecisionSummary(action, value.summary),
+      wait: {
+        type: value.wait?.type,
+        message:
+          normalizeString(value.wait?.message) ||
+          'The workflow is waiting for operator action.',
+      },
+    };
+  }
+
+  return {
+    action: 'fail',
+    reasoning,
+    summary: normalizeDecisionSummary('fail', value.summary || value.action),
+  };
+};
+
+export const getExecutionDecisionRepairReason = (value: Record<string, any>) => {
+  const action = normalizeString(value.action);
+
+  if (action === 'invoke_tool' && !normalizeString(value.toolCall?.toolId)) {
+    return 'Tool action was missing toolCall.toolId.';
+  }
+
+  if (
+    (action === 'pause_for_input' ||
+      action === 'pause_for_approval' ||
+      action === 'pause_for_conflict') &&
+    !normalizeString(value.wait?.type)
+  ) {
+    return 'Wait action was missing wait.type.';
+  }
+
+  return null;
+};
+
+export const getRecoverableDecisionFeedback = (
+  decision: ExecutionDecision,
+) => {
+  if (
+    decision.action === 'fail' &&
+    decision.summary ===
+      'Execution model requested a tool action without specifying a valid tool id.'
+  ) {
+    return 'The previous response attempted a tool call without toolCall.toolId. Choose exactly one tool from the allowed list and return a complete invoke_tool decision with valid args.';
+  }
+
+  return null;
+};
+
+export const buildToolLoopExhaustedWaitMessage = ({
+  step,
+  inspectedPaths,
+  attemptedTools,
+}: {
+  step: WorkflowStep;
+  inspectedPaths: string[];
+  attemptedTools: ToolAdapterId[];
+}) => {
+  const attemptedSummary = attemptedTools.length
+    ? attemptedTools.map(formatToolLabel).join(', ')
+    : 'No tools were executed';
+  const inspectedSummary = inspectedPaths.length
+    ? inspectedPaths.join(', ')
+    : 'No specific files were inspected';
+
+  return `${step.name} explored the workspace for too long without moving into a concrete implementation result. It already used: ${attemptedSummary}. Recent files or paths inspected: ${inspectedSummary}. Provide direct implementation guidance such as the exact files to edit, the change to make, or confirmation that it should start writing code now.`;
 };
 
 const emitRunProgressEvent = async ({
@@ -390,6 +532,25 @@ const buildMarkdownArtifact = (sections: Array<[string, string | undefined]>) =>
     .filter(([, value]) => Boolean(value))
     .map(([heading, value]) => `## ${heading}\n${value}`)
     .join('\n\n');
+
+const summarizeText = (value: string, limit = 240) => {
+  const trimmed = value.replace(/\s+/g, ' ').trim();
+  if (trimmed.length <= limit) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, Math.max(0, limit - 1)).trimEnd()}...`;
+};
+
+const inferAttachmentContentFormat = (
+  attachment: WorkItemAttachmentUpload,
+): Artifact['contentFormat'] => {
+  const lowerName = attachment.fileName.toLowerCase();
+  const lowerMime = String(attachment.mimeType || '').toLowerCase();
+  if (lowerName.endsWith('.md') || lowerMime.includes('markdown')) {
+    return 'MARKDOWN';
+  }
+  return 'TEXT';
+};
 
 const formatMarkdownList = (items: string[]) =>
   items.length > 0 ? items.map(item => `- ${item}`).join('\n') : 'None captured.';
@@ -644,6 +805,7 @@ const persistProjection = async ({
   workflow,
   logsToAppend = [],
   artifacts,
+  learningUpdates,
   taskMutator,
 }: {
   capabilityId: string;
@@ -652,6 +814,7 @@ const persistProjection = async ({
   workflow: Workflow;
   logsToAppend?: ExecutionLog[];
   artifacts?: Artifact[];
+  learningUpdates?: LearningUpdate[];
   taskMutator?: (tasks: AgentTask[]) => AgentTask[];
 }) => {
   const syncedTasks = syncWorkflowManagedTasksForWorkItem({
@@ -667,27 +830,286 @@ const persistProjection = async ({
     tasks: nextTasks,
     executionLogs: [...workspace.executionLogs, ...logsToAppend],
     artifacts: artifacts || workspace.artifacts,
+    learningUpdates: learningUpdates || workspace.learningUpdates,
   });
 };
 
-const extractJsonObject = (value: string) => {
+const buildTargetedLearningUpdates = ({
+  workspace,
+  capabilityId,
+  focusedAgentId,
+  insight,
+  triggerType,
+  relatedWorkItemId,
+  relatedRunId,
+  sourceLogIds = [],
+}: {
+  workspace: ProjectionContext['workspace'];
+  capabilityId: string;
+  focusedAgentId?: string;
+  insight: string;
+  triggerType: NonNullable<LearningUpdate['triggerType']>;
+  relatedWorkItemId?: string;
+  relatedRunId?: string;
+  sourceLogIds?: string[];
+}) => {
+  const ownerAgentId = workspace.agents.find(agent => agent.isOwner)?.id;
+  const executionAgentId = workspace.agents.find(
+    agent => agent.standardTemplateKey === 'EXECUTION-OPS',
+  )?.id;
+  const targetAgentIds = [...new Set([focusedAgentId, ownerAgentId, executionAgentId])]
+    .filter((value): value is string => Boolean(value));
+
+  const nextUpdates = targetAgentIds.map(
+    agentId =>
+      ({
+        id: createLearningUpdateId(),
+        capabilityId,
+        agentId,
+        sourceLogIds,
+        insight,
+        timestamp: new Date().toISOString(),
+        triggerType,
+        relatedWorkItemId,
+        relatedRunId,
+      }) satisfies LearningUpdate,
+  );
+
+  return [...workspace.learningUpdates, ...nextUpdates];
+};
+
+const queueTargetedLearningRefresh = async ({
+  workspace,
+  capabilityId,
+  focusedAgentId,
+  triggerType,
+}: {
+  workspace: ProjectionContext['workspace'];
+  capabilityId: string;
+  focusedAgentId?: string;
+  triggerType: NonNullable<LearningUpdate['triggerType']>;
+}) => {
+  const ownerAgentId = workspace.agents.find(agent => agent.isOwner)?.id;
+  const executionAgentId = workspace.agents.find(
+    agent => agent.standardTemplateKey === 'EXECUTION-OPS',
+  )?.id;
+  const targetAgentIds = [...new Set([focusedAgentId, ownerAgentId, executionAgentId])]
+    .filter((value): value is string => Boolean(value));
+
+  await Promise.all(
+    targetAgentIds.map(agentId =>
+      queueSingleAgentLearningRefresh(
+        capabilityId,
+        agentId,
+        `execution-feedback:${triggerType.toLowerCase()}`,
+      ),
+    ),
+  ).catch(() => undefined);
+  wakeAgentLearningWorker();
+};
+
+const extractBalancedJsonCandidates = (value: string) => {
+  const candidates: string[] = [];
+  let startIndex = -1;
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+
+    if (startIndex === -1) {
+      if (character === '{') {
+        startIndex = index;
+        depth = 1;
+        inString = false;
+        escaping = false;
+      }
+      continue;
+    }
+
+    if (escaping) {
+      escaping = false;
+      continue;
+    }
+
+    if (character === '\\' && inString) {
+      escaping = true;
+      continue;
+    }
+
+    if (character === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (character === '{') {
+      depth += 1;
+      continue;
+    }
+
+    if (character === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        candidates.push(value.slice(startIndex, index + 1));
+        startIndex = -1;
+      }
+    }
+  }
+
+  return candidates;
+};
+
+const tryParseJsonObject = (value?: string | null) => {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, any>)
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+export const extractJsonObject = (value: string) => {
   const trimmed = value.trim();
   const candidates = [
     trimmed,
     trimmed.match(/```json\s*([\s\S]*?)```/i)?.[1],
     trimmed.match(/```\s*([\s\S]*?)```/i)?.[1],
+    ...extractBalancedJsonCandidates(trimmed),
     trimmed.slice(trimmed.indexOf('{'), trimmed.lastIndexOf('}') + 1),
   ].filter(Boolean) as string[];
 
   for (const candidate of candidates) {
-    try {
-      return JSON.parse(candidate) as Record<string, any>;
-    } catch {
-      continue;
+    const parsed = tryParseJsonObject(candidate);
+    if (parsed) {
+      return parsed;
     }
   }
 
   throw new Error('Model response did not contain valid JSON.');
+};
+
+const combineUsage = (
+  left: DecisionEnvelope['usage'],
+  right: DecisionEnvelope['usage'],
+): DecisionEnvelope['usage'] => ({
+  promptTokens: left.promptTokens + right.promptTokens,
+  completionTokens: left.completionTokens + right.completionTokens,
+  totalTokens: left.totalTokens + right.totalTokens,
+  estimatedCostUsd: Number((left.estimatedCostUsd + right.estimatedCostUsd).toFixed(4)),
+});
+
+export const buildExecutionFailureRecoveryMessage = (
+  step: WorkflowStep,
+  message: string,
+) => {
+  const normalizedMessage = String(message || '').trim();
+  const appendFailureDetail = (base: string) => {
+    if (!normalizedMessage) {
+      return base;
+    }
+
+    const condensed = normalizedMessage.replace(/\s+/g, ' ').trim();
+    if (!condensed) {
+      return base;
+    }
+
+    const detail = condensed.length > 240 ? `${condensed.slice(0, 237)}...` : condensed;
+    return `${base} Actual failure: ${detail}`;
+  };
+
+  if (/valid JSON/i.test(normalizedMessage)) {
+    return appendFailureDetail(
+      `${step.name} returned malformed structured output. Add guidance for this step and restart the workflow from ${step.phase}.`,
+    );
+  }
+
+  if (/timed out|timeout/i.test(normalizedMessage)) {
+    return appendFailureDetail(
+      `${step.name} timed out while waiting for the agent response. Add guidance or retry the step when the runtime is healthy.`,
+    );
+  }
+
+  if (/rate limit|too many requests/i.test(normalizedMessage)) {
+    return appendFailureDetail(
+      `${step.name} hit a model rate limit. Wait briefly, then add guidance or retry the step.`,
+    );
+  }
+
+  return appendFailureDetail(
+    `${step.name} could not complete automatically. Add guidance for the agent and restart this step.`,
+  );
+};
+
+const repairMalformedExecutionDecision = async ({
+  capability,
+  workItem,
+  workflow,
+  step,
+  runStep,
+  agent,
+  malformedResponse,
+  repairReason,
+}: {
+  capability: Capability;
+  workItem: WorkItem;
+  workflow: Workflow;
+  step: WorkflowStep;
+  runStep: WorkflowRunStep;
+  agent: CapabilityAgent;
+  malformedResponse: string;
+  repairReason?: string;
+}) => {
+  const startedAt = Date.now();
+  const repaired = await invokeScopedCapabilitySession({
+    capability,
+    agent,
+    scope: workItem.id ? 'WORK_ITEM' : 'TASK',
+    scopeId: workItem.id || runStep.id,
+    developerPrompt:
+      'You repair malformed workflow execution responses. Return one valid JSON object only with no markdown.',
+    prompt: [
+      `Workflow: ${workflow.name}`,
+      `Step: ${step.name}`,
+      `Phase: ${step.phase}`,
+      `Attempt: ${runStep.attemptCount}`,
+      repairReason
+        ? `The previous assistant response for this step was incomplete or invalid: ${repairReason}`
+        : 'The previous assistant response for this step was malformed and could not be parsed as JSON.',
+      'Repair it into exactly one valid JSON object without adding commentary.',
+      'If the intent is ambiguous after reading the malformed response, choose pause_for_input and ask for the smallest missing clarification.',
+      'Allowed shapes:',
+      '1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"README.md"}}}',
+      '2. {"action":"complete","reasoning":"...","summary":"..."}',
+      '3. {"action":"pause_for_input","reasoning":"...","wait":{"type":"INPUT","message":"..."}}',
+      '4. {"action":"pause_for_approval","reasoning":"...","wait":{"type":"APPROVAL","message":"..."}}',
+      '5. {"action":"pause_for_conflict","reasoning":"...","wait":{"type":"CONFLICT_RESOLUTION","message":"..."}}',
+      '6. {"action":"fail","reasoning":"...","summary":"..."}',
+      `Malformed response:\n${malformedResponse}`,
+    ].join('\n\n'),
+    timeoutMs: 45_000,
+    resetSession: true,
+  });
+
+  const repairedObject = extractJsonObject(repaired.content) as Record<string, any>;
+
+  return {
+    decision: normalizeExecutionDecision(repairedObject),
+    model: repaired.model,
+    usage: repaired.usage,
+    latencyMs: Date.now() - startedAt,
+  };
 };
 
 const requestContrarianConflictReview = async ({
@@ -822,9 +1244,11 @@ const requestStepDecision = async ({
   step,
   runStep,
   agent,
+  artifacts,
   compiledStepContext,
   compiledWorkItemPlan,
   toolHistory,
+  operatorGuidanceContext,
 }: {
   capability: Capability;
   workItem: WorkItem;
@@ -832,26 +1256,28 @@ const requestStepDecision = async ({
   step: WorkflowStep;
   runStep: WorkflowRunStep;
   agent: CapabilityAgent;
+  artifacts: Artifact[];
   compiledStepContext: CompiledStepContext;
   compiledWorkItemPlan: CompiledWorkItemPlan;
   toolHistory: Array<{ role: 'assistant' | 'user'; content: string }>;
+  operatorGuidanceContext?: string;
 }): Promise<DecisionEnvelope> => {
   const allowedToolIds = compiledStepContext.executionBoundary.allowedToolIds;
   const toolDescriptions = allowedToolIds.length
     ? listToolDescriptions(allowedToolIds).join('\n')
     : 'No tools are allowed for this step.';
   const approvedWorkspacePaths = getCapabilityWorkspaceRoots(capability);
-  const workspaceProfile = detectWorkspaceProfile(approvedWorkspacePaths);
+  const workspaceProfile = detectWorkspaceProfile({
+    defaultWorkspacePath: capability.executionConfig.defaultWorkspacePath,
+    workspaceRoots: approvedWorkspacePaths,
+  });
   const workspaceGuidance = approvedWorkspacePaths.length
     ? [
         capability.executionConfig.defaultWorkspacePath
           ? `Default approved workspace path: ${capability.executionConfig.defaultWorkspacePath}`
           : null,
         `Approved workspace paths: ${approvedWorkspacePaths.join(', ')}`,
-        `Detected workspace profile: ${workspaceProfile.detectedStack}`,
-        workspaceProfile.sampledFiles.length
-          ? `Observed workspace files: ${workspaceProfile.sampledFiles.join(', ')}`
-          : null,
+        ...buildWorkspaceProfilePromptLines(workspaceProfile),
         'When using workspace tools, prefer relative file paths and omit workspacePath unless you intentionally need a non-default approved workspace or approved subfolder.',
         'If you do provide workspacePath, it must be the approved root or a child folder inside one approved workspace root. Do not use sibling paths or parent traversal.',
       ]
@@ -859,10 +1285,32 @@ const requestStepDecision = async ({
         .join('\n')
     : 'No approved workspace paths are configured for this capability.';
   const startedAt = Date.now();
+  const workItemInputArtifacts = artifacts
+    .filter(
+      artifact =>
+        artifact.workItemId === workItem.id &&
+        artifact.direction === 'INPUT' &&
+        Boolean(artifact.contentText || artifact.summary),
+    )
+    .slice(0, 4);
+  const workItemInputArtifactPrompt = workItemInputArtifacts.length
+    ? workItemInputArtifacts
+        .map(
+          artifact =>
+            `- ${artifact.name}${artifact.mimeType ? ` (${artifact.mimeType})` : ''}\n${summarizeText(artifact.contentText || artifact.summary || '', 1200)}`,
+        )
+        .join('\n\n')
+    : 'No uploaded work item input files were attached.';
   const memoryContext = await buildMemoryContext({
     capabilityId: capability.id || workItem.capabilityId,
     agentId: agent.id,
-    queryText: [workItem.title, workItem.description, step.action, step.name]
+    queryText: [
+      workItem.title,
+      workItem.description,
+      step.action,
+      step.name,
+      ...workItemInputArtifacts.map(artifact => artifact.name),
+    ]
       .filter(Boolean)
       .join('\n'),
   });
@@ -885,8 +1333,10 @@ const requestStepDecision = async ({
       `Step objective: ${compiledStepContext.objective}`,
       `Step guidance: ${compiledStepContext.description || 'None'}`,
       `Execution notes: ${compiledStepContext.executionNotes || 'None'}`,
+      `Attached work item input files:\n${workItemInputArtifactPrompt}`,
       `Workflow hand-off context from prior completed steps:\n${compiledStepContext.handoffContext || 'None'}`,
       `Resolved human input/conflict context for this step:\n${compiledStepContext.resolvedWaitContext || 'None'}`,
+      `Explicit operator guidance and override context:\n${operatorGuidanceContext || 'None'}`,
       `Allowed tools:\n${toolDescriptions}`,
       `Workspace policy:\n${workspaceGuidance}`,
       toolHistory.length
@@ -896,6 +1346,7 @@ const requestStepDecision = async ({
         : null,
       'Treat the compiled step contract as authoritative. Stay inside the execution boundary, use the required inputs and artifact checklist as the operating contract, and never invent orchestration outside this single step.',
       'Use prior-step hand-offs, retrieved memory, and resolved human inputs as authoritative downstream context. Do not ask for information that is already present in those sections. If you truly need more input, explain exactly what new gap remains and why the existing context is insufficient.',
+      'If explicit operator guidance says to skip build, test, or docs execution for this attempt because the command template is unavailable or intentionally waived, do not keep retrying that tool. Complete the step with a clear note about the skipped validation, or pause for input only if the operator instruction is genuinely ambiguous.',
       'Return JSON with one of these shapes:',
       '1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"README.md"}}}',
       '2. {"action":"complete","reasoning":"...","summary":"..."}',
@@ -913,13 +1364,61 @@ const requestStepDecision = async ({
       .join('\n\n'),
   });
 
-  return {
-    decision: extractJsonObject(response.content) as ExecutionDecision,
-    model: response.model,
-    usage: response.usage,
-    latencyMs: Date.now() - startedAt,
-    retrievalReferences: memoryContext.results.map(result => result.reference),
-  } as DecisionEnvelope;
+  try {
+    const parsed = extractJsonObject(response.content) as Record<string, any>;
+    const repairReason = getExecutionDecisionRepairReason(parsed);
+    if (repairReason) {
+      const repaired = await repairMalformedExecutionDecision({
+        capability,
+        workItem,
+        workflow,
+        step,
+        runStep,
+        agent,
+        malformedResponse: response.content,
+        repairReason,
+      });
+
+      return {
+        decision: repaired.decision,
+        model: repaired.model,
+        usage: combineUsage(response.usage, repaired.usage),
+        latencyMs: Date.now() - startedAt,
+        retrievalReferences: memoryContext.results.map(result => result.reference),
+      } as DecisionEnvelope;
+    }
+
+    return {
+      decision: normalizeExecutionDecision(parsed),
+      model: response.model,
+      usage: response.usage,
+      latencyMs: Date.now() - startedAt,
+      retrievalReferences: memoryContext.results.map(result => result.reference),
+    } as DecisionEnvelope;
+  } catch (error) {
+    if (!(error instanceof Error) || !/valid JSON/i.test(error.message)) {
+      throw error;
+    }
+
+    const repaired = await repairMalformedExecutionDecision({
+      capability,
+      workItem,
+      workflow,
+        step,
+        runStep,
+        agent,
+        malformedResponse: response.content,
+        repairReason: 'The response did not contain valid JSON.',
+      });
+
+    return {
+      decision: repaired.decision,
+      model: repaired.model,
+      usage: combineUsage(response.usage, repaired.usage),
+      latencyMs: Date.now() - startedAt,
+      retrievalReferences: memoryContext.results.map(result => result.reference),
+    } as DecisionEnvelope;
+  }
 };
 
 const getNormalizedWorkflowSnapshot = (detail: WorkflowRunDetail) =>
@@ -1283,6 +1782,61 @@ const buildResolvedWaitContext = ({
   return lines.length > 0 ? lines.join('\n') : undefined;
 };
 
+const buildOperatorGuidanceContext = ({
+  workItem,
+  artifacts,
+}: {
+  workItem: WorkItem;
+  artifacts: Artifact[];
+}) => {
+  const guidanceHistory = workItem.history
+    .filter(entry =>
+      [
+        'Agent guidance added',
+        'Stage control session completed',
+        'Changes requested',
+        'Conflict resolved',
+        'Human input provided',
+      ].includes(entry.action),
+    )
+    .slice(-6)
+    .map(entry => `${entry.action}: ${entry.detail}`);
+
+  const guidanceArtifacts = artifacts
+    .filter(
+      artifact =>
+        artifact.workItemId === workItem.id &&
+        (
+          artifact.artifactKind === 'INPUT_NOTE' ||
+          artifact.artifactKind === 'STAGE_CONTROL_NOTE' ||
+          artifact.artifactKind === 'CONFLICT_RESOLUTION' ||
+          artifact.artifactKind === 'APPROVAL_RECORD'
+        ),
+    )
+    .slice()
+    .sort(
+      (left, right) =>
+        new Date(right.created || 0).getTime() - new Date(left.created || 0).getTime(),
+    )
+    .slice(0, 4)
+    .reverse()
+    .map(
+      artifact =>
+        `${artifact.name}: ${artifact.summary || compactMarkdownSummary(artifact.contentText || '')}`,
+    );
+
+  const sections = [
+    guidanceHistory.length > 0
+      ? `Recent operator guidance history:\n${guidanceHistory.join('\n')}`
+      : null,
+    guidanceArtifacts.length > 0
+      ? `Latest operator guidance artifacts:\n${guidanceArtifacts.join('\n')}`
+      : null,
+  ].filter(Boolean) as string[];
+
+  return sections.length > 0 ? sections.join('\n\n') : undefined;
+};
+
 const buildStructuredInputWaitMessage = (
   step: WorkflowStep,
   missingInputs: CompiledRequiredInputField[],
@@ -1600,6 +2154,7 @@ const syncFailedProjection = async ({
   const projection = await resolveProjectionContext(detail.run.capabilityId, detail.run.workItemId, detail.run.workflowSnapshot);
   const currentStep = getCurrentWorkflowStep(detail);
   const runStep = getCurrentRunStep(detail);
+  const recoveryMessage = buildExecutionFailureRecoveryMessage(currentStep, message);
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     phase: currentStep.phase,
@@ -1607,14 +2162,14 @@ const syncFailedProjection = async ({
     assignedAgentId: currentStep.agentId,
     status: 'BLOCKED',
     pendingRequest: {
-      type: 'CONFLICT_RESOLUTION',
-      message,
+      type: 'INPUT',
+      message: recoveryMessage,
       requestedBy: currentStep.agentId,
       timestamp: new Date().toISOString(),
     },
     blocker: {
-      type: 'CONFLICT_RESOLUTION',
-      message,
+      type: 'HUMAN_INPUT',
+      message: recoveryMessage,
       requestedBy: currentStep.agentId,
       timestamp: new Date().toISOString(),
       status: 'OPEN',
@@ -1624,6 +2179,13 @@ const syncFailedProjection = async ({
     history: [
       ...projection.workItem.history,
       createHistoryEntry('System', 'Execution failed', message, currentStep.phase, 'BLOCKED'),
+      createHistoryEntry(
+        'System',
+        'Guidance requested',
+        recoveryMessage,
+        currentStep.phase,
+        'BLOCKED',
+      ),
     ],
   };
 
@@ -1716,12 +2278,16 @@ const buildArtifactFromStepCompletion = ({
 
 const buildHandoffArtifact = ({
   detail,
+  workItem,
+  lifecycle,
   step,
   nextStep,
   runStep,
   summary,
 }: {
   detail: WorkflowRunDetail;
+  workItem?: WorkItem;
+  lifecycle?: Capability['lifecycle'];
   step: WorkflowStep;
   nextStep: WorkflowStep;
   runStep: WorkflowRunStep;
@@ -1754,11 +2320,19 @@ const buildHandoffArtifact = ({
   fileName: `${toFileSlug(detail.run.workItemId)}-${toFileSlug(step.name)}-handoff.md`,
   contentText: `# ${step.name} to ${nextStep.name} Handoff\n\n${buildMarkdownArtifact([
     ['Work Item', detail.run.workItemId],
-    ['Source Phase', getLifecyclePhaseLabel(undefined, step.phase)],
-    ['Target Phase', getLifecyclePhaseLabel(undefined, nextStep.phase)],
+    ['Source Phase', getLifecyclePhaseLabel(lifecycle, step.phase)],
+    ['Target Phase', getLifecyclePhaseLabel(lifecycle, nextStep.phase)],
     ['Source Agent', step.agentId],
     ['Target Agent', nextStep.agentId],
     ['Carry Forward Summary', summary],
+    [
+      'Signed On Behalf Of',
+      buildWorkItemPhaseSignatureMarkdown({
+        workItem,
+        source: lifecycle,
+        phaseId: nextStep.phase,
+      }),
+    ],
   ])}`,
   downloadable: true,
   traceId: detail.run.traceId,
@@ -1766,6 +2340,8 @@ const buildHandoffArtifact = ({
 
 const buildHumanInteractionArtifact = ({
   detail,
+  workItem,
+  lifecycle,
   step,
   runStep,
   wait,
@@ -1773,6 +2349,8 @@ const buildHumanInteractionArtifact = ({
   resolvedBy,
 }: {
   detail: WorkflowRunDetail;
+  workItem?: WorkItem;
+  lifecycle?: Capability['lifecycle'];
   step: WorkflowStep;
   runStep: WorkflowRunStep;
   wait: RunWait;
@@ -1834,7 +2412,7 @@ const buildHumanInteractionArtifact = ({
     fileName: `${toFileSlug(detail.run.workItemId)}-${toFileSlug(wait.type)}-${toFileSlug(step.name)}.md`,
     contentText: `# ${artifactName}\n\n${buildMarkdownArtifact([
       ['Work Item', detail.run.workItemId],
-      ['Phase', getLifecyclePhaseLabel(undefined, step.phase)],
+      ['Phase', getLifecyclePhaseLabel(lifecycle, step.phase)],
       ['Requested By', wait.requestedBy],
       ['Request', wait.message],
       requestedInputFields.length > 0
@@ -1847,6 +2425,14 @@ const buildHumanInteractionArtifact = ({
         : ['Requested Inputs', undefined],
       ['Resolved By', resolvedBy],
       ['Resolution', resolution],
+      [
+        'Signed On Behalf Of',
+        buildWorkItemPhaseSignatureMarkdown({
+          workItem,
+          source: lifecycle,
+          phaseId: step.phase,
+        }),
+      ],
       isCodeDiffApproval ? ['Code Diff Summary', codeDiffSummary] : ['Code Diff Summary', undefined],
       isCodeDiffApproval
         ? ['Linked Code Diff Artifact', codeDiffArtifactId]
@@ -1857,6 +2443,540 @@ const buildHumanInteractionArtifact = ({
     ])}`,
     downloadable: true,
     traceId: detail.run.traceId,
+  };
+};
+
+const buildOperatorGuidanceArtifact = ({
+  capabilityId,
+  workItem,
+  lifecycle,
+  workflow,
+  guidance,
+  guidedBy,
+}: {
+  capabilityId: string;
+  workItem: WorkItem;
+  lifecycle?: Capability['lifecycle'];
+  workflow: Workflow;
+  guidance: string;
+  guidedBy: string;
+}): Artifact => ({
+  id: createArtifactId(),
+  name: `${workItem.title} Agent Guidance`,
+  capabilityId,
+  type: 'Human Interaction',
+  version: `phase-${toFileSlug(workItem.phase)}`,
+  agent: guidedBy,
+  created: new Date().toISOString(),
+  direction: 'OUTPUT',
+  connectedAgentId: workItem.assignedAgentId,
+  sourceWorkflowId: workflow.id,
+  summary: compactMarkdownSummary(guidance),
+  artifactKind: 'INPUT_NOTE',
+  phase: workItem.phase,
+  workItemId: workItem.id,
+  contentFormat: 'MARKDOWN',
+  mimeType: 'text/markdown',
+  fileName: `${toFileSlug(workItem.id)}-agent-guidance.md`,
+  contentText: `# Agent Guidance\n\n${buildMarkdownArtifact([
+    ['Work Item', workItem.id],
+    ['Phase', getLifecyclePhaseLabel(lifecycle, workItem.phase)],
+    ['Guided By', guidedBy],
+    ['Current Status', workItem.status],
+    ['Guidance', guidance],
+    [
+      'Signed On Behalf Of',
+      buildWorkItemPhaseSignatureMarkdown({
+        workItem,
+        source: lifecycle,
+        phaseId: workItem.phase,
+      }),
+    ],
+  ])}`,
+  downloadable: true,
+});
+
+const buildWorkItemAttachmentArtifact = ({
+  capability,
+  workflow,
+  workItem,
+  attachment,
+}: {
+  capability: Capability;
+  workflow: Workflow;
+  workItem: WorkItem;
+  attachment: WorkItemAttachmentUpload;
+}): Artifact => {
+  const preview = summarizeText(attachment.contentText);
+  const artifactName = `${workItem.title} · ${attachment.fileName}`;
+  const contentFormat = inferAttachmentContentFormat(attachment);
+
+  return {
+    id: createArtifactId(),
+    name: artifactName,
+    capabilityId: capability.id,
+    type: 'Reference Document',
+    version: `phase-${toFileSlug(workItem.phase)}`,
+    agent: 'User Upload',
+    created: new Date().toISOString(),
+    direction: 'INPUT',
+    connectedAgentId: workItem.assignedAgentId,
+    sourceWorkflowId: workflow.id,
+    summary: compactMarkdownSummary(
+      `Uploaded work item reference file ${attachment.fileName}. ${preview}`,
+    ),
+    artifactKind: 'INPUT_NOTE',
+    phase: workItem.phase,
+    workItemId: workItem.id,
+    contentFormat,
+    mimeType: attachment.mimeType || 'text/plain',
+    fileName: attachment.fileName,
+    contentText:
+      contentFormat === 'MARKDOWN'
+        ? `# ${attachment.fileName}\n\n${buildMarkdownArtifact([
+            ['Work Item', workItem.id],
+            ['Phase', getLifecyclePhaseLabel(capability.lifecycle, workItem.phase)],
+            ['Uploaded For', workItem.title],
+            ['Summary', preview],
+          ])}\n\n## Source Content\n\n${attachment.contentText}`
+        : `# ${attachment.fileName}\n\n${buildMarkdownArtifact([
+            ['Work Item', workItem.id],
+            ['Phase', getLifecyclePhaseLabel(capability.lifecycle, workItem.phase)],
+            ['Uploaded For', workItem.title],
+            ['Summary', preview],
+          ])}\n\n## Source Content\n\n${attachment.contentText}`,
+    downloadable: true,
+  };
+};
+
+const recordOperatorGuidance = async ({
+  capabilityId,
+  workItemId,
+  workflowOverride,
+  guidance,
+  guidedBy,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  workflowOverride?: Workflow;
+  guidance?: string;
+  guidedBy?: string;
+}) => {
+  const trimmedGuidance = guidance?.trim();
+  if (!trimmedGuidance) {
+    return resolveProjectionContext(capabilityId, workItemId, workflowOverride);
+  }
+
+  const projection = await resolveProjectionContext(
+    capabilityId,
+    workItemId,
+    workflowOverride,
+  );
+  const actor = guidedBy?.trim() || 'Capability Owner';
+  const guidanceArtifact = buildOperatorGuidanceArtifact({
+    capabilityId,
+    workItem: projection.workItem,
+    lifecycle: projection.capability.lifecycle,
+    workflow: projection.workflow,
+    guidance: trimmedGuidance,
+    guidedBy: actor,
+  });
+  const nextWorkItem: WorkItem = {
+    ...projection.workItem,
+    history: [
+      ...projection.workItem.history,
+      createHistoryEntry(
+        actor,
+        'Agent guidance added',
+        trimmedGuidance,
+        projection.workItem.phase,
+        projection.workItem.status,
+      ),
+    ],
+  };
+  const nextArtifacts = replaceArtifacts(projection.workspace.artifacts, [
+    guidanceArtifact,
+  ]);
+  const guidanceLog = createExecutionLog({
+    capabilityId,
+    taskId: projection.workItem.id,
+    agentId: projection.workItem.assignedAgentId || 'SYSTEM',
+    message: trimmedGuidance,
+    metadata: {
+      interactionType: 'AGENT_GUIDANCE',
+      artifactId: guidanceArtifact.id,
+      guidedBy: actor,
+    },
+  });
+  const nextLearningUpdates = buildTargetedLearningUpdates({
+    workspace: projection.workspace,
+    capabilityId,
+    focusedAgentId: projection.workItem.assignedAgentId,
+    insight: `Operator guidance was added for ${projection.workItem.title}: ${trimmedGuidance}`,
+    triggerType: 'GUIDANCE',
+    relatedWorkItemId: projection.workItem.id,
+    relatedRunId: projection.workItem.activeRunId || projection.workItem.lastRunId,
+    sourceLogIds: [guidanceLog.id],
+  });
+
+  await persistProjection({
+    capabilityId,
+    workspace: projection.workspace,
+    workItem: nextWorkItem,
+    workflow: projection.workflow,
+    artifacts: nextArtifacts,
+    logsToAppend: [guidanceLog],
+    learningUpdates: nextLearningUpdates,
+  });
+  await refreshCapabilityMemory(capabilityId).catch(() => undefined);
+  await queueTargetedLearningRefresh({
+    workspace: projection.workspace,
+    capabilityId,
+    focusedAgentId: projection.workItem.assignedAgentId,
+    triggerType: 'GUIDANCE',
+  });
+
+  return {
+    ...projection,
+    workItem: nextWorkItem,
+    workspace: {
+      ...projection.workspace,
+      workItems: replaceWorkItem(projection.workspace.workItems, nextWorkItem),
+      artifacts: nextArtifacts,
+    },
+  };
+};
+
+type StageControlConversationEntry = {
+  role: 'user' | 'agent';
+  content: string;
+  timestamp?: string;
+};
+
+const buildStageControlTranscriptMarkdown = (
+  conversation: StageControlConversationEntry[],
+) =>
+  conversation
+    .filter(entry => entry.content?.trim())
+    .map(entry => {
+      const speaker = entry.role === 'agent' ? 'Agent' : 'Operator';
+      const timestamp = entry.timestamp?.trim() ? ` (${entry.timestamp.trim()})` : '';
+      return `### ${speaker}${timestamp}\n\n${entry.content.trim()}`;
+    })
+    .join('\n\n');
+
+const buildStageControlCarryForwardNote = ({
+  workItem,
+  step,
+  conversation,
+  carryForwardNote,
+}: {
+  workItem: WorkItem;
+  step?: WorkflowStep;
+  conversation: StageControlConversationEntry[];
+  carryForwardNote?: string;
+}) => {
+  const trimmedCarryForward = carryForwardNote?.trim();
+  const latestOperatorMessage = [...conversation]
+    .reverse()
+    .find(entry => entry.role === 'user' && entry.content?.trim())
+    ?.content?.trim();
+  const latestAgentMessage = [...conversation]
+    .reverse()
+    .find(entry => entry.role === 'agent' && entry.content?.trim())
+    ?.content?.trim();
+
+  return [
+    trimmedCarryForward ? `Operator continuation note: ${trimmedCarryForward}` : null,
+    latestOperatorMessage ? `Latest operator direction: ${latestOperatorMessage}` : null,
+    latestAgentMessage ? `Latest agent conclusion: ${latestAgentMessage}` : null,
+    `Continue ${workItem.title}${step ? ` at ${step.name}` : ''} using the stage-control conversation as authoritative operator context.`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+};
+
+const buildStageControlArtifact = ({
+  capabilityId,
+  workItem,
+  lifecycle,
+  workflow,
+  step,
+  run,
+  runStepId,
+  conversation,
+  carryForwardNote,
+  resolvedBy,
+}: {
+  capabilityId: string;
+  workItem: WorkItem;
+  lifecycle?: Capability['lifecycle'];
+  workflow: Workflow;
+  step?: WorkflowStep;
+  run?: WorkflowRun | null;
+  runStepId?: string;
+  conversation: StageControlConversationEntry[];
+  carryForwardNote?: string;
+  resolvedBy: string;
+}): Artifact => ({
+  id: createArtifactId(),
+  name: `${workItem.title} Stage Control Note`,
+  capabilityId,
+  type: 'Human Interaction',
+  version: `phase-${toFileSlug(workItem.phase)}`,
+  agent: resolvedBy,
+  created: new Date().toISOString(),
+  direction: 'OUTPUT',
+  connectedAgentId: step?.agentId || workItem.assignedAgentId,
+  sourceWorkflowId: workflow.id,
+  runId: run?.id,
+  runStepId,
+  summary: compactMarkdownSummary(
+    buildStageControlCarryForwardNote({
+      workItem,
+      step,
+      conversation,
+      carryForwardNote,
+    }),
+  ),
+  artifactKind: 'STAGE_CONTROL_NOTE',
+  phase: workItem.phase,
+  workItemId: workItem.id,
+  contentFormat: 'MARKDOWN',
+  mimeType: 'text/markdown',
+  fileName: `${toFileSlug(workItem.id)}-stage-control-note.md`,
+  contentText: `# Stage Control Note\n\n${buildMarkdownArtifact([
+    ['Work Item', workItem.id],
+    ['Phase', getLifecyclePhaseLabel(lifecycle, workItem.phase)],
+    ['Stage', step?.name],
+    ['Resolved By', resolvedBy],
+    ['Run', run?.id],
+    ['Carry Forward', carryForwardNote?.trim() || undefined],
+    [
+      'Signed On Behalf Of',
+      buildWorkItemPhaseSignatureMarkdown({
+        workItem,
+        source: lifecycle,
+        phaseId: workItem.phase,
+      }),
+    ],
+  ])}\n\n## Conversation\n\n${buildStageControlTranscriptMarkdown(conversation) || 'No conversation transcript was captured.'}`,
+  downloadable: true,
+});
+
+export const continueWorkflowStageControl = async ({
+  capabilityId,
+  workItemId,
+  conversation,
+  carryForwardNote,
+  resolvedBy,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  conversation: StageControlConversationEntry[];
+  carryForwardNote?: string;
+  resolvedBy: string;
+}) => {
+  const trimmedConversation = conversation.filter(entry => entry.content?.trim());
+  const trimmedCarryForward = carryForwardNote?.trim();
+
+  if (trimmedConversation.length === 0 && !trimmedCarryForward) {
+    throw new Error('Add stage-control conversation or a carry-forward note before continuing.');
+  }
+
+  const projection = await resolveProjectionContext(capabilityId, workItemId);
+  const runId = projection.workItem.activeRunId || projection.workItem.lastRunId;
+  const runDetail = runId
+    ? await getWorkflowRunDetail(capabilityId, runId).catch(() => null)
+    : null;
+  const currentRunStep = runDetail
+    ? (() => {
+        try {
+          return getCurrentRunStep(runDetail);
+        } catch {
+          return null;
+        }
+      })()
+    : null;
+  const currentStep =
+    (runDetail ? getCurrentWorkflowStep(runDetail) : null) ||
+    (projection.workItem.currentStepId
+      ? projection.workflow.steps.find(step => step.id === projection.workItem.currentStepId)
+      : undefined) ||
+    projection.workflow.steps.find(step => step.phase === projection.workItem.phase) ||
+    projection.workflow.steps[0];
+  const carryForward = buildStageControlCarryForwardNote({
+    workItem: projection.workItem,
+    step: currentStep,
+    conversation: trimmedConversation,
+    carryForwardNote: trimmedCarryForward,
+  });
+  const stageControlArtifact = buildStageControlArtifact({
+    capabilityId,
+    workItem: projection.workItem,
+    lifecycle: projection.capability.lifecycle,
+    workflow: projection.workflow,
+    step: currentStep,
+    run: runDetail?.run || null,
+    runStepId: currentRunStep?.id,
+    conversation: trimmedConversation,
+    carryForwardNote: trimmedCarryForward,
+    resolvedBy,
+  });
+  const nextArtifacts = replaceArtifacts(projection.workspace.artifacts, [stageControlArtifact]);
+  const nextWorkItem: WorkItem = {
+    ...projection.workItem,
+    history: [
+      ...projection.workItem.history,
+      createHistoryEntry(
+        resolvedBy,
+        'Stage control session completed',
+        trimmedCarryForward || carryForward,
+        projection.workItem.phase,
+        projection.workItem.status,
+      ),
+    ],
+  };
+  const stageControlLog = createExecutionLog({
+    capabilityId,
+    taskId: projection.workItem.id,
+    agentId: currentStep?.agentId || projection.workItem.assignedAgentId || 'SYSTEM',
+    message: trimmedCarryForward || carryForward,
+    runId: runDetail?.run.id,
+    runStepId: currentRunStep?.id,
+    traceId: runDetail?.run.traceId,
+    metadata: {
+      interactionType: 'STAGE_CONTROL',
+      artifactId: stageControlArtifact.id,
+      resolvedBy,
+      messageCount: trimmedConversation.length,
+    },
+  });
+  const nextLearningUpdates = buildTargetedLearningUpdates({
+    workspace: projection.workspace,
+    capabilityId,
+    focusedAgentId: currentStep?.agentId || projection.workItem.assignedAgentId,
+    insight: `Stage control guidance was finalized for ${projection.workItem.title}: ${trimmedCarryForward || carryForward}`,
+    triggerType: 'STAGE_CONTROL',
+    relatedWorkItemId: projection.workItem.id,
+    relatedRunId: runDetail?.run.id,
+    sourceLogIds: [stageControlLog.id],
+  });
+
+  await persistProjection({
+    capabilityId,
+    workspace: projection.workspace,
+    workItem: nextWorkItem,
+    workflow: projection.workflow,
+    artifacts: nextArtifacts,
+    logsToAppend: [stageControlLog],
+    learningUpdates: nextLearningUpdates,
+  });
+  await refreshCapabilityMemory(capabilityId).catch(() => undefined);
+  await queueTargetedLearningRefresh({
+    workspace: projection.workspace,
+    capabilityId,
+    focusedAgentId: currentStep?.agentId || projection.workItem.assignedAgentId,
+    triggerType: 'STAGE_CONTROL',
+  });
+
+  const openWait =
+    runDetail?.waits.find(wait => wait.status === 'OPEN') || null;
+
+  if (runDetail && openWait) {
+    if (openWait.type === 'APPROVAL') {
+      const detail = await approveWorkflowRun({
+        capabilityId,
+        runId: runDetail.run.id,
+        resolution: carryForward,
+        resolvedBy,
+      });
+      return {
+        action: 'APPROVED_WAIT' as const,
+        summary: `${projection.workItem.title} was approved from the stage-control session and can move to the next stage once the current output is accepted.`,
+        artifactId: stageControlArtifact.id,
+        run: detail.run,
+      };
+    }
+
+    if (openWait.type === 'INPUT') {
+      const detail = await provideWorkflowRunInput({
+        capabilityId,
+        runId: runDetail.run.id,
+        resolution: carryForward,
+        resolvedBy,
+      });
+      return {
+        action: 'PROVIDED_INPUT' as const,
+        summary: `${projection.workItem.title} received the missing stage guidance and resumed from the current stage.`,
+        artifactId: stageControlArtifact.id,
+        run: detail.run,
+      };
+    }
+
+    const detail = await resolveWorkflowRunConflict({
+      capabilityId,
+      runId: runDetail.run.id,
+      resolution: carryForward,
+      resolvedBy,
+    });
+    return {
+      action: 'RESOLVED_CONFLICT' as const,
+      summary: `${projection.workItem.title} received an operator decision from stage control and resumed from the current stage.`,
+      artifactId: stageControlArtifact.id,
+      run: detail.run,
+    };
+  }
+
+  if (runDetail && ['QUEUED', 'RUNNING'].includes(runDetail.run.status)) {
+    await cancelWorkflowRun({
+      capabilityId,
+      runId: runDetail.run.id,
+      note: `Cancelled so ${resolvedBy} can take direct stage control.`,
+    });
+    const detail = await startWorkflowExecution({
+      capabilityId,
+      workItemId,
+      restartFromPhase: projection.workItem.phase,
+      guidance: carryForward,
+      guidedBy: resolvedBy,
+    });
+    return {
+      action: 'CANCELLED_AND_RESTARTED' as const,
+      summary: `${projection.workItem.title} was restarted from ${getLifecyclePhaseLabel(undefined, projection.workItem.phase)} with the stage-control guidance attached to the next attempt.`,
+      artifactId: stageControlArtifact.id,
+      run: detail.run,
+    };
+  }
+
+  if (runDetail) {
+    const detail = await restartWorkflowRun({
+      capabilityId,
+      runId: runDetail.run.id,
+      restartFromPhase: projection.workItem.phase,
+      guidance: carryForward,
+      guidedBy: resolvedBy,
+    });
+    return {
+      action: 'RESTARTED' as const,
+      summary: `${projection.workItem.title} was restarted from the current stage with the stage-control guidance attached to the next attempt.`,
+      artifactId: stageControlArtifact.id,
+      run: detail.run,
+    };
+  }
+
+  const detail = await startWorkflowExecution({
+    capabilityId,
+    workItemId,
+    restartFromPhase: projection.workItem.phase,
+    guidance: carryForward,
+    guidedBy: resolvedBy,
+  });
+  return {
+    action: 'STARTED' as const,
+    summary: `${projection.workItem.title} started from ${getLifecyclePhaseLabel(undefined, projection.workItem.phase)} with the stage-control guidance attached to the first attempt.`,
+    artifactId: stageControlArtifact.id,
+    run: detail.run,
   };
 };
 
@@ -1925,6 +3045,9 @@ export const createWorkItemRecord = async ({
   title,
   description,
   workflowId,
+  taskType,
+  phaseStakeholders,
+  attachments,
   priority,
   tags,
 }: {
@@ -1932,19 +3055,44 @@ export const createWorkItemRecord = async ({
   title: string;
   description?: string;
   workflowId: string;
+  taskType?: WorkItem['taskType'];
+  phaseStakeholders?: WorkItem['phaseStakeholders'];
+  attachments?: WorkItemAttachmentUpload[];
   priority: WorkItem['priority'];
   tags: string[];
 }) => {
   const bundle = await getCapabilityBundle(capabilityId);
+  if (bundle.capability.isSystemCapability) {
+    throw new Error(
+      `${bundle.capability.name} is a system foundation capability and cannot accept work items.`,
+    );
+  }
   const workflow = bundle.workspace.workflows.find(item => item.id === workflowId);
   if (!workflow) {
     throw new Error(`Workflow ${workflowId} was not found.`);
   }
 
-  const firstNode = findFirstExecutableNode(workflow);
-  const firstStep = firstNode
-    ? workflow.steps.find(step => step.id === firstNode.id)
-    : undefined;
+  const normalizedTaskType = normalizeWorkItemTaskType(taskType);
+  const normalizedPhaseStakeholders = normalizeWorkItemPhaseStakeholders(
+    phaseStakeholders,
+    bundle.capability.lifecycle,
+  );
+  const normalizedAttachments = (attachments || [])
+    .map(attachment => ({
+      fileName: normalizeString(attachment.fileName),
+      mimeType: normalizeString(attachment.mimeType) || undefined,
+      contentText: typeof attachment.contentText === 'string' ? attachment.contentText : '',
+      sizeBytes:
+        typeof attachment.sizeBytes === 'number' && Number.isFinite(attachment.sizeBytes)
+          ? attachment.sizeBytes
+          : undefined,
+    }))
+    .filter(attachment => attachment.fileName && attachment.contentText.trim().length > 0);
+  const firstStep = resolveWorkItemEntryStep(
+    workflow,
+    normalizedTaskType,
+    bundle.capability.lifecycle,
+  );
   if (!firstStep) {
     throw new Error(`Workflow ${workflow.name} does not define any executable nodes.`);
   }
@@ -1953,6 +3101,8 @@ export const createWorkItemRecord = async ({
     id: `WI-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
     title: title.trim(),
     description: description?.trim() || `Delivery story for ${bundle.capability.name}.`,
+    taskType: normalizedTaskType,
+    phaseStakeholders: normalizedPhaseStakeholders,
     phase: firstStep.phase,
     capabilityId,
     workflowId,
@@ -1965,30 +3115,43 @@ export const createWorkItemRecord = async ({
       createHistoryEntry(
         'System',
         'Story created',
-        `Story entered ${firstStep.name} in ${workflow.name}.`,
+        `${getWorkItemTaskTypeLabel(normalizedTaskType)} work entered ${firstStep.name} in ${workflow.name}.${normalizedPhaseStakeholders.length > 0 ? ` Stakeholder sign-off was configured for ${normalizedPhaseStakeholders.length} phases.` : ''}${normalizedAttachments.length > 0 ? ` ${normalizedAttachments.length} supporting file${normalizedAttachments.length === 1 ? '' : 's'} were attached for agent context.` : ''}`,
         firstStep.phase,
         getStepStatus(firstStep),
       ),
     ],
   };
 
+  const attachmentArtifacts = normalizedAttachments.map(attachment =>
+    buildWorkItemAttachmentArtifact({
+      capability: bundle.capability,
+      workflow,
+      workItem: nextWorkItem,
+      attachment,
+    }),
+  );
+  const nextArtifacts = attachmentArtifacts.length
+    ? replaceArtifacts(bundle.workspace.artifacts, attachmentArtifacts)
+    : bundle.workspace.artifacts;
+
   const nextTasks = syncWorkflowManagedTasksForWorkItem({
     allTasks: bundle.workspace.tasks,
     workItem: nextWorkItem,
     workflow,
-    artifacts: bundle.workspace.artifacts,
+    artifacts: nextArtifacts,
   });
 
   await replaceCapabilityWorkspaceContentRecord(capabilityId, {
     workItems: [...bundle.workspace.workItems, nextWorkItem],
     tasks: nextTasks,
+    artifacts: nextArtifacts,
     executionLogs: [
       ...bundle.workspace.executionLogs,
       createExecutionLog({
         capabilityId,
         taskId: nextWorkItem.id,
         agentId: firstStep.agentId,
-        message: `${nextWorkItem.title} entered ${firstStep.name} in ${workflow.name}.`,
+        message: `${nextWorkItem.title} entered ${firstStep.name} in ${workflow.name}.${normalizedAttachments.length > 0 ? ` ${normalizedAttachments.length} uploaded file${normalizedAttachments.length === 1 ? '' : 's'} were attached.` : ''}`,
         traceId: undefined,
       }),
     ],
@@ -2086,12 +3249,28 @@ export const startWorkflowExecution = async ({
   capabilityId,
   workItemId,
   restartFromPhase,
+  guidance,
+  guidedBy,
 }: {
   capabilityId: string;
   workItemId: string;
   restartFromPhase?: WorkItemPhase;
+  guidance?: string;
+  guidedBy?: string;
 }) => {
-  const projection = await resolveProjectionContext(capabilityId, workItemId);
+  const existingActiveRun = await getActiveRunForWorkItem(capabilityId, workItemId);
+  if (existingActiveRun) {
+    throw new Error(
+      `Work item ${workItemId} already has an active or waiting workflow run.`,
+    );
+  }
+
+  const projection = await recordOperatorGuidance({
+    capabilityId,
+    workItemId,
+    guidance,
+    guidedBy,
+  });
   if (
     restartFromPhase &&
     !getCapabilityBoardPhaseIds(projection.capability).includes(restartFromPhase)
@@ -2236,9 +3415,16 @@ const resolveRunWaitAndQueue = async ({
     }),
   );
 
+  const projection = await resolveProjectionContext(
+    capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
   const nextDetail = await getWorkflowRunDetail(capabilityId, nextRun.id);
   const interactionArtifact = buildHumanInteractionArtifact({
     detail,
+    workItem: projection.workItem,
+    lifecycle: projection.capability.lifecycle,
     step: currentStep,
     runStep: currentRunStep,
     wait: openWait,
@@ -2267,11 +3453,6 @@ const resolveRunWaitAndQueue = async ({
       }),
     );
 
-    const projection = await resolveProjectionContext(
-      capabilityId,
-      detail.run.workItemId,
-      detail.run.workflowSnapshot,
-    );
     const generatedArtifactIds = Array.isArray(openWait.payload?.generatedArtifactIds)
       ? openWait.payload.generatedArtifactIds.filter(
           (value): value is string => typeof value === 'string' && value.trim().length > 0,
@@ -2285,6 +3466,8 @@ const resolveRunWaitAndQueue = async ({
     const handoffArtifact = nextWorkflowStep
       ? buildHandoffArtifact({
           detail,
+          workItem: projection.workItem,
+          lifecycle: projection.capability.lifecycle,
           step: currentStep,
           nextStep: nextWorkflowStep,
           runStep: currentRunStep,
@@ -2311,11 +3494,6 @@ const resolveRunWaitAndQueue = async ({
     return nextDetail;
   }
 
-  const projection = await resolveProjectionContext(
-    capabilityId,
-    detail.run.workItemId,
-    detail.run.workflowSnapshot,
-  );
   const nextArtifacts = replaceArtifacts(projection.workspace.artifacts, [interactionArtifact]);
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
@@ -2339,6 +3517,44 @@ const resolveRunWaitAndQueue = async ({
       ),
     ],
   };
+  const resolutionLog = createExecutionLog({
+    capabilityId,
+    taskId: projection.workItem.id,
+    agentId: currentStep.agentId,
+    message: resolution,
+    runId: detail.run.id,
+    runStepId: currentRunStep.id,
+    traceId: detail.run.traceId,
+    metadata: {
+      waitId: openWait.id,
+      waitType: expectedType,
+      resolvedBy,
+      approvalDisposition:
+        expectedType === 'APPROVAL' ? approvalDisposition : undefined,
+      artifactId: interactionArtifact.id,
+    },
+  });
+  const learningTriggerType =
+    expectedType === 'CONFLICT_RESOLUTION'
+      ? ('CONFLICT_RESOLUTION' as const)
+      : isRequestChangesApproval
+      ? ('REQUEST_CHANGES' as const)
+      : null;
+  const nextLearningUpdates = learningTriggerType
+    ? buildTargetedLearningUpdates({
+        workspace: projection.workspace,
+        capabilityId,
+        focusedAgentId: currentStep.agentId,
+        insight:
+          learningTriggerType === 'REQUEST_CHANGES'
+            ? `Changes were requested for ${projection.workItem.title}: ${resolution}`
+            : `Conflict resolution was provided for ${projection.workItem.title}: ${resolution}`,
+        triggerType: learningTriggerType,
+        relatedWorkItemId: projection.workItem.id,
+        relatedRunId: detail.run.id,
+        sourceLogIds: [resolutionLog.id],
+      })
+    : projection.workspace.learningUpdates;
 
   await persistProjection({
     capabilityId,
@@ -2346,27 +3562,18 @@ const resolveRunWaitAndQueue = async ({
     workItem: nextWorkItem,
     workflow: detail.run.workflowSnapshot,
     artifacts: nextArtifacts,
-    logsToAppend: [
-      createExecutionLog({
-        capabilityId,
-        taskId: projection.workItem.id,
-        agentId: currentStep.agentId,
-        message: resolution,
-        runId: detail.run.id,
-        runStepId: currentRunStep.id,
-        traceId: detail.run.traceId,
-        metadata: {
-          waitId: openWait.id,
-          waitType: expectedType,
-          resolvedBy,
-          approvalDisposition:
-            expectedType === 'APPROVAL' ? approvalDisposition : undefined,
-          artifactId: interactionArtifact.id,
-        },
-      }),
-    ],
+    logsToAppend: [resolutionLog],
+    learningUpdates: nextLearningUpdates,
   });
   await refreshCapabilityMemory(capabilityId).catch(() => undefined);
+  if (learningTriggerType) {
+    await queueTargetedLearningRefresh({
+      workspace: projection.workspace,
+      capabilityId,
+      focusedAgentId: currentStep.agentId,
+      triggerType: learningTriggerType,
+    });
+  }
 
   return nextDetail;
 };
@@ -2512,10 +3719,14 @@ export const restartWorkflowRun = async ({
   capabilityId,
   runId,
   restartFromPhase,
+  guidance,
+  guidedBy,
 }: {
   capabilityId: string;
   runId: string;
   restartFromPhase?: WorkItemPhase;
+  guidance?: string;
+  guidedBy?: string;
 }) => {
   const latest = await getWorkflowRunDetail(capabilityId, runId);
   return startWorkflowExecution({
@@ -2523,6 +3734,8 @@ export const restartWorkflowRun = async ({
     workItemId: latest.run.workItemId,
     restartFromPhase:
       restartFromPhase || latest.run.restartFromPhase || latest.run.currentPhase,
+    guidance,
+    guidedBy,
   });
 };
 
@@ -2951,6 +4164,8 @@ const executeAutomatedStep = async (
   });
 
   const toolHistory: Array<{ role: 'assistant' | 'user'; content: string }> = [];
+  const inspectedPaths = new Set<string>();
+  const attemptedTools: ToolAdapterId[] = [];
   let hasApprovedDeployment = runningDetail.steps.some(
     item => item.stepType === 'HUMAN_APPROVAL' && item.status === 'COMPLETED',
   ) || runningDetail.waits.some(
@@ -2965,12 +4180,17 @@ const executeAutomatedStep = async (
     detail: runningDetail,
     runStep: currentRunStep,
   });
+  const operatorGuidanceContext = buildOperatorGuidanceContext({
+    workItem: projection.workItem,
+    artifacts: projection.workspace.artifacts,
+  });
   const stepTouchedPaths = new Set<string>();
   const compiledStepContext = compileStepContext({
     capability: projection.capability,
     workItem: projection.workItem,
     workflow: detail.run.workflowSnapshot,
     step,
+    agent,
     handoffContext,
     resolvedWaitContext,
     artifacts: projection.workspace.artifacts,
@@ -3055,9 +4275,11 @@ const executeAutomatedStep = async (
       step,
       runStep: currentRunStep,
       agent,
+      artifacts: projection.workspace.artifacts,
       compiledStepContext,
       compiledWorkItemPlan,
       toolHistory,
+      operatorGuidanceContext,
     });
     const decision = decisionEnvelope.decision;
     await emitRunProgressEvent({
@@ -3115,6 +4337,40 @@ const executeAutomatedStep = async (
         model: decisionEnvelope.model,
       },
     });
+    const recoverableDecisionFeedback = getRecoverableDecisionFeedback(decision);
+    if (recoverableDecisionFeedback) {
+      toolHistory.push({
+        role: 'assistant',
+        content: JSON.stringify(decision),
+      });
+      toolHistory.push({
+        role: 'user',
+        content: recoverableDecisionFeedback,
+      });
+      currentRunStep = await updateWorkflowRunStep({
+        ...currentRunStep,
+        metadata: {
+          ...(currentRunStep.metadata || {}),
+          lastToolSummary: recoverableDecisionFeedback,
+        },
+      });
+      await emitRunProgressEvent({
+        capabilityId: detail.run.capabilityId,
+        runId: detail.run.id,
+        workItemId: detail.run.workItemId,
+        runStepId: currentRunStep.id,
+        traceId,
+        spanId: stepSpan.id,
+        level: 'WARN',
+        message: recoverableDecisionFeedback,
+        details: {
+          stage: 'DECISION_REPAIRED',
+          stepName: step.name,
+          iteration: iteration + 1,
+        },
+      });
+      continue;
+    }
 
     if (decision.action === 'invoke_tool') {
       const allowedToolIds = step.allowedToolIds || [];
@@ -3240,6 +4496,7 @@ const executeAutomatedStep = async (
       const toolStartedAt = Date.now();
 
       try {
+        attemptedTools.push(decision.toolCall.toolId);
         const result = await executeTool({
           capability: projection.capability,
           agent,
@@ -3328,10 +4585,17 @@ const executeAutomatedStep = async (
         ) {
           stepTouchedPaths.add(result.details.path.trim());
         }
+        if (typeof decision.toolCall.args?.path === 'string' && decision.toolCall.args.path.trim()) {
+          inspectedPaths.add(decision.toolCall.args.path.trim());
+        }
         continue;
       } catch (error) {
         const message =
           error instanceof Error ? error.message : 'Tool execution failed unexpectedly.';
+        const recoverableToolError = classifyToolExecutionError({
+          toolId: decision.toolCall.toolId,
+          message,
+        });
         await emitRunProgressEvent({
           capabilityId: detail.run.capabilityId,
           runId: detail.run.id,
@@ -3365,6 +4629,25 @@ const executeAutomatedStep = async (
             policyDecisionId: policyDecision.id,
           },
         });
+        if (recoverableToolError?.recoverable) {
+          toolHistory.push({
+            role: 'assistant',
+            content: JSON.stringify(decision),
+          });
+          toolHistory.push({
+            role: 'user',
+            content: recoverableToolError.feedback,
+          });
+          currentRunStep = await updateWorkflowRunStep({
+            ...currentRunStep,
+            lastToolInvocationId: toolInvocation.id,
+            metadata: {
+              ...(currentRunStep.metadata || {}),
+              lastToolSummary: recoverableToolError.feedback,
+            },
+          });
+          continue;
+        }
         await finishTelemetrySpan({
           capabilityId: detail.run.capabilityId,
           spanId: stepSpan.id,
@@ -3469,6 +4752,8 @@ const executeAutomatedStep = async (
       const handoffArtifact = nextStep
         ? buildHandoffArtifact({
             detail: runningDetail,
+            workItem: projection.workItem,
+            lifecycle: projection.capability.lifecycle,
             step,
             nextStep,
             runStep: currentRunStep,
@@ -3577,14 +4862,38 @@ const executeAutomatedStep = async (
   await finishTelemetrySpan({
     capabilityId: detail.run.capabilityId,
     spanId: stepSpan.id,
-    status: 'ERROR',
+    status: 'WAITING',
     attributes: {
+      waitType: 'INPUT',
       error: `${step.name} exceeded the maximum tool loop iterations.`,
     },
   });
-  return failRun({
+  return completeRunWithWait({
     detail: runningDetail,
-    message: `${step.name} exceeded the maximum tool loop iterations.`,
+    waitType: 'INPUT',
+    waitMessage: buildToolLoopExhaustedWaitMessage({
+      step,
+      inspectedPaths: Array.from(inspectedPaths).slice(-5),
+      attemptedTools: Array.from(new Set(attemptedTools)).slice(-5),
+    }),
+    waitPayload: {
+      requestedInputFields: [
+        {
+          id: 'implementation-direction',
+          label: 'Implementation direction',
+          description:
+            'Tell the agent exactly which files to edit or what concrete change to make next.',
+          required: true,
+          source: 'HUMAN_INPUT',
+          kind: 'MARKDOWN',
+          status: 'MISSING',
+        } satisfies CompiledRequiredInputField,
+      ],
+      compiledStepContext,
+      compiledWorkItemPlan,
+      attemptedTools: Array.from(new Set(attemptedTools)),
+      inspectedPaths: Array.from(inspectedPaths),
+    },
   });
 };
 
@@ -3623,6 +4932,8 @@ export const processWorkflowRun = async (
         workItem: projection.workItem,
         workflow: currentDetail.run.workflowSnapshot,
         step: currentStep,
+        agent:
+          projection.workspace.agents.find(agent => agent.id === currentStep.agentId) || null,
         handoffContext,
         resolvedWaitContext,
         artifacts: projection.workspace.artifacts,

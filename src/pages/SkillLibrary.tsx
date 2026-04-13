@@ -14,6 +14,7 @@ import { useNavigate } from 'react-router-dom';
 import { SKILL_LIBRARY } from '../constants';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
+import { normalizeLearningUpdate, normalizeSkill } from '../lib/agentRuntime';
 import { LearningUpdate, Skill } from '../types';
 
 const createSkillId = (name: string) =>
@@ -42,7 +43,8 @@ const inferCategory = (value: string): Skill['category'] => {
 };
 
 const buildLearningSkill = (update: LearningUpdate): Skill => {
-  const source = (update.skillUpdate || update.insight).trim();
+  const normalizedUpdate = normalizeLearningUpdate(update);
+  const source = (normalizedUpdate.skillUpdate || normalizedUpdate.insight).trim();
   const normalizedName = source
     .split(/[.!?]/)[0]
     .split(/\s+/)
@@ -54,9 +56,14 @@ const buildLearningSkill = (update: LearningUpdate): Skill => {
   return {
     id: createSkillId(name),
     name,
-    description: update.skillUpdate || update.insight,
-    category: inferCategory(`${update.insight} ${update.skillUpdate || ''}`),
+    description: normalizedUpdate.skillUpdate || normalizedUpdate.insight,
+    category: inferCategory(
+      `${normalizedUpdate.insight} ${normalizedUpdate.skillUpdate || ''}`,
+    ),
     version: '1.0.0',
+    contentMarkdown: `# ${name}\n\n${normalizedUpdate.skillUpdate || normalizedUpdate.insight}`,
+    kind: 'LEARNING',
+    origin: 'CAPABILITY',
   };
 };
 
@@ -73,11 +80,16 @@ export default function SkillLibrary() {
   const [draft, setDraft] = useState({
     name: '',
     description: '',
+    contentMarkdown: '',
     category: 'Analysis' as Skill['category'],
     version: '1.0.0',
+    kind: 'CUSTOM' as NonNullable<Skill['kind']>,
   });
 
-  const capabilitySkills = activeCapability.skillLibrary;
+  const capabilitySkills = useMemo(
+    () => activeCapability.skillLibrary.map(skill => normalizeSkill(skill)),
+    [activeCapability.skillLibrary],
+  );
   const capabilitySkillIds = useMemo(
     () => new Set(capabilitySkills.map(skill => skill.id)),
     [capabilitySkills],
@@ -129,16 +141,22 @@ export default function SkillLibrary() {
       id: createSkillId(draft.name),
       name: skillName,
       description: draft.description.trim(),
+      contentMarkdown:
+        draft.contentMarkdown.trim() || `# ${skillName}\n\n${draft.description.trim()}`,
       category: draft.category,
       version: draft.version.trim() || '1.0.0',
+      kind: draft.kind,
+      origin: 'CAPABILITY',
     });
     success('Skill added', `${skillName} is now available in this capability.`);
 
     setDraft({
       name: '',
       description: '',
+      contentMarkdown: '',
       category: 'Analysis',
       version: '1.0.0',
+      kind: 'CUSTOM',
     });
   };
 
@@ -241,21 +259,33 @@ export default function SkillLibrary() {
                     <div>
                       <p className="text-sm font-bold text-on-surface">{skill.name}</p>
                       <p className="mt-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                        {skill.category} • v{skill.version}
+                        {skill.category} • {skill.kind || 'CUSTOM'} • {skill.origin || 'CAPABILITY'} • v{skill.version}
                       </p>
                     </div>
-                    <button
-                      onClick={() => handleRemoveSkill(skill)}
-                      className="rounded-full p-2 text-slate-400 transition-colors hover:bg-white hover:text-error"
-                      aria-label={`Remove ${skill.name}`}
-                    >
-                      <Trash2 size={16} />
-                    </button>
+                    {skill.origin === 'CAPABILITY' ? (
+                      <button
+                        onClick={() => handleRemoveSkill(skill)}
+                        className="rounded-full p-2 text-slate-400 transition-colors hover:bg-white hover:text-error"
+                        aria-label={`Remove ${skill.name}`}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    ) : (
+                      <span className="rounded-full bg-primary/5 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">
+                        Shared default
+                      </span>
+                    )}
                   </div>
 
                   <p className="mt-4 text-sm leading-relaxed text-secondary">
                     {skill.description}
                   </p>
+                  {skill.contentMarkdown?.trim() ? (
+                    <pre className="mt-4 overflow-hidden rounded-2xl bg-slate-950/95 p-4 text-xs leading-6 text-slate-100">
+                      {skill.contentMarkdown.slice(0, 500)}
+                      {skill.contentMarkdown.length > 500 ? '\n…' : ''}
+                    </pre>
+                  ) : null}
 
                   <div className="mt-5 rounded-2xl bg-white p-4">
                     <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
@@ -413,6 +443,35 @@ export default function SkillLibrary() {
                 </label>
               </div>
 
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                  Skill Content
+                </span>
+                <textarea
+                  value={draft.contentMarkdown}
+                  onChange={event => setField('contentMarkdown', event.target.value)}
+                  placeholder="Detailed instructions, guardrails, output shape, and conflict handling for this skill."
+                  className="h-44 w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                  Skill Kind
+                </span>
+                <select
+                  value={draft.kind}
+                  onChange={event => setField('kind', event.target.value as NonNullable<Skill['kind']>)}
+                  className="w-full rounded-2xl border border-outline-variant/15 bg-surface-container-low px-4 py-3 text-sm outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
+                >
+                  {['CUSTOM', 'GENERAL', 'ROLE', 'LEARNING'].map(kind => (
+                    <option key={kind} value={kind}>
+                      {kind}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
               <button
                 type="submit"
                 disabled={!canCreate}
@@ -447,7 +506,7 @@ export default function SkillLibrary() {
                     <div>
                       <p className="text-sm font-bold text-on-surface">{skill.name}</p>
                       <p className="mt-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                        {skill.category} • v{skill.version}
+                        {skill.category} • {skill.kind || 'CUSTOM'} • {skill.origin || 'FOUNDATION'} • v{skill.version}
                       </p>
                     </div>
                     <button
@@ -461,6 +520,12 @@ export default function SkillLibrary() {
                   <p className="mt-3 text-sm leading-relaxed text-secondary">
                     {skill.description}
                   </p>
+                  {skill.contentMarkdown?.trim() ? (
+                    <pre className="mt-4 overflow-hidden rounded-2xl bg-slate-950/95 p-4 text-xs leading-6 text-slate-100">
+                      {skill.contentMarkdown.slice(0, 360)}
+                      {skill.contentMarkdown.length > 360 ? '\n…' : ''}
+                    </pre>
+                  ) : null}
                 </div>
               ))}
 

@@ -20,6 +20,7 @@ import {
   LEARNING_UPDATES,
   WORKFLOWS,
   WORK_ITEMS,
+  getStandardAgentContract,
 } from '../constants';
 import {
   addCapabilityAgentRecord,
@@ -35,13 +36,27 @@ import {
   removeCapabilitySkillRecord,
   setActiveChatAgentRecord,
   updateCapabilityAgentRecord,
+  updateCapabilityAgentModelsRecord,
   updateCapabilityRecord,
   updateWorkspaceSettingsRecord,
   type AppState,
 } from '../lib/api';
 import { createDefaultCapabilityLifecycle } from '../lib/capabilityLifecycle';
 import { getDefaultCapabilityWorkflows } from '../lib/standardWorkflow';
+import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowGraph';
+import { normalizeWorkspaceConnectorSettings } from '../lib/workspaceConnectors';
+import { WORKSPACE_AGENT_TEMPLATES } from '../lib/workspaceFoundations';
+import {
+  getLegacyArtifactListsFromContract,
+  normalizeAgentOperatingContract,
+  normalizeAgentLearningProfile,
+  normalizeAgentRoleStarterKey,
+  normalizeAgentSessionSummary,
+  normalizeAgentUsage,
+  normalizeLearningUpdate,
+  normalizeSkill,
+} from '../lib/agentRuntime';
 import { useToast } from './ToastContext';
 
 interface CapabilityContextType {
@@ -56,6 +71,8 @@ interface CapabilityContextType {
   >;
   activeCapability: Capability;
   setActiveCapability: (capability: Capability) => void;
+  preferredCapabilityId?: string;
+  setPreferredCapabilityId: (capabilityId?: string) => void;
   capabilities: Capability[];
   capabilityWorkspaces: CapabilityWorkspace[];
   workspaceSettings: WorkspaceSettings;
@@ -75,6 +92,10 @@ interface CapabilityContextType {
     capabilityId: string,
     agentId: string,
     updates: Partial<CapabilityAgent>,
+  ) => Promise<CapabilityBundle>;
+  updateCapabilityAgentModels: (
+    capabilityId: string,
+    model: string,
   ) => Promise<CapabilityBundle>;
   appendCapabilityMessage: (
     capabilityId: string,
@@ -130,13 +151,16 @@ const EMPTY_CAPABILITY: Capability = {
     deploymentTargets: [],
   },
   status: 'PENDING',
+  isSystemCapability: false,
   specialAgentId: '',
   skillLibrary: [],
 };
 
 const EMPTY_WORKSPACE_SETTINGS: WorkspaceSettings = {
   databaseConfigs: [],
+  connectors: normalizeWorkspaceConnectorSettings(),
 };
+const DEFAULT_CAPABILITY_PREFERENCE_KEY = 'singularity.workspace.defaultCapabilityId';
 
 const createDefaultAgentLearningProfile = (): AgentLearningProfile => ({
   status: 'NOT_STARTED',
@@ -166,8 +190,32 @@ const toAgentLabel = (value: string) =>
     .replace(/[_-]+/g, ' ')
     .replace(/\b\w/g, char => char.toUpperCase());
 
-const getDefaultSkillIds = (capability: Capability) =>
-  capability.skillLibrary.map(skill => skill.id);
+const getAgentTemplate = (key?: string) =>
+  WORKSPACE_AGENT_TEMPLATES.find(template => template.key === key);
+
+const getAvailableCapabilitySkillIds = (capability: Capability) =>
+  new Set(capability.skillLibrary.map(skill => skill.id));
+
+const normalizeCapability = (capability: Capability): Capability => ({
+  ...capability,
+  skillLibrary: (capability.skillLibrary || []).map(skill => normalizeSkill(skill)),
+});
+
+const getDefaultSkillIds = (capability: Capability, templateKey?: string) => {
+  const availableSkills = getAvailableCapabilitySkillIds(capability);
+  const template = getAgentTemplate(templateKey || 'OWNER');
+  const preferred = (template?.defaultSkillIds || []).filter(skillId =>
+    availableSkills.has(skillId),
+  );
+
+  return preferred.length > 0
+    ? preferred
+    : capability.skillLibrary.map(skill => skill.id);
+};
+
+const getPreferredToolIds = (templateKey?: string) => [
+  ...(getAgentTemplate(templateKey || 'OWNER')?.preferredToolIds || []),
+];
 
 const createBuiltInAgentId = (capabilityId: string, key: string) =>
   `AGENT-${slugify(capabilityId)}-${key}`;
@@ -288,47 +336,73 @@ const withAgentDefaults = (
   capability: Capability,
   agent: CapabilityAgent,
   workspaceContent?: Pick<CapabilityWorkspace, 'tasks' | 'executionLogs'>,
-): CapabilityAgent => ({
-  ...agent,
-  capabilityId: capability.id,
-  skillIds: agent.skillIds?.length ? agent.skillIds : getDefaultSkillIds(capability),
-  provider: agent.provider || DEFAULT_AGENT_PROVIDER,
-  model: agent.model || DEFAULT_AGENT_MODEL,
-  tokenLimit: agent.tokenLimit || DEFAULT_AGENT_TOKEN_LIMIT,
-  learningProfile: agent.learningProfile || createDefaultAgentLearningProfile(),
-  sessionSummaries: agent.sessionSummaries || [],
-  usage:
-    workspaceContent
-      ? buildAgentUsage(
-          capability.id,
-          agent.id,
-          workspaceContent.tasks,
-          workspaceContent.executionLogs,
-        )
-      : agent.usage ||
-        buildAgentUsage(
-          capability.id,
-          agent.id,
-          workspaceContent?.tasks,
-          workspaceContent?.executionLogs,
-        ),
-  previousOutputs:
-    workspaceContent
-      ? buildPreviousOutputs(
-          capability.id,
-          agent.id,
-          workspaceContent.tasks,
-          workspaceContent.executionLogs,
-        )
-      : agent.previousOutputs !== undefined
-      ? agent.previousOutputs
-      : buildPreviousOutputs(
-          capability.id,
-          agent.id,
-          workspaceContent?.tasks,
-          workspaceContent?.executionLogs,
-        ),
-});
+): CapabilityAgent => {
+  const contract = normalizeAgentOperatingContract(agent.contract, {
+    description: agent.objective || agent.role,
+    suggestedInputArtifacts: agent.inputArtifacts,
+    expectedOutputArtifacts: agent.outputArtifacts,
+  });
+
+  return {
+    ...agent,
+    capabilityId: capability.id,
+    roleStarterKey:
+      normalizeAgentRoleStarterKey(agent.roleStarterKey) ||
+      normalizeAgentRoleStarterKey(agent.isOwner ? 'OWNER' : agent.standardTemplateKey),
+    contract,
+    ...getLegacyArtifactListsFromContract(contract),
+    skillIds:
+      agent.skillIds?.length
+        ? agent.skillIds
+        : getDefaultSkillIds(capability, agent.isOwner ? 'OWNER' : agent.standardTemplateKey),
+    preferredToolIds:
+      agent.preferredToolIds?.length
+        ? agent.preferredToolIds
+        : getPreferredToolIds(agent.isOwner ? 'OWNER' : agent.standardTemplateKey),
+    provider: agent.provider || DEFAULT_AGENT_PROVIDER,
+    model: agent.model || DEFAULT_AGENT_MODEL,
+    tokenLimit: agent.tokenLimit || DEFAULT_AGENT_TOKEN_LIMIT,
+    learningProfile: normalizeAgentLearningProfile(
+      agent.learningProfile || createDefaultAgentLearningProfile(),
+    ),
+    sessionSummaries: (agent.sessionSummaries || []).map(summary =>
+      normalizeAgentSessionSummary(summary),
+    ),
+    usage:
+      workspaceContent
+        ? buildAgentUsage(
+            capability.id,
+            agent.id,
+            workspaceContent.tasks,
+            workspaceContent.executionLogs,
+          )
+        : normalizeAgentUsage(
+            agent.usage ||
+              buildAgentUsage(
+                capability.id,
+                agent.id,
+                workspaceContent?.tasks,
+                workspaceContent?.executionLogs,
+              ),
+          ),
+    previousOutputs:
+      workspaceContent
+        ? buildPreviousOutputs(
+            capability.id,
+            agent.id,
+            workspaceContent.tasks,
+            workspaceContent.executionLogs,
+          )
+        : agent.previousOutputs !== undefined
+        ? agent.previousOutputs
+        : buildPreviousOutputs(
+            capability.id,
+            agent.id,
+            workspaceContent?.tasks,
+            workspaceContent?.executionLogs,
+          ),
+  };
+};
 
 const buildOwnerAgent = (capability: Capability): CapabilityAgent => {
   const ownerAgentId =
@@ -339,18 +413,20 @@ const buildOwnerAgent = (capability: Capability): CapabilityAgent => {
     capabilityId: capability.id,
     name: 'Capability Owning Agent',
     role: 'Capability Owner',
+    roleStarterKey: 'OWNER',
     objective: `Own the end-to-end delivery context for ${capability.name} and coordinate all downstream agents within this capability.`,
     systemPrompt: `You are the capability owner for ${capability.name}. Ground every decision, workflow, and team action in the capability's domain, documentation, and governance context.`,
+    contract: getStandardAgentContract('OWNER'),
     initializationStatus: 'READY',
     documentationSources: getCapabilityDocumentationSources(capability),
-    inputArtifacts: ['Capability charter'],
-    outputArtifacts: ['Capability operating model'],
+    ...getLegacyArtifactListsFromContract(getStandardAgentContract('OWNER')),
     isOwner: true,
     learningNotes: [
       `${capability.name} team context is isolated to this capability.`,
       `All downstream chats, agents, and workflows should remain aligned to ${capability.domain || capability.name}.`,
     ],
-    skillIds: getDefaultSkillIds(capability),
+    skillIds: getDefaultSkillIds(capability, 'OWNER'),
+    preferredToolIds: getPreferredToolIds('OWNER'),
     provider: DEFAULT_AGENT_PROVIDER,
     model: DEFAULT_AGENT_MODEL,
     tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
@@ -370,19 +446,21 @@ const buildBuiltInAgents = (capability: Capability): CapabilityAgent[] =>
       capabilityId: capability.id,
       name: template.name,
       role: template.role,
+      roleStarterKey: template.roleStarterKey,
       objective: resolveCapabilityText(template.objective, capability),
       systemPrompt: resolveCapabilityText(template.systemPrompt, capability),
+      contract: template.contract,
       initializationStatus: 'READY',
       documentationSources: getCapabilityDocumentationSources(capability),
-      inputArtifacts: [...template.inputArtifacts],
-      outputArtifacts: [...template.outputArtifacts],
+      ...getLegacyArtifactListsFromContract(template.contract),
       isBuiltIn: true,
       standardTemplateKey: template.key,
       learningNotes: [
         `${template.name} is a built-in agent for ${capability.name}.`,
         `Keep all outputs aligned to ${capability.domain || capability.name} capability context.`,
       ],
-      skillIds: getDefaultSkillIds(capability),
+      skillIds: getDefaultSkillIds(capability, template.key),
+      preferredToolIds: getPreferredToolIds(template.key),
       provider: DEFAULT_AGENT_PROVIDER,
       model: DEFAULT_AGENT_MODEL,
       tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
@@ -481,20 +559,28 @@ const buildSeededAgents = (
         artifact.capabilityId === capability.id &&
         (artifact.connectedAgentId === agentId || artifact.agent === agentId),
     ).map(artifact => artifact.name);
+    const contract = normalizeAgentOperatingContract(undefined, {
+      description: `Execute ${capability.name} work inside this capability context and hand off outputs to the next workflow stage.`,
+      expectedOutputArtifacts: outputArtifacts,
+    });
+    const legacyArtifacts = getLegacyArtifactListsFromContract(contract);
 
     nextAgents.set(agentId, {
       id: agentId,
       capabilityId: capability.id,
       name: toAgentLabel(agentId),
       role,
+      roleStarterKey: 'EXECUTION-OPS',
       objective: `Execute ${capability.name} work inside this capability context and hand off outputs to the next workflow stage.`,
       systemPrompt: `You are a ${role.toLowerCase()} for ${capability.name}. Stay inside this capability's metadata, documentation, workflows, and learning context.`,
+      contract,
       initializationStatus: 'READY',
       documentationSources: getCapabilityDocumentationSources(capability),
-      inputArtifacts: [],
-      outputArtifacts,
+      inputArtifacts: legacyArtifacts.inputArtifacts,
+      outputArtifacts: legacyArtifacts.outputArtifacts,
       learningNotes: learningByAgent[agentId] || [],
       skillIds: getDefaultSkillIds(capability),
+      preferredToolIds: [],
       provider: DEFAULT_AGENT_PROVIDER,
       model: DEFAULT_AGENT_MODEL,
       tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
@@ -528,27 +614,34 @@ const buildCapabilityWorkspace = (
   capability: Capability,
   includeSeedData = false,
 ): CapabilityWorkspace => {
-  const ownerAgent = buildOwnerAgent(capability);
-  const defaultWorkflows = getDefaultCapabilityWorkflows(capability).map(workflow =>
+  const normalizedCapability = normalizeCapability(capability);
+  const ownerAgent = buildOwnerAgent(normalizedCapability);
+  const defaultWorkflows = getDefaultCapabilityWorkflows(normalizedCapability).map(workflow =>
     buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)),
   );
   return {
-    capabilityId: capability.id,
+    capabilityId: normalizedCapability.id,
     agents: includeSeedData
-      ? buildSeededAgents(capability, ownerAgent)
-      : buildBaseAgents(capability, ownerAgent),
+      ? buildSeededAgents(normalizedCapability, ownerAgent)
+      : buildBaseAgents(normalizedCapability, ownerAgent),
     workflows: defaultWorkflows,
     artifacts: includeSeedData
-      ? ARTIFACTS.filter(artifact => artifact.capabilityId === capability.id)
+      ? ARTIFACTS.filter(artifact => artifact.capabilityId === normalizedCapability.id)
       : [],
-    tasks: includeSeedData ? AGENT_TASKS.filter(task => task.capabilityId === capability.id) : [],
+    tasks: includeSeedData
+      ? AGENT_TASKS.filter(task => task.capabilityId === normalizedCapability.id)
+      : [],
     executionLogs: includeSeedData
-      ? EXECUTION_LOGS.filter(log => log.capabilityId === capability.id)
+      ? EXECUTION_LOGS.filter(log => log.capabilityId === normalizedCapability.id)
       : [],
     learningUpdates: includeSeedData
-      ? LEARNING_UPDATES.filter(update => update.capabilityId === capability.id)
+      ? LEARNING_UPDATES.filter(
+          update => update.capabilityId === normalizedCapability.id,
+        ).map(update => normalizeLearningUpdate(update))
       : [],
-    workItems: includeSeedData ? WORK_ITEMS.filter(item => item.capabilityId === capability.id) : [],
+    workItems: includeSeedData
+      ? WORK_ITEMS.filter(item => item.capabilityId === normalizedCapability.id)
+      : [],
     messages: [buildWelcomeMessage(capability, ownerAgent)],
     activeChatAgentId: ownerAgent.id,
     createdAt: new Date().toISOString(),
@@ -566,36 +659,40 @@ const upsertWorkspace = (items: CapabilityWorkspace[], next: CapabilityWorkspace
     : [...items, next];
 
 const mergeCapabilities = (persistedCapabilities: Capability[]) =>
-  persistedCapabilities.reduce(
+  persistedCapabilities.map(normalizeCapability).reduce(
     (items, capability) => upsertCapability(items, capability),
     DEMO_MODE_ENABLED ? [...CAPABILITIES] : [],
   );
 
 const upsertCapabilitySkill = (skills: Skill[], nextSkill: Skill) =>
   skills.some(skill => skill.id === nextSkill.id)
-    ? skills.map(skill => (skill.id === nextSkill.id ? nextSkill : skill))
-    : [...skills, nextSkill];
+    ? skills.map(skill =>
+        skill.id === nextSkill.id ? normalizeSkill(nextSkill) : normalizeSkill(skill),
+      )
+    : [...skills.map(skill => normalizeSkill(skill)), normalizeSkill(nextSkill)];
 
 const normalizeWorkspace = (
   capability: Capability,
   workspace?: Partial<CapabilityWorkspace>,
 ): CapabilityWorkspace => {
+  const normalizedCapability = normalizeCapability(capability);
   const seededWorkspace = buildCapabilityWorkspace(
-    capability,
+    normalizedCapability,
     DEMO_MODE_ENABLED && SEEDED_CAPABILITY_IDS.has(capability.id),
   );
   const existingOwnerAgent = workspace?.agents?.find(agent => agent.isOwner);
   const nextOwnerAgent = {
-    ...buildOwnerAgent(capability),
+    ...buildOwnerAgent(normalizedCapability),
     ...(existingOwnerAgent || seededWorkspace.agents[0]),
-    capabilityId: capability.id,
+    capabilityId: normalizedCapability.id,
     isOwner: true,
   };
   const nextMessages =
-    workspace?.messages?.length && workspace.messages.some(message => message.capabilityId === capability.id)
+    workspace?.messages?.length &&
+    workspace.messages.some(message => message.capabilityId === normalizedCapability.id)
       ? workspace.messages.map(message => ({
           ...message,
-          capabilityId: capability.id,
+          capabilityId: normalizedCapability.id,
         }))
       : seededWorkspace.messages;
   const nextTasks = workspace?.tasks || seededWorkspace.tasks;
@@ -604,9 +701,9 @@ const normalizeWorkspace = (
   return {
     ...seededWorkspace,
     ...workspace,
-    capabilityId: capability.id,
+    capabilityId: normalizedCapability.id,
     agents: mergeWorkspaceAgents(
-      capability,
+      normalizedCapability,
       nextOwnerAgent,
       workspace?.agents || seededWorkspace.agents,
       nextTasks,
@@ -618,7 +715,9 @@ const normalizeWorkspace = (
     artifacts: workspace?.artifacts || seededWorkspace.artifacts,
     tasks: nextTasks,
     executionLogs: nextExecutionLogs,
-    learningUpdates: workspace?.learningUpdates || seededWorkspace.learningUpdates,
+    learningUpdates: (workspace?.learningUpdates || seededWorkspace.learningUpdates).map(
+      update => normalizeLearningUpdate(update),
+    ),
     workItems: workspace?.workItems || seededWorkspace.workItems,
     messages: nextMessages,
     activeChatAgentId:
@@ -634,16 +733,27 @@ const getPreferredActiveCapability = (
   capabilities: Capability[],
   preferredCapabilityId?: string,
 ) =>
-  capabilities.find(capability => capability.id === preferredCapabilityId) ||
+  capabilities.find(
+    capability =>
+      capability.id === preferredCapabilityId && capability.status !== 'ARCHIVED',
+  ) ||
   capabilities.find(capability => capability.status !== 'ARCHIVED') ||
+  capabilities.find(capability => capability.id === preferredCapabilityId) ||
   capabilities[0];
 
 const readInitialState = () => {
   const capabilities = DEMO_MODE_ENABLED ? [...CAPABILITIES] : [];
+  const preferredCapabilityId = readViewPreference(
+    DEFAULT_CAPABILITY_PREFERENCE_KEY,
+    '',
+  );
 
   return {
     capabilities,
-    activeCapability: getPreferredActiveCapability(capabilities) || EMPTY_CAPABILITY,
+    preferredCapabilityId,
+    activeCapability:
+      getPreferredActiveCapability(capabilities, preferredCapabilityId) ||
+      EMPTY_CAPABILITY,
     capabilityWorkspaces: capabilities.map(capability =>
       buildCapabilityWorkspace(capability, true),
     ),
@@ -685,6 +795,9 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
   const [activeCapability, setActiveCapabilityState] = useState<Capability>(
     initialState.activeCapability,
   );
+  const [preferredCapabilityId, setPreferredCapabilityIdState] = useState<string>(
+    initialState.preferredCapabilityId || '',
+  );
   const [capabilityWorkspaces, setCapabilityWorkspaces] = useState<CapabilityWorkspace[]>(
     initialState.capabilityWorkspaces,
   );
@@ -697,6 +810,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
   const mutationQueueRef = useRef<Record<string, Promise<unknown>>>({});
   const capabilitiesRef = useRef(capabilities);
   const activeCapabilityRef = useRef(activeCapability);
+  const preferredCapabilityIdRef = useRef(preferredCapabilityId);
   const capabilityWorkspacesRef = useRef(capabilityWorkspaces);
 
   useEffect(() => {
@@ -706,6 +820,10 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     activeCapabilityRef.current = activeCapability;
   }, [activeCapability]);
+
+  useEffect(() => {
+    preferredCapabilityIdRef.current = preferredCapabilityId;
+  }, [preferredCapabilityId]);
 
   useEffect(() => {
     capabilityWorkspacesRef.current = capabilityWorkspaces;
@@ -752,8 +870,15 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
       allowArchivedFallback?: boolean;
     },
   ) => {
-    const normalizedWorkspace = normalizeWorkspace(bundle.capability, bundle.workspace);
-    const nextCapabilities = upsertCapability(capabilitiesRef.current, bundle.capability);
+    const normalizedCapability = normalizeCapability(bundle.capability);
+    const normalizedWorkspace = normalizeWorkspace(
+      normalizedCapability,
+      bundle.workspace,
+    );
+    const nextCapabilities = upsertCapability(
+      capabilitiesRef.current,
+      normalizedCapability,
+    );
     const nextWorkspaces = upsertWorkspace(
       capabilityWorkspacesRef.current,
       normalizedWorkspace,
@@ -764,18 +889,18 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     setCapabilityWorkspaces(nextWorkspaces);
 
     if (
-      options?.activateCapabilityId === bundle.capability.id ||
-      currentActiveCapability.id === bundle.capability.id ||
+      options?.activateCapabilityId === normalizedCapability.id ||
+      currentActiveCapability.id === normalizedCapability.id ||
       !currentActiveCapability.id
     ) {
-      if (bundle.capability.status === 'ARCHIVED' && options?.allowArchivedFallback) {
+      if (normalizedCapability.status === 'ARCHIVED' && options?.allowArchivedFallback) {
         setActiveCapabilityState(
           getPreferredActiveCapability(
-            nextCapabilities.filter(capability => capability.id !== bundle.capability.id),
-          ) || bundle.capability,
+            nextCapabilities.filter(capability => capability.id !== normalizedCapability.id),
+          ) || normalizedCapability,
         );
       } else {
-        setActiveCapabilityState(bundle.capability);
+        setActiveCapabilityState(normalizedCapability);
       }
       return;
     }
@@ -807,7 +932,10 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
   const runInitialSync = async () => {
     setBootStatus('loading');
     try {
-      const nextState = normalizeAppState(await fetchAppState(), activeCapabilityRef.current.id);
+      const nextState = normalizeAppState(
+        await fetchAppState(),
+        preferredCapabilityIdRef.current || activeCapabilityRef.current.id,
+      );
       setCapabilities(nextState.capabilities);
       setCapabilityWorkspaces(nextState.capabilityWorkspaces);
       setWorkspaceSettings(nextState.workspaceSettings);
@@ -1029,6 +1157,31 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     }) as Promise<CapabilityBundle>;
   };
 
+  const updateCapabilityAgentModels = (
+    capabilityId: string,
+    model: string,
+  ) => {
+    ensureWritableState();
+    setMutationStatus(capabilityId, 'pending');
+
+    return queueCapabilityMutation(capabilityId, async () => {
+      const bundle = await updateCapabilityAgentModelsRecord(capabilityId, {
+        model,
+      });
+      syncCapabilityBundleState(bundle);
+      clearMutationStatus(capabilityId);
+      return bundle;
+    }).catch(error => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : `Unable to update agent models for ${capabilityId}.`;
+      setMutationStatus(capabilityId, 'error', message);
+      logMutationFailure(`agent models for ${capabilityId}`, error);
+      throw error;
+    }) as Promise<CapabilityBundle>;
+  };
+
   const appendCapabilityMessage = (
     capabilityId: string,
     message: Omit<CapabilityChatMessage, 'capabilityId'>,
@@ -1118,6 +1271,12 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     return nextSettings;
   };
 
+  const setPreferredCapabilityId = (capabilityId?: string) => {
+    const nextValue = capabilityId || '';
+    setPreferredCapabilityIdState(nextValue);
+    writeViewPreference(DEFAULT_CAPABILITY_PREFERENCE_KEY, nextValue || null);
+  };
+
   const refreshCapabilityBundle = async (capabilityId: string) => {
     try {
       const bundle = await fetchCapabilityBundle(capabilityId);
@@ -1157,6 +1316,8 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
         setActiveCapability: capability => {
           setActiveCapabilityState(capability);
         },
+        preferredCapabilityId,
+        setPreferredCapabilityId,
         capabilities,
         capabilityWorkspaces,
         workspaceSettings,
@@ -1167,6 +1328,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
         removeCapabilitySkill,
         addCapabilityAgent,
         updateCapabilityAgent,
+        updateCapabilityAgentModels,
         appendCapabilityMessage,
         setActiveChatAgent,
         setCapabilityWorkspaceContent,

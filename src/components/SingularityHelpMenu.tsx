@@ -35,42 +35,42 @@ const PRIMARY_WORKSPACES: Array<{
     title: 'Home',
     path: '/',
     description:
-      'See what the capability owns, whether it is trustworthy, what needs attention, and what has already been delivered.',
+      'Start here to understand capability health, trust, readiness, active risk, and what the team should focus on next.',
     icon: LayoutDashboard,
   },
   {
     title: 'Work',
     path: '/orchestrator',
     description:
-      'Move delivery forward, unblock waits, approve decisions, and restart or reset work when needed.',
+      'Operate one work item at a time, guide agents, review waits, approve gated work, and keep delivery moving.',
     icon: Trello,
   },
   {
     title: 'Team',
     path: '/team',
     description:
-      'Understand who can help, which agents are ready, and quickly hand a collaborator into Chat.',
+      'See who can help, what each agent is responsible for, and whether skills, tools, and learning are in good shape.',
     icon: Users,
   },
   {
     title: 'Chat',
     path: '/chat',
     description:
-      'Collaborate with the active agent using capability context, resumable sessions, and grounded memory.',
+      'Talk to agents with capability context, resumable sessions, execution awareness, and memory-backed grounding.',
     icon: MessageSquare,
   },
   {
     title: 'Evidence',
     path: '/ledger',
     description:
-      'Review artifacts, handoffs, completed work, and the Flight Recorder audit trail for each work item.',
+      'Inspect artifacts, approvals, handoffs, completed work, and flight recorder history when you need proof.',
     icon: Wallet,
   },
   {
     title: 'Designer',
     path: '/designer',
     description:
-      'Define the workflow, lifecycle lanes, and orchestration structure that drive work through the capability.',
+      'Define the workflow, lifecycle lanes, artifact expectations, and orchestration rules that shape delivery.',
     icon: Workflow,
   },
 ];
@@ -83,25 +83,25 @@ const OPERATING_MODEL: Array<{
   {
     title: 'Capability',
     description:
-      'A capability is the operating unit. It owns the business charter, collaborators, lifecycle, workflows, and evidence for one domain of work.',
+      'A capability is the operating unit. It owns the business purpose, lifecycle, workflows, collaborators, runtime context, and evidence for one domain of work.',
     icon: Flag,
   },
   {
     title: 'Lifecycle',
     description:
-      'Each capability can define its own working phases. Those phases become the lanes in Designer, the columns in Work, and the timeline labels in Evidence.',
+      'Each capability can define its own phases. Those phases become the lanes in Designer, the flow map in Work, and the timeline labels in Evidence.',
     icon: GitBranch,
   },
   {
     title: 'Agents',
     description:
-      'Agents learn from the capability memory and help with planning, design, delivery, review, and collaboration inside that capability context.',
+      'Agents help with planning, design, delivery, validation, release, and explanation, but humans still control approvals and operating decisions.',
     icon: BrainCircuit,
   },
   {
     title: 'Evidence',
     description:
-      'Artifacts, handoffs, approvals, waits, and run history become durable evidence so teams can understand what happened and why.',
+      'Artifacts, handoffs, approvals, waits, and run history become durable proof so teams can understand what happened and why.',
     icon: ShieldCheck,
   },
 ];
@@ -111,34 +111,66 @@ const DAILY_FLOW: Array<{
   description: string;
 }> = [
   {
-    title: '1. Define the business outcome',
+    title: '1. Choose the right capability',
     description:
-      'Create or open a capability, confirm what it owns, and make sure the outcome, success metrics, and evidence expectations are clear.',
+      'Open the capability that owns this work so every page, workflow, agent, and artifact stays in the right context.',
   },
   {
-    title: '2. Shape the operating model',
+    title: '2. Confirm the operating model',
     description:
-      'Use Designer to define the lifecycle and workflow so the system knows how work should move through the capability.',
+      'Use Designer when the lifecycle, workflow, artifact contract, or step ownership needs to change.',
   },
   {
-    title: '3. Prepare collaborators',
+    title: '3. Check the people and agents',
     description:
-      'Review Team so the owner and specialist agents are ready, learned, and aligned to the capability purpose.',
+      'Review Team so the owner and specialist agents have the right skills, tools, and learning for this capability.',
   },
   {
-    title: '4. Deliver through Work and Chat',
+    title: '4. Run the work through Work and Chat',
     description:
-      'Create work items, collaborate with agents, resolve waits, and keep delivery moving from one lifecycle phase to the next.',
+      'Create or select a work item, collaborate with the active agent, resolve waits, and keep the item moving phase by phase.',
   },
   {
-    title: '5. Audit what was delivered',
+    title: '5. Use Evidence to prove the result',
     description:
-      'Use Evidence and Flight Recorder to inspect artifacts, approvals, handoffs, and the final decision trail behind each result.',
+      'Use Evidence and Flight Recorder to inspect artifacts, approvals, handoffs, and the decision trail behind the result.',
+  },
+];
+
+const WHEN_WORK_GETS_STUCK: Array<{
+  title: string;
+  description: string;
+  icon: LucideIcon;
+}> = [
+  {
+    title: 'Blocked',
+    description:
+      'Open Work, inspect the latest failure reason, add guidance for the agent, and restart from the current phase when ready.',
+    icon: Activity,
+  },
+  {
+    title: 'Waiting for input',
+    description:
+      'Provide the requested input in Work or Chat. Only workflow-required inputs block execution; advisory agent suggestions should not.',
+    icon: MessageSquare,
+  },
+  {
+    title: 'Waiting for approval',
+    description:
+      'Review the gated documents, diffs, and evidence, then approve, reject, or request changes with a clear operator decision.',
+    icon: ShieldCheck,
+  },
+  {
+    title: 'Need the full story',
+    description:
+      'Use Explain and Evidence to understand the latest attempt, what changed, and what the system expects next.',
+    icon: FileText,
   },
 ];
 
 const ADVANCED_TOOL_ICONS: Record<string, LucideIcon> = {
   memory: BrainCircuit,
+  'tool-access': ShieldCheck,
   'run-console': Activity,
   evals: BarChart3,
   skills: BookOpen,
@@ -165,8 +197,8 @@ export const SingularityHelpMenu = ({
     />
     <ModalShell
       eyebrow="Help menu"
-      title="Understanding Singularity Neo"
-      description="Singularity Neo is a capability-centered operating workspace. It helps a team define how work should move, collaborate with agents, run delivery, and keep an audit-grade record of what happened."
+      title="Getting Started With Singulairy"
+      description="Singulairy helps a team define how work should move, collaborate with agents, execute safely, and keep an audit-grade record of what happened."
       actions={
         <button
           type="button"
@@ -183,7 +215,7 @@ export const SingularityHelpMenu = ({
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.6fr)_minmax(20rem,0.9fr)]">
           <SectionCard
             title="What this workspace is for"
-            description="Think of Singularity Neo as the operating system for one business capability. The capability holds the workflow, lifecycle, people, agents, evidence, and runtime context needed to take work from idea to release."
+            description="Think of Singulairy as the operating console for one business capability. It keeps workflows, agents, evidence, approvals, and runtime context connected from idea to delivery."
             tone="brand"
             icon={Sparkles}
           >
@@ -196,14 +228,14 @@ export const SingularityHelpMenu = ({
               />
               <StatTile
                 label="Primary promise"
-                value="Trusted delivery"
-                helper="Move work with clear approvals, durable evidence, and business-friendly visibility."
+                value="Controlled delivery"
+                helper="Move work with agent help while keeping approvals, evidence, and operator control intact."
                 tone="success"
               />
               <StatTile
                 label="Best daily path"
                 value="Home -> Work -> Evidence"
-                helper="Understand readiness, move delivery, then inspect what was produced."
+                helper="Understand readiness, operate the work, then inspect the proof."
                 tone="info"
               />
             </div>
@@ -211,7 +243,7 @@ export const SingularityHelpMenu = ({
 
           <SectionCard
             title="Current workspace lens"
-            description="The whole app stays inside the selected capability context."
+            description="The whole app follows the selected capability context."
             icon={ShieldCheck}
           >
             <StatusChipGroup
@@ -222,8 +254,8 @@ export const SingularityHelpMenu = ({
               ]}
             />
             <p className="text-sm leading-relaxed text-secondary">
-              If something looks surprising, first check which capability is active. Team,
-              Chat, Work, Designer, and Evidence all follow that same selected capability.
+              If something looks surprising, first check which capability is active. Home,
+              Work, Team, Chat, Designer, and Evidence all follow that same selected capability.
             </p>
           </SectionCard>
         </div>
@@ -289,7 +321,7 @@ export const SingularityHelpMenu = ({
 
           <SectionCard
             title="Suggested daily operating flow"
-            description="A simple mental model for getting value from the product without opening every tool."
+            description="A practical way to get value without opening every tool."
             icon={ArrowRight}
           >
             <div className="space-y-3">
@@ -307,6 +339,31 @@ export const SingularityHelpMenu = ({
             </div>
           </SectionCard>
         </div>
+
+        <SectionCard
+          title="When work gets stuck"
+          description="These are the fastest ways to get delivery moving again."
+          icon={Activity}
+        >
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            {WHEN_WORK_GETS_STUCK.map(item => (
+              <div
+                key={item.title}
+                className="rounded-3xl border border-outline-variant/35 bg-white p-4 shadow-[0_6px_18px_rgba(12,23,39,0.035)]"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="section-card-icon h-10 w-10 rounded-2xl">
+                    <item.icon size={16} />
+                  </div>
+                  <h3 className="text-sm font-bold text-on-surface">{item.title}</h3>
+                </div>
+                <p className="mt-3 text-sm leading-relaxed text-secondary">
+                  {item.description}
+                </p>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
 
         <AdvancedDisclosure
           title="Advanced tools"

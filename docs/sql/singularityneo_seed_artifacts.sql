@@ -1082,14 +1082,41 @@ Required input for the Business Analysis step.
     'Execution evidence',
     'Agent Contract',
     'INPUT',
-    'CONTRARIAN-REVIEWER',
-    'Contrarian Reviewer',
-    'Contrarian Reviewer depends on this artifact as an approved starting input.',
+    'EXECUTION-OPS',
+    'Execution Agent',
+    'Execution Agent depends on this artifact as an approved starting input.',
     ARRAY[]::TEXT[],
     '# Execution evidence
 
 ## Purpose
-Contrarian Reviewer depends on this artifact as an approved starting input.
+Execution Agent depends on this artifact as an approved starting input.
+
+## Required Inputs
+- Add required context here
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    FALSE
+  ),
+  (
+    'EXECUTION-STATUS-BRIEF',
+    'Execution status brief',
+    'Agent Contract',
+    'OUTPUT',
+    'EXECUTION-OPS',
+    'Execution Agent',
+    'Execution Agent is expected to publish this artifact as part of its baseline contribution.',
+    ARRAY[]::TEXT[],
+    '# Execution status brief
+
+## Purpose
+Execution Agent is expected to publish this artifact as part of its baseline contribution.
 
 ## Required Inputs
 - Add required context here
@@ -1448,6 +1475,33 @@ Translate human approval into a deployment-ready hand-off for release execution.
 ## Follow-up
 - Record owners, next steps, and downstream hand-off expectations.',
     TRUE
+  ),
+  (
+    'OPERATOR-ACTION-PLAN',
+    'Operator action plan',
+    'Agent Contract',
+    'OUTPUT',
+    'EXECUTION-OPS',
+    'Execution Agent',
+    'Execution Agent is expected to publish this artifact as part of its baseline contribution.',
+    ARRAY[]::TEXT[],
+    '# Operator action plan
+
+## Purpose
+Execution Agent is expected to publish this artifact as part of its baseline contribution.
+
+## Required Inputs
+- Add required context here
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    FALSE
   ),
   (
     'PLANNING-ASSUMPTIONS-LOG',
@@ -2367,6 +2421,33 @@ Validation Agent is expected to publish this artifact as part of its baseline co
     FALSE
   ),
   (
+    'WAIT-RECORDS',
+    'Wait records',
+    'Agent Contract',
+    'INPUT',
+    'EXECUTION-OPS',
+    'Execution Agent',
+    'Execution Agent depends on this artifact as an approved starting input.',
+    ARRAY[]::TEXT[],
+    '# Wait records
+
+## Purpose
+Execution Agent depends on this artifact as an approved starting input.
+
+## Required Inputs
+- Add required context here
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    FALSE
+  ),
+  (
     'WORKFLOW-OUTPUTS',
     'Workflow outputs',
     'Agent Contract',
@@ -2379,6 +2460,33 @@ Validation Agent is expected to publish this artifact as part of its baseline co
 
 ## Purpose
 Validation Agent depends on this artifact as an approved starting input.
+
+## Required Inputs
+- Add required context here
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    FALSE
+  ),
+  (
+    'WORKFLOW-RUNS',
+    'Workflow runs',
+    'Agent Contract',
+    'INPUT',
+    'EXECUTION-OPS',
+    'Execution Agent',
+    'Execution Agent depends on this artifact as an approved starting input.',
+    ARRAY[]::TEXT[],
+    '# Workflow runs
+
+## Purpose
+Execution Agent depends on this artifact as an approved starting input.
 
 ## Required Inputs
 - Add required context here

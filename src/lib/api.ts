@@ -13,6 +13,7 @@ import {
   CompletedWorkOrderDetail,
   CompletedWorkOrderSummary,
   ConnectorValidationResult,
+  CapabilityConnectorContext,
   DeploymentTargetValidationResult,
   ChatStreamEvent,
   EvalRun,
@@ -25,12 +26,23 @@ import {
   RunEvent,
   RunConsoleSnapshot,
   Skill,
+  StageControlContinueResponse,
   TelemetryMetricSample,
   TelemetrySpan,
+  ReviewPacketArtifactSummary,
+  WorkspaceDatabaseBootstrapConfig,
+  WorkspaceDatabaseBootstrapProfileSnapshot,
+  WorkspaceDatabaseBootstrapResult,
+  WorkspaceDatabaseBootstrapStatus,
   WorkspaceSettings,
+  WorkspaceConnectorSettings,
   WorkspaceCatalogSnapshot,
+  WorkspaceDetectionResult,
   WorkspacePathValidationResult,
   WorkItem,
+  WorkItemAttachmentUpload,
+  WorkItemPhaseStakeholderAssignment,
+  WorkItemExplainDetail,
   WorkItemFlightRecorderDetail,
   WorkItemPhase,
   WorkflowRun,
@@ -147,6 +159,12 @@ interface CapabilityChatRequest {
   history: CapabilityChatMessage[];
   message: string;
   sessionMode?: 'resume' | 'fresh';
+  sessionScope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  sessionScopeId?: string;
+  contextMode?: 'GENERAL' | 'WORK_ITEM_STAGE';
+  workItemId?: string;
+  runId?: string;
+  workflowStepId?: string;
 }
 
 const getError = async (response: Response) => {
@@ -200,6 +218,35 @@ export const sendCapabilityChat = async (
 export const fetchAppState = async (): Promise<AppState> =>
   requestJson<AppState>('/api/state');
 
+export const fetchDatabaseBootstrapStatus = async (): Promise<WorkspaceDatabaseBootstrapStatus> =>
+  requestJson<WorkspaceDatabaseBootstrapStatus>('/api/bootstrap/database/status');
+
+export const setupDatabaseBootstrap = async (
+  payload: WorkspaceDatabaseBootstrapConfig,
+): Promise<WorkspaceDatabaseBootstrapResult> =>
+  requestJson<WorkspaceDatabaseBootstrapResult>('/api/bootstrap/database/setup', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload),
+  });
+
+export const fetchDatabaseBootstrapProfiles =
+  async (): Promise<WorkspaceDatabaseBootstrapProfileSnapshot> =>
+    requestJson<WorkspaceDatabaseBootstrapProfileSnapshot>(
+      '/api/bootstrap/database/profiles',
+    );
+
+export const activateDatabaseBootstrapProfile = async (
+  profileId: string,
+): Promise<WorkspaceDatabaseBootstrapResult> =>
+  requestJson<WorkspaceDatabaseBootstrapResult>(
+    `/api/bootstrap/database/profiles/${encodeURIComponent(profileId)}/activate`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+    },
+  );
+
 export const fetchWorkspaceSettings = async (): Promise<WorkspaceSettings> =>
   requestJson<WorkspaceSettings>('/api/workspace/settings');
 
@@ -207,6 +254,18 @@ export const updateWorkspaceSettingsRecord = async (
   updates: Partial<WorkspaceSettings>,
 ): Promise<WorkspaceSettings> =>
   requestJson<WorkspaceSettings>('/api/workspace/settings', {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(updates),
+  });
+
+export const fetchWorkspaceConnectors = async (): Promise<WorkspaceConnectorSettings> =>
+  requestJson<WorkspaceConnectorSettings>('/api/workspace/connectors');
+
+export const updateWorkspaceConnectors = async (
+  updates: Partial<WorkspaceConnectorSettings>,
+): Promise<WorkspaceConnectorSettings> =>
+  requestJson<WorkspaceConnectorSettings>('/api/workspace/connectors', {
     method: 'PATCH',
     headers: jsonHeaders,
     body: JSON.stringify(updates),
@@ -249,6 +308,35 @@ export const validateOnboardingWorkspacePath = async (payload: {
       method: 'POST',
       headers: jsonHeaders,
       body: JSON.stringify(payload),
+    },
+  );
+
+export const detectOnboardingWorkspaceProfile = async (payload: {
+  defaultWorkspacePath?: string;
+  approvedWorkspacePaths?: string[];
+}): Promise<WorkspaceDetectionResult> =>
+  requestJson<WorkspaceDetectionResult>(
+    '/api/onboarding/detect-workspace-profile',
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const detectCapabilityWorkspaceProfile = async (
+  capabilityId: string,
+  payload?: {
+    defaultWorkspacePath?: string;
+    approvedWorkspacePaths?: string[];
+  },
+): Promise<WorkspaceDetectionResult> =>
+  requestJson<WorkspaceDetectionResult>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/detect-workspace-profile`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
     },
   );
 
@@ -328,6 +416,96 @@ export const fetchWorkItemEvidence = async (
 ): Promise<CompletedWorkOrderDetail> =>
   requestJson<CompletedWorkOrderDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/evidence`,
+  );
+
+export const fetchWorkItemExplainDetail = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<WorkItemExplainDetail> =>
+  requestJson<WorkItemExplainDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/explain`,
+  );
+
+export const generateWorkItemReviewPacket = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<ReviewPacketArtifactSummary> =>
+  requestJson<ReviewPacketArtifactSummary>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/review-packet`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const fetchCapabilityConnectorContext = async (
+  capabilityId: string,
+): Promise<CapabilityConnectorContext> =>
+  requestJson<CapabilityConnectorContext>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors`,
+  );
+
+export const syncCapabilityGithubConnector = async (
+  capabilityId: string,
+) =>
+  requestJson<CapabilityConnectorContext['github']>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors/github/sync`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const syncCapabilityJiraConnector = async (
+  capabilityId: string,
+) =>
+  requestJson<CapabilityConnectorContext['jira']>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors/jira/sync`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const transitionCapabilityJiraIssue = async (
+  capabilityId: string,
+  payload: { issueKey: string; transitionId: string },
+) =>
+  requestJson<{ status: 'READY'; message: string }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors/jira/transition`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const syncCapabilityConfluenceConnector = async (
+  capabilityId: string,
+) =>
+  requestJson<CapabilityConnectorContext['confluence']>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors/confluence/sync`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const publishCapabilityArtifactToConfluence = async (
+  capabilityId: string,
+  payload: { artifactId: string; title?: string; parentPageId?: string },
+) =>
+  requestJson<{ status: 'READY'; message: string; url?: string; pageId?: string }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors/confluence/publish`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
   );
 
 export const fetchArtifactContent = async (
@@ -420,6 +598,19 @@ export const updateCapabilityAgentRecord = async (
     },
   );
 
+export const updateCapabilityAgentModelsRecord = async (
+  capabilityId: string,
+  payload: { model: string },
+): Promise<CapabilityBundle> =>
+  requestJson<CapabilityBundle>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/bulk-model`,
+    {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
 export const appendCapabilityMessageRecord = async (
   capabilityId: string,
   message: Omit<CapabilityChatMessage, 'capabilityId'>,
@@ -485,6 +676,9 @@ export const createCapabilityWorkItem = async (
     title: string;
     description?: string;
     workflowId: string;
+    taskType?: WorkItem['taskType'];
+    phaseStakeholders?: WorkItemPhaseStakeholderAssignment[];
+    attachments?: WorkItemAttachmentUpload[];
     priority: WorkItem['priority'];
     tags: string[];
   },
@@ -515,7 +709,11 @@ export const moveCapabilityWorkItem = async (
 export const startCapabilityWorkflowRun = async (
   capabilityId: string,
   workItemId: string,
-  payload?: { restartFromPhase?: WorkItemPhase },
+  payload?: {
+    restartFromPhase?: WorkItemPhase;
+    guidance?: string;
+    guidedBy?: string;
+  },
 ): Promise<WorkflowRunDetail> =>
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/runs`,
@@ -623,7 +821,11 @@ export const cancelCapabilityWorkflowRun = async (
 export const restartCapabilityWorkflowRun = async (
   capabilityId: string,
   runId: string,
-  payload?: { restartFromPhase?: WorkItemPhase },
+  payload?: {
+    restartFromPhase?: WorkItemPhase;
+    guidance?: string;
+    guidedBy?: string;
+  },
 ): Promise<WorkflowRunDetail> =>
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/restart`,
@@ -915,3 +1117,26 @@ export const streamCapabilityChat = async (
     sawError,
   };
 };
+
+export const continueCapabilityWorkItemStageControl = async (
+  capabilityId: string,
+  workItemId: string,
+  payload: {
+    agentId?: string;
+    conversation: Array<{
+      role: 'user' | 'agent';
+      content: string;
+      timestamp?: string;
+    }>;
+    carryForwardNote?: string;
+    resolvedBy?: string;
+  },
+): Promise<StageControlContinueResponse> =>
+  requestJson<StageControlContinueResponse>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/stage-control/continue`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );

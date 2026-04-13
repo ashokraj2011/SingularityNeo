@@ -1,42 +1,158 @@
-# Singularity Neo
+# Singulairy
 
-Singularity Neo is a capability-centered delivery workspace for enterprise software teams. It combines business-facing capability management with AI-assisted collaboration, workflow design, orchestration, evidence tracking, and runtime-backed execution.
+Singulairy is a capability-centered delivery workspace for enterprise software teams. It combines workflow orchestration, agent collaboration, approvals, evidence, and auditability in one local-first operating console.
 
-The current product direction is:
-- `Home` tells a business owner what matters now
-- `Work` moves delivery through a capability-owned lifecycle
-- `Team` shows who can help and whether they are ready
-- `Chat` gives capability-scoped collaboration with resumable context
-- `Evidence` shows artifacts, handoffs, and flight recorder history
-- `Designer` defines the workflow and lifecycle lanes that drive execution
+Instead of treating delivery as separate tools for planning, coding, approvals, and reporting, Singulairy keeps them connected inside one selected capability.
 
-## What It Does
+## What Singulairy Is
 
-Singularity Neo treats a `capability` as the operating unit of the workspace. A capability owns:
-- its business charter
-- collaborators and agents
-- approved workspaces and command templates
-- workflows and lifecycle phases
-- work items and workflow runs
-- artifacts, handoffs, and evidence
-- memory and agent learning
+Singulairy is best understood as a delivery operating system for a business capability.
 
-Primary surfaces:
-- `Home` (`/`) - capability trust, next action, delivery, and evidence
-- `Work` (`/orchestrator`) - orchestration board, waits, approvals, restart/reset
-- `Team` (`/team`) - collaborators, readiness, learning refresh, chat handoff
-- `Chat` (`/chat`) - capability-scoped collaboration with context inspector
-- `Evidence` (`/ledger`) - artifacts, completed work, and work-item flight recorder
-- `Designer` (`/designer`) - full-screen Workflow Designer Neo
+A capability owns:
+- its charter and business outcome
+- lifecycle phases and workflow steps
+- human collaborators and standard agents
+- work items, runs, waits, and approvals
+- evidence, handoffs, review packets, and audit trails
+- memory, skills, tools, and agent learning
 
-Advanced tools:
-- `Run Console` (`/run-console`)
-- `Memory Explorer` (`/memory`)
-- `Eval Center` (`/evals`)
-- `Skill Library` (`/skills`)
-- `Artifact Designer` (`/artifact-designer`)
-- `Tasks` (`/tasks`)
-- `Studio` (`/studio`)
+The product is strongest when a team wants to:
+- move work through an explicit SDLC or org-specific lifecycle
+- let agents help, but keep humans in control
+- explain why work is blocked, waiting, approved, or complete
+- keep durable evidence for reviews, release readiness, and audit
+
+## Main Workspaces
+
+- `Home` shows capability health, trust, readiness, and what matters now.
+- `Work` is the delivery workbench for operating one work item well.
+- `Team` shows standard agents, custom agents, skills, tools, and learning.
+- `Chat` gives capability-scoped and execution-aware collaboration.
+- `Evidence` provides artifacts, completed work, approvals, and flight recorder history.
+- `Designer` defines workflows, lifecycle lanes, and operating rules.
+
+Advanced tools include:
+- `Run Console`
+- `Memory Explorer`
+- `Eval Center`
+- `Skill Library`
+- `Artifact Designer`
+- `Tool Access`
+- `Tasks`
+- `Studio`
+- `Database Setup`
+
+## Core Product Ideas
+
+### 1. Capability-Centered
+
+The active capability is the center of gravity. Most of the application follows that selected capability, including its lifecycle, agents, evidence, database-backed state, and runtime context.
+
+### 2. Human-Governed Agents
+
+Agents can plan, design, implement, validate, review, and explain. Workflow steps still control actual tool access, approvals, artifact contracts, and execution boundaries.
+
+### 3. Work With Proof
+
+Every meaningful run can leave behind artifacts, handoffs, approvals, waits, policy decisions, and work-item explainability so the team can see what happened and why.
+
+### 4. Adaptable Lifecycle
+
+The platform supports capability-specific lifecycles, including organization-specific flows like Brokerage SDLC. Lifecycle phases drive the Work lanes, Designer structure, and Evidence timeline.
+
+## What A Normal Day Looks Like
+
+1. Open a capability and check `Home` for readiness, blockers, and trust signals.
+2. Use `Work` to start or continue a work item.
+3. If the workflow pauses, review the wait, provide guidance, approve, or take control.
+4. Use `Chat` for direct collaboration with the relevant agent or the execution agent.
+5. Use `Evidence` to inspect artifacts, approvals, review packets, and flight recorder history.
+6. Use `Designer` or `Team` when the operating model itself needs to change.
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 22+
+- a reachable PostgreSQL instance
+- one runtime path configured:
+  - preferred: `COPILOT_CLI_URL`
+  - fallback: `GITHUB_MODELS_TOKEN`
+
+### Install
+
+```bash
+npm install
+cp .env.example .env.local
+```
+
+### Configure Runtime
+
+Recommended:
+
+```bash
+COPILOT_CLI_URL="http://127.0.0.1:4321"
+```
+
+Fallback:
+
+```bash
+GITHUB_MODELS_TOKEN="github_pat_..."
+```
+
+### Configure Database
+
+Set the local Postgres connection in `.env.local`:
+
+```bash
+PGHOST="127.0.0.1"
+PGPORT="5432"
+PGDATABASE="singularity"
+PGUSER="postgres"
+PGPASSWORD=""
+PGADMIN_DATABASE="postgres"
+```
+
+You do not need to pre-create every object manually. Singulairy can bootstrap the target database from `Database Setup` at `/workspace/databases`.
+
+### Start The App
+
+```bash
+npm run dev
+```
+
+This starts:
+- frontend at `http://localhost:3000`
+- API at `http://localhost:3001`
+
+## First 10 Minutes
+
+If this is a fresh database or first run:
+
+1. Open `http://localhost:3000/workspace/databases`
+2. Confirm the Postgres connection
+3. Initialize the database objects and shared foundations
+4. Create or open a capability
+5. Review `Team`, `Designer`, and `Work`
+
+If the workspace looks empty after DB setup, that usually means the shared foundations are loaded but no visible business capability has been created yet.
+
+## Development Commands
+
+```bash
+npm run dev          # client + server
+npm run dev:client   # Vite only
+npm run dev:server   # Express API only
+npm run build        # production frontend build
+npm run preview      # preview built frontend
+npm run start        # serve backend + built frontend
+npm run clean        # remove dist
+npm run lint         # TypeScript check
+npm run test         # all Vitest tests
+npm run test:unit    # frontend-focused tests
+npm run test:backend # backend-focused tests
+npm run test:e2e     # Playwright browser tests
+```
 
 ## Architecture
 
@@ -50,159 +166,129 @@ Frontend:
 Backend:
 - Express
 - PostgreSQL
-- GitHub Copilot SDK
+- GitHub Copilot SDK runtime integration
 
 Runtime model:
-- the React app talks only to the local Express API
-- the Express API is the system of record for capabilities and workspace state
-- capability data is persisted in Postgres
-- runtime-backed chat and execution use the GitHub Copilot SDK
+- the React app talks to the local Express API
+- Postgres is the durable system of record
+- workflow execution, waits, artifacts, approvals, and learning are persisted
+- the runtime combines deterministic orchestration with agent-backed execution
 
-Persistence model:
-- capability records live in Postgres
-- workspace entities are capability-scoped
-- workflow runs, waits, artifacts, learning profiles, and sessions are durable
-
-## Prerequisites
-
-- Node.js 22+ recommended
-- PostgreSQL running locally or reachable from the API server
-- one Copilot runtime path configured:
-  - preferred: `COPILOT_CLI_URL`
-  - fallback: `GITHUB_MODELS_TOKEN`
-
-## Quick Start
-
-1. Install dependencies.
-
-```bash
-npm install
-```
-
-2. Create `.env.local` from `.env.example`.
-
-```bash
-cp .env.example .env.local
-```
-
-3. Set your runtime configuration in `.env.local`.
-
-Recommended enterprise path:
-
-```bash
-COPILOT_CLI_URL="http://127.0.0.1:4321"
-```
-
-Token fallback:
-
-```bash
-GITHUB_MODELS_TOKEN="github_pat_..."
-```
-
-4. Set your local Postgres connection in `.env.local`.
-
-```bash
-PGHOST="127.0.0.1"
-PGPORT="5432"
-PGDATABASE="singularity"
-PGUSER="postgres"
-PGPASSWORD=""
-PGADMIN_DATABASE="postgres"
-```
-
-5. If the database does not exist yet, create it once.
-
-```bash
-createdb singularity
-```
-
-6. Start the app.
-
-```bash
-npm run dev
-```
-
-This starts:
-- Vite on `http://localhost:3000`
-- the Express API on `http://localhost:3001`
-
-## Useful Scripts
-
-```bash
-npm run dev          # client + server
-npm run dev:client   # Vite only
-npm run dev:server   # Express API only
-npm run build        # production frontend build
-npm run start        # serve backend + built frontend
-npm run lint         # TypeScript check
-npm run test         # all Vitest tests
-npm run test:unit    # frontend-focused tests
-npm run test:backend # backend-focused tests
-npm run test:e2e     # Playwright browser tests
-```
-
-## Environment Variables
-
-Important variables:
-
-```bash
-COPILOT_CLI_URL=""
-GITHUB_MODELS_TOKEN=""
-PORT="3001"
-VITE_ENABLE_DEMO_MODE="false"
-ENABLE_DEMO_SEED="false"
-PGHOST="127.0.0.1"
-PGPORT="5432"
-PGDATABASE="singularity"
-PGUSER="postgres"
-PGPASSWORD=""
-PGADMIN_DATABASE="postgres"
-```
-
-Notes:
-- `COPILOT_CLI_URL` is the preferred long-term enterprise runtime path
-- `GITHUB_MODELS_TOKEN` is a fallback, not the preferred production setup
-- `VITE_ENABLE_DEMO_MODE` and `ENABLE_DEMO_SEED` should stay `false` for real workspaces
-- the Vite dev server proxies `/api` to `http://127.0.0.1:3001` unless `VITE_API_PROXY_TARGET` overrides it
-
-## Repo Structure
+## Repository Structure
 
 ```text
 src/
-  components/        shared UI and layout
-  context/           capability state and app boot flow
-  lib/               client helpers, lifecycle, workflow, UX models
-  pages/             Home, Work, Team, Chat, Evidence, Designer, Advanced tools
-  types.ts           shared frontend domain model
+  components/        shared UI and workspace shells
+  context/           capability boot and workspace state
+  lib/               lifecycle, workflow, UX, and client helpers
+  pages/             Home, Work, Team, Chat, Evidence, Designer, tools
+  types.ts           shared application model
 
 server/
-  index.ts           Express bootstrap and route registration
-  repository.ts      capability and workspace persistence
-  execution/         workflow runs, waits, orchestration, worker
-  agentLearning/     learning profiles, jobs, sessions
-  memory.ts          capability memory indexing and retrieval
-  ledger.ts          evidence and artifact aggregation
-  flightRecorder.ts  work-item audit reconstruction
-  db.ts              Postgres init and schema evolution
-
-tests/
-  e2e/               Playwright flows
+  index.ts           API bootstrap and route registration
+  repository.ts      durable persistence and workspace materialization
+  db.ts              schema setup and Postgres helpers
+  execution/         runs, waits, worker, tools, orchestration
+  agentLearning/     learning profiles, jobs, and summaries
+  ledger.ts          evidence aggregation and artifact access
+  flightRecorder.ts  explainability and audit reconstruction
 ```
 
-## Product Highlights
+## Important Product Surfaces
 
-- Business-first capability home with trust and proof milestones
-- Capability-owned lifecycle phases that drive workflow lanes and work board columns
-- Full-screen Workflow Designer Neo
-- Team workspace with agent learning and resumable session visibility
-- Collaboration-first chat with context inspector and stream recovery
-- Orchestrator with approvals, blockers, restart, and reset controls
-- Evidence and Flight Recorder views for artifacts and end-to-end audit history
-- Built-in contrarian reviewer support for conflict-resolution waits
+### Work
 
-## Quality Gates
+`/orchestrator` is the main delivery workbench. It is where users:
+- start or restart phases
+- review blockers and waits
+- guide agents
+- approve or reject gated work
+- inspect attempts and artifacts for the selected work item
 
-Run these before pushing changes:
+### Evidence
+
+`/ledger` is the audit and proof workspace. It is where users:
+- browse artifacts and completed work
+- inspect approvals and handoffs
+- review flight recorder history
+- generate or inspect review-ready outputs
+
+### Team
+
+`/team` is the operating model for collaborators and agents. It is where users:
+- inspect standard agents
+- review skills, tools, and learning
+- adjust models or role setup
+- understand who should help at each stage
+
+## Troubleshooting
+
+### The frontend or backend is not responding
+
+Check the ports:
+
+```bash
+lsof -iTCP:3000 -sTCP:LISTEN -n -P
+lsof -iTCP:3001 -sTCP:LISTEN -n -P
+```
+
+Then restart what you need:
+
+```bash
+npm run dev:client
+npm run dev:server
+```
+
+### The app is waiting for capability workspace or `/api/state`
+
+Check the API directly:
+
+```bash
+curl -i http://127.0.0.1:3001/api/state
+```
+
+If it hangs or fails:
+- confirm Postgres is reachable
+- confirm the runtime DB is the expected one in `Database Setup`
+- restart the backend cleanly
+
+### Database initialization fails
+
+Open `Database Setup` and verify:
+- host
+- port
+- database name
+- user
+- password
+- admin database
+
+The app supports saved runtime DB profiles, so you can switch between known database connections without retyping each time.
+
+### Copilot runtime is not configured
+
+Set one of:
+- `COPILOT_CLI_URL`
+- `GITHUB_MODELS_TOKEN`
+
+Then restart the backend.
+
+### Playwright uses your configured database
+
+The e2e suite uses the configured Postgres database. If you do not isolate it, tests can create test capabilities in your normal workspace.
+
+Recommended:
+- use a dedicated database for e2e
+- or clean up test capabilities after the run
+
+## Additional Docs
+
+- [Competitive positioning and product gap assessment](./docs/research/competitive-positioning.md)
+- [Demo video script](./docs/demo-video-script.md)
+- [SQL schema and seed exports](./docs/sql/)
+
+## Quality Checks
+
+Run these before pushing:
 
 ```bash
 npm run lint
@@ -211,72 +297,13 @@ npm run build
 git diff --check
 ```
 
-If you are touching UI flows, also run:
+If you changed UI flows, also run:
 
 ```bash
 npm run test:e2e
 ```
 
-## Troubleshooting
+## Notes
 
-### Port 3001 is already in use
-
-Check what owns the API port:
-
-```bash
-lsof -iTCP:3001 -sTCP:LISTEN -n -P
-```
-
-If you need a clean restart:
-
-```bash
-pkill -f "server/index.ts"
-npm run dev:server
-```
-
-### App hangs on “Waiting for the authoritative capability workspace”
-
-This means the frontend is waiting for `/api/state`.
-
-Check the API directly:
-
-```bash
-curl -i http://127.0.0.1:3001/api/state
-```
-
-If it hangs:
-- confirm Postgres is reachable
-- confirm the API process is healthy
-- restart the backend cleanly
-
-### Copilot is not configured
-
-You must set one of:
-- `COPILOT_CLI_URL`
-- `GITHUB_MODELS_TOKEN`
-
-Then restart the backend.
-
-### Playwright creates test capabilities
-
-The e2e suite currently uses the configured Postgres database. If you run Playwright against your normal local database, it will create test capabilities unless you isolate it to a separate DB.
-
-Recommended:
-- use a dedicated Postgres database for e2e runs
-- or clean up test capabilities after the suite
-
-### Large bundle warning during build
-
-The production build currently warns about a large main JS chunk. This does not block the build, but it is a good candidate for future code-splitting work.
-
-## Current Defaults And Assumptions
-
-- business-owner-first UX for primary navigation
-- desktop-first design
-- Postgres as the durable system of record
-- GitHub Copilot SDK as the AI runtime path
-- demo data disabled by default
-
-## License / Internal Use
-
-This repository appears to be an active product workspace rather than a polished public package template. If you plan to publish or distribute it outside your organization, add the appropriate license, contribution guide, and security policy first.
+- The build currently warns about a large main JS chunk. This does not block the build, but code splitting is still a worthwhile follow-up.
+- This repository looks like an active product workspace rather than a polished public package template. Add a license, contribution guide, and security policy before wider distribution.

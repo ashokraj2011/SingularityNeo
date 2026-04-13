@@ -50,11 +50,14 @@ import {
   StatusBadge,
 } from '../components/EnterpriseUI';
 import CapabilityLifecycleEditor from '../components/CapabilityLifecycleEditor';
+import { normalizeAgentOperatingContract } from '../lib/agentRuntime';
 import {
-  applyStandardArtifactsToWorkflow,
+  applyWorkflowTemplateArtifacts,
+  createBrokerageCapabilityWorkflow,
   createStandardCapabilityWorkflow,
 } from '../lib/standardWorkflow';
 import {
+  createBrokerageCapabilityLifecycle,
   createDefaultCapabilityLifecycle,
   createLifecyclePhase,
   getCapabilityGraphPhaseIds,
@@ -86,6 +89,7 @@ import {
 } from '../lib/workflowGraph';
 import { cn } from '../lib/utils';
 import type {
+  AgentArtifactExpectation,
   ToolAdapterId,
   WorkItemPhase,
   Workflow,
@@ -265,6 +269,13 @@ const splitArtifactLines = (value: string) =>
     .split('\n')
     .map(entry => entry.trim())
     .filter(Boolean);
+
+const formatAgentArtifactSuggestionLines = (
+  expectations: AgentArtifactExpectation[] = [],
+) => expectations.map(expectation => expectation.artifactName);
+
+const mergeArtifactLines = (...groups: string[][]) =>
+  [...new Set(groups.flat().map(item => item.trim()).filter(Boolean))];
 
 const cloneArtifactContract = (artifactContract?: WorkflowNode['artifactContract']) =>
   artifactContract
@@ -699,7 +710,7 @@ export default function WorkflowStudio({
     () =>
       workspace.workflows.map(workflow =>
         normalizeWorkflowForCapability(
-          applyStandardArtifactsToWorkflow(activeCapability, workflow),
+          applyWorkflowTemplateArtifacts(activeCapability, workflow),
         ),
       ),
     [activeCapability, normalizeWorkflowForCapability, workspace.workflows],
@@ -1824,6 +1835,46 @@ export default function WorkflowStudio({
     setSelectedNodeIds(standardWorkflow.entryNodeId ? [standardWorkflow.entryNodeId] : []);
   };
 
+  const handleLoadBrokerageWorkflow = async () => {
+    const brokerageLifecycle = createBrokerageCapabilityLifecycle();
+    const brokerageCapability = {
+      ...activeCapability,
+      lifecycle: brokerageLifecycle,
+    };
+    const brokerageWorkflow = createBrokerageCapabilityWorkflow(brokerageCapability);
+    const existingBrokerageIndex = workflows.findIndex(
+      workflow => workflow.id === brokerageWorkflow.id,
+    );
+    const nextWorkflows =
+      existingBrokerageIndex >= 0
+        ? workflows.map(workflow =>
+            workflow.id === brokerageWorkflow.id ? brokerageWorkflow : workflow,
+          )
+        : [...workflows, brokerageWorkflow];
+
+    try {
+      await setCapabilityWorkspaceContent(activeCapability.id, {
+        workflows: cloneWorkflowSet(nextWorkflows, brokerageLifecycle),
+      });
+      await updateCapabilityMetadata(activeCapability.id, {
+        lifecycle: brokerageLifecycle,
+      });
+      setLifecycleDraft(brokerageLifecycle);
+      setLastSavedAt(new Date().toISOString());
+      success(
+        'Brokerage workflow loaded',
+        'The Brokerage SDLC flow and lifecycle lanes are now active for this capability.',
+      );
+      setSelectedWorkflowId(brokerageWorkflow.id);
+      setSelectedNodeId(brokerageWorkflow.entryNodeId || null);
+      setSelectedNodeIds(
+        brokerageWorkflow.entryNodeId ? [brokerageWorkflow.entryNodeId] : [],
+      );
+    } catch {
+      // Capability context mutation paths already emit failure toasts.
+    }
+  };
+
   const handleDuplicateWorkflow = (workflowToCopy: Workflow | null = selectedWorkflow) => {
     if (!workflowToCopy) {
       return;
@@ -2554,6 +2605,50 @@ export default function WorkflowStudio({
       return null;
     }
 
+    const assignedAgent = nodeDraft.agentId
+      ? workspace.agents.find(agent => agent.id === nodeDraft.agentId) || null
+      : null;
+    const assignedAgentContract = assignedAgent
+      ? normalizeAgentOperatingContract(assignedAgent.contract, {
+          description: assignedAgent.objective || assignedAgent.role,
+          suggestedInputArtifacts: assignedAgent.inputArtifacts,
+          expectedOutputArtifacts: assignedAgent.outputArtifacts,
+        })
+      : null;
+    const agentSuggestedInputs = formatAgentArtifactSuggestionLines(
+      assignedAgentContract?.suggestedInputArtifacts,
+    );
+    const agentExpectedOutputs = formatAgentArtifactSuggestionLines(
+      assignedAgentContract?.expectedOutputArtifacts,
+    );
+    const hasAgentArtifactSuggestions =
+      agentSuggestedInputs.length > 0 || agentExpectedOutputs.length > 0;
+    const applyAssignedAgentArtifactSuggestions = () => {
+      if (!hasAgentArtifactSuggestions) {
+        return;
+      }
+
+      setNodeDraft(current =>
+        current
+          ? {
+              ...current,
+              artifactContract: {
+                ...(current.artifactContract || {}),
+                requiredInputs: mergeArtifactLines(
+                  current.artifactContract?.requiredInputs || [],
+                  agentSuggestedInputs,
+                ),
+                expectedOutputs: mergeArtifactLines(
+                  current.artifactContract?.expectedOutputs || [],
+                  agentExpectedOutputs,
+                ),
+                notes: current.artifactContract?.notes,
+              },
+            }
+          : current,
+      );
+    };
+
     return (
       <div className="grid gap-4">
         <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
@@ -2673,6 +2768,69 @@ export default function WorkflowStudio({
             className="enterprise-input min-h-[7rem]"
           />
         </label>
+
+        {assignedAgent ? (
+          <div className="rounded-2xl border border-primary/15 bg-primary/5 px-4 py-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">
+                  Agent IO Suggestions
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-secondary">
+                  {assignedAgent.name} carries advisory artifact defaults from its operating
+                  contract. Workflow-level artifact requirements still win.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={applyAssignedAgentArtifactSuggestions}
+                disabled={!hasAgentArtifactSuggestions}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                Apply suggestions
+              </button>
+            </div>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                  Suggested inputs
+                </p>
+                {agentSuggestedInputs.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {agentSuggestedInputs.map(item => (
+                      <StatusBadge key={item} tone="neutral">
+                        {item}
+                      </StatusBadge>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+                    This agent does not suggest default inputs.
+                  </p>
+                )}
+              </div>
+              <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                  Expected outputs
+                </p>
+                {agentExpectedOutputs.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {agentExpectedOutputs.map(item => (
+                      <StatusBadge key={item} tone="brand">
+                        {item}
+                      </StatusBadge>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+                    This agent does not define default outputs.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {nodeDraft.type === 'EVENT' ? (
           <>
@@ -3675,6 +3833,14 @@ export default function WorkflowStudio({
                 <Sparkles size={14} />
                 Standard
               </button>
+              <button
+                type="button"
+                onClick={() => void handleLoadBrokerageWorkflow()}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                <Sparkles size={14} />
+                Brokerage
+              </button>
             </div>
             <input
               value={workflowLibraryQuery}
@@ -3920,6 +4086,14 @@ export default function WorkflowStudio({
           >
             <Sparkles size={14} />
             Standard
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleLoadBrokerageWorkflow()}
+            className="enterprise-button enterprise-button-brand-muted"
+          >
+            <Sparkles size={14} />
+            Brokerage
           </button>
           {selectedWorkflow ? (
             <>
@@ -4428,7 +4602,7 @@ export default function WorkflowStudio({
           description={
             archivedWorkflows.length
               ? 'All workflows are archived. Restore one from the archive or create a new graph workflow.'
-              : 'Start with the shared standard workflow template or create a capability-specific graph workflow in the new studio.'
+              : 'Start with the shared Standard or Brokerage workflow templates, or create a capability-specific graph workflow in the new studio.'
           }
           icon={WorkflowIcon}
         >
@@ -4449,6 +4623,14 @@ export default function WorkflowStudio({
                 >
                   <Sparkles size={16} />
                   Load Standard SDLC
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleLoadBrokerageWorkflow()}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  <Sparkles size={16} />
+                  Load Brokerage SDLC
                 </button>
                 <button
                   type="button"
@@ -4659,6 +4841,14 @@ export default function WorkflowStudio({
                 >
                   <Sparkles size={16} />
                   Standard
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleLoadBrokerageWorkflow()}
+                  className="workflow-lab-toolbar-button"
+                >
+                  <Sparkles size={16} />
+                  Brokerage
                 </button>
                 <button
                   type="button"
@@ -5230,7 +5420,7 @@ export default function WorkflowStudio({
                             Start a workflow without leaving the canvas
                           </p>
                           <p className="mt-3 text-sm leading-relaxed text-slate-300">
-                            Create a brand-new workflow or load the standard SDLC template, then use the studio panels to model nodes, hand-offs, events, alerts, and approvals.
+                            Create a brand-new workflow or load the Standard or Brokerage SDLC template, then use the studio panels to model nodes, hand-offs, events, alerts, and approvals.
                           </p>
                           <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
                             <button
@@ -5248,6 +5438,14 @@ export default function WorkflowStudio({
                             >
                               <Sparkles size={16} />
                               Load Standard SDLC
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleLoadBrokerageWorkflow()}
+                              className="enterprise-button enterprise-button-secondary"
+                            >
+                              <Sparkles size={16} />
+                              Load Brokerage SDLC
                             </button>
                           </div>
                         </div>

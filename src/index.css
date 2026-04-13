@@ -190,11 +190,15 @@
   }
 
   .modal-shell {
-    @apply relative my-auto w-full max-h-[calc(100vh-8rem)] overflow-y-auto rounded-[1.75rem] border border-outline-variant/60 bg-white p-7 shadow-[0_24px_80px_rgba(12,23,39,0.18)];
+    @apply relative my-auto flex w-full max-h-[calc(100vh-8rem)] min-h-0 flex-col rounded-[1.75rem] border border-outline-variant/60 bg-white p-7 shadow-[0_24px_80px_rgba(12,23,39,0.18)];
   }
 
   .modal-shell-header {
     @apply flex flex-col gap-4 border-b border-outline-variant/40 pb-5 lg:flex-row lg:items-start lg:justify-between;
+  }
+
+  .modal-shell-body {
+    @apply min-h-0 flex-1 overflow-y-auto pt-5;
   }
 
   .form-section-header {
@@ -506,7 +510,7 @@
   }
 
   .orchestrator-workspace-grid {
-    @apply grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem] 2xl:grid-cols-[minmax(0,1fr)_26rem];
+    @apply grid gap-4;
   }
 
   .orchestrator-board-shell {
@@ -574,11 +578,59 @@
   }
 
   .orchestrator-detail-rail {
-    @apply min-w-0;
+    @apply order-[-1] min-w-0;
   }
 
   .orchestrator-detail-panel {
-    @apply min-h-[50rem] p-0 xl:sticky xl:top-4;
+    @apply min-h-[46rem] overflow-hidden p-0;
+  }
+
+  .orchestrator-workbench-grid {
+    @apply grid min-h-[46rem] gap-0 xl:grid-cols-[22rem_minmax(0,1fr)];
+  }
+
+  .orchestrator-navigator-rail {
+    @apply min-w-0 border-b border-outline-variant/25 bg-[linear-gradient(180deg,rgba(246,248,252,0.98),rgba(251,252,253,0.98))] xl:border-b-0 xl:border-r;
+  }
+
+  .orchestrator-navigator-shell {
+    @apply flex h-full flex-col;
+  }
+
+  .orchestrator-navigator-header {
+    @apply flex items-start justify-between gap-3 border-b border-outline-variant/20 px-4 pb-4 pt-5;
+  }
+
+  .orchestrator-navigator-groups {
+    @apply flex-1 space-y-4 overflow-y-auto px-4 py-4;
+  }
+
+  .orchestrator-navigator-group {
+    @apply space-y-3;
+  }
+
+  .orchestrator-navigator-group-header {
+    @apply flex items-start justify-between gap-3;
+  }
+
+  .orchestrator-navigator-list {
+    @apply space-y-3;
+  }
+
+  .orchestrator-navigator-item {
+    @apply w-full rounded-[1.35rem] border border-outline-variant/30 bg-white px-4 py-4 text-left transition-all hover:border-primary/20 hover:bg-primary/5 hover:shadow-[0_12px_26px_rgba(15,23,42,0.08)];
+  }
+
+  .orchestrator-navigator-item-active {
+    @apply border-primary/35 bg-primary/5 shadow-[0_14px_30px_rgba(0,132,61,0.12)];
+  }
+
+  .orchestrator-navigator-empty {
+    @apply rounded-[1.25rem] border border-dashed border-outline-variant/35 bg-white/85 px-4 py-4 text-sm leading-relaxed text-secondary;
+  }
+
+  .orchestrator-workbench-canvas {
+    @apply min-w-0;
   }
 
   .orchestrator-detail-header {
@@ -599,6 +651,54 @@
 
   .orchestrator-preview-panel {
     @apply overflow-hidden;
+  }
+
+  .orchestrator-artifact-browser {
+    @apply grid gap-4 xl:grid-cols-[minmax(0,24rem)_minmax(0,1fr)];
+  }
+
+  .orchestrator-artifact-list {
+    @apply mt-4 space-y-3;
+  }
+
+  .orchestrator-artifact-list-item {
+    @apply flex w-full items-start justify-between gap-3 rounded-[1.35rem] border border-outline-variant/30 bg-white px-4 py-4 text-left transition-colors hover:border-primary/22 hover:bg-primary/5;
+  }
+
+  .orchestrator-artifact-list-item-active {
+    @apply border-primary/35 bg-primary/5 shadow-[0_14px_30px_rgba(0,132,61,0.12)];
+  }
+
+  .orchestrator-stage-chat-card {
+    @apply bg-[linear-gradient(180deg,rgba(255,255,255,0.99),rgba(246,248,252,0.98))];
+  }
+
+  .orchestrator-stage-chat-thread {
+    @apply mt-4 max-h-[28rem] space-y-3 overflow-y-auto rounded-[1.5rem] border border-outline-variant/28 bg-slate-950/95 px-4 py-4;
+  }
+
+  .orchestrator-stage-chat-empty {
+    @apply rounded-[1.25rem] border border-dashed border-white/15 bg-white/5 px-4 py-4 text-sm leading-relaxed text-slate-200;
+  }
+
+  .orchestrator-stage-chat-message {
+    @apply rounded-[1.25rem] px-4 py-4 shadow-[0_14px_28px_rgba(15,23,42,0.16)];
+  }
+
+  .orchestrator-stage-chat-message-user {
+    @apply ml-auto max-w-[85%] bg-primary/18 text-white;
+  }
+
+  .orchestrator-stage-chat-message-agent {
+    @apply max-w-[92%] bg-white text-slate-900;
+  }
+
+  .orchestrator-stage-chat-message-meta {
+    @apply flex flex-wrap items-center justify-between gap-2 text-[0.72rem] font-semibold uppercase tracking-[0.14em] text-secondary;
+  }
+
+  .orchestrator-stage-chat-message-user .orchestrator-stage-chat-message-meta {
+    @apply text-white/75;
   }
 
   .orchestrator-link-grid {

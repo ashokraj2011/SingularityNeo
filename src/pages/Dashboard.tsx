@@ -17,6 +17,7 @@ import {
   Workflow,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
 import {
   buildCapabilityExperience,
   ADVANCED_TOOL_DESCRIPTORS,
@@ -42,7 +43,9 @@ import {
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
 const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
+  databases: Database,
   memory: Database,
+  'tool-access': ShieldCheck,
   'run-console': Gauge,
   evals: ClipboardCheck,
   skills: Sparkles,
@@ -56,6 +59,7 @@ const Dashboard = () => {
   const { activeCapability, getCapabilityWorkspace } = useCapability();
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [explainWorkItemId, setExplainWorkItemId] = useState('');
 
   useEffect(() => {
     let isMounted = true;
@@ -115,6 +119,12 @@ const Dashboard = () => {
   );
   const primaryWorkflow =
     publishedWorkflow || workspace.workflows.find(workflow => !workflow.archivedAt);
+  const topAttentionWorkItem =
+    activeWork.find(
+      item => item.status === 'BLOCKED' || item.status === 'PENDING_APPROVAL',
+    ) || activeWork[0];
+  const explainWorkItem =
+    workspace.workItems.find(item => item.id === explainWorkItemId) || null;
 
   return (
     <div className="space-y-6">
@@ -276,6 +286,17 @@ const Dashboard = () => {
                 {experience.nextAction.actionLabel}
               </button>
             </div>
+            {topAttentionWorkItem ? (
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setExplainWorkItemId(topAttentionWorkItem.id)}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  Explain {topAttentionWorkItem.id}
+                </button>
+              </div>
+            ) : null}
           </div>
 
           <div className="grid gap-3 md:grid-cols-3">
@@ -364,24 +385,37 @@ const Dashboard = () => {
           {activeWork.length > 0 ? (
             <div className="space-y-3">
               {activeWork.map(item => (
-                <button
+                <div
                   key={item.id}
-                  type="button"
-                  onClick={() =>
-                    navigate(`/orchestrator?selected=${encodeURIComponent(item.id)}`)
-                  }
-                  className="flex w-full items-start justify-between gap-3 rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white"
+                  className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4 transition hover:border-primary/20 hover:bg-white"
                 >
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-on-surface">{item.title}</p>
-                    <p className="mt-1 text-xs text-secondary">
-                      {item.phase.toLowerCase()} • {item.priority} priority
-                    </p>
+                  <div className="flex items-start justify-between gap-3">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        navigate(`/orchestrator?selected=${encodeURIComponent(item.id)}`)
+                      }
+                      className="min-w-0 text-left"
+                    >
+                      <p className="text-sm font-semibold text-on-surface">{item.title}</p>
+                      <p className="mt-1 text-xs text-secondary">
+                        {item.phase.toLowerCase()} • {item.priority} priority
+                      </p>
+                    </button>
+                    <StatusBadge tone={getStatusTone(item.status)}>
+                      {getBusinessWorkStatusLabel(item.status)}
+                    </StatusBadge>
                   </div>
-                  <StatusBadge tone={getStatusTone(item.status)}>
-                    {getBusinessWorkStatusLabel(item.status)}
-                  </StatusBadge>
-                </button>
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={() => setExplainWorkItemId(item.id)}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      Explain
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
           ) : (
@@ -581,6 +615,13 @@ const Dashboard = () => {
           })}
         </div>
       </AdvancedDisclosure>
+
+      <ExplainWorkItemDrawer
+        capability={activeCapability}
+        workItem={explainWorkItem}
+        isOpen={Boolean(explainWorkItem)}
+        onClose={() => setExplainWorkItemId('')}
+      />
     </div>
   );
 };

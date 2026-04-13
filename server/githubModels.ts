@@ -238,12 +238,84 @@ const toStakeholderSection = (stakeholders?: CapabilityStakeholder[]) => {
   return content.length > 0 ? `Stakeholders: ${content.join('; ')}` : null;
 };
 
+const toSkillInstructionSections = (
+  capability?: Partial<Capability>,
+  agent?: Partial<CapabilityAgent>,
+) => {
+  const skillMap = new Map((capability?.skillLibrary || []).map(skill => [skill.id, skill]));
+  const attachedSkills = (agent?.skillIds || [])
+    .map(skillId => skillMap.get(skillId))
+    .filter(Boolean);
+
+  const generalSkills = attachedSkills.filter(skill => skill?.kind === 'GENERAL');
+  const roleSkills = attachedSkills.filter(skill => skill?.kind !== 'GENERAL');
+
+  const buildSection = (label: string, skills: typeof attachedSkills) => {
+    if (skills.length === 0) {
+      return null;
+    }
+
+    return [
+      `${label}:`,
+      ...skills.map(
+        skill =>
+          `- ${skill?.name}: ${(skill?.contentMarkdown || skill?.description || '').trim()}`,
+      ),
+    ].join('\n');
+  };
+
+  return [
+    buildSection('Shared operating skills', generalSkills),
+    buildSection('Role skills', roleSkills),
+  ].filter(Boolean);
+};
+
 const toMetadataEntrySection = (entries?: CapabilityMetadataEntry[]) => {
   const content = (entries || [])
     .filter(entry => entry.key || entry.value)
     .map(entry => `${entry.key || 'Key'}=${entry.value || ''}`);
 
   return content.length > 0 ? `Additional metadata: ${content.join('; ')}` : null;
+};
+
+const toAgentContractSection = (agent?: Partial<CapabilityAgent>) => {
+  const contract = agent?.contract;
+  if (!contract) {
+    return null;
+  }
+
+  const renderList = (label: string, items?: string[]) =>
+    items && items.length > 0 ? `${label}:\n${items.map(item => `- ${item}`).join('\n')}` : null;
+
+  const renderArtifacts = (
+    label: string,
+    items?: typeof contract.suggestedInputArtifacts,
+  ) =>
+    items && items.length > 0
+      ? `${label}:\n${items
+          .map(
+            item =>
+              `- ${item.artifactName} (${item.requiredByDefault ? 'required by default' : 'advisory'})${
+                item.description ? `: ${item.description}` : ''
+              }`,
+          )
+          .join('\n')}`
+      : null;
+
+  return [
+    'Structured agent contract:',
+    contract.description ? `Description: ${contract.description}` : null,
+    renderList('Primary responsibilities', contract.primaryResponsibilities),
+    renderList('Working approach', contract.workingApproach),
+    renderList('Preferred outputs', contract.preferredOutputs),
+    renderList('Guardrails', contract.guardrails),
+    renderList('Conflict resolution guidance', contract.conflictResolution),
+    contract.definitionOfDone ? `Definition of done: ${contract.definitionOfDone}` : null,
+    renderArtifacts('Suggested input artifacts', contract.suggestedInputArtifacts),
+    renderArtifacts('Expected output artifacts', contract.expectedOutputArtifacts),
+  ]
+    .filter(Boolean)
+    .join('\n');
 };
 
 const hashText = (value: string) =>
@@ -841,7 +913,10 @@ export const buildCapabilitySystemPrompt = ({
     toPromptSection('Learning notes', agent?.learningNotes),
     toPromptSection('Input artifacts', agent?.inputArtifacts),
     toPromptSection('Output artifacts', agent?.outputArtifacts),
-    toPromptSection('Skill tags', agent?.skillIds),
+    toAgentContractSection(agent),
+    toPromptSection('Attached skill ids', agent?.skillIds),
+    ...toSkillInstructionSections(capability, agent),
+    toPromptSection('Preferred tool profile', agent?.preferredToolIds),
     toPromptSection('Applications', capability?.applications),
     toPromptSection('APIs', capability?.apis),
     toPromptSection('Databases', capability?.databases),
@@ -1805,6 +1880,8 @@ export const invokeCapabilityChat = async ({
   message,
   developerPrompt,
   memoryPrompt,
+  scope = 'GENERAL_CHAT',
+  scopeId,
   resetSession = false,
 }: {
   capability: Partial<Capability>;
@@ -1813,6 +1890,8 @@ export const invokeCapabilityChat = async ({
   message: string;
   developerPrompt?: string;
   memoryPrompt?: string;
+  scope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  scopeId?: string;
   temperature?: number;
   resetSession?: boolean;
 }) => {
@@ -1844,8 +1923,8 @@ export const invokeCapabilityChat = async ({
   const result = await invokeScopedCapabilitySession({
     capability,
     agent,
-    scope: 'GENERAL_CHAT',
-    scopeId: capability.id,
+    scope,
+    scopeId: scopeId || (scope === 'GENERAL_CHAT' ? capability.id : undefined),
     prompt: conversationPrompt,
     initialPrompt: initialConversationPrompt,
     developerPrompt,
@@ -1864,6 +1943,8 @@ export const invokeCapabilityChatStream = async ({
   developerPrompt,
   memoryPrompt,
   onDelta,
+  scope = 'GENERAL_CHAT',
+  scopeId,
   resetSession = false,
 }: {
   capability: Partial<Capability>;
@@ -1873,6 +1954,8 @@ export const invokeCapabilityChatStream = async ({
   developerPrompt?: string;
   memoryPrompt?: string;
   onDelta: (delta: string) => void;
+  scope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  scopeId?: string;
   temperature?: number;
   resetSession?: boolean;
 }) => {
@@ -1904,8 +1987,8 @@ export const invokeCapabilityChatStream = async ({
   const result = await invokeScopedCapabilitySession({
     capability,
     agent,
-    scope: 'GENERAL_CHAT',
-    scopeId: capability.id,
+    scope,
+    scopeId: scopeId || (scope === 'GENERAL_CHAT' ? capability.id : undefined),
     prompt: conversationPrompt,
     initialPrompt: initialConversationPrompt,
     developerPrompt,

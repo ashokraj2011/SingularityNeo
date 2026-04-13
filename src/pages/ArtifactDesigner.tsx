@@ -73,6 +73,18 @@ const getCreatedLabel = () =>
     year: 'numeric',
   });
 
+const DOCUMENTATION_STATUS_HELP: Record<
+  NonNullable<Artifact['documentationStatus']>,
+  string
+> = {
+  PENDING:
+    'Pending means the artifact template exists, but its supporting documentation or final write-up is not confirmed yet. This is a manual tracking field today.',
+  SYNCED:
+    'Synced means the template is aligned with the latest documentation or published reference and is ready to reuse.',
+  FAILED:
+    'Failed means the documentation update or alignment is known to be broken and needs manual attention before teams rely on it.',
+};
+
 const buildDerivedArtifacts = (workspace: CapabilityWorkspace) => {
   const artifactsById = new Map(workspace.artifacts.map(artifact => [artifact.id, artifact]));
   const derived = new Map<string, Artifact>();
@@ -592,6 +604,9 @@ const ArtifactDesigner = () => {
                         <option value="SYNCED">SYNCED</option>
                         <option value="FAILED">FAILED</option>
                       </select>
+                      <p className="text-xs leading-relaxed text-secondary">
+                        {DOCUMENTATION_STATUS_HELP[artifactDraft.documentationStatus]}
+                      </p>
                     </div>
                   </div>
 

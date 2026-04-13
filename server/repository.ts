@@ -15,6 +15,7 @@ import {
   mergeCapabilityDatabaseConfigs,
   normalizeCapabilityDatabaseConfigs,
 } from '../src/lib/capabilityDatabases';
+import { normalizeWorkspaceConnectorSettings } from '../src/lib/workspaceConnectors';
 import {
   AgentTask,
   Capability,
@@ -48,14 +49,28 @@ import {
 } from './workspace';
 import {
   getDefaultCapabilityWorkflows,
+  createBrokerageCapabilityWorkflow,
+  createStandardCapabilityWorkflow,
   STANDARD_WORKFLOW_TEMPLATE_ID,
 } from '../src/lib/standardWorkflow';
 import {
+  createWorkspaceFoundationCapability,
+  isSystemFoundationCapability,
   createDefaultWorkspaceFoundationCatalog,
+  materializeCapabilityStarterArtifacts,
+  mergeCapabilitySkillLibrary,
   summarizeWorkspaceFoundationCatalog,
+  SYSTEM_FOUNDATION_CAPABILITY_ID,
 } from '../src/lib/workspaceFoundations';
 import { normalizeExecutionConfig } from '../src/lib/executionConfig';
 import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../src/lib/workflowGraph';
+import {
+  getLegacyArtifactListsFromContract,
+  normalizeAgentOperatingContract,
+  normalizeAgentRoleStarterKey,
+  normalizeLearningUpdate,
+  normalizeSkill,
+} from '../src/lib/agentRuntime';
 import {
   listAgentLearningProfilesTx,
   listAgentSessionSummariesTx,
@@ -74,6 +89,7 @@ type AppState = {
 
 const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   databaseConfigs: [],
+  connectors: normalizeWorkspaceConnectorSettings(),
 };
 
 const withUpdatedTimestamp = 'NOW()';
@@ -123,16 +139,23 @@ const capabilityFromRow = (
   ),
   status: row.status,
   specialAgentId: row.special_agent_id || undefined,
+  isSystemCapability: Boolean(row.is_system_capability),
+  systemCapabilityRole: row.system_capability_role || undefined,
   skillLibrary: skills,
 });
 
-const skillFromRow = (row: Record<string, any>): Skill => ({
-  id: row.id,
-  name: row.name,
-  description: row.description,
-  category: row.category,
-  version: row.version,
-});
+const skillFromRow = (row: Record<string, any>): Skill =>
+  normalizeSkill({
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    category: row.category,
+    version: row.version,
+    contentMarkdown: row.content_markdown || `# ${row.name}\n\n${row.description}`,
+    kind: row.kind || 'CUSTOM',
+    origin: row.origin || 'CAPABILITY',
+    defaultTemplateKeys: asStringArray(row.default_template_keys),
+  });
 
 const workspaceSettingsFromRow = (
   row?: Record<string, any>,
@@ -140,6 +163,7 @@ const workspaceSettingsFromRow = (
   databaseConfigs: normalizeCapabilityDatabaseConfigs(
     asJsonArray<CapabilityDatabaseConfig>(row?.database_configs),
   ),
+  connectors: normalizeWorkspaceConnectorSettings(row?.connector_settings),
 });
 
 const workspaceFoundationCatalogFromRow = (
@@ -160,6 +184,9 @@ const workspaceFoundationCatalogFromRow = (
   artifactTemplates: asJsonArray<
     WorkspaceFoundationCatalog['artifactTemplates'][number]
   >(row?.foundation_artifact_templates),
+  toolTemplates: asJsonArray<
+    WorkspaceFoundationCatalog['toolTemplates'][number]
+  >(row?.foundation_tool_templates),
   initializedAt:
     row?.foundations_initialized_at instanceof Date
       ? row.foundations_initialized_at.toISOString()
@@ -168,22 +195,58 @@ const workspaceFoundationCatalogFromRow = (
       : undefined,
 });
 
+const getWorkspaceFoundationCatalogTx = async (
+  client: PoolClient,
+): Promise<WorkspaceFoundationCatalog> => {
+  const result = await client.query(
+    `
+      SELECT
+        foundation_agent_templates,
+        foundation_workflow_templates,
+        foundation_eval_suite_templates,
+        foundation_skill_templates,
+        foundation_artifact_templates,
+        foundation_tool_templates,
+        foundations_initialized_at
+      FROM workspace_settings
+      WHERE id = $1
+    `,
+    ['DEFAULT'],
+  );
+
+  return result.rowCount
+    ? workspaceFoundationCatalogFromRow(result.rows[0])
+    : createDefaultWorkspaceFoundationCatalog();
+};
+
 const agentFromRow = (row: Record<string, any>): CapabilityAgent => ({
   id: row.id,
   capabilityId: row.capability_id,
   name: row.name,
   role: row.role,
+  roleStarterKey: normalizeAgentRoleStarterKey(row.role_starter_key),
   objective: row.objective,
   systemPrompt: row.system_prompt,
+  contract: normalizeAgentOperatingContract(row.contract || undefined, {
+    description: row.objective || row.role,
+    suggestedInputArtifacts: asStringArray(row.input_artifacts),
+    expectedOutputArtifacts: asStringArray(row.output_artifacts),
+  }),
   initializationStatus: row.initialization_status,
   documentationSources: asStringArray(row.documentation_sources),
-  inputArtifacts: asStringArray(row.input_artifacts),
-  outputArtifacts: asStringArray(row.output_artifacts),
+  ...getLegacyArtifactListsFromContract(
+    normalizeAgentOperatingContract(row.contract || undefined, {
+      description: row.objective || row.role,
+      suggestedInputArtifacts: asStringArray(row.input_artifacts),
+      expectedOutputArtifacts: asStringArray(row.output_artifacts),
+    }),
+  ),
   isOwner: Boolean(row.is_owner),
   isBuiltIn: Boolean(row.is_built_in),
   standardTemplateKey: row.standard_template_key || undefined,
   learningNotes: asStringArray(row.learning_notes),
   skillIds: asStringArray(row.skill_ids),
+  preferredToolIds: asStringArray(row.preferred_tool_ids) as CapabilityAgent['preferredToolIds'],
   provider: process.env.COPILOT_CLI_URL?.trim()
     ? 'GitHub Copilot SDK'
     : row.provider,
@@ -323,20 +386,28 @@ const executionLogFromRow = (row: Record<string, any>): ExecutionLog => ({
   metadata: row.metadata || undefined,
 });
 
-const learningUpdateFromRow = (row: Record<string, any>): LearningUpdate => ({
-  id: row.id,
-  capabilityId: row.capability_id,
-  agentId: row.agent_id,
-  sourceLogIds: asStringArray(row.source_log_ids),
-  insight: row.insight,
-  skillUpdate: row.skill_update || undefined,
-  timestamp: row.timestamp,
-});
+const learningUpdateFromRow = (row: Record<string, any>): LearningUpdate =>
+  normalizeLearningUpdate({
+    id: row.id,
+    capabilityId: row.capability_id,
+    agentId: row.agent_id,
+    sourceLogIds: asStringArray(row.source_log_ids),
+    insight: row.insight,
+    skillUpdate: row.skill_update || undefined,
+    timestamp: row.timestamp,
+    triggerType: row.trigger_type || undefined,
+    relatedWorkItemId: row.related_work_item_id || undefined,
+    relatedRunId: row.related_run_id || undefined,
+  });
 
 const workItemFromRow = (row: Record<string, any>): WorkItem => ({
   id: row.id,
   title: row.title,
   description: row.description,
+  taskType: row.task_type || undefined,
+  phaseStakeholders: asJsonArray<NonNullable<WorkItem['phaseStakeholders']>[number]>(
+    row.phase_stakeholders,
+  ),
   phase: row.phase,
   capabilityId: row.capability_id,
   workflowId: row.workflow_id,
@@ -408,6 +479,7 @@ const getWorkspaceSettingsTx = async (
   const legacyDatabaseConfigs = await collectLegacyWorkspaceDatabaseConfigsTx(client);
   const nextSettings = {
     databaseConfigs: legacyDatabaseConfigs,
+    connectors: normalizeWorkspaceConnectorSettings(),
   };
 
   await client.query(
@@ -415,14 +487,20 @@ const getWorkspaceSettingsTx = async (
       INSERT INTO workspace_settings (
         id,
         database_configs,
+        connector_settings,
         updated_at
       )
-      VALUES ($1, $2, ${withUpdatedTimestamp})
+      VALUES ($1, $2, $3, ${withUpdatedTimestamp})
       ON CONFLICT (id) DO UPDATE SET
         database_configs = EXCLUDED.database_configs,
+        connector_settings = EXCLUDED.connector_settings,
         updated_at = ${withUpdatedTimestamp}
     `,
-    ['DEFAULT', JSON.stringify(legacyDatabaseConfigs)],
+    [
+      'DEFAULT',
+      JSON.stringify(legacyDatabaseConfigs),
+      JSON.stringify(nextSettings.connectors),
+    ],
   );
 
   return nextSettings;
@@ -435,20 +513,27 @@ const upsertWorkspaceSettingsTx = async (
   const normalizedDatabaseConfigs = normalizeCapabilityDatabaseConfigs(
     settings.databaseConfigs,
   );
+  const normalizedConnectors = normalizeWorkspaceConnectorSettings(settings.connectors);
 
   await client.query(
     `
       INSERT INTO workspace_settings (
         id,
         database_configs,
+        connector_settings,
         updated_at
       )
-      VALUES ($1, $2, ${withUpdatedTimestamp})
+      VALUES ($1, $2, $3, ${withUpdatedTimestamp})
       ON CONFLICT (id) DO UPDATE SET
         database_configs = EXCLUDED.database_configs,
+        connector_settings = EXCLUDED.connector_settings,
         updated_at = ${withUpdatedTimestamp}
     `,
-    ['DEFAULT', JSON.stringify(normalizedDatabaseConfigs)],
+    [
+      'DEFAULT',
+      JSON.stringify(normalizedDatabaseConfigs),
+      JSON.stringify(normalizedConnectors),
+    ],
   );
 
   await client.query(
@@ -467,6 +552,7 @@ const upsertWorkspaceSettingsTx = async (
 
   return {
     databaseConfigs: normalizedDatabaseConfigs,
+    connectors: normalizedConnectors,
   } satisfies WorkspaceSettings;
 };
 
@@ -502,10 +588,12 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         execution_config,
         status,
         special_agent_id,
+        is_system_capability,
+        system_capability_role,
         updated_at
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,${withUpdatedTimestamp}
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,${withUpdatedTimestamp}
       )
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
@@ -535,6 +623,8 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         execution_config = EXCLUDED.execution_config,
         status = EXCLUDED.status,
         special_agent_id = EXCLUDED.special_agent_id,
+        is_system_capability = EXCLUDED.is_system_capability,
+        system_capability_role = EXCLUDED.system_capability_role,
         updated_at = ${withUpdatedTimestamp}
     `,
     [
@@ -568,6 +658,8 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
       JSON.stringify(normalizeExecutionConfig(capability, capability.executionConfig)),
       capability.status,
       capability.specialAgentId || null,
+      capability.isSystemCapability || false,
+      capability.systemCapabilityRole || null,
     ],
   );
 };
@@ -608,11 +700,26 @@ const replaceSkillsTx = async (client: PoolClient, capabilityId: string, skills:
           description,
           category,
           version,
+          content_markdown,
+          kind,
+          origin,
+          default_template_keys,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,${withUpdatedTimestamp})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,${withUpdatedTimestamp})
       `,
-      [capabilityId, skill.id, skill.name, skill.description, skill.category, skill.version],
+      [
+        capabilityId,
+        skill.id,
+        skill.name,
+        skill.description,
+        skill.category,
+        skill.version,
+        skill.contentMarkdown || `# ${skill.name}\n\n${skill.description}`,
+        skill.kind || 'CUSTOM',
+        skill.origin || 'CAPABILITY',
+        skill.defaultTemplateKeys || [],
+      ],
     );
   }
 };
@@ -623,6 +730,12 @@ const upsertAgentTx = async (
   agent: Omit<CapabilityAgent, 'usage' | 'previousOutputs'>,
 ) => {
   const normalizedModel = await resolveRuntimeModel(agent.model || undefined);
+  const contract = normalizeAgentOperatingContract(agent.contract, {
+    description: agent.objective || agent.role,
+    suggestedInputArtifacts: agent.inputArtifacts,
+    expectedOutputArtifacts: agent.outputArtifacts,
+  });
+  const legacyArtifacts = getLegacyArtifactListsFromContract(contract);
 
   await client.query(
     `
@@ -640,15 +753,18 @@ const upsertAgentTx = async (
         is_owner,
         is_built_in,
         standard_template_key,
+        role_starter_key,
         learning_notes,
+        contract,
         skill_ids,
+        preferred_tool_ids,
         provider,
         model,
         token_limit,
         updated_at
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,${withUpdatedTimestamp}
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,${withUpdatedTimestamp}
       )
       ON CONFLICT (capability_id, id) DO UPDATE SET
         name = EXCLUDED.name,
@@ -662,8 +778,11 @@ const upsertAgentTx = async (
         is_owner = EXCLUDED.is_owner,
         is_built_in = EXCLUDED.is_built_in,
         standard_template_key = EXCLUDED.standard_template_key,
+        role_starter_key = EXCLUDED.role_starter_key,
         learning_notes = EXCLUDED.learning_notes,
+        contract = EXCLUDED.contract,
         skill_ids = EXCLUDED.skill_ids,
+        preferred_tool_ids = EXCLUDED.preferred_tool_ids,
         provider = EXCLUDED.provider,
         model = EXCLUDED.model,
         token_limit = EXCLUDED.token_limit,
@@ -678,13 +797,16 @@ const upsertAgentTx = async (
       agent.systemPrompt,
       agent.initializationStatus,
       agent.documentationSources,
-      agent.inputArtifacts,
-      agent.outputArtifacts,
+      legacyArtifacts.inputArtifacts,
+      legacyArtifacts.outputArtifacts,
       Boolean(agent.isOwner),
       Boolean(agent.isBuiltIn),
       agent.standardTemplateKey || null,
+      normalizeAgentRoleStarterKey(agent.roleStarterKey) || null,
       agent.learningNotes || [],
+      JSON.stringify(contract),
       agent.skillIds,
+      agent.preferredToolIds || [],
       agent.provider,
       normalizedModel,
       agent.tokenLimit,
@@ -1080,12 +1202,15 @@ const replaceLearningUpdatesTx = async (
           capability_id,
           id,
           agent_id,
-          source_log_ids,
-          insight,
-          skill_update,
-          timestamp
+        source_log_ids,
+        insight,
+        skill_update,
+        timestamp,
+        trigger_type,
+        related_work_item_id,
+        related_run_id
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       `,
       [
         capabilityId,
@@ -1095,6 +1220,9 @@ const replaceLearningUpdatesTx = async (
         update.insight,
         update.skillUpdate || null,
         update.timestamp,
+        update.triggerType || null,
+        update.relatedWorkItemId || null,
+        update.relatedRunId || null,
       ],
     );
   }
@@ -1115,6 +1243,8 @@ const replaceWorkItemsTx = async (
           id,
           title,
           description,
+          task_type,
+          phase_stakeholders,
           phase,
           workflow_id,
           current_step_id,
@@ -1129,13 +1259,15 @@ const replaceWorkItemsTx = async (
           history,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,${withUpdatedTimestamp})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,${withUpdatedTimestamp})
       `,
       [
         capabilityId,
         item.id,
         item.title,
         item.description,
+        item.taskType || null,
+        JSON.stringify(item.phaseStakeholders || []),
         item.phase,
         item.workflowId,
         item.currentStepId || null,
@@ -1354,6 +1486,7 @@ const repairWorkItemProjectionsTx = async (client: PoolClient) => {
           id,
           title,
           description,
+          task_type,
           phase,
           workflow_id,
           current_step_id,
@@ -1369,7 +1502,7 @@ const repairWorkItemProjectionsTx = async (client: PoolClient) => {
           updated_at
         )
         VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,${withUpdatedTimestamp}
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,${withUpdatedTimestamp}
         )
       `,
       [
@@ -1377,6 +1510,7 @@ const repairWorkItemProjectionsTx = async (client: PoolClient) => {
         missing.work_item_id,
         title,
         `Recovered from workflow execution history for ${title}.`,
+        null,
         phase,
         latestRun?.workflow_id || firstTask?.workflow_id || fallbackWorkflowId || '',
         phase === 'DONE' ? null : latestRun?.current_step_id || firstTask?.workflow_step_id || null,
@@ -1465,11 +1599,30 @@ const getCapabilityByIdTx = async (
     [capabilityId],
   );
 
+  const foundationCatalog = await getWorkspaceFoundationCatalogTx(client);
+
   return capabilityFromRow(
     capabilityResult.rows[0],
-    skillsResult.rows.map(skillFromRow),
+    mergeCapabilitySkillLibrary(skillsResult.rows.map(skillFromRow), foundationCatalog),
     workspaceSettings,
   );
+};
+
+const assertCapabilityEditableTx = async (
+  client: PoolClient,
+  capabilityId: string,
+) => {
+  const capability = await getCapabilityByIdTx(client, capabilityId);
+  if (!capability) {
+    throw new Error(`Capability ${capabilityId} was not found.`);
+  }
+  if (capability.isSystemCapability) {
+    throw new Error(
+      `${capability.name} is a system foundation capability and cannot be edited.`,
+    );
+  }
+
+  return capability;
 };
 
 const getCapabilityWorkspaceTx = async (
@@ -1621,7 +1774,9 @@ export const initializeSeedData = async () => {
       }
 
       const existing = await client.query<{ count: string }>(
-        'SELECT COUNT(*)::text AS count FROM capabilities',
+        `SELECT COUNT(*)::text AS count
+         FROM capabilities
+         WHERE COALESCE(is_system_capability, FALSE) = FALSE`,
       );
       const hasCapabilities = Number(existing.rows[0]?.count || '0') > 0;
 
@@ -1724,7 +1879,10 @@ export const initializeSeedData = async () => {
 export const fetchAppState = async (): Promise<AppState> => {
   const workspaceSettings = await transaction(client => getWorkspaceSettingsTx(client));
   const capabilitiesResult = await query<{ id: string }>(
-    'SELECT id FROM capabilities ORDER BY created_at ASC, id ASC',
+    `SELECT id
+     FROM capabilities
+     WHERE COALESCE(is_system_capability, FALSE) = FALSE
+     ORDER BY created_at ASC, id ASC`,
   );
   const bundles: CapabilityBundle[] = [];
 
@@ -1751,6 +1909,7 @@ export const updateWorkspaceSettings = async (
       ...current,
       ...updates,
       databaseConfigs: updates.databaseConfigs ?? current.databaseConfigs,
+      connectors: updates.connectors ?? current.connectors,
     });
   });
 
@@ -1765,6 +1924,7 @@ export const getWorkspaceCatalogSnapshot = async (): Promise<WorkspaceCatalogSna
           foundation_eval_suite_templates,
           foundation_skill_templates,
           foundation_artifact_templates,
+          foundation_tool_templates,
           foundations_initialized_at
         FROM workspace_settings
         WHERE id = $1
@@ -1798,7 +1958,8 @@ export const initializeWorkspaceFoundations = async (): Promise<WorkspaceCatalog
           foundation_eval_suite_templates = $4,
           foundation_skill_templates = $5,
           foundation_artifact_templates = $6,
-          foundations_initialized_at = $7,
+          foundation_tool_templates = $7,
+          foundations_initialized_at = $8,
           updated_at = ${withUpdatedTimestamp}
         WHERE id = $1
       `,
@@ -1809,9 +1970,58 @@ export const initializeWorkspaceFoundations = async (): Promise<WorkspaceCatalog
         JSON.stringify(foundations.evalSuiteTemplates),
         JSON.stringify(foundations.skillTemplates),
         JSON.stringify(foundations.artifactTemplates),
+        JSON.stringify(foundations.toolTemplates),
         initializedAt,
       ],
     );
+
+    const foundationCapability = createWorkspaceFoundationCapability(foundations);
+    const foundationOwnerAgent = buildOwnerAgent(foundationCapability);
+    const foundationAgents = buildBaseAgents(
+      foundationCapability,
+      foundationOwnerAgent,
+    );
+    const foundationArtifacts = materializeCapabilityStarterArtifacts({
+      capability: foundationCapability,
+      agents: foundationAgents,
+      foundationCatalog: foundations,
+      createdAt: initializedAt,
+    });
+    const foundationWorkflows = [
+      createStandardCapabilityWorkflow(foundationCapability),
+      createBrokerageCapabilityWorkflow(foundationCapability),
+    ];
+
+    await upsertCapabilityTx(client, foundationCapability);
+    await replaceSkillsTx(
+      client,
+      foundationCapability.id,
+      foundationCapability.skillLibrary,
+    );
+    await upsertWorkspaceMetaTx(
+      client,
+      foundationCapability.id,
+      foundationOwnerAgent.id,
+    );
+    await replaceAgentsTx(client, foundationCapability.id, foundationAgents);
+    await replaceMessagesTx(client, foundationCapability.id, [
+      buildWelcomeMessage(foundationCapability, foundationOwnerAgent),
+    ]);
+    await replaceWorkflowsTx(
+      client,
+      foundationCapability.id,
+      foundationWorkflows,
+      foundationCapability,
+    );
+    await replaceArtifactsTx(
+      client,
+      foundationCapability.id,
+      foundationArtifacts,
+    );
+    await replaceTasksTx(client, foundationCapability.id, []);
+    await replaceExecutionLogsTx(client, foundationCapability.id, []);
+    await replaceLearningUpdatesTx(client, foundationCapability.id, []);
+    await replaceWorkItemsTx(client, foundationCapability.id, []);
 
     return {
       databaseRuntime: getDatabaseRuntimeInfo(),
@@ -1823,24 +2033,223 @@ export const initializeWorkspaceFoundations = async (): Promise<WorkspaceCatalog
 export const getCapabilityBundle = async (capabilityId: string): Promise<CapabilityBundle> =>
   transaction(client => getCapabilityBundleTx(client, capabilityId));
 
+export const getCapabilityArtifact = async (
+  capabilityId: string,
+  artifactId: string,
+): Promise<Artifact | null> => {
+  const result = await query(
+    `
+      SELECT *
+      FROM capability_artifacts
+      WHERE capability_id = $1 AND id = $2
+      LIMIT 1
+    `,
+    [capabilityId, artifactId],
+  );
+
+  return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
+};
+
+const remapAgentReference = (
+  agentId: string | undefined,
+  agentIdMap: Map<string, string>,
+) => (agentId ? agentIdMap.get(agentId) || agentId : undefined);
+
+const cloneFoundationWorkflowForCapability = (
+  workflow: Workflow,
+  capability: Pick<Capability, 'id' | 'lifecycle'>,
+  agentIdMap: Map<string, string>,
+): Workflow =>
+  buildWorkflowFromGraph(
+    normalizeWorkflowGraph(
+      {
+        ...workflow,
+        capabilityId: capability.id,
+        nodes: (workflow.nodes || []).map(node => ({
+          ...node,
+          agentId: remapAgentReference(node.agentId, agentIdMap),
+        })),
+        steps: workflow.steps.map(step => ({
+          ...step,
+          agentId: remapAgentReference(step.agentId, agentIdMap) || step.agentId,
+          handoffToAgentId: remapAgentReference(step.handoffToAgentId, agentIdMap),
+        })),
+        handoffProtocols: workflow.handoffProtocols?.map(protocol => ({
+          ...protocol,
+          targetAgentId: remapAgentReference(protocol.targetAgentId, agentIdMap),
+        })),
+      },
+      capability.lifecycle,
+    ),
+    capability.lifecycle,
+  );
+
+const cloneFoundationArtifactForCapability = (
+  artifact: CapabilityWorkspace['artifacts'][number],
+  capabilityId: string,
+  agentIdMap: Map<string, string>,
+  agentNameById: Map<string, string>,
+  createdAt: string,
+) => {
+  const connectedAgentId = remapAgentReference(artifact.connectedAgentId, agentIdMap);
+  const handoffFromAgentId = remapAgentReference(artifact.handoffFromAgentId, agentIdMap);
+  const handoffToAgentId = remapAgentReference(artifact.handoffToAgentId, agentIdMap);
+
+  return {
+    ...artifact,
+    capabilityId,
+    created: createdAt,
+    connectedAgentId,
+    handoffFromAgentId,
+    handoffToAgentId,
+    agent:
+      (connectedAgentId && agentNameById.get(connectedAgentId)) ||
+      artifact.agent,
+  };
+};
+
+const buildCapabilityStarterSeed = async (
+  client: PoolClient,
+  capability: Capability,
+) => {
+  const foundationCatalog = await getWorkspaceFoundationCatalogTx(client);
+  const foundationCapability = await getCapabilityByIdTx(
+    client,
+    SYSTEM_FOUNDATION_CAPABILITY_ID,
+  );
+
+  if (!foundationCapability || !isSystemFoundationCapability(foundationCapability)) {
+    const nextCapability = {
+      ...capability,
+      skillLibrary: mergeCapabilitySkillLibrary(
+        capability.skillLibrary,
+        foundationCatalog,
+      ),
+    };
+    const ownerAgent = buildOwnerAgent(nextCapability);
+    const baseAgents = buildBaseAgents(nextCapability, ownerAgent);
+
+    return {
+      capability: nextCapability,
+      persistedSkills: capability.skillLibrary,
+      ownerAgent,
+      agents: baseAgents,
+      workflows: getDefaultCapabilityWorkflows(nextCapability),
+      artifacts: materializeCapabilityStarterArtifacts({
+        capability: nextCapability,
+        agents: baseAgents,
+        foundationCatalog,
+      }),
+    };
+  }
+
+  const foundationWorkspace = await getCapabilityWorkspaceTx(client, foundationCapability);
+  const nextCapability = {
+    ...capability,
+    skillLibrary: mergeCapabilitySkillLibrary(capability.skillLibrary, {
+      ...foundationCatalog,
+      skillTemplates: foundationCapability.skillLibrary,
+    }),
+  };
+  const ownerAgent = buildOwnerAgent(nextCapability);
+  const baseAgents = buildBaseAgents(nextCapability, ownerAgent);
+
+  const agentIdMap = new Map<string, string>();
+  for (const foundationAgent of foundationWorkspace.agents) {
+    if (foundationAgent.isOwner) {
+      agentIdMap.set(foundationAgent.id, ownerAgent.id);
+      continue;
+    }
+
+    const targetAgent = baseAgents.find(
+      agent =>
+        !agent.isOwner &&
+        agent.standardTemplateKey &&
+        agent.standardTemplateKey === foundationAgent.standardTemplateKey,
+    );
+    if (targetAgent) {
+      agentIdMap.set(foundationAgent.id, targetAgent.id);
+    }
+  }
+
+  const agentNameById = new Map(
+    baseAgents.map(agent => [agent.id, agent.name] as const),
+  );
+  const createdAt = new Date().toISOString();
+
+  return {
+    capability: nextCapability,
+    persistedSkills: capability.skillLibrary,
+    ownerAgent,
+    agents: baseAgents,
+    workflows: foundationWorkspace.workflows.map(workflow =>
+      cloneFoundationWorkflowForCapability(workflow, nextCapability, agentIdMap),
+    ),
+    artifacts: foundationWorkspace.artifacts.map(artifact =>
+      cloneFoundationArtifactForCapability(
+        artifact,
+        nextCapability.id,
+        agentIdMap,
+        agentNameById,
+        createdAt,
+      ),
+    ),
+  };
+};
+
 export const createCapabilityRecord = async (
   capability: Capability,
 ): Promise<CapabilityBundle> =>
   transaction(async client => {
-    await upsertCapabilityTx(client, capability);
-    await replaceSkillsTx(client, capability.id, capability.skillLibrary);
+    const starterSeed = await buildCapabilityStarterSeed(client, capability);
+    const initializedAt = new Date().toISOString();
+    const initialLearningUpdates = starterSeed.agents.map(agent => ({
+      id: `LEARN-${agent.id}-INIT`,
+      capabilityId: starterSeed.capability.id,
+      agentId: agent.id,
+      sourceLogIds: [],
+      insight: `Initial learning queued for ${agent.name} during capability initialization.`,
+      timestamp: initializedAt,
+      triggerType: 'INITIALIZATION' as const,
+    }));
 
-    const ownerAgent = buildOwnerAgent(capability);
-    await upsertWorkspaceMetaTx(client, capability.id, ownerAgent.id);
-    await replaceAgentsTx(client, capability.id, buildBaseAgents(capability, ownerAgent));
-    await replaceMessagesTx(client, capability.id, [buildWelcomeMessage(capability, ownerAgent)]);
-    await replaceArtifactsTx(client, capability.id, []);
-    await replaceTasksTx(client, capability.id, []);
-    await replaceExecutionLogsTx(client, capability.id, []);
-    await replaceLearningUpdatesTx(client, capability.id, []);
-    await replaceWorkItemsTx(client, capability.id, []);
+    await upsertCapabilityTx(client, starterSeed.capability);
+    await replaceSkillsTx(
+      client,
+      starterSeed.capability.id,
+      starterSeed.persistedSkills,
+    );
 
-    return getCapabilityBundleTx(client, capability.id);
+    await upsertWorkspaceMetaTx(
+      client,
+      starterSeed.capability.id,
+      starterSeed.ownerAgent.id,
+    );
+    await replaceAgentsTx(client, starterSeed.capability.id, starterSeed.agents);
+    await replaceMessagesTx(client, starterSeed.capability.id, [
+      buildWelcomeMessage(starterSeed.capability, starterSeed.ownerAgent),
+    ]);
+    await replaceWorkflowsTx(
+      client,
+      starterSeed.capability.id,
+      starterSeed.workflows,
+      starterSeed.capability,
+    );
+    await replaceArtifactsTx(
+      client,
+      starterSeed.capability.id,
+      starterSeed.artifacts,
+    );
+    await replaceTasksTx(client, starterSeed.capability.id, []);
+    await replaceExecutionLogsTx(client, starterSeed.capability.id, []);
+    await replaceLearningUpdatesTx(
+      client,
+      starterSeed.capability.id,
+      initialLearningUpdates,
+    );
+    await replaceWorkItemsTx(client, starterSeed.capability.id, []);
+
+    return getCapabilityBundleTx(client, starterSeed.capability.id);
   });
 
 export const updateCapabilityRecord = async (
@@ -1848,10 +2257,7 @@ export const updateCapabilityRecord = async (
   updates: Partial<Capability>,
 ): Promise<CapabilityBundle> =>
   transaction(async client => {
-    const current = await getCapabilityByIdTx(client, capabilityId);
-    if (!current) {
-      throw new Error(`Capability ${capabilityId} was not found.`);
-    }
+    const current = await assertCapabilityEditableTx(client, capabilityId);
 
     const mergedCapability = mergeCapability(current, updates);
     await upsertCapabilityTx(client, mergedCapability);
@@ -1890,10 +2296,7 @@ export const addCapabilitySkillRecord = async (
   skill: Skill,
 ): Promise<CapabilityBundle> =>
   transaction(async client => {
-    const capability = await getCapabilityByIdTx(client, capabilityId);
-    if (!capability) {
-      throw new Error(`Capability ${capabilityId} was not found.`);
-    }
+    await assertCapabilityEditableTx(client, capabilityId);
 
     await client.query(
       `
@@ -1904,17 +2307,36 @@ export const addCapabilitySkillRecord = async (
           description,
           category,
           version,
+          content_markdown,
+          kind,
+          origin,
+          default_template_keys,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,${withUpdatedTimestamp})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,${withUpdatedTimestamp})
         ON CONFLICT (capability_id, id) DO UPDATE SET
           name = EXCLUDED.name,
           description = EXCLUDED.description,
           category = EXCLUDED.category,
           version = EXCLUDED.version,
+          content_markdown = EXCLUDED.content_markdown,
+          kind = EXCLUDED.kind,
+          origin = EXCLUDED.origin,
+          default_template_keys = EXCLUDED.default_template_keys,
           updated_at = ${withUpdatedTimestamp}
       `,
-      [capabilityId, skill.id, skill.name, skill.description, skill.category, skill.version],
+      [
+        capabilityId,
+        skill.id,
+        skill.name,
+        skill.description,
+        skill.category,
+        skill.version,
+        skill.contentMarkdown || `# ${skill.name}\n\n${skill.description}`,
+        skill.kind || 'CUSTOM',
+        skill.origin || 'CAPABILITY',
+        skill.defaultTemplateKeys || [],
+      ],
     );
 
     return getCapabilityBundleTx(client, capabilityId);
@@ -1925,14 +2347,18 @@ export const removeCapabilitySkillRecord = async (
   skillId: string,
 ): Promise<CapabilityBundle> =>
   transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
     await client.query(
       'DELETE FROM capability_skills WHERE capability_id = $1 AND id = $2',
       [capabilityId, skillId],
     );
 
     const workspaceBundle = await getCapabilityBundleTx(client, capabilityId);
+    const stillAvailable = new Set(
+      workspaceBundle.capability.skillLibrary.map(skill => skill.id),
+    );
     for (const agent of workspaceBundle.workspace.agents) {
-      if (agent.skillIds.includes(skillId)) {
+      if (agent.skillIds.includes(skillId) && !stillAvailable.has(skillId)) {
         await upsertAgentTx(client, capabilityId, {
           ...agent,
           skillIds: agent.skillIds.filter(id => id !== skillId),
@@ -1948,6 +2374,7 @@ export const addCapabilityAgentRecord = async (
   agent: Omit<CapabilityAgent, 'capabilityId'>,
 ): Promise<CapabilityBundle> =>
   transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
     await upsertAgentTx(client, capabilityId, {
       ...agent,
       capabilityId,
@@ -1962,6 +2389,7 @@ export const updateCapabilityAgentRecord = async (
   updates: Partial<CapabilityAgent>,
 ): Promise<CapabilityBundle> =>
   transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
     const bundle = await getCapabilityBundleTx(client, capabilityId);
     const currentAgent = bundle.workspace.agents.find(agent => agent.id === agentId);
     if (!currentAgent) {
@@ -1977,20 +2405,40 @@ export const updateCapabilityAgentRecord = async (
     return getCapabilityBundleTx(client, capabilityId);
   });
 
+export const updateCapabilityAgentModelsRecord = async (
+  capabilityId: string,
+  model: string,
+): Promise<CapabilityBundle> =>
+  transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
+    const bundle = await getCapabilityBundleTx(client, capabilityId);
+
+    for (const agent of bundle.workspace.agents) {
+      await upsertAgentTx(client, capabilityId, {
+        ...agent,
+        capabilityId,
+        model,
+      });
+    }
+
+    await client.query(
+      'DELETE FROM capability_agent_sessions WHERE capability_id = $1',
+      [capabilityId],
+    );
+
+    return getCapabilityBundleTx(client, capabilityId);
+  });
+
 export const appendCapabilityMessageRecord = async (
   capabilityId: string,
   message: Omit<CapabilityChatMessage, 'capabilityId'>,
 ): Promise<CapabilityWorkspace> =>
   transaction(async client => {
+    const capability = await assertCapabilityEditableTx(client, capabilityId);
     await appendMessageTx(client, capabilityId, {
       ...message,
       capabilityId,
     });
-
-    const capability = await getCapabilityByIdTx(client, capabilityId);
-    if (!capability) {
-      throw new Error(`Capability ${capabilityId} was not found.`);
-    }
 
     return getCapabilityWorkspaceTx(client, capability);
   });
@@ -2000,10 +2448,7 @@ export const setActiveChatAgentRecord = async (
   agentId: string,
 ): Promise<CapabilityWorkspace> =>
   transaction(async client => {
-    const capability = await getCapabilityByIdTx(client, capabilityId);
-    if (!capability) {
-      throw new Error(`Capability ${capabilityId} was not found.`);
-    }
+    const capability = await assertCapabilityEditableTx(client, capabilityId);
 
     const workspace = await getCapabilityWorkspaceTx(client, capability);
     await upsertWorkspaceMetaTx(client, capabilityId, agentId, workspace.createdAt);
@@ -2026,10 +2471,7 @@ export const replaceCapabilityWorkspaceContentRecord = async (
   >,
 ): Promise<CapabilityWorkspace> =>
   transaction(async client => {
-    const capability = await getCapabilityByIdTx(client, capabilityId);
-    if (!capability) {
-      throw new Error(`Capability ${capabilityId} was not found.`);
-    }
+    const capability = await assertCapabilityEditableTx(client, capabilityId);
 
     const currentWorkspace = await getCapabilityWorkspaceTx(client, capability);
 

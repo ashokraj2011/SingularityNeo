@@ -818,14 +818,36 @@ const Chat = () => {
       : 'First chat session for this agent';
 
   const suggestedPrompts = useMemo(() => {
+    const isExecutionAgent =
+      activeAgent?.standardTemplateKey === 'EXECUTION-OPS' ||
+      /execution agent/i.test(`${activeAgent?.name || ''} ${activeAgent?.role || ''}`);
+    const attentionItem = workspace.workItems.find(item =>
+      ['BLOCKED', 'PENDING_APPROVAL'].includes(item.status),
+    );
+
+    if (isExecutionAgent) {
+      const prompts = attentionItem
+        ? [
+            `Show the live status of ${attentionItem.id}.`,
+            `Why is ${attentionItem.id} blocked and what should I do next?`,
+            `Explain what changed since the last attempt for ${attentionItem.id}.`,
+            `What are the safest next actions for ${attentionItem.id}?`,
+          ]
+        : [
+            'What needs attention in execution right now?',
+            `Summarize the live delivery state for ${activeCapability.name}.`,
+            'Which work items are blocked, waiting, or at risk?',
+            'What are the safest next operator actions right now?',
+          ];
+
+      return prompts.slice(0, 4);
+    }
+
     const prompts = [
       `What is the next best action for ${activeCapability.name}?`,
       `Summarize ${activeCapability.name} readiness in business language.`,
     ];
 
-    const attentionItem = workspace.workItems.find(item =>
-      ['BLOCKED', 'PENDING_APPROVAL'].includes(item.status),
-    );
     if (attentionItem) {
       prompts.push(`Show the live status of ${attentionItem.id}.`);
       prompts.push(`Explain what is needed to move "${attentionItem.title}" forward.`);

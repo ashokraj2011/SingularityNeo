@@ -5,8 +5,16 @@ import type {
   CapabilityExecutionCommandTemplate,
   CommandTemplateValidationResult,
   DeploymentTargetValidationResult,
+  WorkspaceDetectionResult,
 } from '../types';
 import { StatusBadge } from './EnterpriseUI';
+import {
+  formatWorkspaceBuildToolLabel,
+  formatWorkspaceConfidenceLabel,
+  formatWorkspaceStackLabel,
+  hasAppliedWorkspaceRecommendations,
+  joinWorkspaceCommand,
+} from '../lib/workspaceProfile';
 
 const splitCommand = (value: string) =>
   value
@@ -33,6 +41,189 @@ const createDeploymentTarget = (index: number): CapabilityDeploymentTarget => ({
   commandTemplateId: '',
   workspacePath: '',
 });
+
+export const WorkspaceProfileRecommendationCard = ({
+  detection,
+  currentTemplates,
+  currentTargets,
+  dismissed = false,
+  onUseRecommendedSetup,
+  onKeepCurrentSetup,
+  onRefresh,
+}: {
+  detection: WorkspaceDetectionResult | null;
+  currentTemplates: CapabilityExecutionCommandTemplate[];
+  currentTargets: CapabilityDeploymentTarget[];
+  dismissed?: boolean;
+  onUseRecommendedSetup?: (
+    templates: CapabilityExecutionCommandTemplate[],
+    targets: CapabilityDeploymentTarget[],
+  ) => void;
+  onKeepCurrentSetup?: () => void;
+  onRefresh?: () => void;
+}) => {
+  if (!detection || dismissed) {
+    return null;
+  }
+
+  const hasRecommendations =
+    detection.recommendedCommandTemplates.length > 0 ||
+    detection.recommendedDeploymentTargets.length > 0;
+  const applied = hasAppliedWorkspaceRecommendations({
+    currentTemplates,
+    currentTargets,
+    recommendedTemplates: detection.recommendedCommandTemplates,
+    recommendedTargets: detection.recommendedDeploymentTargets,
+  });
+
+  return (
+    <div className="rounded-3xl border border-primary/15 bg-primary/5 p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="form-kicker">Detected workspace profile</p>
+          <h3 className="mt-2 text-lg font-bold text-on-surface">
+            {formatWorkspaceStackLabel(detection.profile.stack)}
+          </h3>
+          <p className="mt-1 text-sm leading-relaxed text-secondary">
+            {detection.profile.summary}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <StatusBadge
+            tone={
+              detection.profile.confidence === 'HIGH'
+                ? 'success'
+                : detection.profile.confidence === 'MEDIUM'
+                ? 'brand'
+                : 'warning'
+            }
+          >
+            {formatWorkspaceConfidenceLabel(detection.profile.confidence)}
+          </StatusBadge>
+          <StatusBadge tone={detection.profile.buildTool === 'UNKNOWN' ? 'neutral' : 'brand'}>
+            {formatWorkspaceBuildToolLabel(detection.profile.buildTool)}
+          </StatusBadge>
+          {applied && <StatusBadge tone="success">Applied</StatusBadge>}
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="space-y-3">
+          <div className="rounded-2xl border border-outline-variant/20 bg-white px-4 py-3">
+            <p className="form-kicker">Workspace path</p>
+            <p className="mt-2 break-all text-sm font-semibold text-on-surface">
+              {detection.normalizedPath || 'No local workspace detected yet'}
+            </p>
+          </div>
+          <div className="rounded-2xl border border-outline-variant/20 bg-white px-4 py-3">
+            <p className="form-kicker">Evidence files</p>
+            {detection.evidenceFiles.length > 0 ? (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {detection.evidenceFiles.map(file => (
+                  <span
+                    key={file}
+                    className="rounded-full border border-primary/10 bg-primary/5 px-3 py-1 text-xs font-semibold text-primary"
+                  >
+                    {file}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-2 text-sm text-secondary">
+                No supporting manifest files were found yet.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div className="rounded-2xl border border-outline-variant/20 bg-white px-4 py-3">
+            <p className="form-kicker">Recommended command templates</p>
+            {detection.recommendedCommandTemplates.length > 0 ? (
+              <div className="mt-3 space-y-3">
+                {detection.recommendedCommandTemplates.map(template => (
+                  <div key={template.id} className="rounded-2xl bg-surface-container-low px-3 py-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-bold text-on-surface">
+                        {template.label}
+                      </p>
+                      <span className="text-xs font-semibold uppercase tracking-[0.16em] text-outline">
+                        {template.id}
+                      </span>
+                    </div>
+                    <p className="mt-2 rounded-xl bg-slate-950 px-3 py-2 font-mono text-xs text-white">
+                      {joinWorkspaceCommand(template.command)}
+                    </p>
+                    {template.rationale && (
+                      <p className="mt-2 text-xs leading-relaxed text-secondary">
+                        {template.rationale}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-2 text-sm text-secondary">
+                No build, test, docs, or deploy command could be inferred with enough confidence.
+              </p>
+            )}
+          </div>
+
+          {detection.recommendedDeploymentTargets.length > 0 && (
+            <div className="rounded-2xl border border-outline-variant/20 bg-white px-4 py-3">
+              <p className="form-kicker">Recommended deployment targets</p>
+              <div className="mt-3 space-y-2">
+                {detection.recommendedDeploymentTargets.map(target => (
+                  <div key={target.id} className="rounded-2xl bg-surface-container-low px-3 py-3">
+                    <p className="text-sm font-bold text-on-surface">{target.label}</p>
+                    <p className="mt-1 text-xs text-secondary">
+                      Uses command template <span className="font-semibold">{target.commandTemplateId}</span>
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-3">
+        {hasRecommendations && onUseRecommendedSetup && (
+          <button
+            type="button"
+            onClick={() =>
+              onUseRecommendedSetup(
+                detection.recommendedCommandTemplates,
+                detection.recommendedDeploymentTargets,
+              )
+            }
+            className="enterprise-button enterprise-button-brand"
+          >
+            Use recommended setup
+          </button>
+        )}
+        {onKeepCurrentSetup && (
+          <button
+            type="button"
+            onClick={onKeepCurrentSetup}
+            className="enterprise-button enterprise-button-secondary"
+          >
+            Keep current setup
+          </button>
+        )}
+        {onRefresh && (
+          <button
+            type="button"
+            onClick={onRefresh}
+            className="enterprise-button enterprise-button-secondary"
+          >
+            Refresh detection
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
 
 export const CommandTemplateEditor = ({
   templates,

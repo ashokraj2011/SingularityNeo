@@ -284,6 +284,7 @@ CREATE TABLE IF NOT EXISTS capability_work_items (
       id TEXT NOT NULL,
       title TEXT NOT NULL,
       description TEXT NOT NULL,
+      task_type TEXT,
       phase TEXT NOT NULL,
       workflow_id TEXT NOT NULL,
       current_step_id TEXT,
@@ -671,7 +672,10 @@ ALTER TABLE capability_tasks
     ADD COLUMN IF NOT EXISTS tool_invocation_id TEXT;
 
 ALTER TABLE capability_work_items
-    ADD COLUMN IF NOT EXISTS blocker JSONB;
+ADD COLUMN IF NOT EXISTS task_type TEXT;
+
+ALTER TABLE capability_work_items
+ADD COLUMN IF NOT EXISTS blocker JSONB;
 
 ALTER TABLE capability_work_items
     ADD COLUMN IF NOT EXISTS active_run_id TEXT;

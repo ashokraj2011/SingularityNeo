@@ -85,7 +85,9 @@ export interface CapabilityOutcomeContract {
 }
 
 export type AdvancedToolId =
+  | 'databases'
   | 'memory'
+  | 'tool-access'
   | 'run-console'
   | 'evals'
   | 'skills'
@@ -121,11 +123,25 @@ export interface CapabilityExperienceModel {
 
 export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
   {
+    id: 'databases',
+    label: 'Database Setup',
+    shortName: 'DB',
+    path: '/workspace/databases',
+    description: 'Initialize the workspace database and inspect shared platform foundations.',
+  },
+  {
     id: 'memory',
     label: 'Memory Explorer',
     shortName: 'Memory',
     path: '/memory',
     description: 'Inspect learned sources, retrieval grounding, and memory provenance.',
+  },
+  {
+    id: 'tool-access',
+    label: 'Tool Access',
+    shortName: 'Tools',
+    path: '/tool-access',
+    description: 'Review which workflow steps and agents can use read, write, test, and deploy tools.',
   },
   {
     id: 'run-console',

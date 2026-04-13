@@ -4,6 +4,7 @@ import {
   getLearningStatusLabel,
 } from '../capabilityExperience';
 import { createDefaultCapabilityLifecycle } from '../capabilityLifecycle';
+import { getStandardAgentContract } from '../../constants';
 import type {
   Capability,
   CapabilityAgent,
@@ -49,6 +50,7 @@ const agent = (overrides: Partial<CapabilityAgent> = {}): CapabilityAgent => ({
   role: 'Owner',
   objective: 'Coordinate capability work.',
   systemPrompt: '',
+  contract: getStandardAgentContract('OWNER'),
   initializationStatus: 'READY',
   documentationSources: [],
   inputArtifacts: [],

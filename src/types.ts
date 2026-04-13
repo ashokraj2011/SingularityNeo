@@ -1,11 +1,48 @@
 export type Status = 'PENDING' | 'VERIFIED' | 'RUNNING' | 'STABLE' | 'ALERT' | 'BETA' | 'IN_PROGRESS' | 'ARCHIVED' | 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'URGENT';
 
+export type SkillKind = 'GENERAL' | 'ROLE' | 'CUSTOM' | 'LEARNING';
+export type SkillOrigin = 'FOUNDATION' | 'CAPABILITY';
+export type AgentRoleStarterKey =
+  | 'OWNER'
+  | 'PLANNING'
+  | 'BUSINESS-ANALYST'
+  | 'ARCHITECT'
+  | 'SOFTWARE-DEVELOPER'
+  | 'QA'
+  | 'DEVOPS'
+  | 'VALIDATION'
+  | 'EXECUTION-OPS'
+  | 'CONTRARIAN-REVIEWER';
+
+export interface AgentArtifactExpectation {
+  artifactName: string;
+  direction: 'INPUT' | 'OUTPUT';
+  requiredByDefault: boolean;
+  description?: string;
+}
+
+export interface AgentOperatingContract {
+  description: string;
+  primaryResponsibilities: string[];
+  workingApproach: string[];
+  preferredOutputs: string[];
+  guardrails: string[];
+  conflictResolution: string[];
+  definitionOfDone: string;
+  suggestedInputArtifacts: AgentArtifactExpectation[];
+  expectedOutputArtifacts: AgentArtifactExpectation[];
+}
+
 export interface Skill {
   id: string;
   name: string;
   description: string;
   category: 'Analysis' | 'Automation' | 'Security' | 'Compliance' | 'Data';
   version: string;
+  contentMarkdown?: string;
+  kind?: SkillKind;
+  origin?: SkillOrigin;
+  defaultTemplateKeys?: string[];
 }
 
 export interface CapabilityStakeholder {
@@ -13,6 +50,25 @@ export interface CapabilityStakeholder {
   name: string;
   email: string;
   teamName?: string;
+}
+
+export interface WorkItemPhaseStakeholder {
+  role: string;
+  name: string;
+  email: string;
+  teamName?: string;
+}
+
+export interface WorkItemPhaseStakeholderAssignment {
+  phaseId: WorkflowPhaseId;
+  stakeholders: WorkItemPhaseStakeholder[];
+}
+
+export interface WorkItemAttachmentUpload {
+  fileName: string;
+  mimeType?: string;
+  contentText: string;
+  sizeBytes?: number;
 }
 
 export interface CapabilityMetadataEntry {
@@ -56,8 +112,62 @@ export interface CapabilityDatabaseConfig {
   notes?: string;
 }
 
+export interface WorkspaceGithubConnectorSettings {
+  enabled: boolean;
+  baseUrl?: string;
+  secretReference?: string;
+  ownerHint?: string;
+  notes?: string;
+}
+
+export interface WorkspaceJiraConnectorSettings {
+  enabled: boolean;
+  baseUrl?: string;
+  email?: string;
+  secretReference?: string;
+  projectKey?: string;
+  notes?: string;
+}
+
+export interface WorkspaceConfluenceConnectorSettings {
+  enabled: boolean;
+  baseUrl?: string;
+  email?: string;
+  secretReference?: string;
+  spaceKey?: string;
+  notes?: string;
+}
+
+export interface WorkspaceConnectorSettings {
+  github: WorkspaceGithubConnectorSettings;
+  jira: WorkspaceJiraConnectorSettings;
+  confluence: WorkspaceConfluenceConnectorSettings;
+}
+
 export interface WorkspaceSettings {
   databaseConfigs: CapabilityDatabaseConfig[];
+  connectors: WorkspaceConnectorSettings;
+}
+
+export interface WorkspaceDatabaseBootstrapConfig {
+  host: string;
+  port: number;
+  databaseName: string;
+  user: string;
+  adminDatabaseName?: string;
+  password?: string;
+}
+
+export interface WorkspaceDatabaseBootstrapProfile
+  extends WorkspaceDatabaseBootstrapConfig {
+  id: string;
+  label: string;
+  lastUsedAt: string;
+}
+
+export interface WorkspaceDatabaseBootstrapProfileSnapshot {
+  activeProfileId?: string;
+  profiles: WorkspaceDatabaseBootstrapProfile[];
 }
 
 export interface WorkspaceDatabaseRuntimeInfo {
@@ -68,17 +178,33 @@ export interface WorkspaceDatabaseRuntimeInfo {
   adminDatabaseName?: string;
   passwordConfigured: boolean;
   pgvectorAvailable: boolean;
+  lastConnectionError?: string;
+}
+
+export interface WorkspaceDatabaseBootstrapStatus {
+  runtime: WorkspaceDatabaseRuntimeInfo;
+  adminReachable: boolean;
+  databaseExists: boolean;
+  databaseReachable: boolean;
+  schemaInitialized: boolean;
+  foundationsInitialized: boolean;
+  ready: boolean;
+  lastError?: string;
 }
 
 export interface WorkspaceAgentTemplate {
   id: string;
   key: string;
+  roleStarterKey: AgentRoleStarterKey;
   name: string;
   role: string;
   objective: string;
   systemPrompt: string;
+  contract: AgentOperatingContract;
   inputArtifacts: string[];
   outputArtifacts: string[];
+  defaultSkillIds: string[];
+  preferredToolIds: ToolAdapterId[];
 }
 
 export interface WorkspaceEvalCaseTemplate {
@@ -126,12 +252,29 @@ export interface WorkspaceArtifactTemplate {
   sourceWorkflow: boolean;
 }
 
+export interface WorkspaceToolTemplate {
+  id: string;
+  toolId: ToolAdapterId;
+  label: string;
+  description: string;
+  category:
+    | 'Workspace'
+    | 'Search'
+    | 'Git'
+    | 'Build'
+    | 'Test'
+    | 'Docs'
+    | 'Deploy';
+  requiresApproval: boolean;
+}
+
 export interface WorkspaceFoundationCatalog {
   agentTemplates: WorkspaceAgentTemplate[];
   workflowTemplates: WorkspaceWorkflowTemplate[];
   evalSuiteTemplates: WorkspaceEvalSuiteTemplate[];
   skillTemplates: Skill[];
   artifactTemplates: WorkspaceArtifactTemplate[];
+  toolTemplates: WorkspaceToolTemplate[];
   initializedAt?: string;
 }
 
@@ -143,6 +286,7 @@ export interface WorkspaceFoundationSummary {
   evalSuiteTemplateCount: number;
   skillTemplateCount: number;
   artifactTemplateCount: number;
+  toolTemplateCount: number;
   totalTemplateCount: number;
 }
 
@@ -150,6 +294,12 @@ export interface WorkspaceCatalogSnapshot {
   databaseRuntime: WorkspaceDatabaseRuntimeInfo;
   foundations: WorkspaceFoundationCatalog;
   summary: WorkspaceFoundationSummary;
+}
+
+export interface WorkspaceDatabaseBootstrapResult {
+  status: WorkspaceDatabaseBootstrapStatus;
+  catalogSnapshot: WorkspaceCatalogSnapshot;
+  profileSnapshot?: WorkspaceDatabaseBootstrapProfileSnapshot;
 }
 
 export interface CapabilityExecutionCommandTemplate {
@@ -235,6 +385,44 @@ export interface DeploymentTargetValidationResult {
   message: string;
 }
 
+export type WorkspaceStackKind = 'NODE' | 'PYTHON' | 'JAVA' | 'GENERIC';
+
+export type WorkspaceBuildTool =
+  | 'NPM'
+  | 'PNPM'
+  | 'YARN'
+  | 'UV'
+  | 'POETRY'
+  | 'PIP'
+  | 'PIPENV'
+  | 'MAVEN'
+  | 'GRADLE'
+  | 'UNKNOWN';
+
+export type WorkspaceDetectionConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
+
+export interface WorkspaceStackProfile {
+  stack: WorkspaceStackKind;
+  buildTool: WorkspaceBuildTool;
+  confidence: WorkspaceDetectionConfidence;
+  workspacePath?: string;
+  summary: string;
+}
+
+export interface WorkspaceCommandRecommendation
+  extends CapabilityExecutionCommandTemplate {
+  rationale?: string;
+}
+
+export interface WorkspaceDetectionResult {
+  requestedPaths: string[];
+  normalizedPath?: string;
+  profile: WorkspaceStackProfile;
+  evidenceFiles: string[];
+  recommendedCommandTemplates: WorkspaceCommandRecommendation[];
+  recommendedDeploymentTargets: CapabilityDeploymentTarget[];
+}
+
 export type WorkflowPhaseId = string;
 
 export type SystemPhaseId = 'BACKLOG' | 'DONE';
@@ -255,6 +443,8 @@ export interface CapabilityLifecycle {
   phases: CapabilityLifecyclePhase[];
   retiredPhases: RetiredCapabilityLifecyclePhase[];
 }
+
+export type CapabilitySystemRole = 'FOUNDATION';
 
 export interface Capability {
   id: string;
@@ -285,6 +475,8 @@ export interface Capability {
   executionConfig: CapabilityExecutionConfig;
   status: Status;
   specialAgentId?: string;
+  isSystemCapability?: boolean;
+  systemCapabilityRole?: CapabilitySystemRole;
   skillLibrary: Skill[];
 }
 
@@ -396,8 +588,10 @@ export interface CapabilityAgent {
   capabilityId: string;
   name: string;
   role: string;
+  roleStarterKey?: AgentRoleStarterKey;
   objective: string;
   systemPrompt: string;
+  contract: AgentOperatingContract;
   initializationStatus: 'NOT_STARTED' | 'READY';
   documentationSources: string[];
   inputArtifacts: string[];
@@ -407,6 +601,7 @@ export interface CapabilityAgent {
   standardTemplateKey?: string;
   learningNotes?: string[];
   skillIds: string[];
+  preferredToolIds?: ToolAdapterId[];
   provider: 'GitHub Copilot SDK' | 'GitHub Copilot API';
   model: string;
   tokenLimit: number;
@@ -484,9 +679,11 @@ export type ArtifactKind =
   | 'HANDOFF_PACKET'
   | 'APPROVAL_RECORD'
   | 'INPUT_NOTE'
+  | 'STAGE_CONTROL_NOTE'
   | 'CONFLICT_RESOLUTION'
   | 'CONTRARIAN_REVIEW'
   | 'EXECUTION_PLAN'
+  | 'REVIEW_PACKET'
   | 'EXECUTION_SUMMARY';
 
 export type ArtifactContentFormat = 'TEXT' | 'MARKDOWN' | 'JSON';
@@ -685,6 +882,8 @@ export interface CompiledStepContext {
   requiredInputs: CompiledRequiredInputField[];
   missingInputs: CompiledRequiredInputField[];
   artifactChecklist: CompiledArtifactChecklistItem[];
+  agentSuggestedInputs: AgentArtifactExpectation[];
+  agentExpectedOutputs: AgentArtifactExpectation[];
   completionChecklist: string[];
   memoryBoundary: string[];
   nextActions: string[];
@@ -836,6 +1035,16 @@ export interface LearningUpdate {
   insight: string;
   skillUpdate?: string;
   timestamp: string;
+  triggerType?:
+    | 'INITIALIZATION'
+    | 'REQUEST_CHANGES'
+    | 'GUIDANCE'
+    | 'STAGE_CONTROL'
+    | 'CONFLICT_RESOLUTION'
+    | 'MANUAL_REFRESH'
+    | 'SKILL_CHANGE';
+  relatedWorkItemId?: string;
+  relatedRunId?: string;
 }
 
 export type WorkItemStatus = 'ACTIVE' | 'BLOCKED' | 'PENDING_APPROVAL' | 'COMPLETED';
@@ -866,10 +1075,22 @@ export interface WorkItemHistoryEntry {
   status?: WorkItemStatus;
 }
 
+export type WorkItemTaskType =
+  | 'GENERAL'
+  | 'STRATEGIC_INITIATIVE'
+  | 'NEW_BUSINESS_CASE'
+  | 'FEATURE_ENHANCEMENT'
+  | 'PRODUCTION_ISSUE'
+  | 'BUGFIX'
+  | 'SECURITY_FINDING'
+  | 'REHYDRATION';
+
 export interface WorkItem {
   id: string;
   title: string;
   description: string;
+  taskType?: WorkItemTaskType;
+  phaseStakeholders?: WorkItemPhaseStakeholderAssignment[];
   phase: WorkItemPhase;
   capabilityId: string;
   workflowId: string;
@@ -1383,6 +1604,179 @@ export interface CapabilityFlightRecorderSnapshot {
   };
   events: FlightRecorderEvent[];
   workItems: WorkItemFlightRecorderDetail[];
+}
+
+export type ReleaseReadinessStatus =
+  | 'READY'
+  | 'WAITING_APPROVAL'
+  | 'BLOCKED'
+  | 'INCOMPLETE';
+
+export interface ReleaseReadinessDimension {
+  id:
+    | 'evidence_complete'
+    | 'approvals_resolved'
+    | 'no_denied_policy'
+    | 'qa_complete'
+    | 'handoff_complete'
+    | 'deployment_authorized';
+  label: string;
+  weight: number;
+  applicable: boolean;
+  passed: boolean;
+  reason: string;
+}
+
+export interface ReleaseReadiness {
+  status: ReleaseReadinessStatus;
+  score: number;
+  dimensions: ReleaseReadinessDimension[];
+  blockingReasons: string[];
+}
+
+export interface WorkItemAttemptDiff {
+  hasPreviousAttempt: boolean;
+  currentAttemptNumber?: number;
+  previousAttemptNumber?: number;
+  summary: string;
+  statusDelta?: string;
+  terminalOutcomeDelta?: string;
+  stepProgressDelta: string[];
+  waitDelta: string[];
+  policyDelta: string[];
+  evidenceDelta: string[];
+  handoffDelta: string[];
+  toolDelta: string[];
+  humanDelta: string[];
+}
+
+export interface ReviewPacketArtifactSummary {
+  artifactId: string;
+  name: string;
+  createdAt: string;
+  fileName: string;
+  contentText: string;
+  downloadUrl: string;
+}
+
+export interface StageControlContinueResponse {
+  action:
+    | 'APPROVED_WAIT'
+    | 'PROVIDED_INPUT'
+    | 'RESOLVED_CONFLICT'
+    | 'RESTARTED'
+    | 'CANCELLED_AND_RESTARTED'
+    | 'STARTED';
+  summary: string;
+  artifactId?: string;
+  run: WorkflowRun;
+}
+
+export type ConnectorSyncStatus = 'READY' | 'NEEDS_CONFIGURATION' | 'ERROR';
+
+export interface GithubConnectorRepositoryContext {
+  url: string;
+  owner: string;
+  repo: string;
+  description?: string;
+  defaultBranch?: string;
+  openIssueCount?: number;
+  openPullRequestCount?: number;
+}
+
+export interface GithubConnectorPullRequestContext {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+}
+
+export interface GithubConnectorIssueContext {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+}
+
+export interface GithubConnectorSyncResult {
+  provider: 'GITHUB';
+  status: ConnectorSyncStatus;
+  message: string;
+  syncedAt: string;
+  repositories: GithubConnectorRepositoryContext[];
+  pullRequests: GithubConnectorPullRequestContext[];
+  issues: GithubConnectorIssueContext[];
+}
+
+export interface JiraConnectorIssueContext {
+  key: string;
+  title: string;
+  status: string;
+  url?: string;
+}
+
+export interface JiraConnectorSyncResult {
+  provider: 'JIRA';
+  status: ConnectorSyncStatus;
+  message: string;
+  syncedAt: string;
+  boardUrl?: string;
+  issues: JiraConnectorIssueContext[];
+}
+
+export interface ConfluenceConnectorPageContext {
+  pageId?: string;
+  title?: string;
+  url: string;
+  spaceKey?: string;
+}
+
+export interface ConfluenceConnectorSyncResult {
+  provider: 'CONFLUENCE';
+  status: ConnectorSyncStatus;
+  message: string;
+  syncedAt: string;
+  pages: ConfluenceConnectorPageContext[];
+}
+
+export interface CapabilityConnectorContext {
+  capabilityId: string;
+  github: GithubConnectorSyncResult;
+  jira: JiraConnectorSyncResult;
+  confluence: ConfluenceConnectorSyncResult;
+}
+
+export interface WorkItemExplainDetail {
+  capabilityId: string;
+  generatedAt: string;
+  workItem: WorkItem;
+  summary: {
+    headline: string;
+    blockingState: string;
+    nextAction: string;
+    latestRunStatus?: WorkflowRunStatus;
+  };
+  releaseReadiness: ReleaseReadiness;
+  attemptDiff: WorkItemAttemptDiff;
+  latestRun?: WorkflowRun;
+  previousRun?: WorkflowRun;
+  flightRecorder: {
+    verdict: FlightRecorderVerdict;
+    verdictReason: string;
+  };
+  evidence: {
+    artifactCount: number;
+    handoffCount: number;
+    phaseCount: number;
+    latestCompletedAt?: string;
+  };
+  humanGates: FlightRecorderHumanGateSummary[];
+  policyDecisions: FlightRecorderPolicySummary[];
+  artifacts: FlightRecorderArtifactSummary[];
+  handoffArtifacts: FlightRecorderArtifactSummary[];
+  telemetry: WorkItemFlightRecorderDetail['telemetry'];
+  connectors: CapabilityConnectorContext;
+  reviewPacket?: ReviewPacketArtifactSummary;
 }
 
 export type MemorySourceType =

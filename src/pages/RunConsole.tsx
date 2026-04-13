@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import MarkdownContent from '../components/MarkdownContent';
+import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
 import {
   fetchCopilotSessionMonitor,
   fetchCapabilityWorkflowRun,
@@ -88,7 +89,8 @@ const getRunEventLabel = (event: RunEvent) => {
 
 const RunConsole = () => {
   const navigate = useNavigate();
-  const { activeCapability, setActiveChatAgent } = useCapability();
+  const { activeCapability, getCapabilityWorkspace, setActiveChatAgent } = useCapability();
+  const workspace = getCapabilityWorkspace(activeCapability.id);
   const [snapshot, setSnapshot] = useState<RunConsoleSnapshot | null>(null);
   const [sessionMonitor, setSessionMonitor] = useState<CopilotSessionMonitorSnapshot | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string>('');
@@ -96,6 +98,7 @@ const RunConsole = () => {
   const [selectedRunEvents, setSelectedRunEvents] = useState<RunEvent[]>([]);
   const [error, setError] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isExplainOpen, setIsExplainOpen] = useState(false);
 
   const loadSnapshot = async () => {
     setIsRefreshing(true);
@@ -204,6 +207,9 @@ const RunConsole = () => {
     recentRuns.find(run => run.id === selectedRunId) ||
     selectedRunDetail?.run ||
     null;
+  const selectedWorkItem = selectedRun
+    ? workspace.workItems.find(item => item.id === selectedRun.workItemId) || null
+    : null;
 
   const recentSpanRows = useMemo(
     () => snapshot?.telemetry.recentSpans.slice(0, 8) || [],
@@ -503,6 +509,17 @@ const RunConsole = () => {
                 <p className="text-sm text-secondary">
                   Current phase: {formatEnumLabel(selectedRun.currentPhase)} • Attempt {selectedRun.attemptNumber}
                 </p>
+                {selectedWorkItem ? (
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsExplainOpen(true)}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      Explain
+                    </button>
+                  </div>
+                ) : null}
               </div>
 
               <KeyValueList
@@ -587,6 +604,13 @@ const RunConsole = () => {
           )}
         </DrawerShell>
       </div>
+
+      <ExplainWorkItemDrawer
+        capability={activeCapability}
+        workItem={selectedWorkItem}
+        isOpen={isExplainOpen}
+        onClose={() => setIsExplainOpen(false)}
+      />
     </div>
   );
 };

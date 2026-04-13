@@ -1,17 +1,32 @@
-import { BUILT_IN_AGENT_TEMPLATES, SKILL_LIBRARY } from '../constants';
-import { createDefaultCapabilityLifecycle } from './capabilityLifecycle';
 import {
+  BUILT_IN_AGENT_TEMPLATES,
+  SKILL_LIBRARY,
+  getStandardAgentContract,
+  getStandardAgentDefaultSkillIds,
+  getStandardAgentPreferredToolIds,
+} from '../constants';
+import {
+  createBrokerageCapabilityLifecycle,
+  createDefaultCapabilityLifecycle,
+} from './capabilityLifecycle';
+import {
+  BROKERAGE_WORKFLOW_TEMPLATE_ID,
+  createBrokerageCapabilityWorkflow,
   createStandardCapabilityWorkflow,
   STANDARD_SDLC_STEP_TEMPLATES,
   STANDARD_WORKFLOW_TEMPLATE_ID,
 } from './standardWorkflow';
 import type {
+  Artifact,
+  Capability,
+  CapabilityAgent,
   Skill,
   WorkspaceAgentTemplate,
   WorkspaceArtifactTemplate,
   WorkspaceEvalSuiteTemplate,
   WorkspaceFoundationCatalog,
   WorkspaceFoundationSummary,
+  WorkspaceToolTemplate,
   WorkspaceWorkflowTemplate,
 } from '../types';
 
@@ -36,6 +51,15 @@ const WORKSPACE_TEMPLATE_CAPABILITY = {
   specialAgentId: 'AGENT-WORKSPACE-OWNER',
   lifecycle: createDefaultCapabilityLifecycle(),
 } as const;
+
+const WORKSPACE_BROKERAGE_TEMPLATE_CAPABILITY = {
+  ...WORKSPACE_TEMPLATE_CAPABILITY,
+  lifecycle: createBrokerageCapabilityLifecycle(),
+} as const;
+
+export const SYSTEM_FOUNDATION_CAPABILITY_ID = 'CAP-SYSTEM-FOUNDATION';
+export const SYSTEM_FOUNDATION_CAPABILITY_ROLE = 'FOUNDATION' as const;
+export const SYSTEM_FOUNDATION_CAPABILITY_NAME = 'Shared Workspace Foundation';
 
 const slugify = (value: string) =>
   value
@@ -79,24 +103,32 @@ export const WORKSPACE_AGENT_TEMPLATES: WorkspaceAgentTemplate[] = [
   {
     id: 'AGENT-TEMPLATE-OWNER',
     key: 'OWNER',
+    roleStarterKey: 'OWNER',
     name: 'Capability Owning Agent',
     role: 'Capability Owner',
     objective:
       'Own the end-to-end delivery context for {capabilityName} and coordinate all downstream agents within this capability.',
     systemPrompt:
       'You are the capability owner for {capabilityName}. Ground every decision, workflow, and team action in the capability domain, documentation, and governance context.',
+    contract: getStandardAgentContract('OWNER'),
     inputArtifacts: ['Capability charter'],
     outputArtifacts: ['Capability operating model'],
+    defaultSkillIds: getStandardAgentDefaultSkillIds('OWNER'),
+    preferredToolIds: getStandardAgentPreferredToolIds('OWNER'),
   },
   ...BUILT_IN_AGENT_TEMPLATES.map(template => ({
     id: `AGENT-TEMPLATE-${template.key}`,
     key: template.key,
+    roleStarterKey: template.roleStarterKey,
     name: template.name,
     role: template.role,
     objective: template.objective,
     systemPrompt: template.systemPrompt,
+    contract: template.contract,
     inputArtifacts: [...template.inputArtifacts],
     outputArtifacts: [...template.outputArtifacts],
+    defaultSkillIds: getStandardAgentDefaultSkillIds(template.key),
+    preferredToolIds: getStandardAgentPreferredToolIds(template.key),
   })),
 ];
 
@@ -174,9 +206,88 @@ export const WORKSPACE_EVAL_SUITE_TEMPLATES: WorkspaceEvalSuiteTemplate[] = [
   },
 ];
 
+export const WORKSPACE_TOOL_TEMPLATES: WorkspaceToolTemplate[] = [
+  {
+    id: 'TOOL-TEMPLATE-WORKSPACE-LIST',
+    toolId: 'workspace_list',
+    label: 'Workspace List',
+    description: 'List files inside an approved workspace path.',
+    category: 'Workspace',
+    requiresApproval: false,
+  },
+  {
+    id: 'TOOL-TEMPLATE-WORKSPACE-READ',
+    toolId: 'workspace_read',
+    label: 'Workspace Read',
+    description: 'Read a text file from an approved workspace path.',
+    category: 'Workspace',
+    requiresApproval: false,
+  },
+  {
+    id: 'TOOL-TEMPLATE-WORKSPACE-SEARCH',
+    toolId: 'workspace_search',
+    label: 'Workspace Search',
+    description: 'Search within an approved workspace for a string or regex pattern.',
+    category: 'Search',
+    requiresApproval: false,
+  },
+  {
+    id: 'TOOL-TEMPLATE-GIT-STATUS',
+    toolId: 'git_status',
+    label: 'Git Status',
+    description: 'Inspect git status for an approved workspace repository.',
+    category: 'Git',
+    requiresApproval: false,
+  },
+  {
+    id: 'TOOL-TEMPLATE-WORKSPACE-WRITE',
+    toolId: 'workspace_write',
+    label: 'Workspace Write',
+    description: 'Write a text file inside an approved workspace path.',
+    category: 'Workspace',
+    requiresApproval: true,
+  },
+  {
+    id: 'TOOL-TEMPLATE-RUN-BUILD',
+    toolId: 'run_build',
+    label: 'Run Build',
+    description: 'Run the approved build command template.',
+    category: 'Build',
+    requiresApproval: false,
+  },
+  {
+    id: 'TOOL-TEMPLATE-RUN-TEST',
+    toolId: 'run_test',
+    label: 'Run Test',
+    description: 'Run the approved test command template.',
+    category: 'Test',
+    requiresApproval: false,
+  },
+  {
+    id: 'TOOL-TEMPLATE-RUN-DOCS',
+    toolId: 'run_docs',
+    label: 'Run Docs',
+    description: 'Run the approved docs command template.',
+    category: 'Docs',
+    requiresApproval: false,
+  },
+  {
+    id: 'TOOL-TEMPLATE-RUN-DEPLOY',
+    toolId: 'run_deploy',
+    label: 'Run Deploy',
+    description:
+      'Execute an approved deployment target using a named command template after approval.',
+    category: 'Deploy',
+    requiresApproval: true,
+  },
+];
+
 export const createWorkspaceWorkflowTemplates = (): WorkspaceWorkflowTemplate[] => {
   const standardWorkflow = createStandardCapabilityWorkflow(
     WORKSPACE_TEMPLATE_CAPABILITY,
+  );
+  const brokerageWorkflow = createBrokerageCapabilityWorkflow(
+    WORKSPACE_BROKERAGE_TEMPLATE_CAPABILITY,
   );
 
   return [
@@ -195,6 +306,22 @@ export const createWorkspaceWorkflowTemplates = (): WorkspaceWorkflowTemplate[] 
       edges: standardWorkflow.edges,
       steps: standardWorkflow.steps,
       publishState: standardWorkflow.publishState,
+    },
+    {
+      id: 'WORKFLOW-TEMPLATE-BROKERAGE-SDLC',
+      templateId: BROKERAGE_WORKFLOW_TEMPLATE_ID,
+      name: brokerageWorkflow.name,
+      summary:
+        brokerageWorkflow.summary ||
+        'Brokerage SDLC workflow with multiple entry points and org-specific lifecycle lanes.',
+      workflowType: brokerageWorkflow.workflowType,
+      scope: 'GLOBAL',
+      schemaVersion: brokerageWorkflow.schemaVersion,
+      entryNodeId: brokerageWorkflow.entryNodeId,
+      nodes: brokerageWorkflow.nodes,
+      edges: brokerageWorkflow.edges,
+      steps: brokerageWorkflow.steps,
+      publishState: brokerageWorkflow.publishState,
     },
   ];
 };
@@ -350,6 +477,8 @@ export const createDefaultWorkspaceFoundationCatalog = (): WorkspaceFoundationCa
     ...template,
     inputArtifacts: [...template.inputArtifacts],
     outputArtifacts: [...template.outputArtifacts],
+    defaultSkillIds: [...template.defaultSkillIds],
+    preferredToolIds: [...template.preferredToolIds],
   })),
   workflowTemplates: createWorkspaceWorkflowTemplates(),
   evalSuiteTemplates: WORKSPACE_EVAL_SUITE_TEMPLATES.map(template => ({
@@ -364,10 +493,171 @@ export const createDefaultWorkspaceFoundationCatalog = (): WorkspaceFoundationCa
     skill =>
       ({
         ...skill,
+        defaultTemplateKeys: [...(skill.defaultTemplateKeys || [])],
       }) satisfies Skill,
   ),
   artifactTemplates: createWorkspaceArtifactTemplates(),
+  toolTemplates: WORKSPACE_TOOL_TEMPLATES.map(template => ({
+    ...template,
+  })),
 });
+
+export const createWorkspaceFoundationCapability = (
+  foundationCatalog?: WorkspaceFoundationCatalog,
+): Capability => {
+  const catalog = resolveWorkspaceFoundationCatalog(foundationCatalog);
+
+  return {
+    id: SYSTEM_FOUNDATION_CAPABILITY_ID,
+    name: SYSTEM_FOUNDATION_CAPABILITY_NAME,
+    description:
+      'Immutable system capability that materializes the shared workspace standards for agents, workflows, skills, artifacts, and tools.',
+    domain: 'Workspace Foundations',
+    businessUnit: 'Platform',
+    ownerTeam: 'System',
+    businessOutcome:
+      'Provide one canonical workspace-owned source for shared delivery standards that every capability can inherit from.',
+    successMetrics: [
+      'All new capabilities inherit a consistent starter set of agents, workflows, skills, and artifacts.',
+    ],
+    definitionOfDone:
+      'Shared standards are materialized and available for inheritance across the workspace.',
+    requiredEvidenceKinds: ['Shared workflow templates', 'Shared artifact templates'],
+    operatingPolicySummary:
+      'This capability is system-managed and read-only. It exists to compensate for capability-scoped persistence while the platform evolves toward stronger workspace-level models.',
+    applications: [],
+    apis: [],
+    databases: [],
+    gitRepositories: [],
+    localDirectories: [],
+    teamNames: ['System'],
+    stakeholders: [],
+    additionalMetadata: [],
+    lifecycle: createDefaultCapabilityLifecycle(),
+    executionConfig: {
+      defaultWorkspacePath: undefined,
+      allowedWorkspacePaths: [],
+      commandTemplates: [],
+      deploymentTargets: [],
+    },
+    status: 'STABLE',
+    isSystemCapability: true,
+    systemCapabilityRole: SYSTEM_FOUNDATION_CAPABILITY_ROLE,
+    skillLibrary: mergeCapabilitySkillLibrary([], catalog),
+  };
+};
+
+export const isSystemFoundationCapability = (
+  capability?: Pick<Capability, 'id' | 'isSystemCapability' | 'systemCapabilityRole'> | null,
+) =>
+  Boolean(
+    capability &&
+      capability.id === SYSTEM_FOUNDATION_CAPABILITY_ID &&
+      capability.isSystemCapability &&
+      capability.systemCapabilityRole === SYSTEM_FOUNDATION_CAPABILITY_ROLE,
+  );
+
+const resolveWorkspaceFoundationCatalog = (
+  catalog?: WorkspaceFoundationCatalog,
+): WorkspaceFoundationCatalog => {
+  const defaults = createDefaultWorkspaceFoundationCatalog();
+
+  if (!catalog) {
+    return defaults;
+  }
+
+  return {
+    ...catalog,
+    agentTemplates:
+      catalog.agentTemplates.length > 0 ? catalog.agentTemplates : defaults.agentTemplates,
+    workflowTemplates:
+      catalog.workflowTemplates.length > 0
+        ? catalog.workflowTemplates
+        : defaults.workflowTemplates,
+    evalSuiteTemplates:
+      catalog.evalSuiteTemplates.length > 0
+        ? catalog.evalSuiteTemplates
+        : defaults.evalSuiteTemplates,
+    skillTemplates:
+      catalog.skillTemplates.length > 0 ? catalog.skillTemplates : defaults.skillTemplates,
+    artifactTemplates:
+      catalog.artifactTemplates.length > 0
+        ? catalog.artifactTemplates
+        : defaults.artifactTemplates,
+    toolTemplates:
+      catalog.toolTemplates.length > 0 ? catalog.toolTemplates : defaults.toolTemplates,
+  };
+};
+
+export const mergeCapabilitySkillLibrary = (
+  skills: Skill[] = [],
+  foundationCatalog?: WorkspaceFoundationCatalog,
+): Skill[] => {
+  const catalog = resolveWorkspaceFoundationCatalog(foundationCatalog);
+  const merged = new Map<string, Skill>();
+
+  catalog.skillTemplates.forEach(skill => {
+    merged.set(skill.id, {
+      ...skill,
+      origin: skill.origin || 'FOUNDATION',
+      kind: skill.kind || 'CUSTOM',
+      contentMarkdown:
+        skill.contentMarkdown?.trim() || `# ${skill.name}\n\n${skill.description}`,
+      defaultTemplateKeys: [...(skill.defaultTemplateKeys || [])],
+    });
+  });
+  skills.forEach(skill => {
+    merged.set(skill.id, {
+      ...skill,
+      origin: skill.origin || 'CAPABILITY',
+      kind: skill.kind || 'CUSTOM',
+      contentMarkdown:
+        skill.contentMarkdown?.trim() || `# ${skill.name}\n\n${skill.description}`,
+      defaultTemplateKeys: [...(skill.defaultTemplateKeys || [])],
+    });
+  });
+
+  return Array.from(merged.values()).sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
+};
+
+export const materializeCapabilityStarterArtifacts = ({
+  capability,
+  agents = [],
+  foundationCatalog,
+  createdAt,
+}: {
+  capability: Capability;
+  agents?: CapabilityAgent[];
+  foundationCatalog?: WorkspaceFoundationCatalog;
+  createdAt?: string;
+}): Artifact[] => {
+  const catalog = resolveWorkspaceFoundationCatalog(foundationCatalog);
+  const timestamp = createdAt || new Date().toISOString();
+
+  return catalog.artifactTemplates.map(template => {
+    const connectedAgent = agents.find(agent => agent.name === template.agentLabel);
+
+    return {
+      id: `ART-${slugify(`${capability.id}-${template.name}`)}`,
+      name: template.name,
+      capabilityId: capability.id,
+      type: template.type,
+      inputs: [...template.inputs],
+      version: 'starter-template',
+      agent: connectedAgent?.name || template.agentLabel,
+      created: timestamp,
+      template: template.template,
+      documentationStatus: 'PENDING',
+      isMasterArtifact: true,
+      description: template.description,
+      direction: template.direction,
+      connectedAgentId: connectedAgent?.id,
+      summary: template.description,
+    } satisfies Artifact;
+  });
+};
 
 export const summarizeWorkspaceFoundationCatalog = (
   catalog: WorkspaceFoundationCatalog,
@@ -377,12 +667,14 @@ export const summarizeWorkspaceFoundationCatalog = (
   const evalSuiteTemplateCount = catalog.evalSuiteTemplates.length;
   const skillTemplateCount = catalog.skillTemplates.length;
   const artifactTemplateCount = catalog.artifactTemplates.length;
+  const toolTemplateCount = catalog.toolTemplates.length;
   const totalTemplateCount =
     agentTemplateCount +
     workflowTemplateCount +
     evalSuiteTemplateCount +
     skillTemplateCount +
-    artifactTemplateCount;
+    artifactTemplateCount +
+    toolTemplateCount;
 
   return {
     initialized: totalTemplateCount > 0,
@@ -392,6 +684,7 @@ export const summarizeWorkspaceFoundationCatalog = (
     evalSuiteTemplateCount,
     skillTemplateCount,
     artifactTemplateCount,
+    toolTemplateCount,
     totalTemplateCount,
   };
 };

@@ -5,6 +5,7 @@ type ErrorBoundaryProps = {
   children: ReactNode;
   title?: string;
   description?: string;
+  resetKey?: string;
 };
 
 type ErrorBoundaryState = {
@@ -22,6 +23,12 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('Route rendering failed.', error, info.componentStack);
+  }
+
+  componentDidUpdate(prevProps: ErrorBoundaryProps) {
+    if (this.state.error && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ error: null });
+    }
   }
 
   render() {
@@ -49,11 +56,11 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
             </pre>
             <button
               type="button"
-              onClick={() => window.location.reload()}
+              onClick={() => this.setState({ error: null })}
               className="enterprise-button enterprise-button-primary mt-5"
             >
               <RefreshCw size={16} />
-              Reload workspace
+              Try again
             </button>
           </div>
         </div>

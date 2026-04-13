@@ -22,6 +22,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   CommandTemplateEditor,
   DeploymentTargetEditor,
+  WorkspaceProfileRecommendationCard,
 } from '../components/CapabilityExecutionSetup';
 import CapabilityLifecycleEditor from '../components/CapabilityLifecycleEditor';
 import { useCapability } from '../context/CapabilityContext';
@@ -29,6 +30,7 @@ import { useToast } from '../context/ToastContext';
 import { cn } from '../lib/utils';
 import {
   clearRuntimeCredentials,
+  detectCapabilityWorkspaceProfile,
   fetchRuntimeStatus,
   updateRuntimeCredentials,
   type RuntimeStatus,
@@ -47,6 +49,7 @@ import {
   Capability,
   CapabilityMetadataEntry,
   CapabilityStakeholder,
+  WorkspaceDetectionResult,
 } from '../types';
 import {
   PageHeader,
@@ -189,6 +192,12 @@ export default function CapabilityMetadata() {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeStatusError, setRuntimeStatusError] = useState('');
   const [runtimeTokenInput, setRuntimeTokenInput] = useState('');
+  const [workspaceDetection, setWorkspaceDetection] =
+    useState<WorkspaceDetectionResult | null>(null);
+  const [workspaceDetectionDismissed, setWorkspaceDetectionDismissed] =
+    useState(false);
+  const [isRefreshingWorkspaceDetection, setIsRefreshingWorkspaceDetection] =
+    useState(false);
   const capabilityLifecycle = useMemo(
     () => normalizeCapabilityLifecycle(activeCapability.lifecycle),
     [activeCapability.lifecycle],
@@ -240,6 +249,8 @@ export default function CapabilityMetadata() {
     });
     setSaveError('');
     setLastSavedAt('');
+    setWorkspaceDetection(null);
+    setWorkspaceDetectionDismissed(false);
   }, [activeCapability]);
 
   useEffect(() => {
@@ -340,11 +351,70 @@ export default function CapabilityMetadata() {
       ),
     [form.allowedWorkspacePaths, form.defaultWorkspacePath, form.localDirectories],
   );
+  const workspaceDetectionSignature = useMemo(
+    () =>
+      JSON.stringify({
+        defaultWorkspacePath: form.defaultWorkspacePath.trim(),
+        approvedWorkspacePaths,
+      }),
+    [approvedWorkspacePaths, form.defaultWorkspacePath],
+  );
+
+  const refreshWorkspaceDetection = async () => {
+    if (approvedWorkspacePaths.length === 0) {
+      setWorkspaceDetection(null);
+      setWorkspaceDetectionDismissed(false);
+      return;
+    }
+
+    setIsRefreshingWorkspaceDetection(true);
+    try {
+      const result = await detectCapabilityWorkspaceProfile(activeCapability.id, {
+        defaultWorkspacePath: form.defaultWorkspacePath.trim() || undefined,
+        approvedWorkspacePaths,
+      });
+      setWorkspaceDetection(result);
+      setWorkspaceDetectionDismissed(false);
+    } catch (error) {
+      showError(
+        'Workspace detection failed',
+        error instanceof Error
+          ? error.message
+          : 'Unable to infer the workspace stack right now.',
+      );
+    } finally {
+      setIsRefreshingWorkspaceDetection(false);
+    }
+  };
+
+  const applyRecommendedExecutionSetup = (
+    commandTemplates: Capability['executionConfig']['commandTemplates'],
+    deploymentTargets: Capability['executionConfig']['deploymentTargets'],
+  ) => {
+    setForm(prev => ({ ...prev, commandTemplates, deploymentTargets }));
+    setWorkspaceDetectionDismissed(false);
+  };
+
+  useEffect(() => {
+    if (approvedWorkspacePaths.length === 0) {
+      setWorkspaceDetection(null);
+      setWorkspaceDetectionDismissed(false);
+      return;
+    }
+
+    void refreshWorkspaceDetection();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCapability.id]);
 
   const setField = (field: keyof typeof form, value: string) => {
     setSaveError('');
     setForm(prev => ({ ...prev, [field]: value }));
   };
+
+  useEffect(() => {
+    setWorkspaceDetection(null);
+    setWorkspaceDetectionDismissed(false);
+  }, [workspaceDetectionSignature]);
 
   const normalizeLifecycleWorkflows = (
     workflowsToNormalize: typeof workspace.workflows,
@@ -1343,6 +1413,34 @@ export default function CapabilityMetadata() {
                     keep agent execution constrained to approved actions.
                   </p>
                 </div>
+                <WorkspaceProfileRecommendationCard
+                  detection={workspaceDetection}
+                  currentTemplates={form.commandTemplates}
+                  currentTargets={form.deploymentTargets}
+                  dismissed={workspaceDetectionDismissed}
+                  onUseRecommendedSetup={applyRecommendedExecutionSetup}
+                  onKeepCurrentSetup={() => setWorkspaceDetectionDismissed(true)}
+                  onRefresh={() => void refreshWorkspaceDetection()}
+                />
+                {approvedWorkspacePaths.length > 0 && !workspaceDetection && (
+                  <div className="rounded-3xl border border-outline-variant/20 bg-surface-container-low px-5 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="form-kicker">Detected workspace profile</p>
+                        <p className="mt-2 text-sm leading-relaxed text-secondary">
+                          Infer stack-aware Java, Python, or Node execution recommendations from the approved workspace paths.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void refreshWorkspaceDetection()}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        {isRefreshingWorkspaceDetection ? 'Detecting' : 'Refresh inferred setup'}
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <CommandTemplateEditor
                   templates={form.commandTemplates}
                   allowedWorkspacePaths={approvedWorkspacePaths}

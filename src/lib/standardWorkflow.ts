@@ -1,5 +1,6 @@
 import { BUILT_IN_AGENT_TEMPLATES } from '../constants';
 import {
+  createBrokerageCapabilityLifecycle,
   createDefaultCapabilityLifecycle,
   getCapabilityBoardPhaseIds,
   getCapabilityGraphPhaseIds,
@@ -15,6 +16,7 @@ import {
   WorkflowEdge,
   WorkflowHandoffProtocol,
   WorkflowNode,
+  WorkflowNodeType,
   WorkflowStep,
   WorkflowStepType,
 } from '../types';
@@ -28,11 +30,12 @@ import {
 type BuiltInAgentKey = (typeof BUILT_IN_AGENT_TEMPLATES)[number]['key'];
 type AgentReference = BuiltInAgentKey | 'OWNER';
 
-type StandardWorkflowStepTemplate = {
+type SharedWorkflowStepTemplate = {
   key: string;
   name: string;
   phase: Exclude<WorkItemPhase, 'BACKLOG' | 'DONE'>;
   stepType: WorkflowStepType;
+  nodeType?: WorkflowNodeType;
   agentRef: AgentReference;
   action: string;
   description: string;
@@ -53,7 +56,10 @@ type StandardWorkflowStepTemplate = {
 
 const STANDARD_LIFECYCLE = createDefaultCapabilityLifecycle();
 const STANDARD_VISIBLE_PHASE_IDS = getCapabilityGraphPhaseIds(STANDARD_LIFECYCLE);
+const BROKERAGE_LIFECYCLE = createBrokerageCapabilityLifecycle();
+const BROKERAGE_VISIBLE_PHASE_IDS = getCapabilityGraphPhaseIds(BROKERAGE_LIFECYCLE);
 export const STANDARD_WORKFLOW_TEMPLATE_ID = 'STANDARD-SDLC';
+export const BROKERAGE_WORKFLOW_TEMPLATE_ID = 'BROKERAGE-SDLC';
 
 export const SDLC_BOARD_PHASES: WorkItemPhase[] = getCapabilityBoardPhaseIds(
   STANDARD_LIFECYCLE,
@@ -97,7 +103,7 @@ const createArtifactContract = (
   notes,
 });
 
-export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
+export const STANDARD_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
   {
     key: 'PLANNING',
     name: 'Planning & Stakeholder Synthesis',
@@ -451,6 +457,7 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
     name: 'Release Execution',
     phase: 'RELEASE',
     stepType: 'DELIVERY',
+    nodeType: 'RELEASE',
     agentRef: 'DEVOPS',
     action: 'Deploy, verify, and close the release.',
     description:
@@ -495,19 +502,271 @@ export const STANDARD_SDLC_STEP_TEMPLATES: StandardWorkflowStepTemplate[] = [
   },
 ];
 
-export const createStandardCapabilityWorkflow = (
+export const BROKERAGE_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
+  {
+    key: 'INCEPTION_INTENT',
+    name: 'Intent & Scope Definition',
+    phase: 'INCEPTION',
+    stepType: 'DELIVERY',
+    agentRef: 'PLANNING',
+    action: 'Clarify the intent, scope, and initial viability of the work request.',
+    description:
+      'Frame the objective, define the scope boundary, and capture early proof-of-concept needs before solution shaping begins.',
+    handoffToAgentRef: 'BUSINESS-ANALYST',
+    handoffToPhase: 'INCEPTION',
+    handoffLabel: 'Inception hand-off to business framing',
+    handoffRules: [
+      'Document the business trigger, expected outcome, and any proof-of-concept expectations.',
+      'Capture upstream dependencies, constraints, and urgency before elaboration begins.',
+      'Publish the initial inception packet so later entry-point work can still reference the shared intent baseline.',
+    ],
+    exitCriteria: [
+      'Intent and scope defined',
+      'Business trigger documented',
+      'Inception packet ready for elaboration',
+    ],
+    templatePath: '/out/steps/brokerage-inception-template.md',
+    allowedToolIds: [],
+    executionNotes:
+      'Inception should stay exploratory and documentation-focused without requiring a local repo or modifying delivery assets.',
+    artifactContract: createArtifactContract(
+      ['Capability Charter', 'Stakeholder Requirements', 'Business Trigger'],
+      ['Inception Brief', 'Scope Boundary Notes', 'POC Hypotheses'],
+      'Inception should leave behind a crisp definition of why the work exists, what it covers, and how much discovery is still needed.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Inception Brief', 'Scope Boundary Notes', 'POC Hypotheses'],
+      ['Brokerage Intake Packet', 'Business Framing Notes'],
+      'Package the initial intent and scope so elaboration can shape the solution with minimal rework.',
+    ),
+  },
+  {
+    key: 'ELABORATION',
+    name: 'Solution Shaping & Architecture',
+    phase: 'ELABORATION',
+    stepType: 'DELIVERY',
+    agentRef: 'ARCHITECT',
+    action: 'Shape the solution, architecture, and safe implementation path.',
+    description:
+      'Translate the brokerage request into architecture, design trade-offs, and a construction-ready execution approach.',
+    handoffToAgentRef: 'SOFTWARE-DEVELOPER',
+    handoffToPhase: 'CONSTRUCTION',
+    handoffLabel: 'Elaboration hand-off to construction',
+    handoffRules: [
+      'Record the preferred implementation path, integration concerns, and constraints.',
+      'Highlight any production-risk or security-sensitive areas that construction must treat carefully.',
+      'Attach the shape of validation and rollout expectations before build work begins.',
+    ],
+    exitCriteria: [
+      'Solution shape documented',
+      'Architecture and constraints clarified',
+      'Construction plan ready',
+    ],
+    templatePath: '/out/steps/brokerage-elaboration-template.md',
+    allowedToolIds: ['workspace_list', 'workspace_read', 'workspace_search', 'git_status'],
+    executionNotes:
+      'Elaboration should inspect the codebase and architecture context, but it should not modify source code yet.',
+    artifactContract: createArtifactContract(
+      ['Brokerage Intake Packet', 'Business Framing Notes', 'Existing Solution Context'],
+      ['Solution Shape Document', 'Architecture Notes', 'Construction Plan'],
+      'Elaboration should turn the request into an implementation-ready approach with explicit guardrails and open questions.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Solution Shape Document', 'Architecture Notes', 'Construction Plan'],
+      ['Construction Handoff Packet', 'Validation Focus Areas'],
+      'Give construction a clear build plan, validation focus, and risk framing.',
+    ),
+  },
+  {
+    key: 'CONSTRUCTION_BUILD',
+    name: 'Build & Test',
+    phase: 'CONSTRUCTION',
+    stepType: 'DELIVERY',
+    agentRef: 'SOFTWARE-DEVELOPER',
+    action: 'Implement the change, run build/test checks, and prepare validation evidence.',
+    description:
+      'Execute the implementation, capture developer evidence, and prepare the package for quality review.',
+    handoffToAgentRef: 'QA',
+    handoffToPhase: 'CONSTRUCTION',
+    handoffLabel: 'Construction hand-off to QA',
+    handoffRules: [
+      'Attach changed areas, developer validation, and known risks for quality review.',
+      'Document any rollout conditions, feature flags, or remediation notes that Delivery will need later.',
+      'Preserve a clear audit trail of what changed and how it was validated in construction.',
+    ],
+    exitCriteria: [
+      'Implementation completed',
+      'Build and test checks passed',
+      'Construction evidence prepared for QA',
+    ],
+    templatePath: '/out/steps/brokerage-construction-template.md',
+    allowedToolIds: [
+      'workspace_list',
+      'workspace_read',
+      'workspace_search',
+      'git_status',
+      'workspace_write',
+      'run_build',
+      'run_test',
+    ],
+    executionNotes:
+      'Construction can modify approved workspace files and should execute build or test commands before handing to QA.',
+    artifactContract: createArtifactContract(
+      ['Construction Handoff Packet', 'Validation Focus Areas', 'Acceptance Criteria Matrix'],
+      ['Code Change Set', 'Construction Test Evidence', 'Implementation Notes'],
+      'Construction should produce the changed asset set together with the minimum validation evidence needed for downstream confidence.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Code Change Set', 'Construction Test Evidence', 'Implementation Notes'],
+      ['QA Review Packet', 'Risk Follow-up Notes'],
+      'Package the build output, validation notes, and residual risk for quality review.',
+    ),
+  },
+  {
+    key: 'CONSTRUCTION_QA',
+    name: 'Quality Review',
+    phase: 'CONSTRUCTION',
+    stepType: 'DELIVERY',
+    agentRef: 'QA',
+    action: 'Validate construction output and record release-facing quality posture.',
+    description:
+      'Confirm the build candidate, capture quality evidence, and document what Delivery should know before authorization.',
+    handoffToAgentRef: 'OWNER',
+    handoffToPhase: 'DELIVERY',
+    handoffLabel: 'Construction quality hand-off to delivery',
+    handoffRules: [
+      'Summarize quality posture, open risks, and acceptance coverage before release authorization.',
+      'Flag defects, waivers, or follow-ups that must be visible during delivery decisions.',
+      'Make the evidence usable for audit, release, and operations teams.',
+    ],
+    exitCriteria: [
+      'Quality evidence attached',
+      'Risks and defects documented',
+      'Delivery decision packet ready',
+    ],
+    templatePath: '/out/steps/brokerage-quality-template.md',
+    allowedToolIds: [
+      'workspace_list',
+      'workspace_read',
+      'workspace_search',
+      'git_status',
+      'run_test',
+      'run_docs',
+    ],
+    executionNotes:
+      'Quality review should run the relevant validation commands, capture evidence, and prepare a release-facing summary.',
+    artifactContract: createArtifactContract(
+      ['QA Review Packet', 'Acceptance Criteria Matrix', 'Implementation Notes'],
+      ['Quality Review Report', 'Defect and Risk Log', 'Delivery Readiness Notes'],
+      'Construction should end with a clear quality posture and a concise readiness packet for Delivery.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Quality Review Report', 'Defect and Risk Log', 'Delivery Readiness Notes'],
+      ['Delivery Authorization Packet', 'Operational Handoff Notes'],
+      'Move quality evidence and release conditions into Delivery for approval and execution.',
+    ),
+  },
+  {
+    key: 'DELIVERY_APPROVAL',
+    name: 'Delivery Authorization',
+    phase: 'DELIVERY',
+    stepType: 'HUMAN_APPROVAL',
+    agentRef: 'OWNER',
+    action: 'Obtain explicit human authorization before deployment or operational recovery.',
+    description:
+      'Capture the final delivery decision, release conditions, and operator comments before execution moves into production.',
+    handoffToAgentRef: 'DEVOPS',
+    handoffToPhase: 'DELIVERY',
+    handoffLabel: 'Delivery authorization hand-off to operations',
+    approverRoles: ['Delivery Lead', 'Operations Lead', 'Capability Owner'],
+    handoffRules: [
+      'Authorization must include the delivery condition, release window, and rollback owner when applicable.',
+      'Any exceptions, defects, or operational cautions must be recorded with the approval.',
+      'The audit trail must show who authorized the move into Delivery and when.',
+    ],
+    exitCriteria: [
+      'Human authorization captured',
+      'Delivery conditions recorded',
+      'Operations cleared to execute',
+    ],
+    templatePath: '/out/steps/brokerage-delivery-approval-template.md',
+    allowedToolIds: [],
+    executionNotes:
+      'This step always waits for explicit human input before the final delivery action can run.',
+    artifactContract: createArtifactContract(
+      ['Delivery Authorization Packet', 'Operational Handoff Notes', 'Rollback Plan'],
+      ['Delivery Authorization', 'Approver Comment Log', 'Release Conditions'],
+      'Delivery authorization should leave behind a durable human decision record before production actions proceed.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Delivery Authorization', 'Approver Comment Log', 'Release Conditions'],
+      ['Operations Execution Packet', 'Delivery Conditions Register'],
+      'Translate authorization into an operational packet for deployment, restoration, or rehydration.',
+    ),
+  },
+  {
+    key: 'DELIVERY_OPERATE',
+    name: 'Deploy & Operate',
+    phase: 'DELIVERY',
+    stepType: 'DELIVERY',
+    nodeType: 'RELEASE',
+    agentRef: 'DEVOPS',
+    action: 'Execute the delivery action, verify the outcome, and publish the operational record.',
+    description:
+      'Deploy, operate, or rehydrate the workload and leave behind the evidence needed for support and audit.',
+    handoffToAgentRef: 'OWNER',
+    handoffToPhase: 'DONE',
+    handoffLabel: 'Delivery completion hand-off to capability owner',
+    handoffRules: [
+      'Capture the final operational result, post-checks, and any support or hypercare follow-up.',
+      'Document what changed in production and what downstream operations must watch next.',
+      'Publish a closure packet so the work item can be explained end to end later.',
+    ],
+    exitCriteria: [
+      'Delivery action completed',
+      'Operational verification recorded',
+      'Closure evidence published',
+    ],
+    templatePath: '/out/steps/brokerage-delivery-template.md',
+    allowedToolIds: ['workspace_read', 'git_status', 'run_deploy', 'run_docs'],
+    executionNotes:
+      'Delivery execution remains approval-gated and should only run approved deployment or documentation commands.',
+    artifactContract: createArtifactContract(
+      ['Operations Execution Packet', 'Delivery Conditions Register', 'Rollback Plan'],
+      ['Delivery Summary', 'Operational Verification Report', 'Support Follow-up List'],
+      'Delivery should conclude with a clear operational record of what changed, how it verified, and what support should expect next.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Delivery Summary', 'Operational Verification Report', 'Support Follow-up List'],
+      ['Capability Closure Packet', 'Operational Closure Notes'],
+      'Close the Brokerage SDLC with a durable ownership hand-off back to the capability owner.',
+    ),
+  },
+];
+
+type SharedWorkflowTemplateDefinition = {
+  templateId: string;
+  name: string;
+  summary: string;
+  stepTemplates: SharedWorkflowStepTemplate[];
+  templatePhaseIds: WorkItemPhase[];
+  startLabel: string;
+};
+
+const createSharedCapabilityWorkflow = (
   capability: Pick<Capability, 'id' | 'name' | 'specialAgentId' | 'lifecycle'>,
+  template: SharedWorkflowTemplateDefinition,
 ): Workflow => {
   const visiblePhaseIds = getCapabilityGraphPhaseIds(capability.lifecycle);
   const resolveTemplatePhase = (phaseId: WorkItemPhase) => {
     if (visiblePhaseIds.includes(phaseId)) {
       return phaseId;
     }
-    const standardIndex = STANDARD_VISIBLE_PHASE_IDS.indexOf(phaseId);
+    const standardIndex = template.templatePhaseIds.indexOf(phaseId);
     if (standardIndex >= 0 && visiblePhaseIds[standardIndex]) {
       return visiblePhaseIds[standardIndex];
     }
-    if (phaseId === 'RELEASE') {
+    if (phaseId === template.templatePhaseIds[template.templatePhaseIds.length - 1]) {
       return getDefaultLifecycleEndPhaseId(capability.lifecycle);
     }
     return visiblePhaseIds[Math.min(Math.max(standardIndex, 0), visiblePhaseIds.length - 1)];
@@ -520,42 +779,41 @@ export const createStandardCapabilityWorkflow = (
       name: 'Start',
       type: 'START',
       phase: getDefaultLifecycleStartPhaseId(capability.lifecycle),
-      description: 'Entry point for the standard SDLC flow.',
+      description: `Entry point for the ${template.name}.`,
       layout: { x: 80, y: 48 },
     }, capability.lifecycle),
-    ...STANDARD_SDLC_STEP_TEMPLATES.map((template, index) =>
+    ...template.stepTemplates.map((stepTemplate, index) =>
       createWorkflowNode({
         id: `STEP-${slugify(capability.id)}-${index + 1}`,
-        name: template.name,
+        name: stepTemplate.name,
         type:
-          template.stepType === 'GOVERNANCE_GATE'
+          stepTemplate.nodeType ||
+          (stepTemplate.stepType === 'GOVERNANCE_GATE'
             ? 'GOVERNANCE_GATE'
-            : template.stepType === 'HUMAN_APPROVAL'
+            : stepTemplate.stepType === 'HUMAN_APPROVAL'
             ? 'HUMAN_APPROVAL'
-            : template.phase === 'RELEASE'
-            ? 'RELEASE'
-            : 'DELIVERY',
-        phase: resolveTemplatePhase(template.phase),
-        agentId: resolveAgentReference(capability, template.agentRef),
-        action: template.action,
-        description: template.description,
-        inputArtifactId: template.artifactContract.requiredInputs?.[0],
-        outputArtifactId: template.artifactContract.expectedOutputs?.[0],
-        governanceGate: template.governanceGate,
-        approverRoles: template.approverRoles,
-        exitCriteria: template.exitCriteria,
-        templatePath: template.templatePath,
-        allowedToolIds: template.allowedToolIds,
-        preferredWorkspacePath: template.preferredWorkspacePath,
-        executionNotes: template.executionNotes,
-        artifactContract: template.artifactContract,
+            : 'DELIVERY'),
+        phase: resolveTemplatePhase(stepTemplate.phase),
+        agentId: resolveAgentReference(capability, stepTemplate.agentRef),
+        action: stepTemplate.action,
+        description: stepTemplate.description,
+        inputArtifactId: stepTemplate.artifactContract.requiredInputs?.[0],
+        outputArtifactId: stepTemplate.artifactContract.expectedOutputs?.[0],
+        governanceGate: stepTemplate.governanceGate,
+        approverRoles: stepTemplate.approverRoles,
+        exitCriteria: stepTemplate.exitCriteria,
+        templatePath: stepTemplate.templatePath,
+        allowedToolIds: stepTemplate.allowedToolIds,
+        preferredWorkspacePath: stepTemplate.preferredWorkspacePath,
+        executionNotes: stepTemplate.executionNotes,
+        artifactContract: stepTemplate.artifactContract,
         layout: {
           x: 80 + (index + 1) * 260,
           y:
             48 +
             Math.max(
               getCapabilityGraphPhaseIds(capability.lifecycle).indexOf(
-                resolveTemplatePhase(template.phase),
+                resolveTemplatePhase(stepTemplate.phase),
               ),
               0,
             ) *
@@ -570,7 +828,7 @@ export const createStandardCapabilityWorkflow = (
       phase: getDefaultLifecycleEndPhaseId(capability.lifecycle),
       description: 'Terminal completion node for the workflow.',
       layout: {
-        x: 80 + (STANDARD_SDLC_STEP_TEMPLATES.length + 1) * 260,
+        x: 80 + (template.stepTemplates.length + 1) * 260,
         y:
           48 +
           Math.max(
@@ -584,30 +842,30 @@ export const createStandardCapabilityWorkflow = (
     }, capability.lifecycle),
   ];
 
-  const handoffProtocols: WorkflowHandoffProtocol[] = STANDARD_SDLC_STEP_TEMPLATES.flatMap(
-    template => {
-      if (!template.handoffToAgentRef) {
+  const handoffProtocols: WorkflowHandoffProtocol[] = template.stepTemplates.flatMap(
+    stepTemplate => {
+      if (!stepTemplate.handoffToAgentRef) {
         return [];
       }
 
-      const sourceStep = nodes.find(step => step.name === template.name);
+      const sourceStep = nodes.find(step => step.name === stepTemplate.name);
       if (!sourceStep) {
         return [];
       }
 
       return [
         {
-          id: getHandoffProtocolId(capability.id, template.key),
-          name: template.handoffLabel || `${template.name} Hand-off`,
+          id: getHandoffProtocolId(capability.id, stepTemplate.key),
+          name: stepTemplate.handoffLabel || `${stepTemplate.name} Hand-off`,
           sourceStepId: sourceStep.id,
           sourceNodeId: sourceStep.id,
-          targetAgentId: resolveAgentReference(capability, template.handoffToAgentRef),
-          targetPhase: template.handoffToPhase
-            ? resolveTemplatePhase(template.handoffToPhase)
+          targetAgentId: resolveAgentReference(capability, stepTemplate.handoffToAgentRef),
+          targetPhase: stepTemplate.handoffToPhase
+            ? resolveTemplatePhase(stepTemplate.handoffToPhase)
             : undefined,
-          description: `Protocol for ${template.name.toLowerCase()} hand-off within ${capability.name}.`,
+          description: `Protocol for ${stepTemplate.name.toLowerCase()} hand-off within ${capability.name}.`,
           rules:
-            template.handoffRules?.length ? template.handoffRules : template.exitCriteria,
+            stepTemplate.handoffRules?.length ? stepTemplate.handoffRules : stepTemplate.exitCriteria,
           validationRequired: true,
           autoDocumentation: true,
         },
@@ -623,31 +881,31 @@ export const createStandardCapabilityWorkflow = (
       createWorkflowEdge({
         fromNodeId: startNodeId,
         toNodeId: visibleNodes[0].id,
-        label: 'Begin SDLC delivery',
+        label: template.startLabel,
       }),
     );
   }
 
   visibleNodes.forEach((node, index) => {
-    const template = STANDARD_SDLC_STEP_TEMPLATES[index];
+    const stepTemplate = template.stepTemplates[index];
     const nextNode = visibleNodes[index + 1];
     edges.push(
       createWorkflowEdge({
         fromNodeId: node.id,
         toNodeId: nextNode?.id || endNodeId,
-        label: template?.handoffLabel || (nextNode ? 'Continue' : 'Complete'),
-        handoffProtocolId: template?.handoffToAgentRef
-          ? getHandoffProtocolId(capability.id, template.key)
+        label: stepTemplate?.handoffLabel || (nextNode ? 'Continue' : 'Complete'),
+        handoffProtocolId: stepTemplate?.handoffToAgentRef
+          ? getHandoffProtocolId(capability.id, stepTemplate.key)
           : undefined,
-        artifactContract: template?.handoffArtifactContract,
+        artifactContract: stepTemplate?.handoffArtifactContract,
       }),
     );
   });
 
   return buildWorkflowFromGraph({
-    id: `WF-${slugify(capability.id)}-STANDARD-SDLC`,
-    templateId: STANDARD_WORKFLOW_TEMPLATE_ID,
-    name: 'Enterprise SDLC Flow',
+    id: `WF-${slugify(capability.id)}-${slugify(template.templateId)}`,
+    templateId: template.templateId,
+    name: template.name,
     capabilityId: capability.id,
     status: 'STABLE',
     workflowType: 'SDLC',
@@ -656,13 +914,38 @@ export const createStandardCapabilityWorkflow = (
     entryNodeId: startNodeId,
     nodes,
     edges,
-    summary:
-      'Standard SDLC workflow with explicit agent hand-offs, standard input/output document artifacts, governance validation, and human approval before release.',
+    summary: template.summary,
     steps: [],
     handoffProtocols,
     publishState: 'PUBLISHED',
   }, capability.lifecycle);
 };
+
+export const createStandardCapabilityWorkflow = (
+  capability: Pick<Capability, 'id' | 'name' | 'specialAgentId' | 'lifecycle'>,
+): Workflow =>
+  createSharedCapabilityWorkflow(capability, {
+    templateId: STANDARD_WORKFLOW_TEMPLATE_ID,
+    name: 'Enterprise SDLC Flow',
+    summary:
+      'Standard SDLC workflow with explicit agent hand-offs, standard input/output document artifacts, governance validation, and human approval before release.',
+    stepTemplates: STANDARD_SDLC_STEP_TEMPLATES,
+    templatePhaseIds: STANDARD_VISIBLE_PHASE_IDS,
+    startLabel: 'Begin SDLC delivery',
+  });
+
+export const createBrokerageCapabilityWorkflow = (
+  capability: Pick<Capability, 'id' | 'name' | 'specialAgentId' | 'lifecycle'>,
+): Workflow =>
+  createSharedCapabilityWorkflow(capability, {
+    templateId: BROKERAGE_WORKFLOW_TEMPLATE_ID,
+    name: 'Brokerage SDLC Flow',
+    summary:
+      'Brokerage SDLC workflow with Inception, Elaboration, Construction, and Delivery lanes plus entry points for strategic initiatives, feature enhancements, production issues, bugfixes, security findings, and rehydration work.',
+    stepTemplates: BROKERAGE_SDLC_STEP_TEMPLATES,
+    templatePhaseIds: BROKERAGE_VISIBLE_PHASE_IDS,
+    startLabel: 'Begin Brokerage SDLC',
+  });
 
 const mergeArtifactContract = (
   current?: WorkflowArtifactContract,
@@ -681,27 +964,34 @@ const mergeArtifactContract = (
   };
 };
 
-export const applyStandardArtifactsToWorkflow = (
+export const applyWorkflowTemplateArtifacts = (
   capability: Pick<Capability, 'id' | 'name' | 'specialAgentId' | 'lifecycle'>,
   workflow: Workflow,
 ): Workflow => {
   const standardWorkflowId = `WF-${slugify(capability.id)}-STANDARD-SDLC`;
-  const isStandardWorkflow =
+  const brokerageWorkflowId = `WF-${slugify(capability.id)}-${slugify(
+    BROKERAGE_WORKFLOW_TEMPLATE_ID,
+  )}`;
+  const templateWorkflow =
     workflow.templateId === STANDARD_WORKFLOW_TEMPLATE_ID ||
     workflow.id === standardWorkflowId ||
-    workflow.name === 'Enterprise SDLC Flow';
+    workflow.name === 'Enterprise SDLC Flow'
+      ? createStandardCapabilityWorkflow(capability)
+      : workflow.templateId === BROKERAGE_WORKFLOW_TEMPLATE_ID ||
+          workflow.id === brokerageWorkflowId ||
+          workflow.name === 'Brokerage SDLC Flow'
+      ? createBrokerageCapabilityWorkflow(capability)
+      : null;
 
-  if (!isStandardWorkflow) {
+  if (!templateWorkflow) {
     return workflow;
   }
-
-  const standardWorkflow = createStandardCapabilityWorkflow(capability);
-  const standardNodes = standardWorkflow.nodes || [];
+  const standardNodes = templateWorkflow.nodes || [];
   const workflowNodes = workflow.nodes || [];
   const workflowNodeNamesById = new Map(workflowNodes.map(node => [node.id, node.name]));
   const standardNodesByName = new Map(standardNodes.map(node => [node.name, node]));
   const standardEdgesByName = new Map(
-    (standardWorkflow.edges || []).map(edge => {
+    (templateWorkflow.edges || []).map(edge => {
       const fromName = standardNodes.find(node => node.id === edge.fromNodeId)?.name || edge.fromNodeId;
       const toName = standardNodes.find(node => node.id === edge.toNodeId)?.name || edge.toNodeId;
       return [`${fromName}::${toName}`, edge] as const;
@@ -718,7 +1008,10 @@ export const applyStandardArtifactsToWorkflow = (
       ...node,
       inputArtifactId: node.inputArtifactId || standardNode.inputArtifactId,
       outputArtifactId: node.outputArtifactId || standardNode.outputArtifactId,
-      artifactContract: mergeArtifactContract(node.artifactContract, standardNode.artifactContract),
+      artifactContract: mergeArtifactContract(
+        node.artifactContract,
+        standardNode.artifactContract,
+      ),
     };
   });
 
@@ -743,11 +1036,13 @@ export const applyStandardArtifactsToWorkflow = (
       edges: nextEdges,
       summary:
         workflow.summary ||
-        'Standard SDLC workflow with explicit agent hand-offs, standard input/output document artifacts, governance validation, and human approval before release.',
+        templateWorkflow.summary,
     }, capability.lifecycle),
     capability.lifecycle,
   );
 };
+
+export const applyStandardArtifactsToWorkflow = applyWorkflowTemplateArtifacts;
 
 export const getDefaultCapabilityWorkflows = (
   capability: Pick<Capability, 'id' | 'name' | 'specialAgentId' | 'lifecycle'>,

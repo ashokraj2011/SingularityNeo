@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   AlertTriangle,
@@ -17,6 +17,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   CommandTemplateEditor,
   DeploymentTargetEditor,
+  WorkspaceProfileRecommendationCard,
 } from '../components/CapabilityExecutionSetup';
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
 import { StatusBadge } from '../components/EnterpriseUI';
@@ -24,11 +25,11 @@ import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { createDefaultCapabilityLifecycle } from '../lib/capabilityLifecycle';
 import {
-  getDefaultExecutionConfig,
   hasMeaningfulExecutionCommandTemplate,
   isWorkspacePathInsideApprovedRoot,
 } from '../lib/executionConfig';
 import {
+  detectOnboardingWorkspaceProfile,
   validateOnboardingCommandTemplate,
   validateOnboardingConnectors,
   validateOnboardingDeploymentTarget,
@@ -40,6 +41,7 @@ import type {
   CommandTemplateValidationResult,
   ConnectorValidationResult,
   DeploymentTargetValidationResult,
+  WorkspaceDetectionResult,
   WorkspacePathValidationResult,
 } from '../types';
 
@@ -76,8 +78,6 @@ const isOptionalConnectorUrl = (value: string) => {
   }
 };
 
-const defaultExecutionConfig = getDefaultExecutionConfig({ localDirectories: [] });
-
 const createDraft = (): CapabilityOnboardingDraft => ({
   name: '',
   domain: '',
@@ -97,7 +97,7 @@ const createDraft = (): CapabilityOnboardingDraft => ({
   localDirectories: [],
   defaultWorkspacePath: '',
   allowedWorkspacePaths: [],
-  commandTemplates: defaultExecutionConfig.commandTemplates,
+  commandTemplates: [],
   deploymentTargets: [],
 });
 
@@ -151,6 +151,10 @@ export default function CapabilitySetup() {
   const [deploymentValidation, setDeploymentValidation] = useState<
     Record<string, DeploymentTargetValidationResult>
   >({});
+  const [workspaceDetection, setWorkspaceDetection] =
+    useState<WorkspaceDetectionResult | null>(null);
+  const [workspaceDetectionDismissed, setWorkspaceDetectionDismissed] =
+    useState(false);
 
   const activeStepIndex = steps.findIndex(step => step.id === activeStepId);
   const activeStep = steps[activeStepIndex];
@@ -167,6 +171,14 @@ export default function CapabilitySetup() {
         ...draft.allowedWorkspacePaths,
       ]),
     [draft.allowedWorkspacePaths, draft.defaultWorkspacePath, draft.localDirectories],
+  );
+  const workspaceDetectionSignature = useMemo(
+    () =>
+      JSON.stringify({
+        defaultWorkspacePath: draft.defaultWorkspacePath.trim(),
+        approvedWorkspacePaths,
+      }),
+    [approvedWorkspacePaths, draft.defaultWorkspacePath],
   );
 
   const minimumReady = Boolean(draft.name.trim() && draft.description.trim());
@@ -253,6 +265,48 @@ export default function CapabilitySetup() {
     setDraft(current => ({ ...current, ...updates }));
   };
 
+  useEffect(() => {
+    setWorkspaceDetection(null);
+    setWorkspaceDetectionDismissed(false);
+  }, [workspaceDetectionSignature]);
+
+  const detectWorkspaceProfile = async (paths = approvedWorkspacePaths) => {
+    if (paths.length === 0) {
+      setWorkspaceDetection(null);
+      setWorkspaceDetectionDismissed(false);
+      return;
+    }
+
+    setIsValidating('workspace-profile');
+    try {
+      const result = await detectOnboardingWorkspaceProfile({
+        defaultWorkspacePath: draft.defaultWorkspacePath.trim() || undefined,
+        approvedWorkspacePaths: paths,
+      });
+      setWorkspaceDetection(result);
+      setWorkspaceDetectionDismissed(false);
+    } catch (error) {
+      showError(
+        'Workspace detection failed',
+        error instanceof Error
+          ? error.message
+          : 'Unable to infer the workspace stack right now.',
+      );
+    } finally {
+      setIsValidating('');
+    }
+  };
+
+  const applyRecommendedSetup = (
+    commandTemplates: CapabilityOnboardingDraft['commandTemplates'],
+    deploymentTargets: CapabilityOnboardingDraft['deploymentTargets'],
+  ) => {
+    updateDraft({ commandTemplates, deploymentTargets });
+    setCommandValidation({});
+    setDeploymentValidation({});
+    setWorkspaceDetectionDismissed(false);
+  };
+
   const goNext = () => {
     const nextStep = steps[activeStepIndex + 1];
     if (nextStep) {
@@ -304,6 +358,16 @@ export default function CapabilitySetup() {
           {},
         ),
       );
+      const validPaths = results
+        .filter(result => result.valid)
+        .map(result => result.normalizedPath || result.path);
+
+      if (validPaths.length > 0) {
+        await detectWorkspaceProfile(validPaths);
+      } else {
+        setWorkspaceDetection(null);
+        setWorkspaceDetectionDismissed(false);
+      }
     } catch (error) {
       showError(
         'Workspace validation failed',
@@ -928,6 +992,38 @@ export default function CapabilitySetup() {
                   the owning agent understands the codebase and your operating
                   model more clearly.
                 </div>
+
+                <WorkspaceProfileRecommendationCard
+                  detection={workspaceDetection}
+                  currentTemplates={draft.commandTemplates}
+                  currentTargets={draft.deploymentTargets}
+                  dismissed={workspaceDetectionDismissed}
+                  onUseRecommendedSetup={applyRecommendedSetup}
+                  onKeepCurrentSetup={() => setWorkspaceDetectionDismissed(true)}
+                  onRefresh={() => void detectWorkspaceProfile()}
+                />
+
+                {approvedWorkspacePaths.length > 0 && !workspaceDetection && (
+                  <div className="rounded-3xl border border-outline-variant/20 bg-surface-container-low px-5 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="form-kicker">Detected workspace profile</p>
+                        <p className="mt-2 text-sm leading-relaxed text-secondary">
+                          Validate or refresh the approved workspace paths to infer Java, Python, or Node execution setup from the local codebase.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void detectWorkspaceProfile()}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        {isValidating === 'workspace-profile'
+                          ? 'Detecting'
+                          : 'Refresh detection'}
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <AdvancedDisclosure
                   title="Command templates"
