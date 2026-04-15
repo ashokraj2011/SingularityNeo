@@ -85,6 +85,11 @@ const isExecutionAgent = (agent: Partial<CapabilityAgent>) => {
 const extractId = (message: string, prefix: 'WI' | 'RUN') =>
   message.match(new RegExp(`\\b${prefix}-[A-Z0-9-]+\\b`, 'i'))?.[0]?.toUpperCase();
 
+export const extractChatWorkspaceReferenceId = (
+  message: string,
+  prefix: 'WI' | 'RUN',
+) => extractId(message, prefix);
+
 const extractQuotedTitle = (message: string) =>
   message.match(/"([^"]+)"|'([^']+)'/)?.slice(1).find(Boolean)?.trim();
 
@@ -121,6 +126,32 @@ const findWorkItemMatches = (
   });
 };
 
+export const resolveMentionedWorkItem = (
+  bundle: CapabilityBundle,
+  message: string,
+): {
+  workItem?: WorkItem;
+  ambiguous?: WorkItem[];
+} => {
+  const matches = findWorkItemMatches(bundle, message);
+  if (matches.length === 1) {
+    return { workItem: matches[0] };
+  }
+  if (matches.length > 1) {
+    return { ambiguous: matches };
+  }
+
+  const runId = extractId(message, 'RUN');
+  if (runId) {
+    const workItem = findWorkItemByRunId(bundle, runId);
+    if (workItem) {
+      return { workItem };
+    }
+  }
+
+  return {};
+};
+
 const getAttentionWorkItems = (bundle: CapabilityBundle) =>
   bundle.workspace.workItems.filter(
     item =>
@@ -144,12 +175,9 @@ const resolveTargetWorkItem = (
   workItem?: WorkItem;
   ambiguous?: WorkItem[];
 } => {
-  const matches = findWorkItemMatches(bundle, message);
-  if (matches.length === 1) {
-    return { workItem: matches[0] };
-  }
-  if (matches.length > 1) {
-    return { ambiguous: matches };
+  const resolvedMention = resolveMentionedWorkItem(bundle, message);
+  if (resolvedMention.workItem || resolvedMention.ambiguous?.length) {
+    return resolvedMention;
   }
 
   const attentionItems = getAttentionWorkItems(bundle);
@@ -159,6 +187,185 @@ const resolveTargetWorkItem = (
 
   return {};
 };
+
+const summarizeSingleLine = (value: string, maxLength = 180) =>
+  value.replace(/\s+/g, ' ').trim().slice(0, maxLength);
+
+const getRecentExecutionLogsForWorkItem = ({
+  bundle,
+  workItem,
+  runId,
+}: {
+  bundle: CapabilityBundle;
+  workItem: WorkItem;
+  runId?: string;
+}) => {
+  const relatedTaskIds = new Set(
+    bundle.workspace.tasks
+      .filter(task => task.workItemId === workItem.id || task.runId === runId)
+      .map(task => task.id),
+  );
+
+  return bundle.workspace.executionLogs
+    .filter(log => {
+      const metadata = log.metadata || {};
+      return (
+        log.runId === runId ||
+        log.taskId === workItem.id ||
+        relatedTaskIds.has(log.taskId) ||
+        metadata.workItemId === workItem.id ||
+        metadata.relatedWorkItemId === workItem.id ||
+        metadata.runId === runId
+      );
+    })
+    .sort((left, right) =>
+      new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime(),
+    )
+    .slice(0, 5);
+};
+
+const buildToolActivityLines = (runDetail?: WorkflowRunDetail | null) =>
+  (runDetail?.toolInvocations || [])
+    .slice()
+    .sort((left, right) => {
+      const leftTime = new Date(
+        left.completedAt || left.startedAt || left.createdAt,
+      ).getTime();
+      const rightTime = new Date(
+        right.completedAt || right.startedAt || right.createdAt,
+      ).getTime();
+      return rightTime - leftTime;
+    })
+    .slice(0, 4)
+    .map(invocation => {
+      const summary =
+        invocation.resultSummary ||
+        invocation.stderrPreview ||
+        invocation.stdoutPreview ||
+        'No output summary recorded.';
+      const exitCode =
+        invocation.exitCode === undefined ? '' : ` | exit ${invocation.exitCode}`;
+      return `- ${invocation.toolId} | ${invocation.status.toLowerCase()}${exitCode} | ${summarizeSingleLine(summary)}`;
+    });
+
+const buildExecutionLogLines = (
+  logs: CapabilityWorkspace['executionLogs'],
+) =>
+  logs.map(log => {
+    const timestamp = log.timestamp
+      ? new Date(log.timestamp).toISOString().slice(11, 19)
+      : 'unknown';
+    return `- ${timestamp} | ${log.level} | ${summarizeSingleLine(log.message)}`;
+  });
+
+const buildRecentConversationLines = ({
+  bundle,
+  workItem,
+  runId,
+}: {
+  bundle: CapabilityBundle;
+  workItem: WorkItem;
+  runId?: string;
+}) =>
+  bundle.workspace.messages
+    .filter(message => message.workItemId === workItem.id || message.runId === runId)
+    .slice(-4)
+    .map(message => {
+      const speaker =
+        message.role === 'user'
+          ? 'Operator'
+          : message.agentName || message.role;
+      return `- ${speaker}: ${summarizeSingleLine(message.content)}`;
+    });
+
+const buildSharedBranchLine = ({
+  bundle,
+  workItem,
+}: {
+  bundle: CapabilityBundle;
+  workItem: WorkItem;
+}) => {
+  const branch = workItem.executionContext?.branch;
+  const repository = bundle.capability.repositories?.find(
+    item =>
+      item.id ===
+      (branch?.repositoryId || workItem.executionContext?.primaryRepositoryId),
+  );
+
+  if (!branch && !repository) {
+    return null;
+  }
+
+  return [
+    'Shared branch context:',
+    branch?.sharedBranch || 'Branch not created yet',
+    repository?.label ? `repo ${repository.label}` : null,
+    branch?.baseBranch || repository?.defaultBranch
+      ? `base ${branch?.baseBranch || repository?.defaultBranch}`
+      : null,
+    repository?.localRootHint ? `root ${repository.localRootHint}` : null,
+  ]
+    .filter(Boolean)
+    .join(' | ');
+};
+
+export const buildWorkItemRuntimeBriefing = async ({
+  bundle,
+  workItem,
+}: {
+  bundle: CapabilityBundle;
+  workItem: WorkItem;
+}) => {
+  const statusSummary = await buildWorkItemStatusSummary(bundle, workItem);
+  const runId = workItem.activeRunId || workItem.lastRunId;
+  const conversationLines = buildRecentConversationLines({
+    bundle,
+    workItem,
+    runId,
+  });
+
+  return [
+    'Focused work item context:',
+    statusSummary,
+    conversationLines.length > 0
+      ? ['Recent work-item chat context:', ...conversationLines].join('\n')
+      : null,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+};
+
+export const buildFocusedWorkItemDeveloperPrompt = ({
+  agentName,
+  ambiguousWorkItems,
+}: {
+  agentName: string;
+  ambiguousWorkItems?: WorkItem[];
+}) =>
+  [
+    `You are ${agentName}, answering inside Singulairy capability chat.`,
+    ambiguousWorkItems?.length
+      ? `The user's latest message ambiguously matches these work items: ${ambiguousWorkItems
+          .map(item => item.id)
+          .join(', ')}. Ask for the exact work item id before giving item-specific status or instructions.`
+      : 'If the user references a work item or run, use the focused work-item context, shared branch details, tool activity, and execution logs provided to answer concretely.',
+    'When discussing failures or logs, summarize the most relevant evidence first, then explain the likely meaning in plain language.',
+    'Call out direct evidence separately from inference. Mention the exact work item id, run id, step name, or tool id when they are available.',
+    'If the user asks what happened, why something failed, or what to do next, interpret the latest waits, tool failures, and execution logs rather than giving generic advice.',
+  ].join('\n');
+
+const looksLikeWorkItemStatusShortcutRequest = (normalizedMessage: string) =>
+  /\b(show|give|summarize|summary|status|overview|attention|what needs attention|live status|approval status|input status|conflict status)\b/.test(
+    normalizedMessage,
+  ) &&
+  !/\b(log|logs|trace|tool|stdout|stderr|interpret|explain|why did|root cause|debug|diagnose|investigate)\b/.test(
+    normalizedMessage,
+  );
+
+const looksLikeExecutionOverviewRequest = (normalizedMessage: string) =>
+  /\b(what needs attention|execution overview|delivery overview|overall status|show attention|show work items|which work items)\b/.test(
+    normalizedMessage,
+  );
 
 const getOpenWait = (detail?: WorkflowRunDetail | null) =>
   detail?.waits.find(wait => wait.status === 'OPEN');
@@ -303,6 +510,15 @@ const buildWorkItemStatusSummary = async (
       .map(config => `${config.label} (${config.engine})`)
       .slice(0, 3);
     const detection = detectCapabilityWorkspaceProfile(bundle.capability);
+    const branchLine = buildSharedBranchLine({ bundle, workItem });
+    const toolLines = buildToolActivityLines(runDetail);
+    const logLines = buildExecutionLogLines(
+      getRecentExecutionLogsForWorkItem({
+        bundle,
+        workItem,
+        runId,
+      }),
+    );
 
     return [
       `Execution view: ${formatWorkItemHeading(workItem)}`,
@@ -342,9 +558,14 @@ const buildWorkItemStatusSummary = async (
       explain.attemptDiff.summary
         ? `What changed since last attempt: ${explain.attemptDiff.summary}`
         : null,
+      branchLine,
       repositories.length > 0 ? `Repositories: ${repositories.join(', ')}` : null,
       approvedRoots.length > 0 ? `Approved workspaces: ${approvedRoots.join(', ')}` : null,
       databases.length > 0 ? `Databases: ${databases.join(', ')}` : null,
+      toolLines.length > 0 ? 'Recent tool activity:' : null,
+      ...toolLines,
+      logLines.length > 0 ? 'Recent execution logs:' : null,
+      ...logLines,
       workItem.history.length > 0
         ? `Latest history: ${
             workItem.history[workItem.history.length - 1]?.detail ||
@@ -756,14 +977,17 @@ export const maybeHandleCapabilityChatAction = async ({
           content: buildAmbiguousTargetMessage(resolved.ambiguous),
         };
       }
-      if (resolved.workItem) {
+      if (
+        resolved.workItem &&
+        looksLikeWorkItemStatusShortcutRequest(normalizedMessage)
+      ) {
         return {
           handled: true,
           content: await buildWorkItemStatusSummary(bundle, resolved.workItem),
         };
       }
 
-      if (/\b(status|progress|blocked|stuck|run|execution|approval|input|conflict|attention|overview|summary)\b/.test(normalizedMessage)) {
+      if (looksLikeExecutionOverviewRequest(normalizedMessage)) {
         return {
           handled: true,
           content: buildExecutionOverviewSummary(bundle),

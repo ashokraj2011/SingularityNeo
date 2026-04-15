@@ -3,6 +3,7 @@ import {
   buildCapabilityExperience,
   getLearningStatusLabel,
 } from '../capabilityExperience';
+import { buildCapabilityBriefing } from '../capabilityBriefing';
 import { createDefaultCapabilityLifecycle } from '../capabilityLifecycle';
 import { getStandardAgentContract } from '../../constants';
 import type {
@@ -97,6 +98,7 @@ const workflow = (overrides: Partial<Workflow> = {}): Workflow => ({
 
 const workspace = (overrides: Partial<CapabilityWorkspace> = {}): CapabilityWorkspace => ({
   capabilityId: 'CAP-1',
+  briefing: buildCapabilityBriefing(capability()),
   agents: [agent()],
   workflows: [workflow()],
   artifacts: [],

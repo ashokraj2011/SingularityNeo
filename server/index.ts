@@ -6,19 +6,38 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type {
+  ActorContext,
   Capability,
   CapabilityAgent,
   CapabilityChatMessage,
+  CapabilityContractDraft,
+  CapabilityDependency,
+  CapabilityRepository,
   CapabilityDeploymentTarget,
   CapabilityExecutionCommandTemplate,
   CapabilityWorkspace,
   Skill,
+  UserPreference,
   WorkItem,
   WorkItemAttachmentUpload,
+  WorkItemBranch,
+  WorkItemCheckoutSession,
+  WorkItemCodeClaim,
+  WorkItemHandoffPacket,
   WorkItemPhase,
+  WorkspaceOrganization,
   WorkspaceDatabaseBootstrapProfileSnapshot,
   WorkspaceDatabaseBootstrapResult,
 } from '../src/types';
+import {
+  applyCapabilityArchitecture,
+  buildCapabilityHierarchyNode,
+  normalizeCapabilityCollectionKind,
+  normalizeCapabilityContractDraft,
+  normalizeCapabilityDependencies,
+  normalizeCapabilityKind,
+  normalizeCapabilitySharedReferences,
+} from '../src/lib/capabilityArchitecture';
 import { normalizeCapabilityLifecycle } from '../src/lib/capabilityLifecycle';
 import { normalizeCapabilityDatabaseConfigs } from '../src/lib/capabilityDatabases';
 import { normalizeWorkItemPhaseStakeholders } from '../src/lib/workItemStakeholders';
@@ -47,25 +66,43 @@ import {
   appendCapabilityMessageRecord,
   createCapabilityRecord,
   fetchAppState,
+  getCapabilityAlmExportRecord,
   getCapabilityBundle,
+  getCapabilityRepositoriesRecord,
   getWorkspaceCatalogSnapshot,
   getWorkspaceSettings,
+  getWorkItemExecutionContextRecord,
   initializeWorkspaceFoundations,
+  initializeWorkItemExecutionContextRecord,
+  listWorkItemHandoffPacketsRecord,
   initializeSeedData,
+  publishCapabilityContractRecord,
   removeCapabilitySkillRecord,
   replaceCapabilityWorkspaceContentRecord,
   setActiveChatAgentRecord,
+  updateCapabilityRepositoriesRecord,
   updateCapabilityAgentRecord,
   updateCapabilityAgentModelsRecord,
   updateCapabilityRecord,
+  updateWorkItemBranchRecord,
   updateWorkspaceSettings,
+  upsertWorkItemCheckoutSessionRecord,
+  upsertWorkItemCodeClaimRecord,
+  releaseWorkItemCodeClaimRecord,
+  createWorkItemHandoffPacketRecord,
+  acceptWorkItemHandoffPacketRecord,
 } from './repository';
 import {
   getWorkflowRunDetail,
+  listActiveWorkItemClaims,
+  listWorkItemPresence,
   listRecentWorkflowRunEvents,
   listWorkflowRunEvents,
   listWorkflowRunsByCapability,
   listWorkflowRunsForWorkItem,
+  releaseWorkItemClaim,
+  upsertWorkItemClaim,
+  upsertWorkItemPresence,
 } from './execution/repository';
 import {
   approveWorkflowRun,
@@ -80,6 +117,11 @@ import {
   startWorkflowExecution,
 } from './execution/service';
 import { startExecutionWorker, wakeExecutionWorker } from './execution/worker';
+import {
+  getWorkspaceOrganization,
+  updateWorkspaceOrganization,
+  upsertUserPreference,
+} from './workspaceOrganization';
 import {
   buildWorkItemEvidenceBundle,
   getCompletedWorkOrderEvidence,
@@ -148,9 +190,13 @@ import { sendApiError } from './api/errors';
 import { buildRuntimeStatus } from './runtimeStatus';
 import { registerRuntimeRoutes } from './routes/runtime';
 import {
+  buildFocusedWorkItemDeveloperPrompt,
   buildWorkItemStageControlBriefing,
   buildLiveWorkspaceBriefing,
+  buildWorkItemRuntimeBriefing,
+  extractChatWorkspaceReferenceId,
   maybeHandleCapabilityChatAction,
+  resolveMentionedWorkItem,
 } from './chatWorkspace';
 import {
   getCapabilityWorkspaceRoots,
@@ -230,6 +276,39 @@ const slugify = (value: string) =>
 const createRuntimeId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
+const normalizeCapabilityRepositoriesPayload = (
+  capabilityId: string,
+  repositories: unknown,
+): CapabilityRepository[] =>
+  Array.isArray(repositories)
+    ? repositories
+        .map((repository, index) => {
+          const candidate = repository as Partial<CapabilityRepository>;
+          const url = String(candidate?.url || '').trim();
+          const label = String(candidate?.label || '').trim();
+          if (!url && !label) {
+            return null;
+          }
+
+          return {
+            id:
+              String(candidate?.id || '').trim() ||
+              `${createRuntimeId('REPO')}-${index + 1}`,
+            capabilityId,
+            label:
+              label ||
+              url.split('/').pop()?.replace(/\.git$/i, '') ||
+              `Repository ${index + 1}`,
+            url: url || label,
+            defaultBranch: String(candidate?.defaultBranch || '').trim() || 'main',
+            localRootHint: String(candidate?.localRootHint || '').trim() || undefined,
+            isPrimary: Boolean(candidate?.isPrimary),
+            status: candidate?.status === 'ARCHIVED' ? 'ARCHIVED' : 'ACTIVE',
+          } satisfies CapabilityRepository;
+        })
+        .filter(Boolean) as CapabilityRepository[]
+    : [];
+
 const ensureCapabilityCreatePayload = (
   capability: Partial<Capability> | undefined,
 ): Capability | null => {
@@ -237,10 +316,17 @@ const ensureCapabilityCreatePayload = (
     return null;
   }
 
+  const capabilityId = capability.id?.trim() || createRuntimeId('CAP');
+
   return {
     ...capability,
-    id: capability.id?.trim() || createRuntimeId('CAP'),
+    id: capabilityId,
     domain: capability.domain || '',
+    capabilityKind: normalizeCapabilityKind(
+      capability.capabilityKind,
+      capability.collectionKind,
+    ),
+    collectionKind: normalizeCapabilityCollectionKind(capability.collectionKind),
     description: capability.description,
     businessOutcome: capability.businessOutcome || '',
     successMetrics: capability.successMetrics || [],
@@ -253,11 +339,28 @@ const ensureCapabilityCreatePayload = (
     databaseConfigs: normalizeCapabilityDatabaseConfigs(
       capability.databaseConfigs || [],
     ),
+    repositories: normalizeCapabilityRepositoriesPayload(capabilityId, capability.repositories),
     gitRepositories: capability.gitRepositories || [],
     localDirectories: capability.localDirectories || [],
     teamNames: capability.teamNames || [],
     stakeholders: capability.stakeholders || [],
     additionalMetadata: capability.additionalMetadata || [],
+    dependencies: normalizeCapabilityDependencies(
+      capabilityId,
+      capability.dependencies as CapabilityDependency[] | undefined,
+    ),
+    sharedCapabilities:
+      normalizeCapabilityKind(capability.capabilityKind, capability.collectionKind) ===
+      'COLLECTION'
+        ? normalizeCapabilitySharedReferences(
+            capabilityId,
+            capability.sharedCapabilities,
+          )
+        : [],
+    contractDraft: normalizeCapabilityContractDraft(
+      capability.contractDraft as Partial<CapabilityContractDraft> | undefined,
+    ),
+    publishedSnapshots: capability.publishedSnapshots || [],
     lifecycle: normalizeCapabilityLifecycle(capability.lifecycle),
     skillLibrary: capability.skillLibrary || [],
     status: capability.status || 'PENDING',
@@ -643,6 +746,51 @@ const parseActor = (value: unknown, fallback: string) => {
   return actor || fallback;
 };
 
+const parseHeaderStringList = (value: unknown) => {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map(item => String(item || '').trim())
+        .filter(Boolean);
+    }
+  } catch {
+    // Ignore invalid JSON and fall back to CSV parsing.
+  }
+
+  return raw
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+};
+
+const parseActorContext = (
+  request: express.Request,
+  fallbackDisplayName: string,
+): ActorContext => ({
+  userId: String(request.header('x-singularity-actor-user-id') || '').trim() || undefined,
+  displayName:
+    String(request.header('x-singularity-actor-display-name') || '').trim() ||
+    fallbackDisplayName,
+  teamIds: parseHeaderStringList(request.header('x-singularity-actor-team-ids')),
+  actedOnBehalfOfStakeholderIds: parseHeaderStringList(
+    request.header('x-singularity-actor-stakeholder-ids'),
+  ),
+});
+
+const assertCapabilitySupportsExecution = (capability: Capability) => {
+  if (normalizeCapabilityKind(capability.capabilityKind, capability.collectionKind) === 'COLLECTION') {
+    throw new Error(
+      `${capability.name} is a collection capability. Collection nodes are architecture and planning layers, so they cannot own work items or execution runs.`,
+    );
+  }
+};
+
 const ZERO_RUNTIME_USAGE = {
   promptTokens: 0,
   completionTokens: 0,
@@ -704,39 +852,92 @@ const resolveChatRuntimeContext = async ({
   const requestedWorkItem = body.workItemId
     ? bundle.workspace.workItems.find(item => item.id === body.workItemId)
     : undefined;
+  const referencedRunId =
+    body.runId || extractChatWorkspaceReferenceId(body.message || '', 'RUN');
+  const mentionedWorkItem = !requestedWorkItem
+    ? resolveMentionedWorkItem(bundle, body.message || '')
+    : undefined;
+  const referencedWorkItem =
+    requestedWorkItem ||
+    (referencedRunId
+      ? bundle.workspace.workItems.find(
+          item =>
+            item.activeRunId === referencedRunId || item.lastRunId === referencedRunId,
+        )
+      : undefined) ||
+    mentionedWorkItem?.workItem;
   const requestedWorkflow = requestedWorkItem
     ? bundle.workspace.workflows.find(workflow => workflow.id === requestedWorkItem.workflowId)
     : undefined;
+  const referencedWorkflow =
+    referencedWorkItem && referencedWorkItem.id !== requestedWorkItem?.id
+      ? bundle.workspace.workflows.find(
+          workflow => workflow.id === referencedWorkItem.workflowId,
+        )
+      : requestedWorkflow;
   const requestedStep =
     body.workflowStepId && requestedWorkflow
       ? requestedWorkflow.steps.find(step => step.id === body.workflowStepId)
       : requestedWorkItem?.currentStepId && requestedWorkflow
       ? requestedWorkflow.steps.find(step => step.id === requestedWorkItem.currentStepId)
       : undefined;
+  const referencedStep =
+    referencedWorkItem &&
+    referencedWorkflow &&
+    (body.workflowStepId || referencedWorkItem.currentStepId)
+      ? referencedWorkflow.steps.find(
+          step =>
+            step.id === (body.workflowStepId || referencedWorkItem.currentStepId),
+        )
+      : undefined;
   const isStageControlRequest =
     body.contextMode === 'WORK_ITEM_STAGE' && Boolean(requestedWorkItem);
+  const hasReferencedWorkItem = Boolean(
+    referencedWorkItem && !mentionedWorkItem?.ambiguous?.length,
+  );
   const liveBriefing = isStageControlRequest && requestedWorkItem
     ? await buildWorkItemStageControlBriefing({
         bundle,
         workItemId: requestedWorkItem.id,
       })
-    : buildLiveWorkspaceBriefing(bundle);
-  const chatScope = isStageControlRequest
-    ? 'WORK_ITEM'
-    : body.sessionScope || 'GENERAL_CHAT';
-  const chatScopeId = isStageControlRequest
-    ? requestedWorkItem?.id
-    : body.sessionScopeId || (chatScope === 'GENERAL_CHAT' ? bundle.capability.id : undefined);
-  const memoryQueryText = isStageControlRequest
-    ? [
-        body.message?.trim(),
-        requestedWorkItem?.title,
-        requestedWorkItem?.description,
-        requestedStep?.name,
-      ]
-        .filter(Boolean)
-        .join('\n')
-    : body.message?.trim() || '';
+    : hasReferencedWorkItem && referencedWorkItem
+      ? await buildWorkItemRuntimeBriefing({
+          bundle,
+          workItem: referencedWorkItem,
+        })
+      : buildLiveWorkspaceBriefing(bundle);
+  const chatScope =
+    isStageControlRequest || hasReferencedWorkItem
+      ? 'WORK_ITEM'
+      : body.sessionScope || 'GENERAL_CHAT';
+  const chatScopeId =
+    isStageControlRequest || hasReferencedWorkItem
+      ? referencedWorkItem?.id
+      : body.sessionScopeId || (chatScope === 'GENERAL_CHAT' ? bundle.capability.id : undefined);
+  const memoryQueryText =
+    isStageControlRequest && requestedWorkItem
+      ? [
+          body.message?.trim(),
+          requestedWorkItem?.title,
+          requestedWorkItem?.description,
+          requestedStep?.name,
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : hasReferencedWorkItem && referencedWorkItem
+        ? [
+            body.message?.trim(),
+            referencedWorkItem.id,
+            referencedWorkItem.title,
+            referencedWorkItem.description,
+            referencedStep?.name,
+            referencedWorkItem.blocker?.message,
+            referencedWorkItem.pendingRequest?.message,
+            referencedRunId,
+          ]
+            .filter(Boolean)
+            .join('\n')
+        : body.message?.trim() || '';
 
   return {
     liveBriefing,
@@ -747,6 +948,15 @@ const resolveChatRuntimeContext = async ({
       ? buildStageControlDeveloperPrompt({
           agentName: liveAgent.name || liveAgent.role || 'the current stage agent',
         })
+      : mentionedWorkItem?.ambiguous?.length
+        ? buildFocusedWorkItemDeveloperPrompt({
+            agentName: liveAgent.name || liveAgent.role || 'the active agent',
+            ambiguousWorkItems: mentionedWorkItem.ambiguous,
+          })
+        : hasReferencedWorkItem
+          ? buildFocusedWorkItemDeveloperPrompt({
+              agentName: liveAgent.name || liveAgent.role || 'the active agent',
+            })
       : undefined,
   };
 };
@@ -856,7 +1066,17 @@ app.use((request, response, next) => {
   response.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   response.setHeader(
     'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization',
+    [
+      'Origin',
+      'X-Requested-With',
+      'Content-Type',
+      'Accept',
+      'Authorization',
+      'x-singularity-actor-user-id',
+      'x-singularity-actor-display-name',
+      'x-singularity-actor-team-ids',
+      'x-singularity-actor-stakeholder-ids',
+    ].join(', '),
   );
 
   if (request.method === 'OPTIONS') {
@@ -1150,6 +1370,45 @@ app.get('/api/state', async (_request, response) => {
   try {
     await awaitStartupInitialization();
     response.json(await fetchAppState());
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/workspace/organization', async (_request, response) => {
+  try {
+    await awaitStartupInitialization();
+    response.json(await getWorkspaceOrganization());
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.patch('/api/workspace/organization', async (request, response) => {
+  try {
+    await awaitStartupInitialization();
+    response.json(
+      await updateWorkspaceOrganization(request.body as Partial<WorkspaceOrganization>),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.put('/api/workspace/users/:userId/preferences', async (request, response) => {
+  try {
+    await awaitStartupInitialization();
+    response.json(
+      await upsertUserPreference({
+        userId: request.params.userId,
+        defaultCapabilityId:
+          String(request.body?.defaultCapabilityId || '').trim() || undefined,
+        lastSelectedTeamId:
+          String(request.body?.lastSelectedTeamId || '').trim() || undefined,
+        workbenchView:
+          String(request.body?.workbenchView || '').trim() || undefined,
+      } as UserPreference),
+    );
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -1518,6 +1777,12 @@ app.post(
     };
 
     try {
+      const actor = parseActorContext(
+        request,
+        typeof body.resolvedBy === 'string' && body.resolvedBy.trim()
+          ? body.resolvedBy.trim()
+          : 'Capability Owner',
+      );
       response.json(
         await continueWorkflowStageControl({
           capabilityId: request.params.capabilityId,
@@ -1538,10 +1803,8 @@ app.post(
             typeof body.carryForwardNote === 'string'
               ? body.carryForwardNote
               : undefined,
-          resolvedBy:
-            typeof body.resolvedBy === 'string' && body.resolvedBy.trim()
-              ? body.resolvedBy.trim()
-              : 'Capability Owner',
+          resolvedBy: actor.displayName,
+          actor,
         }),
       );
     } catch (error) {
@@ -1779,6 +2042,94 @@ app.patch('/api/capabilities/:capabilityId', async (request, response) => {
   }
 });
 
+app.get('/api/capabilities/:capabilityId/architecture', async (request, response) => {
+  try {
+    const state = await fetchAppState();
+    const capability = state.capabilities.find(
+      item => item.id === request.params.capabilityId,
+    );
+    if (!capability) {
+      response.status(404).json({ error: 'Capability was not found.' });
+      return;
+    }
+
+    const relatedCapabilities = state.capabilities.filter(item => {
+      if (item.id === capability.id) {
+        return true;
+      }
+      if (item.parentCapabilityId === capability.id) {
+        return true;
+      }
+      if (capability.parentCapabilityId && item.id === capability.parentCapabilityId) {
+        return true;
+      }
+      if ((capability.dependencies || []).some(dep => dep.targetCapabilityId === item.id)) {
+        return true;
+      }
+      if ((item.dependencies || []).some(dep => dep.targetCapabilityId === capability.id)) {
+        return true;
+      }
+      return false;
+    });
+
+    response.json({
+      capability,
+      hierarchy: capability.hierarchyNode || buildCapabilityHierarchyNode(capability, state.capabilities),
+      rollupSummary: capability.rollupSummary,
+      relatedCapabilities,
+    });
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/publish-contract', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Capability Owner');
+    const result = await publishCapabilityContractRecord({
+      capabilityId: request.params.capabilityId,
+      publishedBy: actor.displayName,
+    });
+    await refreshCapabilityMemory(request.params.capabilityId, {
+      requeueAgents: true,
+      requestReason: 'capability-contract-published',
+    }).catch(() => undefined);
+    response.status(201).json(result);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/alm-export', async (request, response) => {
+  try {
+    response.json(await getCapabilityAlmExportRecord(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/repositories', async (request, response) => {
+  try {
+    response.json(await getCapabilityRepositoriesRecord(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.patch('/api/capabilities/:capabilityId/repositories', async (request, response) => {
+  try {
+    const repositories = normalizeCapabilityRepositoriesPayload(
+      request.params.capabilityId,
+      request.body?.repositories,
+    );
+    response.json(
+      await updateCapabilityRepositoriesRecord(request.params.capabilityId, repositories),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
 app.post('/api/capabilities/:capabilityId/skills', async (request, response) => {
   const skill = request.body as Skill | undefined;
   if (!skill?.id || !skill?.name || !skill?.description) {
@@ -1938,6 +2289,20 @@ app.patch('/api/capabilities/:capabilityId/chat-agent', async (request, response
 
 app.patch('/api/capabilities/:capabilityId/workspace', async (request, response) => {
   try {
+    const capability = (await getCapabilityBundle(request.params.capabilityId)).capability;
+    if (
+      normalizeCapabilityKind(capability.capabilityKind, capability.collectionKind) ===
+        'COLLECTION' &&
+      (request.body?.workflows ||
+        request.body?.workItems ||
+        request.body?.tasks ||
+        request.body?.executionLogs)
+    ) {
+      throw new Error(
+        `${capability.name} is a collection capability and cannot persist execution workspace content.`,
+      );
+    }
+
     const workspace = await replaceCapabilityWorkspaceContentRecord(
       request.params.capabilityId,
       request.body as WorkspacePatchBody,
@@ -1995,6 +2360,10 @@ app.post('/api/capabilities/:capabilityId/work-items', async (request, response)
   }
 
   try {
+    assertCapabilitySupportsExecution(
+      (await getCapabilityBundle(request.params.capabilityId)).capability,
+    );
+    const actor = parseActorContext(request, parseActor(request.body?.guidedBy, 'Capability Owner'));
     response.status(201).json(
       await createWorkItemRecord({
         capabilityId: request.params.capabilityId,
@@ -2006,6 +2375,7 @@ app.post('/api/capabilities/:capabilityId/work-items', async (request, response)
         attachments,
         priority,
         tags,
+        actor,
       }),
     );
   } catch (error) {
@@ -2023,12 +2393,14 @@ app.post('/api/capabilities/:capabilityId/work-items/:workItemId/move', async (r
   }
 
   try {
+    const actor = parseActorContext(request, 'Capability Owner');
     response.json(
       await moveWorkItemToPhaseControl({
         capabilityId: request.params.capabilityId,
         workItemId: request.params.workItemId,
         targetPhase,
         note: note || undefined,
+        actor,
       }),
     );
   } catch (error) {
@@ -2036,14 +2408,485 @@ app.post('/api/capabilities/:capabilityId/work-items/:workItemId/move', async (r
   }
 });
 
+app.get(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/collaboration',
+  async (request, response) => {
+    try {
+      const [claims, presence] = await Promise.all([
+        listActiveWorkItemClaims(request.params.capabilityId, request.params.workItemId),
+        listWorkItemPresence(request.params.capabilityId, request.params.workItemId),
+      ]);
+      response.json({ claims, presence });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.get(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/execution-context',
+  async (request, response) => {
+    try {
+      const [context, handoffs] = await Promise.all([
+        getWorkItemExecutionContextRecord({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+        }),
+        listWorkItemHandoffPacketsRecord({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+        }),
+      ]);
+      response.json({ context, handoffs });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/execution-context/initialize',
+  async (request, response) => {
+    try {
+      const actor = parseActorContext(request, 'Capability Owner');
+      const context = await initializeWorkItemExecutionContextRecord({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+        actorUserId: actor.userId,
+      });
+      response.status(201).json(context);
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/branch/create',
+  async (request, response) => {
+    try {
+      const actor = parseActorContext(request, 'Capability Owner');
+      const context = await initializeWorkItemExecutionContextRecord({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+        actorUserId: actor.userId,
+      });
+      if (!context.branch || !context.primaryRepositoryId) {
+        throw new Error('Work item execution context did not resolve a primary repository.');
+      }
+
+      const bundle = await getCapabilityBundle(request.params.capabilityId);
+      const repository = (bundle.capability.repositories || []).find(
+        item => item.id === context.primaryRepositoryId,
+      );
+      const workspaceRoot = normalizeDirectoryPath(repository?.localRootHint || '');
+      if (!workspaceRoot) {
+        throw new Error(
+          'This repository does not have a local root hint yet, so Singulairy cannot create the shared Git branch.',
+        );
+      }
+
+      const approvedPaths = getCapabilityWorkspaceRoots(bundle.capability);
+      if (!isWorkspacePathApproved(workspaceRoot, approvedPaths)) {
+        throw new Error(
+          'The repository local root is not inside an approved capability workspace path.',
+        );
+      }
+
+      const workspaceStatus = await inspectCodeWorkspace(workspaceRoot);
+      if (!workspaceStatus.exists || !workspaceStatus.isGitRepository) {
+        throw new Error(
+          workspaceStatus.error ||
+            'The repository local root exists but is not a Git repository.',
+        );
+      }
+
+      const branchName = context.branch.sharedBranch;
+      const baseBranch = context.branch.baseBranch || repository?.defaultBranch || 'main';
+      const existingBranch = await runGitCommand(workspaceRoot, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `refs/heads/${branchName}`,
+      ]).catch(() => '');
+
+      if (existingBranch) {
+        await runGitCommand(workspaceRoot, ['switch', branchName]);
+      } else {
+        try {
+          await runGitCommand(workspaceRoot, ['switch', '-c', branchName, baseBranch]);
+        } catch {
+          await runGitCommand(workspaceRoot, ['switch', '-c', branchName]);
+        }
+      }
+
+      const headSha = await runGitCommand(workspaceRoot, ['rev-parse', 'HEAD']).catch(
+        () => '',
+      );
+      const nextContext = await updateWorkItemBranchRecord({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+        branch: {
+          ...context.branch,
+          createdByUserId: actor.userId || context.branch.createdByUserId,
+          headSha: headSha || context.branch.headSha,
+          status: 'ACTIVE',
+        },
+      });
+
+      if (actor.userId) {
+        await upsertWorkItemCheckoutSessionRecord({
+          capabilityId: request.params.capabilityId,
+          session: {
+            workItemId: request.params.workItemId,
+            userId: actor.userId,
+            repositoryId: context.primaryRepositoryId,
+            localPath: workspaceRoot,
+            branch: branchName,
+            lastSeenHeadSha: headSha || undefined,
+            lastSyncedAt: new Date().toISOString(),
+          },
+        });
+      }
+
+      response.status(201).json({
+        context: nextContext,
+        workspace: await inspectCodeWorkspace(workspaceRoot),
+        repository,
+      });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/claim/write',
+  async (request, response) => {
+    const actor = parseActorContext(request, 'Capability Owner');
+    if (!actor.userId) {
+      response.status(400).json({ error: 'Choose an operator before taking write control.' });
+      return;
+    }
+
+    try {
+      await initializeWorkItemExecutionContextRecord({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+        actorUserId: actor.userId,
+      });
+      const claim = await upsertWorkItemCodeClaimRecord({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+        userId: actor.userId,
+        teamId: actor.teamIds[0],
+        claimType: 'WRITE',
+        status: 'ACTIVE',
+        expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+      });
+      const context = await getWorkItemExecutionContextRecord({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+      });
+      response.status(201).json({ claim, context });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.delete(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/claim/write',
+  async (request, response) => {
+    const actor = parseActorContext(request, 'Capability Owner');
+    if (!actor.userId) {
+      response.status(400).json({ error: 'Choose an operator before releasing write control.' });
+      return;
+    }
+
+    try {
+      await releaseWorkItemCodeClaimRecord({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+        claimType: 'WRITE',
+        userId: actor.userId,
+      });
+      response.status(204).end();
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.get(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/handoff',
+  async (request, response) => {
+    try {
+      response.json(
+        await listWorkItemHandoffPacketsRecord({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/handoff',
+  async (request, response) => {
+    const actor = parseActorContext(request, 'Capability Owner');
+    const summary = String(request.body?.summary || '').trim();
+    if (!summary) {
+      response.status(400).json({ error: 'A handoff summary is required.' });
+      return;
+    }
+
+    try {
+      const packet = await createWorkItemHandoffPacketRecord({
+        capabilityId: request.params.capabilityId,
+        packet: {
+          id: createRuntimeId('HANDOFF'),
+          workItemId: request.params.workItemId,
+          fromUserId: actor.userId,
+          toUserId: String(request.body?.toUserId || '').trim() || undefined,
+          fromTeamId: actor.teamIds[0],
+          toTeamId: String(request.body?.toTeamId || '').trim() || undefined,
+          summary,
+          openQuestions: Array.isArray(request.body?.openQuestions)
+            ? request.body.openQuestions
+                .map((value: unknown) => String(value || '').trim())
+                .filter(Boolean)
+            : [],
+          blockingDependencies: Array.isArray(request.body?.blockingDependencies)
+            ? request.body.blockingDependencies
+                .map((value: unknown) => String(value || '').trim())
+                .filter(Boolean)
+            : [],
+          recommendedNextStep:
+            String(request.body?.recommendedNextStep || '').trim() || undefined,
+          artifactIds: Array.isArray(request.body?.artifactIds)
+            ? request.body.artifactIds
+                .map((value: unknown) => String(value || '').trim())
+                .filter(Boolean)
+            : [],
+          traceIds: Array.isArray(request.body?.traceIds)
+            ? request.body.traceIds
+                .map((value: unknown) => String(value || '').trim())
+                .filter(Boolean)
+            : [],
+          createdAt: new Date().toISOString(),
+        },
+      });
+      response.status(201).json(packet);
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/handoff/:packetId/accept',
+  async (request, response) => {
+    const actor = parseActorContext(request, 'Capability Owner');
+    try {
+      const packet = await acceptWorkItemHandoffPacketRecord({
+        capabilityId: request.params.capabilityId,
+        packetId: request.params.packetId,
+      });
+      if (actor.userId) {
+        await upsertWorkItemCodeClaimRecord({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          userId: actor.userId,
+          teamId: actor.teamIds[0],
+          claimType: 'WRITE',
+          status: 'ACTIVE',
+          expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+        });
+      }
+      const context = await getWorkItemExecutionContextRecord({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+      });
+      response.json({ packet, context });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/checkout/register',
+  async (request, response) => {
+    const actor = parseActorContext(request, 'Capability Owner');
+    const userId = actor.userId || String(request.body?.userId || '').trim();
+    if (!userId) {
+      response.status(400).json({ error: 'A user id is required to register a checkout.' });
+      return;
+    }
+
+    try {
+      const session = await upsertWorkItemCheckoutSessionRecord({
+        capabilityId: request.params.capabilityId,
+        session: {
+          workItemId: request.params.workItemId,
+          userId,
+          repositoryId: String(request.body?.repositoryId || '').trim(),
+          localPath: String(request.body?.localPath || '').trim() || undefined,
+          branch: String(request.body?.branch || '').trim(),
+          lastSeenHeadSha:
+            String(request.body?.lastSeenHeadSha || '').trim() || undefined,
+          lastSyncedAt:
+            String(request.body?.lastSyncedAt || '').trim() || new Date().toISOString(),
+        } satisfies WorkItemCheckoutSession,
+      });
+      response.status(201).json(session);
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/claim',
+  async (request, response) => {
+    const actor = parseActorContext(request, 'Capability Owner');
+    if (!actor.userId) {
+      response.status(400).json({ error: 'Choose an operator before taking control.' });
+      return;
+    }
+
+    try {
+      const bundle = await getCapabilityBundle(request.params.capabilityId);
+      const workItem = bundle.workspace.workItems.find(
+        item => item.id === request.params.workItemId,
+      );
+      if (!workItem) {
+        throw new Error(`Work item ${request.params.workItemId} was not found.`);
+      }
+
+      const claim = await upsertWorkItemClaim({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+        userId: actor.userId,
+        teamId: actor.teamIds[0],
+        status: 'ACTIVE',
+        claimedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+      });
+      const nextWorkItem = {
+        ...workItem,
+        claimOwnerUserId: actor.userId,
+        recordVersion: (workItem.recordVersion || 1) + 1,
+        history: [
+          ...workItem.history,
+          {
+            id: `HIST-${Math.random().toString(36).slice(2, 10).toUpperCase()}`,
+            timestamp: new Date().toISOString(),
+            actor: actor.displayName,
+            action: 'Work item claimed',
+            detail: `${actor.displayName} took active operator control of this work item.`,
+            phase: workItem.phase,
+            status: workItem.status,
+          },
+        ],
+      };
+      await replaceCapabilityWorkspaceContentRecord(request.params.capabilityId, {
+        workItems: bundle.workspace.workItems.map(item =>
+          item.id === nextWorkItem.id ? nextWorkItem : item,
+        ),
+      });
+      response.status(201).json({ claim, workItem: nextWorkItem });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.delete(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/claim',
+  async (request, response) => {
+    const actor = parseActorContext(request, 'Capability Owner');
+    if (!actor.userId) {
+      response.status(400).json({ error: 'Choose an operator before releasing control.' });
+      return;
+    }
+
+    try {
+      await releaseWorkItemClaim({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+        userId: actor.userId,
+      });
+      const bundle = await getCapabilityBundle(request.params.capabilityId);
+      const nextWorkItems = bundle.workspace.workItems.map(item =>
+        item.id === request.params.workItemId && item.claimOwnerUserId === actor.userId
+          ? {
+              ...item,
+              claimOwnerUserId: undefined,
+              recordVersion: (item.recordVersion || 1) + 1,
+            }
+          : item,
+      );
+      await replaceCapabilityWorkspaceContentRecord(request.params.capabilityId, {
+        workItems: nextWorkItems,
+      });
+      response.status(204).end();
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/presence',
+  async (request, response) => {
+    const actor = parseActorContext(request, 'Capability Owner');
+    if (!actor.userId) {
+      response.status(400).json({ error: 'Choose an operator before updating presence.' });
+      return;
+    }
+
+    try {
+      const presence = await upsertWorkItemPresence({
+        capabilityId: request.params.capabilityId,
+        workItemId: request.params.workItemId,
+        userId: actor.userId,
+        teamId: actor.teamIds[0],
+        viewContext: String(request.body?.viewContext || '').trim() || undefined,
+        lastSeenAt: new Date().toISOString(),
+      });
+      response.status(201).json(presence);
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
 app.post('/api/capabilities/:capabilityId/work-items/:workItemId/runs', async (request, response) => {
   try {
+    assertCapabilitySupportsExecution(
+      (await getCapabilityBundle(request.params.capabilityId)).capability,
+    );
+    const actor = parseActorContext(
+      request,
+      parseActor(request.body?.guidedBy, 'Capability Owner'),
+    );
+    await initializeWorkItemExecutionContextRecord({
+      capabilityId: request.params.capabilityId,
+      workItemId: request.params.workItemId,
+      actorUserId: actor.userId,
+    }).catch(() => null);
     const detail = await startWorkflowExecution({
       capabilityId: request.params.capabilityId,
       workItemId: request.params.workItemId,
       restartFromPhase: request.body?.restartFromPhase as WorkItemPhase | undefined,
       guidance: String(request.body?.guidance || '').trim() || undefined,
-      guidedBy: parseActor(request.body?.guidedBy, 'Capability Owner'),
+      guidedBy: actor.displayName,
+      actor,
     });
     wakeExecutionWorker();
     response.status(201).json(detail);
@@ -2138,12 +2981,17 @@ app.get('/api/capabilities/:capabilityId/runs/:runId/stream', async (request, re
 
 app.post('/api/capabilities/:capabilityId/runs/:runId/approve', async (request, response) => {
   try {
+    const actor = parseActorContext(
+      request,
+      parseActor(request.body?.resolvedBy, 'Capability Owner'),
+    );
     const detail = await approveWorkflowRun({
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
       resolution:
         String(request.body?.resolution || '').trim() || 'Approved for continuation.',
-      resolvedBy: parseActor(request.body?.resolvedBy, 'Capability Owner'),
+      resolvedBy: actor.displayName,
+      actor,
     });
     wakeExecutionWorker();
     response.json(detail);
@@ -2154,13 +3002,18 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/approve', async (request, 
 
 app.post('/api/capabilities/:capabilityId/runs/:runId/request-changes', async (request, response) => {
   try {
+    const actor = parseActorContext(
+      request,
+      parseActor(request.body?.resolvedBy, 'Capability Owner'),
+    );
     const detail = await requestChangesWorkflowRun({
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
       resolution:
         String(request.body?.resolution || '').trim() ||
         'Changes requested before continuation.',
-      resolvedBy: parseActor(request.body?.resolvedBy, 'Capability Owner'),
+      resolvedBy: actor.displayName,
+      actor,
     });
     wakeExecutionWorker();
     response.json(detail);
@@ -2171,12 +3024,17 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/request-changes', async (r
 
 app.post('/api/capabilities/:capabilityId/runs/:runId/provide-input', async (request, response) => {
   try {
+    const actor = parseActorContext(
+      request,
+      parseActor(request.body?.resolvedBy, 'Capability Owner'),
+    );
     const detail = await provideWorkflowRunInput({
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
       resolution:
         String(request.body?.resolution || '').trim() || 'Input provided for continuation.',
-      resolvedBy: parseActor(request.body?.resolvedBy, 'Capability Owner'),
+      resolvedBy: actor.displayName,
+      actor,
     });
     wakeExecutionWorker();
     response.json(detail);
@@ -2187,13 +3045,18 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/provide-input', async (req
 
 app.post('/api/capabilities/:capabilityId/runs/:runId/resolve-conflict', async (request, response) => {
   try {
+    const actor = parseActorContext(
+      request,
+      parseActor(request.body?.resolvedBy, 'Capability Owner'),
+    );
     const detail = await resolveWorkflowRunConflict({
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
       resolution:
         String(request.body?.resolution || '').trim() ||
         'Conflict resolved for continuation.',
-      resolvedBy: parseActor(request.body?.resolvedBy, 'Capability Owner'),
+      resolvedBy: actor.displayName,
+      actor,
     });
     wakeExecutionWorker();
     response.json(detail);
@@ -2218,12 +3081,17 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/cancel', async (request, r
 
 app.post('/api/capabilities/:capabilityId/runs/:runId/restart', async (request, response) => {
   try {
+    const actor = parseActorContext(
+      request,
+      parseActor(request.body?.guidedBy, 'Capability Owner'),
+    );
     const detail = await restartWorkflowRun({
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
       restartFromPhase: request.body?.restartFromPhase as WorkItemPhase | undefined,
       guidance: String(request.body?.guidance || '').trim() || undefined,
-      guidedBy: parseActor(request.body?.guidedBy, 'Capability Owner'),
+      guidedBy: actor.displayName,
+      actor,
     });
     wakeExecutionWorker();
     response.status(201).json(detail);

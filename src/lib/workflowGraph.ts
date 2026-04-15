@@ -323,6 +323,8 @@ export const deriveWorkflowStepsFromGraph = (
         preferredWorkspacePath: node.preferredWorkspacePath,
         executionNotes: node.executionNotes,
         artifactContract: node.artifactContract,
+        approvalPolicy: node.approvalPolicy,
+        ownershipRule: node.ownershipRule,
       } satisfies WorkflowStep;
     });
 };
@@ -369,6 +371,8 @@ const createLinearGraph = (
       preferredWorkspacePath: step.preferredWorkspacePath,
       executionNotes: step.executionNotes,
       artifactContract: step.artifactContract,
+      approvalPolicy: step.approvalPolicy,
+      ownershipRule: step.ownershipRule,
     })),
     {
       id: endNodeId,
@@ -809,6 +813,8 @@ export const createWorkflowNode = (
   eventConfig: values.eventConfig,
   alertConfig: values.alertConfig,
   artifactContract: values.artifactContract,
+  approvalPolicy: values.approvalPolicy,
+  ownershipRule: values.ownershipRule,
 });
 
 export const createWorkflowEdge = (

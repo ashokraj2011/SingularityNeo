@@ -17,6 +17,10 @@ import type {
   CapabilityStakeholder,
 } from '../src/types';
 import {
+  buildCapabilityBriefing,
+  buildCapabilityBriefingPrompt,
+} from '../src/lib/capabilityBriefing';
+import {
   findAgentSessionRecord,
   upsertAgentSessionRecord,
 } from './agentLearning/repository';
@@ -893,33 +897,17 @@ export const buildCapabilitySystemPrompt = ({
 }: {
   capability?: Partial<Capability>;
   agent?: Partial<CapabilityAgent>;
-}) =>
-  [
+}) => {
+  const briefing = buildCapabilityBriefing(capability);
+
+  return [
     `Capability boundary: ${capability?.name || capability?.id || 'Unknown capability'}`,
-    capability?.description ? `Capability description: ${capability.description}` : null,
+    buildCapabilityBriefingPrompt(briefing),
     capability?.domain ? `Capability domain: ${capability.domain}` : null,
     capability?.parentCapabilityId
       ? `Parent capability: ${capability.parentCapabilityId}`
       : null,
     capability?.businessUnit ? `Business unit: ${capability.businessUnit}` : null,
-    capability?.ownerTeam ? `Owner team: ${capability.ownerTeam}` : null,
-    toPromptSection('Associated teams', capability?.teamNames),
-    toStakeholderSection(capability?.stakeholders),
-    agent?.name ? `Active agent: ${agent.name}` : null,
-    agent?.role ? `Agent role: ${agent.role}` : null,
-    agent?.objective ? `Agent objective: ${agent.objective}` : null,
-    agent?.systemPrompt ? `Agent instructions: ${agent.systemPrompt}` : null,
-    toPromptSection('Documentation sources', agent?.documentationSources),
-    toPromptSection('Learning notes', agent?.learningNotes),
-    toPromptSection('Input artifacts', agent?.inputArtifacts),
-    toPromptSection('Output artifacts', agent?.outputArtifacts),
-    toAgentContractSection(agent),
-    toPromptSection('Attached skill ids', agent?.skillIds),
-    ...toSkillInstructionSections(capability, agent),
-    toPromptSection('Preferred tool profile', agent?.preferredToolIds),
-    toPromptSection('Applications', capability?.applications),
-    toPromptSection('APIs', capability?.apis),
-    toPromptSection('Databases', capability?.databases),
     capability?.databaseConfigs?.length
       ? `Database profiles: ${capability.databaseConfigs
           .map(config =>
@@ -939,26 +927,30 @@ export const buildCapabilitySystemPrompt = ({
           )
           .join('; ')}`
       : null,
-    toPromptSection('Git repositories', capability?.gitRepositories),
-    capability?.executionConfig?.defaultWorkspacePath
-      ? `Default workspace path: ${capability.executionConfig.defaultWorkspacePath}`
-      : null,
-    toPromptSection(
-      'Approved workspace paths',
-      capability?.executionConfig?.allowedWorkspacePaths,
-    ),
-    toPromptSection('Local directories', capability?.localDirectories),
     toMetadataEntrySection(capability?.additionalMetadata),
     capability?.confluenceLink ? `Confluence reference: ${capability.confluenceLink}` : null,
     capability?.jiraBoardLink ? `Jira board reference: ${capability.jiraBoardLink}` : null,
     capability?.documentationNotes
       ? `Capability documentation notes: ${capability.documentationNotes}`
       : null,
+    agent?.name ? `Active agent: ${agent.name}` : null,
+    agent?.role ? `Agent role: ${agent.role}` : null,
+    agent?.objective ? `Agent objective: ${agent.objective}` : null,
+    agent?.systemPrompt ? `Agent instructions: ${agent.systemPrompt}` : null,
+    toPromptSection('Documentation sources', agent?.documentationSources),
+    toPromptSection('Learning notes', agent?.learningNotes),
+    toPromptSection('Input artifacts', agent?.inputArtifacts),
+    toPromptSection('Output artifacts', agent?.outputArtifacts),
+    toAgentContractSection(agent),
+    toPromptSection('Attached skill ids', agent?.skillIds),
+    ...toSkillInstructionSections(capability, agent),
+    toPromptSection('Preferred tool profile', agent?.preferredToolIds),
     'Keep the response inside this capability context. If capability context is missing for a claim, say so clearly instead of inventing it.',
     'Prefer practical, execution-ready answers that help the team move work forward.',
   ]
     .filter(Boolean)
-    .join('\n');
+    .join('\n\n');
+};
 
 export const toUsage = (usage: InferenceUsage | undefined) => {
   const promptTokens = Number(usage?.prompt_tokens || 0);

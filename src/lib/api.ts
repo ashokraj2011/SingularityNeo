@@ -1,9 +1,14 @@
 import {
+  ActorContext,
   AgentLearningProfileDetail,
   ArtifactContentResponse,
   Capability,
   CapabilityAgent,
+  CapabilityAlmExportPayload,
+  CapabilityArchitectureSnapshot,
   CapabilityChatMessage,
+  CapabilityRepository,
+  CapabilityPublishedSnapshot,
   CapabilityDeploymentTarget,
   CapabilityExecutionCommandTemplate,
   CapabilityFlightRecorderSnapshot,
@@ -29,6 +34,7 @@ import {
   StageControlContinueResponse,
   TelemetryMetricSample,
   TelemetrySpan,
+  UserPreference,
   ReviewPacketArtifactSummary,
   WorkspaceDatabaseBootstrapConfig,
   WorkspaceDatabaseBootstrapProfileSnapshot,
@@ -37,10 +43,17 @@ import {
   WorkspaceSettings,
   WorkspaceConnectorSettings,
   WorkspaceCatalogSnapshot,
+  WorkspaceOrganization,
   WorkspaceDetectionResult,
   WorkspacePathValidationResult,
+  WorkItemClaim,
+  WorkItemCodeClaim,
+  WorkItemCheckoutSession,
+  WorkItemExecutionContext,
+  WorkItemHandoffPacket,
   WorkItem,
   WorkItemAttachmentUpload,
+  WorkItemPresence,
   WorkItemPhaseStakeholderAssignment,
   WorkItemExplainDetail,
   WorkItemFlightRecorderDetail,
@@ -48,6 +61,7 @@ import {
   WorkflowRun,
   WorkflowRunDetail,
 } from '../types';
+import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from './desktop';
 
 export interface RuntimeStatus {
   configured: boolean;
@@ -113,10 +127,22 @@ export interface CapabilityChatStreamResult {
   sawError: boolean;
 }
 
+type CapabilityChatStreamAccumulator = {
+  draftContent: string;
+  completeEvent: ChatStreamEvent | null;
+  sawDelta: boolean;
+  sawComplete: boolean;
+  sawError: boolean;
+  streamError: string;
+  retryAfterMs?: number;
+  memoryReferences: MemoryReference[];
+};
+
 export interface AppState {
   capabilities: Capability[];
   capabilityWorkspaces: CapabilityWorkspace[];
   workspaceSettings: WorkspaceSettings;
+  workspaceOrganization: WorkspaceOrganization;
 }
 
 export interface CapabilityBundle {
@@ -180,43 +206,205 @@ const jsonHeaders = {
   'Content-Type': 'application/json',
 };
 
+let currentActorContext: ActorContext | null = null;
+
+const withActorHeaders = (headers?: HeadersInit): HeadersInit => {
+  const nextHeaders = new Headers(headers || {});
+
+  if (currentActorContext?.userId) {
+    nextHeaders.set('x-singularity-actor-user-id', currentActorContext.userId);
+  }
+  if (currentActorContext?.displayName) {
+    nextHeaders.set('x-singularity-actor-display-name', currentActorContext.displayName);
+  }
+  if (currentActorContext?.teamIds?.length) {
+    nextHeaders.set(
+      'x-singularity-actor-team-ids',
+      JSON.stringify(currentActorContext.teamIds),
+    );
+  }
+  if (currentActorContext?.actedOnBehalfOfStakeholderIds?.length) {
+    nextHeaders.set(
+      'x-singularity-actor-stakeholder-ids',
+      JSON.stringify(currentActorContext.actedOnBehalfOfStakeholderIds),
+    );
+  }
+
+  return nextHeaders;
+};
+
 const requestJson = async <T>(input: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(input, init);
+  const response = await fetch(resolveApiUrl(input), {
+    ...init,
+    headers: withActorHeaders(init?.headers),
+  });
   if (!response.ok) {
     throw new Error(await getError(response));
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return response.json() as Promise<T>;
 };
 
-export const fetchRuntimeStatus = async (): Promise<RuntimeStatus> =>
-  requestJson<RuntimeStatus>('/api/runtime/status');
+export const setCurrentActorContext = (actor: ActorContext | null) => {
+  currentActorContext = actor;
+};
+
+export const fetchRuntimeStatus = async (): Promise<RuntimeStatus> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop) {
+    return desktop.getRuntimeStatus() as Promise<RuntimeStatus>;
+  }
+
+  return requestJson<RuntimeStatus>('/api/runtime/status');
+};
 
 export const updateRuntimeCredentials = async (
   token: string,
-): Promise<RuntimeStatus> =>
-  requestJson<RuntimeStatus>('/api/runtime/credentials', {
+): Promise<RuntimeStatus> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop) {
+    return desktop.setRuntimeToken(token) as Promise<RuntimeStatus>;
+  }
+
+  return requestJson<RuntimeStatus>('/api/runtime/credentials', {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify({ token }),
   });
+};
 
-export const clearRuntimeCredentials = async (): Promise<RuntimeStatus> =>
-  requestJson<RuntimeStatus>('/api/runtime/credentials', {
+export const clearRuntimeCredentials = async (): Promise<RuntimeStatus> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop) {
+    return desktop.clearRuntimeToken() as Promise<RuntimeStatus>;
+  }
+
+  return requestJson<RuntimeStatus>('/api/runtime/credentials', {
     method: 'DELETE',
   });
+};
 
 export const sendCapabilityChat = async (
   payload: CapabilityChatRequest,
-): Promise<CapabilityChatResponse> =>
-  requestJson<CapabilityChatResponse>('/api/runtime/chat', {
+): Promise<CapabilityChatResponse> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop) {
+    return desktop.sendRuntimeChat({
+      ...payload,
+      actorContext: currentActorContext,
+    }) as Promise<CapabilityChatResponse>;
+  }
+
+  return requestJson<CapabilityChatResponse>('/api/runtime/chat', {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify(payload),
   });
+};
+
+const createCapabilityChatStreamAccumulator = (): CapabilityChatStreamAccumulator => ({
+  draftContent: '',
+  completeEvent: null,
+  sawDelta: false,
+  sawComplete: false,
+  sawError: false,
+  streamError: '',
+  retryAfterMs: undefined,
+  memoryReferences: [],
+});
+
+const processCapabilityChatStreamEvent = ({
+  event,
+  handlers,
+  state,
+}: {
+  event: ChatStreamEvent;
+  handlers: {
+    onEvent: (event: ChatStreamEvent) => void;
+  };
+  state: CapabilityChatStreamAccumulator;
+}) => {
+  if (event.type === 'memory') {
+    state.memoryReferences = event.memoryReferences || [];
+  }
+  if (event.type === 'delta' && event.content) {
+    state.sawDelta = true;
+    state.draftContent += event.content;
+  }
+  if (event.type === 'complete') {
+    state.sawComplete = true;
+    state.completeEvent = event;
+    state.draftContent = event.content || state.draftContent;
+    state.memoryReferences = event.memoryReferences || state.memoryReferences;
+  }
+  if (event.type === 'error') {
+    state.sawError = true;
+    state.streamError = event.error || 'The runtime ended this stream early.';
+    state.retryAfterMs = event.retryAfterMs;
+  }
+
+  handlers.onEvent(event);
+};
+
+const finalizeCapabilityChatStream = ({
+  state,
+  aborted,
+}: {
+  state: CapabilityChatStreamAccumulator;
+  aborted: boolean;
+}): CapabilityChatStreamResult => {
+  const trimmedDraft = state.draftContent.trim();
+  const termination = state.sawComplete
+    ? 'complete'
+    : trimmedDraft
+      ? state.sawError || aborted
+        ? 'interrupted'
+        : 'recovered'
+      : 'empty';
+
+  return {
+    termination,
+    draftContent: state.draftContent,
+    completeEvent: state.completeEvent,
+    error:
+      state.streamError ||
+      (aborted ? 'Streaming response was stopped before completion.' : undefined),
+    retryAfterMs: state.retryAfterMs,
+    memoryReferences: state.memoryReferences,
+    sawDelta: state.sawDelta,
+    sawComplete: state.sawComplete,
+    sawError: state.sawError,
+  };
+};
 
 export const fetchAppState = async (): Promise<AppState> =>
   requestJson<AppState>('/api/state');
+
+export const fetchWorkspaceOrganization = async (): Promise<WorkspaceOrganization> =>
+  requestJson<WorkspaceOrganization>('/api/workspace/organization');
+
+export const updateWorkspaceOrganizationRecord = async (
+  updates: Partial<WorkspaceOrganization>,
+): Promise<WorkspaceOrganization> =>
+  requestJson<WorkspaceOrganization>('/api/workspace/organization', {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(updates),
+  });
+
+export const updateWorkspaceUserPreferenceRecord = async (
+  userId: string,
+  updates: Partial<UserPreference>,
+): Promise<UserPreference> =>
+  requestJson<UserPreference>(`/api/workspace/users/${encodeURIComponent(userId)}/preferences`, {
+    method: 'PUT',
+    headers: jsonHeaders,
+    body: JSON.stringify(updates),
+  });
 
 export const fetchDatabaseBootstrapStatus = async (): Promise<WorkspaceDatabaseBootstrapStatus> =>
   requestJson<WorkspaceDatabaseBootstrapStatus>('/api/bootstrap/database/status');
@@ -286,6 +474,26 @@ export const fetchCapabilityBundle = async (
 ): Promise<CapabilityBundle> =>
   requestJson<CapabilityBundle>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}`,
+  );
+
+export const fetchCapabilityRepositories = async (
+  capabilityId: string,
+): Promise<CapabilityRepository[]> =>
+  requestJson<CapabilityRepository[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/repositories`,
+  );
+
+export const updateCapabilityRepositories = async (
+  capabilityId: string,
+  repositories: CapabilityRepository[],
+): Promise<CapabilityRepository[]> =>
+  requestJson<CapabilityRepository[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/repositories`,
+    {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify({ repositories }),
+    },
   );
 
 export const validateOnboardingConnectors = async (payload: {
@@ -401,14 +609,18 @@ export const getCapabilityFlightRecorderDownloadUrl = (
   capabilityId: string,
   format: 'json' | 'markdown',
 ) =>
-  `/api/capabilities/${encodeURIComponent(capabilityId)}/flight-recorder/download?format=${format}`;
+  resolveApiUrl(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/flight-recorder/download?format=${format}`,
+  );
 
 export const getWorkItemFlightRecorderDownloadUrl = (
   capabilityId: string,
   workItemId: string,
   format: 'json' | 'markdown',
 ) =>
-  `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/flight-recorder/download?format=${format}`;
+  resolveApiUrl(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/flight-recorder/download?format=${format}`,
+  );
 
 export const fetchWorkItemEvidence = async (
   capabilityId: string,
@@ -517,13 +729,17 @@ export const fetchArtifactContent = async (
   );
 
 export const getArtifactDownloadUrl = (capabilityId: string, artifactId: string) =>
-  `/api/capabilities/${encodeURIComponent(capabilityId)}/artifacts/${encodeURIComponent(artifactId)}/download`;
+  resolveApiUrl(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
+  );
 
 export const getWorkItemEvidenceBundleDownloadUrl = (
   capabilityId: string,
   workItemId: string,
 ) =>
-  `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/evidence-bundle`;
+  resolveApiUrl(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/evidence-bundle`,
+  );
 
 export const createCapabilityRecord = async (
   capability: CreateCapabilityInput,
@@ -545,6 +761,32 @@ export const updateCapabilityRecord = async (
       headers: jsonHeaders,
       body: JSON.stringify(updates),
     },
+  );
+
+export const fetchCapabilityArchitecture = async (
+  capabilityId: string,
+): Promise<CapabilityArchitectureSnapshot> =>
+  requestJson<CapabilityArchitectureSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/architecture`,
+  );
+
+export const publishCapabilityContract = async (
+  capabilityId: string,
+): Promise<{ capability: Capability; snapshot: CapabilityPublishedSnapshot }> =>
+  requestJson<{ capability: Capability; snapshot: CapabilityPublishedSnapshot }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/publish-contract`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const fetchCapabilityAlmExport = async (
+  capabilityId: string,
+): Promise<CapabilityAlmExportPayload> =>
+  requestJson<CapabilityAlmExportPayload>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/alm-export`,
   );
 
 export const addCapabilitySkillRecord = async (
@@ -703,6 +945,166 @@ export const moveCapabilityWorkItem = async (
       method: 'POST',
       headers: jsonHeaders,
       body: JSON.stringify(payload),
+    },
+  );
+
+export const fetchCapabilityWorkItemCollaboration = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<{ claims: WorkItemClaim[]; presence: WorkItemPresence[] }> =>
+  requestJson<{ claims: WorkItemClaim[]; presence: WorkItemPresence[] }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/collaboration`,
+  );
+
+export const fetchCapabilityWorkItemExecutionContext = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<{ context: WorkItemExecutionContext | null; handoffs: WorkItemHandoffPacket[] }> =>
+  requestJson<{ context: WorkItemExecutionContext | null; handoffs: WorkItemHandoffPacket[] }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/execution-context`,
+  );
+
+export const initializeCapabilityWorkItemExecutionContext = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<WorkItemExecutionContext> =>
+  requestJson<WorkItemExecutionContext>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/execution-context/initialize`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const createCapabilityWorkItemSharedBranch = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<{
+  context: WorkItemExecutionContext;
+  repository?: CapabilityRepository;
+  workspace?: CodeWorkspaceStatus;
+}> =>
+  requestJson<{
+    context: WorkItemExecutionContext;
+    repository?: CapabilityRepository;
+    workspace?: CodeWorkspaceStatus;
+  }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/branch/create`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const claimCapabilityWorkItemWriteControl = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<{ claim: WorkItemCodeClaim; context: WorkItemExecutionContext | null }> =>
+  requestJson<{ claim: WorkItemCodeClaim; context: WorkItemExecutionContext | null }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/claim/write`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const releaseCapabilityWorkItemWriteControl = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<void> =>
+  requestJson<void>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/claim/write`,
+    {
+      method: 'DELETE',
+    },
+  );
+
+export const listCapabilityWorkItemHandoffs = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<WorkItemHandoffPacket[]> =>
+  requestJson<WorkItemHandoffPacket[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/handoff`,
+  );
+
+export const createCapabilityWorkItemHandoff = async (
+  capabilityId: string,
+  workItemId: string,
+  payload: Omit<WorkItemHandoffPacket, 'id' | 'workItemId' | 'createdAt' | 'acceptedAt'>,
+): Promise<WorkItemHandoffPacket> =>
+  requestJson<WorkItemHandoffPacket>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/handoff`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const acceptCapabilityWorkItemHandoff = async (
+  capabilityId: string,
+  workItemId: string,
+  packetId: string,
+): Promise<{ packet: WorkItemHandoffPacket; context: WorkItemExecutionContext | null }> =>
+  requestJson<{ packet: WorkItemHandoffPacket; context: WorkItemExecutionContext | null }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/handoff/${encodeURIComponent(packetId)}/accept`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const registerCapabilityWorkItemCheckout = async (
+  capabilityId: string,
+  workItemId: string,
+  payload: WorkItemCheckoutSession,
+): Promise<WorkItemCheckoutSession> =>
+  requestJson<WorkItemCheckoutSession>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/checkout/register`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const claimCapabilityWorkItemControl = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<{ claim: WorkItemClaim; workItem: WorkItem }> =>
+  requestJson<{ claim: WorkItemClaim; workItem: WorkItem }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/claim`,
+    {
+      method: 'POST',
+    },
+  );
+
+export const releaseCapabilityWorkItemControl = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<void> =>
+  requestJson<void>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/claim`,
+    {
+      method: 'DELETE',
+    },
+  );
+
+export const updateCapabilityWorkItemPresence = async (
+  capabilityId: string,
+  workItemId: string,
+  payload?: { viewContext?: string },
+): Promise<WorkItemPresence> =>
+  requestJson<WorkItemPresence>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/presence`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
     },
   );
 
@@ -965,11 +1367,68 @@ export const streamCapabilityChat = async (
     signal?: AbortSignal;
   },
 ): Promise<CapabilityChatStreamResult> => {
+  if (isDesktopRuntime()) {
+    const desktop = getDesktopBridge();
+    if (!desktop) {
+      throw new Error('Desktop runtime bridge is not available.');
+    }
+
+    const streamId = `desktop-chat-${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    const state = createCapabilityChatStreamAccumulator();
+    let aborted = false;
+
+    const abortHandler = () => {
+      aborted = true;
+      void desktop.cancelRuntimeChatStream(streamId).catch(() => undefined);
+    };
+
+    options?.signal?.addEventListener('abort', abortHandler, { once: true });
+
+    try {
+      await desktop.streamRuntimeChat(
+        {
+          ...payload,
+          streamId,
+          actorContext: currentActorContext,
+        },
+        event => {
+          if (aborted) {
+            return;
+          }
+
+          processCapabilityChatStreamEvent({
+            event: event as ChatStreamEvent,
+            handlers,
+            state,
+          });
+        },
+      );
+    } catch (error) {
+      if (aborted) {
+        return finalizeCapabilityChatStream({
+          state,
+          aborted: true,
+        });
+      }
+
+      throw error;
+    } finally {
+      options?.signal?.removeEventListener('abort', abortHandler);
+    }
+
+    return finalizeCapabilityChatStream({
+      state,
+      aborted,
+    });
+  }
+
   let response: Response;
   try {
-    response = await fetch('/api/runtime/chat/stream', {
+    response = await fetch(resolveApiUrl('/api/runtime/chat/stream'), {
       method: 'POST',
-      headers: jsonHeaders,
+      headers: withActorHeaders(jsonHeaders),
       body: JSON.stringify(payload),
       signal: options?.signal,
     });
@@ -1001,14 +1460,7 @@ export const streamCapabilityChat = async (
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffered = '';
-  let draftContent = '';
-  let completeEvent: ChatStreamEvent | null = null;
-  let sawDelta = false;
-  let sawComplete = false;
-  let sawError = false;
-  let streamError = '';
-  let retryAfterMs: number | undefined;
-  let memoryReferences: MemoryReference[] = [];
+  const state = createCapabilityChatStreamAccumulator();
   let aborted = false;
 
   const processFrame = (frame: string) => {
@@ -1035,31 +1487,14 @@ export const streamCapabilityChat = async (
 
     try {
       const streamEvent = JSON.parse(data) as ChatStreamEvent;
-      const normalizedEvent = {
-        ...streamEvent,
-        type: streamEvent.type || (eventType as ChatStreamEvent['type']),
-      };
-
-      if (normalizedEvent.type === 'memory') {
-        memoryReferences = normalizedEvent.memoryReferences || [];
-      }
-      if (normalizedEvent.type === 'delta' && normalizedEvent.content) {
-        sawDelta = true;
-        draftContent += normalizedEvent.content;
-      }
-      if (normalizedEvent.type === 'complete') {
-        sawComplete = true;
-        completeEvent = normalizedEvent;
-        draftContent = normalizedEvent.content || draftContent;
-        memoryReferences = normalizedEvent.memoryReferences || memoryReferences;
-      }
-      if (normalizedEvent.type === 'error') {
-        sawError = true;
-        streamError = normalizedEvent.error || 'The backend runtime ended this stream early.';
-        retryAfterMs = normalizedEvent.retryAfterMs;
-      }
-
-      handlers.onEvent(normalizedEvent);
+      processCapabilityChatStreamEvent({
+        event: {
+          ...streamEvent,
+          type: streamEvent.type || (eventType as ChatStreamEvent['type']),
+        },
+        handlers,
+        state,
+      });
     } catch {
       // Ignore malformed trailing frames so partial streamed output can still recover.
     }
@@ -1094,28 +1529,10 @@ export const streamCapabilityChat = async (
     }
   }
 
-  const trimmedDraft = draftContent.trim();
-  const termination = sawComplete
-    ? 'complete'
-    : trimmedDraft
-      ? sawError || aborted
-        ? 'interrupted'
-        : 'recovered'
-      : 'empty';
-
-  return {
-    termination,
-    draftContent,
-    completeEvent,
-    error:
-      streamError ||
-      (aborted ? 'Streaming response was stopped before completion.' : undefined),
-    retryAfterMs,
-    memoryReferences,
-    sawDelta,
-    sawComplete,
-    sawError,
-  };
+  return finalizeCapabilityChatStream({
+    state,
+    aborted,
+  });
 };
 
 export const continueCapabilityWorkItemStageControl = async (

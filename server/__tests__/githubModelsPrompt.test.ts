@@ -67,6 +67,7 @@ describe('buildCapabilitySystemPrompt', () => {
   it('includes full skill content and preferred tool profile, not only skill ids', () => {
     const prompt = buildCapabilitySystemPrompt({ capability, agent });
 
+    expect(prompt).toContain('Capability briefing for Prompt Test Capability:');
     expect(prompt).toContain('Attached skill ids: SKL-GENERAL-REPO-INSTRUCTIONS, SKL-ROLE-SOFTWARE-ENGINEER');
     expect(prompt).toContain('Shared operating skills:');
     expect(prompt).toContain('Repository-wide Copilot Instructions');

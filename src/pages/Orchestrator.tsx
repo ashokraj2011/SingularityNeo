@@ -24,31 +24,46 @@ import {
   X,
 } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import AgentKnowledgeLensPanel from '../components/AgentKnowledgeLensPanel';
 import ArtifactPreview from '../components/ArtifactPreview';
+import CapabilityBriefingPanel from '../components/CapabilityBriefingPanel';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
+import InteractionTimeline from '../components/InteractionTimeline';
 import StageControlModal from '../components/StageControlModal';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
 import { compactMarkdownPreview } from '../lib/markdown';
+import { createApiEventSource } from '../lib/desktop';
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import {
   approveCapabilityWorkflowRun,
+  acceptCapabilityWorkItemHandoff,
   cancelCapabilityWorkflowRun,
+  claimCapabilityWorkItemControl,
+  claimCapabilityWorkItemWriteControl,
+  createCapabilityWorkItemHandoff,
   createCapabilityWorkItem,
+  createCapabilityWorkItemSharedBranch,
+  fetchCapabilityWorkItemCollaboration,
+  fetchCapabilityWorkItemExecutionContext,
   fetchCapabilityWorkflowRun,
   fetchCapabilityWorkflowRunEvents,
   fetchRuntimeStatus,
+  initializeCapabilityWorkItemExecutionContext,
   listCapabilityWorkflowRuns,
   moveCapabilityWorkItem,
   provideCapabilityWorkflowRunInput,
+  releaseCapabilityWorkItemControl,
+  releaseCapabilityWorkItemWriteControl,
   requestCapabilityWorkflowRunChanges,
   resolveCapabilityWorkflowRunConflict,
   restartCapabilityWorkflowRun,
   startCapabilityWorkflowRun,
   streamCapabilityChat,
   type RuntimeStatus,
+  updateCapabilityWorkItemPresence,
 } from '../lib/api';
 import {
   getCapabilityBoardPhaseIds,
@@ -69,10 +84,14 @@ import {
   resolveWorkItemEntryStep,
   WORK_ITEM_TASK_TYPE_OPTIONS,
 } from '../lib/workItemTaskTypes';
+import { buildAgentKnowledgeLens } from '../lib/agentKnowledge';
+import { buildCapabilityInteractionFeed } from '../lib/interactionFeed';
 import { normalizeCompiledStepContext } from '../lib/workflowRuntime';
 import { cn } from '../lib/utils';
 import type {
   AgentArtifactExpectation,
+  ApprovalAssignment,
+  ApprovalDecision,
   Artifact,
   CapabilityStakeholder,
   CompiledArtifactChecklistItem,
@@ -84,8 +103,12 @@ import type {
   RunWait,
   WorkItem,
   WorkItemAttachmentUpload,
+  WorkItemClaim,
+  WorkItemExecutionContext,
+  WorkItemHandoffPacket,
   WorkItemPhase,
   WorkItemPhaseStakeholderAssignment,
+  WorkItemPresence,
   WorkItemTaskType,
   Workflow,
   WorkflowRun,
@@ -205,6 +228,11 @@ type StageChatMessage = {
   timestamp: string;
   deliveryState?: 'clean' | 'recovered' | 'interrupted';
   error?: string;
+  traceId?: string;
+  model?: string;
+  sessionId?: string;
+  sessionScope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  sessionScopeId?: string;
 };
 type WorkNavigatorItem = {
   item: WorkItem;
@@ -220,6 +248,7 @@ type WorkNavigatorSection = {
   helper: string;
   items: WorkNavigatorItem[];
 };
+type WorkbenchQueueView = 'MY_QUEUE' | 'TEAM_QUEUE' | 'ATTENTION' | 'WATCHING';
 
 const STORAGE_KEYS = {
   view: 'singularity.orchestrator.view',
@@ -229,6 +258,7 @@ const STORAGE_KEYS = {
   workflow: 'singularity.orchestrator.workflow',
   status: 'singularity.orchestrator.status',
   priority: 'singularity.orchestrator.priority',
+  queueView: 'singularity.orchestrator.queueView',
   advanced: 'singularity.orchestrator.advanced.open',
 } as const;
 
@@ -404,6 +434,25 @@ const getWorkItemAttentionTimestamp = (item: WorkItem) =>
 
 const buildBlockedGuidanceSeed = (reason: string) =>
   `Blocking reason from agent:\n- ${reason}\n\nGuidance for the next attempt:\n- `;
+
+const describeApprovalTarget = (
+  assignment: ApprovalAssignment,
+  {
+    usersById,
+    teamsById,
+  }: {
+    usersById: Map<string, { name: string }>;
+    teamsById: Map<string, { name: string }>;
+  },
+) => {
+  if (assignment.targetType === 'USER') {
+    return usersById.get(assignment.targetId)?.name || assignment.targetId;
+  }
+  if (assignment.targetType === 'TEAM') {
+    return teamsById.get(assignment.targetId)?.name || assignment.targetId;
+  }
+  return assignment.targetId;
+};
 
 const getRunEventTone = (event: RunEvent) => {
   if (event.level === 'ERROR' || event.type === 'STEP_FAILED' || event.type === 'TOOL_FAILED') {
@@ -696,9 +745,11 @@ const Orchestrator = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const {
     activeCapability,
+    currentActorContext,
     getCapabilityWorkspace,
     refreshCapabilityBundle,
     setActiveChatAgent,
+    workspaceOrganization,
   } = useCapability();
   const { error: showError, success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
@@ -769,6 +820,9 @@ const Orchestrator = () => {
   const [priorityFilter, setPriorityFilter] = useState<WorkItemPriorityFilter>(() =>
     readSessionValue(STORAGE_KEYS.priority, 'ALL') as WorkItemPriorityFilter,
   );
+  const [queueView, setQueueView] = useState<WorkbenchQueueView>(() =>
+    readSessionValue(STORAGE_KEYS.queueView, 'MY_QUEUE') as WorkbenchQueueView,
+  );
   const [draggedWorkItemId, setDraggedWorkItemId] = useState<string | null>(null);
   const [dragOverPhase, setDragOverPhase] = useState<WorkItemPhase | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
@@ -789,6 +843,11 @@ const Orchestrator = () => {
   const [approvalReviewWaitSnapshot, setApprovalReviewWaitSnapshot] = useState<RunWait | null>(
     null,
   );
+  const [selectedClaims, setSelectedClaims] = useState<WorkItemClaim[]>([]);
+  const [selectedPresence, setSelectedPresence] = useState<WorkItemPresence[]>([]);
+  const [selectedExecutionContext, setSelectedExecutionContext] =
+    useState<WorkItemExecutionContext | null>(null);
+  const [selectedHandoffs, setSelectedHandoffs] = useState<WorkItemHandoffPacket[]>([]);
   const [isExplainOpen, setIsExplainOpen] = useState(false);
   const [isStageControlOpen, setIsStageControlOpen] = useState(false);
   const [artifactFilter, setArtifactFilter] = useState<ArtifactWorkbenchFilter>('ALL');
@@ -978,6 +1037,10 @@ const Orchestrator = () => {
       setSelectedRunHistory([]);
       setSelectedArtifactId(null);
       setSelectedApprovalArtifactId(null);
+      setSelectedClaims([]);
+      setSelectedPresence([]);
+      setSelectedExecutionContext(null);
+      setSelectedHandoffs([]);
       setResolutionNote('');
       setIsDiffReviewOpen(false);
       setIsApprovalReviewOpen(false);
@@ -998,6 +1061,42 @@ const Orchestrator = () => {
   }, [loadSelectedRunData, selectedWorkItemId]);
 
   useEffect(() => {
+    if (!selectedWorkItemId || !currentActorContext.userId) {
+      return;
+    }
+
+    let isMounted = true;
+    void Promise.all([
+      updateCapabilityWorkItemPresence(activeCapability.id, selectedWorkItemId, {
+        viewContext: 'WORKBENCH',
+      }).catch(() => null),
+      fetchCapabilityWorkItemCollaboration(activeCapability.id, selectedWorkItemId),
+      fetchCapabilityWorkItemExecutionContext(activeCapability.id, selectedWorkItemId).catch(
+        () => ({ context: null, handoffs: [] }),
+      ),
+    ])
+      .then(([, collaboration, executionContext]) => {
+        if (!isMounted) {
+          return;
+        }
+        setSelectedClaims(collaboration.claims);
+        setSelectedPresence(collaboration.presence);
+        setSelectedExecutionContext(executionContext.context);
+        setSelectedHandoffs(executionContext.handoffs);
+      })
+      .catch(error => {
+        if (!isMounted) {
+          return;
+        }
+        console.warn('Failed to load work item collaboration state.', error);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeCapability.id, currentActorContext.userId, selectedWorkItemId]);
+
+  useEffect(() => {
     const selectedRunStreamId =
       selectedRunDetail?.run?.id || selectedRunHistory[0]?.id || null;
     const selectedRunStreamStatus =
@@ -1012,7 +1111,7 @@ const Orchestrator = () => {
     }
 
     let isMounted = true;
-    const eventSource = new EventSource(
+    const eventSource = createApiEventSource(
       `/api/capabilities/${encodeURIComponent(activeCapability.id)}/runs/${encodeURIComponent(selectedRunStreamId)}/stream`,
     );
 
@@ -1178,8 +1277,17 @@ const Orchestrator = () => {
     writeViewPreference(STORAGE_KEYS.priority, priorityFilter, { storage: 'session' });
   }, [priorityFilter]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    writeViewPreference(STORAGE_KEYS.queueView, queueView, { storage: 'session' });
+  }, [queueView]);
+
   const filteredWorkItems = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
+    const actorUserId = currentActorContext.userId;
+    const actorTeamIds = currentActorContext.teamIds;
 
     return workItems.filter(item => {
       const workflow = workflowsById.get(item.workflowId) || null;
@@ -1203,12 +1311,35 @@ const Orchestrator = () => {
       const matchesStatus = statusFilter === 'ALL' || item.status === statusFilter;
       const matchesPriority =
         priorityFilter === 'ALL' || item.priority === priorityFilter;
+      const matchesQueueView =
+        queueView === 'MY_QUEUE'
+          ? Boolean(actorUserId) &&
+            (item.claimOwnerUserId === actorUserId ||
+              (item.phaseOwnerTeamId
+                ? actorTeamIds.includes(item.phaseOwnerTeamId)
+                : true))
+          : queueView === 'TEAM_QUEUE'
+          ? Boolean(item.phaseOwnerTeamId && actorTeamIds.includes(item.phaseOwnerTeamId))
+          : queueView === 'ATTENTION'
+          ? item.status === 'BLOCKED' ||
+            item.status === 'PENDING_APPROVAL' ||
+            Boolean(item.pendingRequest)
+          : Boolean(actorUserId && item.watchedByUserIds?.includes(actorUserId));
 
-      return matchesQuery && matchesWorkflow && matchesStatus && matchesPriority;
+      return (
+        matchesQuery &&
+        matchesWorkflow &&
+        matchesStatus &&
+        matchesPriority &&
+        matchesQueueView
+      );
     });
   }, [
+    currentActorContext.teamIds,
+    currentActorContext.userId,
     agentsById,
     priorityFilter,
+    queueView,
     searchQuery,
     statusFilter,
     workflowFilter,
@@ -1438,6 +1569,40 @@ const Orchestrator = () => {
   const selectedResetAgent = selectedResetStep?.agentId
     ? agentsById.get(selectedResetStep.agentId) || null
     : null;
+  const workspaceUsersById = useMemo(
+    () => new Map(workspaceOrganization.users.map(user => [user.id, user])),
+    [workspaceOrganization.users],
+  );
+  const workspaceTeamsById = useMemo(
+    () => new Map(workspaceOrganization.teams.map(team => [team.id, team])),
+    [workspaceOrganization.teams],
+  );
+  const selectedPhaseOwnerTeam =
+    (selectedWorkItem?.phaseOwnerTeamId
+      ? workspaceTeamsById.get(selectedWorkItem.phaseOwnerTeamId)
+      : null) || null;
+  const selectedClaimOwner =
+    (selectedWorkItem?.claimOwnerUserId
+      ? workspaceUsersById.get(selectedWorkItem.claimOwnerUserId)
+      : null) || null;
+  const selectedEffectiveExecutionContext =
+    selectedExecutionContext || selectedWorkItem?.executionContext || null;
+  const selectedSharedBranch = selectedEffectiveExecutionContext?.branch || null;
+  const selectedExecutionRepository =
+    activeCapability.repositories?.find(
+      repository =>
+        repository.id ===
+        (selectedEffectiveExecutionContext?.primaryRepositoryId ||
+          selectedSharedBranch?.repositoryId),
+    ) || null;
+  const selectedActiveWriter =
+    (selectedEffectiveExecutionContext?.activeWriterUserId
+      ? workspaceUsersById.get(selectedEffectiveExecutionContext.activeWriterUserId)
+      : null) || null;
+  const latestSelectedHandoff = selectedHandoffs[0] || null;
+  const selectedPresenceUsers = selectedPresence
+    .map(entry => workspaceUsersById.get(entry.userId) || null)
+    .filter(Boolean) as NonNullable<typeof selectedClaimOwner>[];
 
   const currentRun = selectedRunRecord || selectedRunHistory[0] || null;
   const currentRunIsActive = Boolean(
@@ -1465,6 +1630,23 @@ const Orchestrator = () => {
     !selectedWorkItem?.activeRunId &&
     selectedWorkItem?.phase !== 'DONE' &&
     runtimeReady;
+  const currentActorOwnsSelectedWorkItem = Boolean(
+    selectedWorkItem &&
+      currentActorContext.userId &&
+      (selectedWorkItem.claimOwnerUserId === currentActorContext.userId ||
+        (selectedWorkItem.phaseOwnerTeamId &&
+          currentActorContext.teamIds.includes(selectedWorkItem.phaseOwnerTeamId))),
+  );
+  const currentActorOwnsWriteControl = Boolean(
+    currentActorContext.userId &&
+      selectedEffectiveExecutionContext?.activeWriterUserId === currentActorContext.userId,
+  );
+  const canInitializeExecutionContext = Boolean(selectedWorkItem);
+  const canCreateSharedBranch = Boolean(
+    selectedWorkItem &&
+      selectedExecutionRepository?.localRootHint &&
+      selectedEffectiveExecutionContext?.branch,
+  );
 
   const canRestartFromPhase =
     Boolean(selectedWorkItem && currentRun && !selectedWorkItem.activeRunId) &&
@@ -1674,6 +1856,23 @@ const Orchestrator = () => {
     selectedOpenWait?.type === 'APPROVAL' && Boolean(selectedCodeDiffArtifactId);
   const approvalReviewWait =
     selectedOpenWait?.type === 'APPROVAL' ? selectedOpenWait : approvalReviewWaitSnapshot;
+  const approvalAssignments = approvalReviewWait?.approvalAssignments || [];
+  const approvalDecisions = approvalReviewWait?.approvalDecisions || [];
+  const approvalDecisionByAssignmentId = useMemo(
+    () =>
+      new Map(
+        approvalDecisions
+          .filter((decision): decision is ApprovalDecision & { assignmentId: string } =>
+            Boolean(decision.assignmentId),
+          )
+          .map(decision => [decision.assignmentId, decision]),
+      ),
+    [approvalDecisions],
+  );
+  const unassignedApprovalDecisions = useMemo(
+    () => approvalDecisions.filter(decision => !decision.assignmentId),
+    [approvalDecisions],
+  );
 
   useEffect(() => {
     if (selectedHasCodeDiffApproval) {
@@ -1783,6 +1982,36 @@ const Orchestrator = () => {
   const selectedStageChatMessages = stageChatScopeKey
     ? stageChatByScope[stageChatScopeKey] || []
     : [];
+  const selectedStageChatTimelineMessages = useMemo(
+    () =>
+      selectedWorkItem && selectedAgent
+        ? selectedStageChatMessages.map(message => ({
+            id: message.id,
+            capabilityId: activeCapability.id,
+            role: message.role,
+            content: message.content,
+            timestamp: message.timestamp,
+            agentId: message.role === 'agent' ? selectedAgent.id : undefined,
+            agentName: message.role === 'agent' ? selectedAgent.name : undefined,
+            traceId: message.traceId,
+            model: message.model,
+            sessionId: message.sessionId,
+            sessionScope: message.sessionScope || 'WORK_ITEM',
+            sessionScopeId: message.sessionScopeId || selectedWorkItem.id,
+            workItemId: selectedWorkItem.id,
+            runId: currentRun?.id,
+            workflowStepId: selectedCurrentStep?.id,
+          }))
+        : [],
+    [
+      activeCapability.id,
+      currentRun?.id,
+      selectedAgent,
+      selectedCurrentStep?.id,
+      selectedStageChatMessages,
+      selectedWorkItem,
+    ],
+  );
 
   useEffect(() => {
     stageChatRequestRef.current += 1;
@@ -1810,6 +2039,62 @@ const Orchestrator = () => {
 
     return prompts.slice(0, 3);
   }, [selectedAttentionReason, selectedCurrentStep, selectedWorkItem]);
+  const selectedAgentKnowledgeLens = useMemo(
+    () =>
+      selectedAgent
+        ? buildAgentKnowledgeLens({
+            capability: activeCapability,
+            workspace,
+            agent: selectedAgent,
+            workItemId: selectedWorkItem?.id,
+          })
+        : null,
+    [activeCapability, selectedAgent, selectedWorkItem?.id, workspace],
+  );
+  const selectedInteractionFeed = useMemo(
+    () =>
+      buildCapabilityInteractionFeed({
+        capability: activeCapability,
+        workspace,
+        workItemId: selectedWorkItem?.id,
+        runDetail: selectedRunDetail,
+        runEvents: selectedRunEvents,
+        extraChatMessages: selectedStageChatTimelineMessages,
+        agentId: selectedAgent?.id,
+      }),
+    [
+      activeCapability,
+      selectedAgent?.id,
+      selectedRunDetail,
+      selectedRunEvents,
+      selectedStageChatTimelineMessages,
+      selectedWorkItem?.id,
+      workspace,
+    ],
+  );
+  const handleOpenArtifactFromTimeline = useCallback((artifactId: string) => {
+    setDetailTab('artifacts');
+    setSelectedArtifactId(artifactId);
+  }, []);
+  const handleOpenRunFromTimeline = useCallback(
+    async (runId: string) => {
+      try {
+        const [detail, events] = await Promise.all([
+          fetchCapabilityWorkflowRun(activeCapability.id, runId),
+          fetchCapabilityWorkflowRunEvents(activeCapability.id, runId),
+        ]);
+        setSelectedRunDetail(detail);
+        setSelectedRunEvents(events);
+        setDetailTab('attempts');
+      } catch (error) {
+        showError(
+          'Unable to open run',
+          error instanceof Error ? error.message : 'Unable to load the selected run right now.',
+        );
+      }
+    },
+    [activeCapability.id, showError],
+  );
   const selectedStateSummary = useMemo(() => {
     if (!selectedWorkItem) {
       return 'Select a work item to see the current delivery state.';
@@ -2150,6 +2435,226 @@ const Orchestrator = () => {
     }
   };
 
+  const handleClaimControl = async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    await withAction(
+      'claimControl',
+      async () => {
+        const result = await claimCapabilityWorkItemControl(
+          activeCapability.id,
+          selectedWorkItem.id,
+        );
+        setSelectedClaims(current =>
+          [result.claim, ...current.filter(claim => claim.userId !== result.claim.userId)].slice(0, 5),
+        );
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Operator control claimed',
+        description: `${currentActorContext.displayName} now holds active control for ${selectedWorkItem.title}.`,
+      },
+    );
+  };
+
+  const handleReleaseControl = async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    await withAction(
+      'releaseControl',
+      async () => {
+        await releaseCapabilityWorkItemControl(activeCapability.id, selectedWorkItem.id);
+        setSelectedClaims([]);
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Operator control released',
+        description: `${selectedWorkItem.title} is available for another team member to take over.`,
+      },
+    );
+  };
+
+  const handleInitializeExecutionContext = async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    await withAction(
+      'initExecutionContext',
+      async () => {
+        const context = await initializeCapabilityWorkItemExecutionContext(
+          activeCapability.id,
+          selectedWorkItem.id,
+        );
+        setSelectedExecutionContext(context);
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Execution context prepared',
+        description: `${selectedWorkItem.title} now has a shared repository and branch context.`,
+      },
+    );
+  };
+
+  const handleCreateSharedBranch = async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    await withAction(
+      'createSharedBranch',
+      async () => {
+        const result = await createCapabilityWorkItemSharedBranch(
+          activeCapability.id,
+          selectedWorkItem.id,
+        );
+        setSelectedExecutionContext(result.context);
+        if (currentActorContext.userId) {
+          setSelectedPresence(current =>
+            current.some(entry => entry.userId === currentActorContext.userId)
+              ? current
+              : [
+                  {
+                    capabilityId: activeCapability.id,
+                    workItemId: selectedWorkItem.id,
+                    userId: currentActorContext.userId,
+                    teamId: currentActorContext.teamIds[0],
+                    viewContext: 'WORKBENCH',
+                    lastSeenAt: new Date().toISOString(),
+                  },
+                  ...current,
+                ],
+          );
+        }
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Shared branch ready',
+        description: `${selectedWorkItem.title} can now be worked from the shared branch ${
+          selectedSharedBranch?.sharedBranch || 'context'
+        }.`,
+      },
+    );
+  };
+
+  const handleClaimWriteControl = async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    await withAction(
+      'claimWriteControl',
+      async () => {
+        const result = await claimCapabilityWorkItemWriteControl(
+          activeCapability.id,
+          selectedWorkItem.id,
+        );
+        setSelectedExecutionContext(result.context);
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Write control claimed',
+        description: `${currentActorContext.displayName} is now the active writer for ${selectedWorkItem.title}.`,
+      },
+    );
+  };
+
+  const handleReleaseWriteControl = async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    await withAction(
+      'releaseWriteControl',
+      async () => {
+        await releaseCapabilityWorkItemWriteControl(
+          activeCapability.id,
+          selectedWorkItem.id,
+        );
+        setSelectedExecutionContext(current =>
+          current
+            ? {
+                ...current,
+                activeWriterUserId: undefined,
+                claimExpiresAt: undefined,
+              }
+            : current,
+        );
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Write control released',
+        description: `${selectedWorkItem.title} is ready for another stakeholder to take over the shared branch.`,
+      },
+    );
+  };
+
+  const handleCreateHandoff = async () => {
+    if (!selectedWorkItem || !resolutionNote.trim()) {
+      return;
+    }
+
+    await withAction(
+      'createHandoff',
+      async () => {
+        const packet = await createCapabilityWorkItemHandoff(
+          activeCapability.id,
+          selectedWorkItem.id,
+          {
+            fromUserId: currentActorContext.userId,
+            toUserId: undefined,
+            fromTeamId: currentActorContext.teamIds[0],
+            toTeamId: selectedWorkItem.phaseOwnerTeamId,
+            summary: resolutionNote.trim(),
+            openQuestions: [],
+            blockingDependencies: [],
+            recommendedNextStep: selectedNextActionSummary,
+            artifactIds: selectedWorkItemArtifacts.slice(0, 5).map(artifact => artifact.id),
+            traceIds: selectedRunRecord?.traceId ? [selectedRunRecord.traceId] : [],
+          },
+        );
+        setSelectedHandoffs(current => [packet, ...current]);
+        setResolutionNote('');
+      },
+      {
+        title: 'Handoff packet captured',
+        description: `The shared branch context and next steps are now attached to ${selectedWorkItem.title}.`,
+      },
+    );
+  };
+
+  const handleAcceptLatestHandoff = async () => {
+    if (!selectedWorkItem || !latestSelectedHandoff) {
+      return;
+    }
+
+    await withAction(
+      'acceptHandoff',
+      async () => {
+        const result = await acceptCapabilityWorkItemHandoff(
+          activeCapability.id,
+          selectedWorkItem.id,
+          latestSelectedHandoff.id,
+        );
+        setSelectedExecutionContext(result.context);
+        setSelectedHandoffs(current =>
+          current.map(packet =>
+            packet.id === result.packet.id ? result.packet : packet,
+          ),
+        );
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Handoff accepted',
+        description: `${currentActorContext.displayName} accepted the latest shared-branch handoff for ${selectedWorkItem.title}.`,
+      },
+    );
+  };
+
   const handleCreateWorkItem = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!draftWorkItem.title.trim() || !draftWorkItem.workflowId) {
@@ -2293,7 +2798,7 @@ const Orchestrator = () => {
         if (selectedOpenWait.type === 'APPROVAL') {
           await approveCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
             resolution,
-            resolvedBy: 'Capability Owner',
+            resolvedBy: currentActorContext.displayName,
           });
           setIsDiffReviewOpen(false);
           setIsApprovalReviewOpen(false);
@@ -2301,12 +2806,12 @@ const Orchestrator = () => {
         } else if (selectedOpenWait.type === 'INPUT') {
           await provideCapabilityWorkflowRunInput(activeCapability.id, currentRun.id, {
             resolution,
-            resolvedBy: 'Capability Owner',
+            resolvedBy: currentActorContext.displayName,
           });
         } else {
           await resolveCapabilityWorkflowRunConflict(activeCapability.id, currentRun.id, {
             resolution,
-            resolvedBy: 'Capability Owner',
+            resolvedBy: currentActorContext.displayName,
           });
         }
 
@@ -2341,7 +2846,7 @@ const Orchestrator = () => {
       async () => {
         await requestCapabilityWorkflowRunChanges(activeCapability.id, currentRun.id, {
           resolution,
-          resolvedBy: 'Capability Owner',
+          resolvedBy: currentActorContext.displayName,
         });
         setResolutionNote('');
         setIsDiffReviewOpen(false);
@@ -2374,13 +2879,13 @@ const Orchestrator = () => {
           await restartCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
             restartFromPhase: selectedWorkItem.phase,
             guidance,
-            guidedBy: 'Capability Owner',
+            guidedBy: currentActorContext.displayName,
           });
         } else {
           await startCapabilityWorkflowRun(activeCapability.id, selectedWorkItem.id, {
             restartFromPhase: selectedWorkItem.phase,
             guidance,
-            guidedBy: 'Capability Owner',
+            guidedBy: currentActorContext.displayName,
           });
         }
 
@@ -2556,8 +3061,22 @@ const Orchestrator = () => {
         ? {
             agentId: selectedAgent.id,
             agentName: selectedAgent.name,
+            traceId: message.traceId,
+            model: message.model,
+            sessionId: message.sessionId,
+            sessionScope: message.sessionScope,
+            sessionScopeId: message.sessionScopeId,
+            workItemId: selectedWorkItem.id,
+            runId: currentRun?.id,
+            workflowStepId: selectedCurrentStep?.id,
           }
-        : {}),
+        : {
+            sessionScope: 'WORK_ITEM' as const,
+            sessionScopeId: selectedWorkItem.id,
+            workItemId: selectedWorkItem.id,
+            runId: currentRun?.id,
+            workflowStepId: selectedCurrentStep?.id,
+          }),
     }));
 
     updateStageChatMessages(stageChatScopeKey, current => [...current, userMessage]);
@@ -2631,6 +3150,11 @@ const Orchestrator = () => {
               ? 'recovered'
               : 'interrupted',
           error: streamResult.error,
+          traceId: streamResult.completeEvent?.traceId,
+          model: streamResult.completeEvent?.model || selectedAgent.model,
+          sessionId: streamResult.completeEvent?.sessionId,
+          sessionScope: streamResult.completeEvent?.sessionScope,
+          sessionScopeId: streamResult.completeEvent?.sessionScopeId,
         },
       ]);
       setStageChatDraft('');
@@ -2735,6 +3259,26 @@ const Orchestrator = () => {
 
             <div className="orchestrator-toolbar-row orchestrator-toolbar-row-secondary">
               <div className="orchestrator-filter-strip">
+                <div className="orchestrator-view-toggle" aria-label="Choose work queue">
+                  {[
+                    ['MY_QUEUE', 'My queue'],
+                    ['TEAM_QUEUE', 'Team queue'],
+                    ['ATTENTION', 'Needs approval'],
+                    ['WATCHING', 'Watching'],
+                  ].map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setQueueView(value as WorkbenchQueueView)}
+                      className={cn(
+                        'orchestrator-view-toggle-button',
+                        queueView === value && 'orchestrator-view-toggle-button-active',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
                 <select
                   value={workflowFilter}
                   onChange={event => setWorkflowFilter(event.target.value)}
@@ -2801,6 +3345,15 @@ const Orchestrator = () => {
             <div className="orchestrator-commandbar-footnote">
               <span className="orchestrator-commandbar-footnote-copy">
                 Showing {filteredWorkItems.length} of {workItems.length} work items
+              </span>
+              <span className="orchestrator-commandbar-footnote-copy">
+                {queueView === 'MY_QUEUE'
+                  ? `${currentActorContext.displayName}'s queue`
+                  : queueView === 'TEAM_QUEUE'
+                  ? 'Current team queue'
+                  : queueView === 'ATTENTION'
+                  ? 'Attention queue'
+                  : 'Watching queue'}
               </span>
               <span className="orchestrator-commandbar-footnote-copy">
                 {runtimeError
@@ -3330,6 +3883,23 @@ const Orchestrator = () => {
                       {selectedWorkItem.description ||
                         'No description was captured when this work item was staged into execution.'}
                     </p>
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-secondary">
+                      {selectedPhaseOwnerTeam && (
+                        <span className="rounded-full bg-surface-container px-3 py-1">
+                          Phase owner team: {selectedPhaseOwnerTeam.name}
+                        </span>
+                      )}
+                      {selectedClaimOwner && (
+                        <span className="rounded-full bg-surface-container px-3 py-1">
+                          Active operator: {selectedClaimOwner.name}
+                        </span>
+                      )}
+                      {selectedPresenceUsers.length > 0 && (
+                        <span className="rounded-full bg-surface-container px-3 py-1">
+                          Watching: {selectedPresenceUsers.map(user => user.name).join(', ')}
+                        </span>
+                      )}
+                    </div>
                     <div className="mt-4 flex flex-wrap gap-2">
                       <button
                         type="button"
@@ -3363,6 +3933,18 @@ const Orchestrator = () => {
                       >
                         <MessageSquareText size={16} />
                         Take control
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void (currentActorOwnsSelectedWorkItem
+                            ? handleReleaseControl()
+                            : handleClaimControl())
+                        }
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        <User size={16} />
+                        {currentActorOwnsSelectedWorkItem ? 'Release control' : 'Claim control'}
                       </button>
                     </div>
 
@@ -3512,6 +4094,30 @@ const Orchestrator = () => {
                         </p>
                       </div>
                     </div>
+
+                    <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+                      <CapabilityBriefingPanel
+                        briefing={workspace.briefing}
+                        compact
+                        title="Capability brain"
+                      />
+                      {selectedAgentKnowledgeLens ? (
+                        <AgentKnowledgeLensPanel
+                          lens={selectedAgentKnowledgeLens}
+                          compact
+                          title="What this agent knows now"
+                        />
+                      ) : null}
+                    </div>
+
+                    <InteractionTimeline
+                      feed={selectedInteractionFeed}
+                      maxItems={12}
+                      title="Attempt story"
+                      emptyMessage="This work item has not produced a linked interaction story yet."
+                      onOpenArtifact={handleOpenArtifactFromTimeline}
+                      onOpenRun={runId => void handleOpenRunFromTimeline(runId)}
+                    />
 
                     {selectedAttentionReason && (
                       <div className="workspace-inline-alert workspace-inline-alert-warning">
@@ -3728,6 +4334,160 @@ const Orchestrator = () => {
                       </div>
                     </div>
 
+                    {selectedWorkItem && (
+                      <div className="workspace-meta-card">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Shared branch collaboration</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              {selectedSharedBranch?.sharedBranch ||
+                                'No shared branch has been prepared for this work item yet.'}
+                            </p>
+                            <p className="mt-2 text-sm leading-relaxed text-secondary">
+                              {selectedExecutionRepository
+                                ? `${selectedExecutionRepository.label} · base ${
+                                    selectedSharedBranch?.baseBranch ||
+                                    selectedExecutionRepository.defaultBranch
+                                  }${selectedExecutionRepository.localRootHint ? ` · ${selectedExecutionRepository.localRootHint}` : ''}`
+                                : 'Execution defaults now belong to the work item, not the capability-wide local workspace.'}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleInitializeExecutionContext()}
+                              disabled={!canInitializeExecutionContext || busyAction !== null}
+                              className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {busyAction === 'initExecutionContext' ? (
+                                <LoaderCircle size={16} className="animate-spin" />
+                              ) : (
+                                <WorkflowIcon size={16} />
+                              )}
+                              {selectedEffectiveExecutionContext ? 'Refresh context' : 'Initialize context'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleCreateSharedBranch()}
+                              disabled={!canCreateSharedBranch || busyAction !== null}
+                              className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {busyAction === 'createSharedBranch' ? (
+                                <LoaderCircle size={16} className="animate-spin" />
+                              ) : (
+                                <ArrowRight size={16} />
+                              )}
+                              {selectedSharedBranch?.status === 'ACTIVE'
+                                ? 'Re-open branch'
+                                : 'Create shared branch'}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                          <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                            <p className="workspace-meta-label">Primary repository</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              {selectedExecutionRepository?.label || 'Not attached'}
+                            </p>
+                          </div>
+                          <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                            <p className="workspace-meta-label">Active writer</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              {selectedActiveWriter?.name ||
+                                selectedEffectiveExecutionContext?.activeWriterUserId ||
+                                'No one has claimed write control'}
+                            </p>
+                          </div>
+                          <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                            <p className="workspace-meta-label">Writer claim</p>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void (currentActorOwnsWriteControl
+                                    ? handleReleaseWriteControl()
+                                    : handleClaimWriteControl())
+                                }
+                                disabled={busyAction !== null}
+                                className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                {busyAction === 'claimWriteControl' ||
+                                busyAction === 'releaseWriteControl' ? (
+                                  <LoaderCircle size={14} className="animate-spin" />
+                                ) : (
+                                  <User size={14} />
+                                )}
+                                {currentActorOwnsWriteControl
+                                  ? 'Release write control'
+                                  : 'Take write control'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 grid gap-3 sm:grid-cols-[1.1fr_0.9fr]">
+                          <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div>
+                                <p className="workspace-meta-label">Latest handoff</p>
+                                <p className="mt-2 text-sm leading-relaxed text-secondary">
+                                  {latestSelectedHandoff?.summary ||
+                                    'Capture a handoff packet when another stakeholder needs to continue this same shared branch.'}
+                                </p>
+                              </div>
+                              {latestSelectedHandoff?.acceptedAt ? (
+                                <StatusBadge tone="success">Accepted</StatusBadge>
+                              ) : latestSelectedHandoff ? (
+                                <StatusBadge tone="warning">Pending acceptance</StatusBadge>
+                              ) : (
+                                <StatusBadge tone="neutral">No packet</StatusBadge>
+                              )}
+                            </div>
+                            {latestSelectedHandoff?.recommendedNextStep ? (
+                              <p className="mt-3 text-xs leading-relaxed text-secondary">
+                                Next: {latestSelectedHandoff.recommendedNextStep}
+                              </p>
+                            ) : null}
+                          </div>
+                          <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                            <p className="workspace-meta-label">Handoff actions</p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                onClick={() => void handleCreateHandoff()}
+                                disabled={!resolutionNote.trim() || busyAction !== null}
+                                className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                {busyAction === 'createHandoff' ? (
+                                  <LoaderCircle size={14} className="animate-spin" />
+                                ) : (
+                                  <Send size={14} />
+                                )}
+                                Capture handoff
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleAcceptLatestHandoff()}
+                                disabled={!latestSelectedHandoff || busyAction !== null}
+                                className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                {busyAction === 'acceptHandoff' ? (
+                                  <LoaderCircle size={14} className="animate-spin" />
+                                ) : (
+                                  <ShieldCheck size={14} />
+                                )}
+                                Accept latest handoff
+                              </button>
+                            </div>
+                            <p className="mt-3 text-xs leading-relaxed text-secondary">
+                              Use the guidance note above as the handoff summary so the next stakeholder inherits the branch context, artifacts, and next step clearly.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
                     {selectedCompiledStepContext && (
                       <div className="grid gap-3">
                         <div className="workspace-meta-card">
@@ -3808,6 +4568,66 @@ const Orchestrator = () => {
                               </ul>
                             </div>
                           </div>
+
+                          {selectedCompiledStepContext.ownership && (
+                            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                              <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                                <p className="workspace-meta-label">Primary owner</p>
+                                <p className="mt-2 text-sm font-semibold text-on-surface">
+                                  {selectedCompiledStepContext.ownership.stepOwnerTeamId ||
+                                  selectedCompiledStepContext.ownership.phaseOwnerTeamId
+                                    ? workspaceTeamsById.get(
+                                        selectedCompiledStepContext.ownership.stepOwnerTeamId ||
+                                          selectedCompiledStepContext.ownership.phaseOwnerTeamId ||
+                                          '',
+                                      )?.name ||
+                                      selectedCompiledStepContext.ownership.stepOwnerTeamId ||
+                                      selectedCompiledStepContext.ownership.phaseOwnerTeamId
+                                    : 'Phase default'}
+                                </p>
+                                <p className="mt-1 text-xs text-secondary">
+                                  Current queue routing follows this team unless an operator claim is active.
+                                </p>
+                              </div>
+                              <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                                <p className="workspace-meta-label">Approval routing</p>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {selectedCompiledStepContext.ownership.approvalTeamIds.length > 0 ? (
+                                    selectedCompiledStepContext.ownership.approvalTeamIds.map(
+                                      teamId => (
+                                        <StatusBadge key={teamId} tone="warning">
+                                          {workspaceTeamsById.get(teamId)?.name || teamId}
+                                        </StatusBadge>
+                                      ),
+                                    )
+                                  ) : (
+                                    <span className="text-sm text-secondary">
+                                      No explicit approval team override
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
+                                <p className="workspace-meta-label">Escalation / handoff</p>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {selectedCompiledStepContext.ownership.escalationTeamIds.length > 0 ? (
+                                    selectedCompiledStepContext.ownership.escalationTeamIds.map(
+                                      teamId => (
+                                        <StatusBadge key={teamId} tone="danger">
+                                          {workspaceTeamsById.get(teamId)?.name || teamId}
+                                        </StatusBadge>
+                                      ),
+                                    )
+                                  ) : (
+                                    <StatusBadge tone="neutral">No escalation teams</StatusBadge>
+                                  )}
+                                  {selectedCompiledStepContext.ownership.requireHandoffAcceptance ? (
+                                    <StatusBadge tone="info">Handoff acceptance required</StatusBadge>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
 
                         <div className="grid gap-3 sm:grid-cols-2">
@@ -5076,6 +5896,86 @@ const Orchestrator = () => {
                         </strong>
                       </p>
                     </div>
+                  </div>
+                  <div className="workspace-meta-card">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="workspace-meta-label">Approval coverage</p>
+                        <p className="mt-2 text-sm leading-relaxed text-secondary">
+                          These assignments are the durable approval records for this gate.
+                        </p>
+                      </div>
+                      <StatusBadge tone="info">
+                        {approvalAssignments.length} assignment
+                        {approvalAssignments.length === 1 ? '' : 's'}
+                      </StatusBadge>
+                    </div>
+                    {approvalAssignments.length === 0 ? (
+                      <p className="mt-3 text-sm leading-relaxed text-secondary">
+                        No explicit approval assignments were created for this gate. The phase owner team or legacy approver roles will act as the fallback routing.
+                      </p>
+                    ) : (
+                      <div className="mt-4 space-y-3">
+                        {approvalAssignments.map(assignment => {
+                          const linkedDecision = approvalDecisionByAssignmentId.get(assignment.id);
+                          return (
+                            <div
+                              key={assignment.id}
+                              className="rounded-2xl border border-outline-variant/25 bg-white px-4 py-3"
+                            >
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="text-sm font-semibold text-on-surface">
+                                    {describeApprovalTarget(assignment, {
+                                      usersById: workspaceUsersById,
+                                      teamsById: workspaceTeamsById,
+                                    })}
+                                  </p>
+                                  <p className="mt-1 text-xs text-secondary">
+                                    {formatEnumLabel(assignment.targetType)}
+                                    {assignment.dueAt
+                                      ? ` · Due ${formatTimestamp(assignment.dueAt)}`
+                                      : ''}
+                                  </p>
+                                </div>
+                                <StatusBadge tone={getStatusTone(assignment.status)}>
+                                  {formatEnumLabel(assignment.status)}
+                                </StatusBadge>
+                              </div>
+                              {linkedDecision ? (
+                                <p className="mt-2 text-xs leading-relaxed text-secondary">
+                                  {linkedDecision.actorDisplayName} recorded{' '}
+                                  <strong className="text-on-surface">
+                                    {formatEnumLabel(linkedDecision.disposition)}
+                                  </strong>
+                                  {linkedDecision.comment
+                                    ? ` · ${compactMarkdownPreview(linkedDecision.comment, 120)}`
+                                    : ''}
+                                </p>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {unassignedApprovalDecisions.length > 0 ? (
+                      <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white px-4 py-3">
+                        <p className="workspace-meta-label">Recorded decisions without assignment link</p>
+                        <div className="mt-3 space-y-2">
+                          {unassignedApprovalDecisions.map(decision => (
+                            <p key={decision.id} className="text-xs leading-relaxed text-secondary">
+                              {decision.actorDisplayName} ·{' '}
+                              <strong className="text-on-surface">
+                                {formatEnumLabel(decision.disposition)}
+                              </strong>
+                              {decision.comment
+                                ? ` · ${compactMarkdownPreview(decision.comment, 140)}`
+                                : ''}
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                   {selectedHasCodeDiffApproval && (
                     <button

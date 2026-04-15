@@ -1,5 +1,11 @@
 import { Suspense, lazy, type ReactNode } from 'react';
-import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
+import {
+  BrowserRouter,
+  HashRouter,
+  Routes,
+  Route,
+  useLocation,
+} from 'react-router-dom';
 import { Layout } from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import { CapabilityProvider } from './context/CapabilityContext';
@@ -9,7 +15,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'));
 const WorkflowDesignerNeo = lazy(() => import('./pages/WorkflowDesignerNeo'));
 const Tasks = lazy(() => import('./pages/Tasks'));
 const Ledger = lazy(() => import('./pages/Ledger'));
-const Team = lazy(() => import('./pages/Team'));
+const Agents = lazy(() => import('./pages/Agents'));
 const SkillLibrary = lazy(() => import('./pages/SkillLibrary'));
 const Studio = lazy(() => import('./pages/Studio'));
 const Chat = lazy(() => import('./pages/Chat'));
@@ -17,6 +23,7 @@ const Orchestrator = lazy(() => import('./pages/Orchestrator'));
 const ArtifactDesigner = lazy(() => import('./pages/ArtifactDesigner'));
 const CapabilitySetup = lazy(() => import('./pages/CapabilitySetup'));
 const CapabilityMetadata = lazy(() => import('./pages/CapabilityMetadata'));
+const Architecture = lazy(() => import('./pages/Architecture'));
 const CapabilityDatabases = lazy(() => import('./pages/CapabilityDatabases'));
 const ToolAccess = lazy(() => import('./pages/ToolAccess'));
 const RunConsole = lazy(() => import('./pages/RunConsole'));
@@ -51,6 +58,11 @@ const RouteErrorBoundary = ({ children }: { children: ReactNode }) => {
 };
 
 export default function App() {
+  const Router = typeof window !== 'undefined' &&
+    (window.singularityDesktop?.isDesktop || window.location.protocol === 'file:')
+      ? HashRouter
+      : BrowserRouter;
+
   return (
     <ToastProvider>
       <CapabilityProvider>
@@ -64,7 +76,7 @@ export default function App() {
                   <Route path="/workflow-designer-neo" element={<WorkflowDesignerNeo />} />
                   <Route path="/tasks" element={<Tasks />} />
                   <Route path="/ledger" element={<Ledger />} />
-                  <Route path="/team" element={<Team />} />
+                  <Route path="/team" element={<Agents />} />
                   <Route path="/skills" element={<SkillLibrary />} />
                   <Route path="/studio" element={<Studio />} />
                   <Route path="/chat" element={<Chat />} />
@@ -72,6 +84,7 @@ export default function App() {
                   <Route path="/artifact-designer" element={<ArtifactDesigner />} />
                   <Route path="/capabilities/new" element={<CapabilitySetup />} />
                   <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
+                  <Route path="/architecture" element={<Architecture />} />
                   <Route path="/capabilities/databases" element={<CapabilityDatabases />} />
                   <Route path="/workspace/databases" element={<CapabilityDatabases />} />
                   <Route path="/tool-access" element={<ToolAccess />} />

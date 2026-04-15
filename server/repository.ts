@@ -11,6 +11,7 @@ import {
 import {
   normalizeCapabilityLifecycle,
 } from '../src/lib/capabilityLifecycle';
+import { normalizeCapabilityPhaseOwnershipRules } from '../src/lib/capabilityOwnership';
 import {
   mergeCapabilityDatabaseConfigs,
   normalizeCapabilityDatabaseConfigs,
@@ -18,9 +19,17 @@ import {
 import { normalizeWorkspaceConnectorSettings } from '../src/lib/workspaceConnectors';
 import {
   AgentTask,
+  Artifact,
+  ArtifactTemplateSection,
   Capability,
+  CapabilityAlmExportPayload,
   CapabilityAgent,
+  CapabilityContractDraft,
+  CapabilityDependency,
   CapabilityDatabaseConfig,
+  CapabilityPublishedSnapshot,
+  CapabilityRepository,
+  CapabilitySharedReference,
   CapabilityChatMessage,
   CapabilityMetadataEntry,
   CapabilityStakeholder,
@@ -30,14 +39,32 @@ import {
   Skill,
   WorkspaceCatalogSnapshot,
   WorkspaceFoundationCatalog,
+  WorkspaceOrganization,
   WorkspaceSettings,
   WorkItem,
+  WorkItemBranch,
+  WorkItemCheckoutSession,
+  WorkItemCodeClaim,
+  WorkItemExecutionContext,
   WorkItemPhase,
+  WorkItemRepositoryAssignment,
   WorkItemStatus,
+  WorkItemHandoffPacket,
   Workflow,
 } from '../src/types';
+import {
+  applyCapabilityArchitecture,
+  buildCapabilityAlmExport,
+  createEmptyCapabilityContractDraft,
+  normalizeCapabilityContractDraft,
+  normalizeCapabilityDependencies,
+  normalizeCapabilityKind,
+  normalizeCapabilityPublishedSnapshots,
+  normalizeCapabilitySharedReferences,
+} from '../src/lib/capabilityArchitecture';
 import { query, transaction, getDatabaseRuntimeInfo } from './db';
 import { resolveRuntimeModel } from './githubModels';
+import { syncWorkspaceOrganizationFromCapabilities } from './workspaceOrganization';
 import {
   applyWorkspaceRuntime,
   buildBaseAgents,
@@ -85,6 +112,7 @@ type AppState = {
   capabilities: Capability[];
   capabilityWorkspaces: CapabilityWorkspace[];
   workspaceSettings: WorkspaceSettings;
+  workspaceOrganization: WorkspaceOrganization;
 };
 
 const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
@@ -100,9 +128,206 @@ const asStringArray = (value: unknown): string[] =>
 
 const asJsonArray = <T>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
 
+const toStableSlug = (value: string) =>
+  value
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+
+const normalizeCapabilityRepository = (
+  capabilityId: string,
+  repository: Partial<CapabilityRepository>,
+  fallbackIndex = 0,
+): CapabilityRepository | null => {
+  const url = String(repository.url || '').trim();
+  const label = String(repository.label || '').trim();
+  const defaultBranch = String(repository.defaultBranch || '').trim() || 'main';
+
+  if (!url && !label) {
+    return null;
+  }
+
+  return {
+    id:
+      String(repository.id || '').trim() ||
+      `REPO-${toStableSlug(capabilityId)}-${
+        toStableSlug(url || label || `REPOSITORY-${fallbackIndex + 1}`) ||
+        `REPOSITORY-${fallbackIndex + 1}`
+      }`,
+    capabilityId,
+    label: label || url.split('/').pop()?.replace(/\.git$/i, '') || `Repository ${fallbackIndex + 1}`,
+    url: url || label,
+    defaultBranch,
+    localRootHint: String(repository.localRootHint || '').trim() || undefined,
+    isPrimary: Boolean(repository.isPrimary),
+    status: repository.status || 'ACTIVE',
+  };
+};
+
+const buildLegacyCapabilityRepositories = (
+  capabilityId: string,
+  gitRepositories: string[],
+  localDirectories: string[],
+): CapabilityRepository[] => {
+  const repoUrls = gitRepositories.map(value => String(value || '').trim()).filter(Boolean);
+  const repoRoots = localDirectories.map(value => String(value || '').trim()).filter(Boolean);
+  const total = Math.max(repoUrls.length, repoRoots.length);
+
+  return Array.from({ length: total }).flatMap((_, index) => {
+    const normalized = normalizeCapabilityRepository(
+      capabilityId,
+      {
+        label: repoUrls[index]
+          ? repoUrls[index].split('/').pop()?.replace(/\.git$/i, '')
+          : repoRoots[index]
+          ? repoRoots[index].split('/').pop()
+          : `Repository ${index + 1}`,
+        url: repoUrls[index] || repoRoots[index] || '',
+        defaultBranch: 'main',
+        localRootHint: repoRoots[index] || undefined,
+        isPrimary: index === 0,
+        status: 'ACTIVE',
+      },
+      index,
+    );
+
+    return normalized ? [normalized] : [];
+  });
+};
+
+const normalizeCapabilityRepositories = (
+  capabilityId: string,
+  repositories: Array<Partial<CapabilityRepository>> | undefined,
+  gitRepositories: string[],
+  localDirectories: string[],
+): CapabilityRepository[] => {
+  const normalized = (repositories || [])
+    .map((repository, index) =>
+      normalizeCapabilityRepository(capabilityId, repository, index),
+    )
+    .filter(Boolean) as CapabilityRepository[];
+
+  if (normalized.length === 0) {
+    return buildLegacyCapabilityRepositories(capabilityId, gitRepositories, localDirectories);
+  }
+
+  return normalized.map((repository, index) => ({
+    ...repository,
+    isPrimary: index === 0 ? true : repository.isPrimary,
+  }));
+};
+
+const toLegacyRepositoryLists = (repositories: CapabilityRepository[]) => ({
+  gitRepositories: Array.from(
+    new Set(
+      repositories
+        .filter(repository => repository.status !== 'ARCHIVED')
+        .map(repository => repository.url)
+        .filter(Boolean),
+    ),
+  ),
+  localDirectories: Array.from(
+    new Set(
+      repositories
+        .filter(repository => repository.status !== 'ARCHIVED')
+        .map(repository => repository.localRootHint)
+        .filter(Boolean) as string[],
+    ),
+  ),
+});
+
+const repositoryAssignmentFromRow = (
+  row: Record<string, any>,
+): WorkItemRepositoryAssignment => ({
+  workItemId: row.work_item_id,
+  repositoryId: row.repository_id,
+  role: row.role,
+  checkoutRequired: Boolean(row.checkout_required),
+});
+
+const workItemBranchFromRow = (row: Record<string, any>): WorkItemBranch => ({
+  id: row.id,
+  workItemId: row.work_item_id,
+  repositoryId: row.repository_id,
+  baseBranch: row.base_branch,
+  sharedBranch: row.shared_branch,
+  createdByUserId: row.created_by_user_id || undefined,
+  createdAt:
+    row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ''),
+  headSha: row.head_sha || undefined,
+  linkedPrUrl: row.linked_pr_url || undefined,
+  status: row.status,
+});
+
+const workItemCodeClaimFromRow = (row: Record<string, any>): WorkItemCodeClaim => ({
+  workItemId: row.work_item_id,
+  userId: row.user_id,
+  teamId: row.team_id || undefined,
+  claimType: row.claim_type,
+  status: row.status,
+  claimedAt:
+    row.claimed_at instanceof Date ? row.claimed_at.toISOString() : String(row.claimed_at || ''),
+  expiresAt:
+    row.expires_at instanceof Date ? row.expires_at.toISOString() : String(row.expires_at || ''),
+  releasedAt:
+    row.released_at instanceof Date
+      ? row.released_at.toISOString()
+      : row.released_at
+      ? String(row.released_at)
+      : undefined,
+});
+
+const workItemCheckoutSessionFromRow = (
+  row: Record<string, any>,
+): WorkItemCheckoutSession => ({
+  workItemId: row.work_item_id,
+  userId: row.user_id,
+  repositoryId: row.repository_id,
+  localPath: row.local_path || undefined,
+  branch: row.branch,
+  lastSeenHeadSha: row.last_seen_head_sha || undefined,
+  lastSyncedAt:
+    row.last_synced_at instanceof Date
+      ? row.last_synced_at.toISOString()
+      : row.last_synced_at
+      ? String(row.last_synced_at)
+      : undefined,
+});
+
+const workItemHandoffPacketFromRow = (
+  row: Record<string, any>,
+): WorkItemHandoffPacket => ({
+  id: row.id,
+  workItemId: row.work_item_id,
+  fromUserId: row.from_user_id || undefined,
+  toUserId: row.to_user_id || undefined,
+  fromTeamId: row.from_team_id || undefined,
+  toTeamId: row.to_team_id || undefined,
+  summary: row.summary,
+  openQuestions: asStringArray(row.open_questions),
+  blockingDependencies: asStringArray(row.blocking_dependencies),
+  recommendedNextStep: row.recommended_next_step || undefined,
+  artifactIds: asStringArray(row.artifact_ids),
+  traceIds: asStringArray(row.trace_ids),
+  createdAt:
+    row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ''),
+  acceptedAt:
+    row.accepted_at instanceof Date
+      ? row.accepted_at.toISOString()
+      : row.accepted_at
+      ? String(row.accepted_at)
+      : undefined,
+});
+
 const capabilityFromRow = (
   row: Record<string, any>,
   skills: Skill[],
+  repositories: CapabilityRepository[] = [],
+  dependencies: CapabilityDependency[] = [],
+  sharedReferences: CapabilitySharedReference[] = [],
+  publishedSnapshots: CapabilityPublishedSnapshot[] = [],
   workspaceSettings: WorkspaceSettings = DEFAULT_WORKSPACE_SETTINGS,
 ): Capability => ({
   id: row.id,
@@ -110,6 +335,8 @@ const capabilityFromRow = (
   description: row.description,
   domain: row.domain || undefined,
   parentCapabilityId: row.parent_capability_id || undefined,
+  capabilityKind: normalizeCapabilityKind(row.capability_kind, row.collection_kind),
+  collectionKind: row.collection_kind || undefined,
   businessUnit: row.business_unit || undefined,
   ownerTeam: row.owner_team || undefined,
   businessOutcome: row.business_outcome || undefined,
@@ -129,10 +356,27 @@ const capabilityFromRow = (
   ),
   gitRepositories: asStringArray(row.git_repositories),
   localDirectories: asStringArray(row.local_directories),
+  repositories: normalizeCapabilityRepositories(
+    row.id,
+    repositories,
+    asStringArray(row.git_repositories),
+    asStringArray(row.local_directories),
+  ),
   teamNames: asStringArray(row.team_names),
   stakeholders: asJsonArray<CapabilityStakeholder>(row.stakeholders),
   additionalMetadata: asJsonArray<CapabilityMetadataEntry>(row.additional_metadata),
+  dependencies: normalizeCapabilityDependencies(row.id, dependencies),
+  sharedCapabilities: normalizeCapabilitySharedReferences(row.id, sharedReferences),
+  contractDraft: normalizeCapabilityContractDraft(
+    row.contract_draft as Partial<CapabilityContractDraft> | undefined,
+  ),
+  publishedSnapshots: normalizeCapabilityPublishedSnapshots(row.id, publishedSnapshots),
   lifecycle: normalizeCapabilityLifecycle(row.lifecycle || undefined),
+  phaseOwnershipRules: normalizeCapabilityPhaseOwnershipRules({
+    lifecycle: normalizeCapabilityLifecycle(row.lifecycle || undefined),
+    ownerTeam: row.owner_team || undefined,
+    phaseOwnershipRules: asJsonArray(row.phase_ownership_rules),
+  }),
   executionConfig: normalizeExecutionConfig(
     { localDirectories: asStringArray(row.local_directories) },
     row.execution_config || undefined,
@@ -194,6 +438,383 @@ const workspaceFoundationCatalogFromRow = (
       ? String(row.foundations_initialized_at)
       : undefined,
 });
+
+const listCapabilityRepositoriesTx = async (
+  client: PoolClient,
+  capabilityId: string,
+  legacy?: {
+    gitRepositories: string[];
+    localDirectories: string[];
+  },
+): Promise<CapabilityRepository[]> => {
+  const result = await client.query(
+    `
+      SELECT *
+      FROM capability_repositories
+      WHERE capability_id = $1
+      ORDER BY is_primary DESC, created_at ASC, id ASC
+    `,
+    [capabilityId],
+  );
+
+  if (result.rowCount === 0) {
+    return buildLegacyCapabilityRepositories(
+      capabilityId,
+      legacy?.gitRepositories || [],
+      legacy?.localDirectories || [],
+    );
+  }
+
+  return result.rows
+    .map((row, index) =>
+      normalizeCapabilityRepository(
+        capabilityId,
+        {
+          id: row.id,
+          label: row.label,
+          url: row.url,
+          defaultBranch: row.default_branch,
+          localRootHint: row.local_root_hint || undefined,
+          isPrimary: row.is_primary,
+          status: row.status,
+        },
+        index,
+      ),
+    )
+    .filter(Boolean) as CapabilityRepository[];
+};
+
+const replaceCapabilityRepositoriesTx = async (
+  client: PoolClient,
+  capabilityId: string,
+  repositories: CapabilityRepository[],
+) => {
+  await client.query('DELETE FROM capability_repositories WHERE capability_id = $1', [
+    capabilityId,
+  ]);
+
+  for (const repository of repositories) {
+    await client.query(
+      `
+        INSERT INTO capability_repositories (
+          capability_id,
+          id,
+          label,
+          url,
+          default_branch,
+          local_root_hint,
+          is_primary,
+          status,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,${withUpdatedTimestamp})
+      `,
+      [
+        capabilityId,
+        repository.id,
+        repository.label,
+        repository.url,
+        repository.defaultBranch,
+        repository.localRootHint || null,
+        repository.isPrimary,
+        repository.status || 'ACTIVE',
+      ],
+    );
+  }
+};
+
+const listCapabilityDependenciesTx = async (
+  client: PoolClient,
+  capabilityId: string,
+): Promise<CapabilityDependency[]> => {
+  const result = await client.query(
+    `
+      SELECT *
+      FROM capability_dependencies
+      WHERE capability_id = $1
+      ORDER BY updated_at ASC, created_at ASC, id ASC
+    `,
+    [capabilityId],
+  );
+
+  return normalizeCapabilityDependencies(
+    capabilityId,
+    result.rows.map(row => ({
+      id: row.id,
+      capabilityId,
+      targetCapabilityId: row.target_capability_id,
+      dependencyKind: row.dependency_kind,
+      description: row.description,
+      criticality: row.criticality,
+      versionConstraint: row.version_constraint || undefined,
+    })),
+  );
+};
+
+const replaceCapabilityDependenciesTx = async (
+  client: PoolClient,
+  capabilityId: string,
+  dependencies: CapabilityDependency[],
+) => {
+  await client.query('DELETE FROM capability_dependencies WHERE capability_id = $1', [
+    capabilityId,
+  ]);
+
+  for (const dependency of normalizeCapabilityDependencies(capabilityId, dependencies)) {
+    await client.query(
+      `
+        INSERT INTO capability_dependencies (
+          capability_id,
+          id,
+          target_capability_id,
+          dependency_kind,
+          description,
+          criticality,
+          version_constraint,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,${withUpdatedTimestamp})
+      `,
+      [
+        capabilityId,
+        dependency.id,
+        dependency.targetCapabilityId,
+        dependency.dependencyKind,
+        dependency.description,
+        dependency.criticality,
+        dependency.versionConstraint || null,
+      ],
+    );
+  }
+};
+
+const listCapabilitySharedReferencesTx = async (
+  client: PoolClient,
+  capabilityId: string,
+): Promise<CapabilitySharedReference[]> => {
+  const result = await client.query(
+    `
+      SELECT *
+      FROM capability_shared_references
+      WHERE collection_capability_id = $1
+      ORDER BY updated_at ASC, created_at ASC, id ASC
+    `,
+    [capabilityId],
+  );
+
+  return normalizeCapabilitySharedReferences(
+    capabilityId,
+    result.rows.map(row => ({
+      id: row.id,
+      collectionCapabilityId: capabilityId,
+      memberCapabilityId: row.member_capability_id,
+      label: row.label || undefined,
+    })),
+  );
+};
+
+const replaceCapabilitySharedReferencesTx = async (
+  client: PoolClient,
+  capabilityId: string,
+  references: CapabilitySharedReference[],
+) => {
+  await client.query(
+    'DELETE FROM capability_shared_references WHERE collection_capability_id = $1',
+    [capabilityId],
+  );
+
+  for (const reference of normalizeCapabilitySharedReferences(capabilityId, references)) {
+    await client.query(
+      `
+        INSERT INTO capability_shared_references (
+          collection_capability_id,
+          id,
+          member_capability_id,
+          label,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,${withUpdatedTimestamp})
+      `,
+      [
+        capabilityId,
+        reference.id,
+        reference.memberCapabilityId,
+        reference.label || null,
+      ],
+    );
+  }
+};
+
+const listCapabilityPublishedSnapshotsTx = async (
+  client: PoolClient,
+  capabilityId: string,
+): Promise<CapabilityPublishedSnapshot[]> => {
+  const result = await client.query(
+    `
+      SELECT *
+      FROM capability_published_snapshots
+      WHERE capability_id = $1
+      ORDER BY publish_version DESC, published_at DESC, created_at DESC
+    `,
+    [capabilityId],
+  );
+
+  return normalizeCapabilityPublishedSnapshots(
+    capabilityId,
+    result.rows.map(row => ({
+      id: row.id,
+      capabilityId,
+      publishVersion:
+        typeof row.publish_version === 'number'
+          ? row.publish_version
+          : Number(row.publish_version || 0),
+      publishedAt:
+        row.published_at instanceof Date
+          ? row.published_at.toISOString()
+          : String(row.published_at || ''),
+      publishedBy: row.published_by,
+      supersedesSnapshotId: row.supersedes_snapshot_id || undefined,
+      contract: row.snapshot_json,
+    })),
+  );
+};
+
+const createCapabilityPublishedSnapshotTx = async (
+  client: PoolClient,
+  capabilityId: string,
+  snapshot: CapabilityPublishedSnapshot,
+) => {
+  await client.query(
+    `
+      INSERT INTO capability_published_snapshots (
+        capability_id,
+        id,
+        publish_version,
+        published_at,
+        published_by,
+        supersedes_snapshot_id,
+        snapshot_json,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4::timestamptz,$5,$6,$7::jsonb,${withUpdatedTimestamp})
+    `,
+    [
+      capabilityId,
+      snapshot.id,
+      snapshot.publishVersion,
+      snapshot.publishedAt,
+      snapshot.publishedBy,
+      snapshot.supersedesSnapshotId || null,
+      JSON.stringify(normalizeCapabilityContractDraft(snapshot.contract)),
+    ],
+  );
+};
+
+const buildWorkItemExecutionContextsTx = async (
+  client: PoolClient,
+  capabilityId: string,
+): Promise<Map<string, WorkItemExecutionContext>> => {
+  const [assignmentResult, branchResult, claimResult] = await Promise.all([
+    client.query(
+      `
+        SELECT *
+        FROM capability_work_item_repository_assignments
+        WHERE capability_id = $1
+        ORDER BY created_at ASC
+      `,
+      [capabilityId],
+    ),
+    client.query(
+      `
+        SELECT *
+        FROM capability_work_item_branches
+        WHERE capability_id = $1
+        ORDER BY created_at DESC
+      `,
+      [capabilityId],
+    ),
+    client.query(
+      `
+        SELECT *
+        FROM capability_work_item_code_claims
+        WHERE capability_id = $1
+          AND status = 'ACTIVE'
+          AND claim_type = 'WRITE'
+        ORDER BY claimed_at DESC
+      `,
+      [capabilityId],
+    ),
+  ]);
+
+  const assignmentsByWorkItem = new Map<string, WorkItemRepositoryAssignment[]>();
+  for (const row of assignmentResult.rows) {
+    const assignment = repositoryAssignmentFromRow(row);
+    const next = assignmentsByWorkItem.get(assignment.workItemId) || [];
+    next.push(assignment);
+    assignmentsByWorkItem.set(assignment.workItemId, next);
+  }
+
+  const branchesByWorkItem = new Map<string, WorkItemBranch[]>();
+  for (const row of branchResult.rows) {
+    const branch = workItemBranchFromRow(row);
+    const next = branchesByWorkItem.get(branch.workItemId) || [];
+    next.push(branch);
+    branchesByWorkItem.set(branch.workItemId, next);
+  }
+
+  const activeClaimByWorkItem = new Map<string, WorkItemCodeClaim>();
+  for (const row of claimResult.rows) {
+    const claim = workItemCodeClaimFromRow(row);
+    if (!activeClaimByWorkItem.has(claim.workItemId)) {
+      activeClaimByWorkItem.set(claim.workItemId, claim);
+    }
+  }
+
+  const workItemIds = new Set<string>([
+    ...assignmentsByWorkItem.keys(),
+    ...branchesByWorkItem.keys(),
+    ...activeClaimByWorkItem.keys(),
+  ]);
+  const contexts = new Map<string, WorkItemExecutionContext>();
+
+  for (const workItemId of workItemIds) {
+    const assignments = assignmentsByWorkItem.get(workItemId) || [];
+    const branches = branchesByWorkItem.get(workItemId) || [];
+    const activeBranch =
+      branches.find(branch => branch.status === 'ACTIVE') ||
+      branches.find(branch => branch.status === 'NOT_CREATED') ||
+      branches[0];
+    const activeClaim = activeClaimByWorkItem.get(workItemId);
+    const primaryRepositoryId =
+      assignments.find(assignment => assignment.role === 'PRIMARY')?.repositoryId ||
+      activeBranch?.repositoryId ||
+      assignments[0]?.repositoryId;
+
+    contexts.set(workItemId, {
+      workItemId,
+      primaryRepositoryId,
+      repositoryAssignments:
+        assignments.length > 0
+          ? assignments
+          : activeBranch
+          ? [
+              {
+                workItemId,
+                repositoryId: activeBranch.repositoryId,
+                role: 'PRIMARY',
+                checkoutRequired: true,
+              },
+            ]
+          : [],
+      branch: activeBranch,
+      activeWriterUserId: activeClaim?.userId,
+      claimExpiresAt: activeClaim?.expiresAt,
+      strategy: 'SHARED_BRANCH',
+    });
+  }
+
+  return contexts;
+};
 
 const getWorkspaceFoundationCatalogTx = async (
   client: PoolClient,
@@ -272,6 +893,14 @@ const messageFromRow = (row: Record<string, any>): CapabilityChatMessage => ({
   timestamp: row.timestamp,
   agentId: row.agent_id || undefined,
   agentName: row.agent_name || undefined,
+  traceId: row.trace_id || undefined,
+  model: row.model || undefined,
+  sessionId: row.session_id || undefined,
+  sessionScope: row.session_scope || undefined,
+  sessionScopeId: row.session_scope_id || undefined,
+  workItemId: row.work_item_id || undefined,
+  runId: row.run_id || undefined,
+  workflowStepId: row.workflow_step_id || undefined,
 });
 
 const workflowFromRow = (
@@ -298,7 +927,7 @@ const workflowFromRow = (
     capability.lifecycle,
   );
 
-const artifactFromRow = (row: Record<string, any>) => ({
+const artifactFromRow = (row: Record<string, any>): Artifact => ({
   id: row.id,
   name: row.name,
   capabilityId: row.capability_id,
@@ -308,6 +937,7 @@ const artifactFromRow = (row: Record<string, any>) => ({
   agent: row.agent,
   created: row.created,
   template: row.template || undefined,
+  templateSections: asJsonArray<ArtifactTemplateSection>(row.template_sections),
   documentationStatus: row.documentation_status || undefined,
   isLearningArtifact: row.is_learning_artifact ?? undefined,
   isMasterArtifact: row.is_master_artifact ?? undefined,
@@ -400,7 +1030,10 @@ const learningUpdateFromRow = (row: Record<string, any>): LearningUpdate =>
     relatedRunId: row.related_run_id || undefined,
   });
 
-const workItemFromRow = (row: Record<string, any>): WorkItem => ({
+const workItemFromRow = (
+  row: Record<string, any>,
+  executionContext?: WorkItemExecutionContext,
+): WorkItem => ({
   id: row.id,
   title: row.title,
   description: row.description,
@@ -413,6 +1046,13 @@ const workItemFromRow = (row: Record<string, any>): WorkItem => ({
   workflowId: row.workflow_id,
   currentStepId: row.current_step_id || undefined,
   assignedAgentId: row.assigned_agent_id || undefined,
+  phaseOwnerTeamId: row.phase_owner_team_id || undefined,
+  claimOwnerUserId: row.claim_owner_user_id || undefined,
+  watchedByUserIds: asStringArray(row.watched_by_user_ids),
+  pendingHandoff:
+    row.pending_handoff && typeof row.pending_handoff === 'object'
+      ? row.pending_handoff
+      : undefined,
   status: row.status,
   priority: row.priority,
   tags: asStringArray(row.tags),
@@ -420,15 +1060,28 @@ const workItemFromRow = (row: Record<string, any>): WorkItem => ({
   blocker: row.blocker || undefined,
   activeRunId: row.active_run_id || undefined,
   lastRunId: row.last_run_id || undefined,
+  recordVersion:
+    typeof row.record_version === 'number' && Number.isFinite(row.record_version)
+      ? row.record_version
+      : Number(row.record_version || 1) || 1,
+  executionContext,
   history: asJsonArray<WorkItem['history'][number]>(row.history),
 });
 
 const workspaceCreatedAt = (row: Record<string, any> | undefined) =>
   row?.created_at instanceof Date ? row.created_at.toISOString() : new Date().toISOString();
 
-const mergeCapability = (current: Capability, updates: Partial<Capability>): Capability => ({
-  ...current,
-  ...updates,
+const mergeCapability = (current: Capability, updates: Partial<Capability>): Capability => {
+  const capabilityKind = normalizeCapabilityKind(
+    updates.capabilityKind ?? current.capabilityKind,
+    updates.collectionKind ?? current.collectionKind,
+  );
+
+  return {
+    ...current,
+    ...updates,
+    capabilityKind,
+    collectionKind: updates.collectionKind ?? current.collectionKind,
   successMetrics: updates.successMetrics ?? current.successMetrics,
   requiredEvidenceKinds:
     updates.requiredEvidenceKinds ?? current.requiredEvidenceKinds,
@@ -437,17 +1090,70 @@ const mergeCapability = (current: Capability, updates: Partial<Capability>): Cap
   databases: updates.databases ?? current.databases,
   databaseConfigs:
     updates.databaseConfigs ?? current.databaseConfigs ?? [],
-  gitRepositories: updates.gitRepositories ?? current.gitRepositories,
-  localDirectories: updates.localDirectories ?? current.localDirectories,
+  gitRepositories:
+    updates.repositories !== undefined
+      ? toLegacyRepositoryLists(
+          normalizeCapabilityRepositories(
+            current.id,
+            updates.repositories,
+            updates.gitRepositories ?? current.gitRepositories,
+            updates.localDirectories ?? current.localDirectories,
+          ),
+        ).gitRepositories
+      : updates.gitRepositories ?? current.gitRepositories,
+  localDirectories:
+    updates.repositories !== undefined
+      ? toLegacyRepositoryLists(
+          normalizeCapabilityRepositories(
+            current.id,
+            updates.repositories,
+            updates.gitRepositories ?? current.gitRepositories,
+            updates.localDirectories ?? current.localDirectories,
+          ),
+        ).localDirectories
+      : updates.localDirectories ?? current.localDirectories,
+  repositories:
+    updates.repositories !== undefined
+      ? normalizeCapabilityRepositories(
+          current.id,
+          updates.repositories,
+          updates.gitRepositories ?? current.gitRepositories,
+          updates.localDirectories ?? current.localDirectories,
+        )
+      : current.repositories,
   teamNames: updates.teamNames ?? current.teamNames,
   stakeholders: updates.stakeholders ?? current.stakeholders,
   additionalMetadata: updates.additionalMetadata ?? current.additionalMetadata,
+  dependencies: normalizeCapabilityDependencies(
+    current.id,
+    updates.dependencies ?? current.dependencies,
+  ),
+  sharedCapabilities:
+    capabilityKind === 'COLLECTION'
+      ? normalizeCapabilitySharedReferences(
+          current.id,
+          updates.sharedCapabilities ?? current.sharedCapabilities,
+        )
+      : [],
+  contractDraft: normalizeCapabilityContractDraft(
+    updates.contractDraft ?? current.contractDraft ?? createEmptyCapabilityContractDraft(),
+  ),
+  publishedSnapshots: normalizeCapabilityPublishedSnapshots(
+    current.id,
+    updates.publishedSnapshots ?? current.publishedSnapshots,
+  ),
   lifecycle: normalizeCapabilityLifecycle(updates.lifecycle ?? current.lifecycle),
+  phaseOwnershipRules: normalizeCapabilityPhaseOwnershipRules({
+    lifecycle: normalizeCapabilityLifecycle(updates.lifecycle ?? current.lifecycle),
+    ownerTeam: updates.ownerTeam ?? current.ownerTeam,
+    phaseOwnershipRules: updates.phaseOwnershipRules ?? current.phaseOwnershipRules,
+  }),
   executionConfig:
     updates.executionConfig ??
     normalizeExecutionConfig(current, current.executionConfig),
   skillLibrary: updates.skillLibrary ?? current.skillLibrary,
-});
+  };
+};
 
 const collectLegacyWorkspaceDatabaseConfigsTx = async (
   client: PoolClient,
@@ -556,7 +1262,72 @@ const upsertWorkspaceSettingsTx = async (
   } satisfies WorkspaceSettings;
 };
 
+const assertCapabilityHierarchyValidTx = async (
+  client: PoolClient,
+  capability: Capability,
+) => {
+  const parentId = String(capability.parentCapabilityId || '').trim();
+  if (!parentId) {
+    return;
+  }
+
+  if (parentId === capability.id) {
+    throw new Error('A capability cannot be its own parent.');
+  }
+
+  const parentResult = await client.query(
+    'SELECT id, parent_capability_id FROM capabilities WHERE id = $1 LIMIT 1',
+    [parentId],
+  );
+  if (!parentResult.rowCount) {
+    throw new Error(`Parent capability ${parentId} could not be found.`);
+  }
+
+  const visited = new Set<string>([capability.id]);
+  let cursor = parentResult.rows[0] as { id: string; parent_capability_id?: string | null };
+  while (cursor) {
+    if (visited.has(cursor.id)) {
+      throw new Error('The selected parent would create a hierarchy cycle.');
+    }
+    visited.add(cursor.id);
+    const nextParentId = String(cursor.parent_capability_id || '').trim();
+    if (!nextParentId) {
+      break;
+    }
+    const nextResult = await client.query(
+      'SELECT id, parent_capability_id FROM capabilities WHERE id = $1 LIMIT 1',
+      [nextParentId],
+    );
+    cursor = nextResult.rows[0] as { id: string; parent_capability_id?: string | null };
+  }
+};
+
 const upsertCapabilityTx = async (client: PoolClient, capability: Capability) => {
+  const repositories = normalizeCapabilityRepositories(
+    capability.id,
+    capability.repositories,
+    capability.gitRepositories,
+    capability.localDirectories,
+  );
+  const legacyLists = toLegacyRepositoryLists(repositories);
+  const normalizedDependencies = normalizeCapabilityDependencies(
+    capability.id,
+    capability.dependencies,
+  );
+  const normalizedSharedReferences =
+    normalizeCapabilityKind(capability.capabilityKind, capability.collectionKind) ===
+    'COLLECTION'
+      ? normalizeCapabilitySharedReferences(
+          capability.id,
+          capability.sharedCapabilities,
+        )
+      : [];
+  const normalizedContractDraft = normalizeCapabilityContractDraft(
+    capability.contractDraft ?? createEmptyCapabilityContractDraft(),
+  );
+
+  await assertCapabilityHierarchyValidTx(client, capability);
+
   await client.query(
     `
       INSERT INTO capabilities (
@@ -565,6 +1336,8 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         description,
         domain,
         parent_capability_id,
+        capability_kind,
+        collection_kind,
         business_unit,
         owner_team,
         business_outcome,
@@ -584,7 +1357,9 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         team_names,
         stakeholders,
         additional_metadata,
+        contract_draft,
         lifecycle,
+        phase_ownership_rules,
         execution_config,
         status,
         special_agent_id,
@@ -593,13 +1368,15 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         updated_at
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,${withUpdatedTimestamp}
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,${withUpdatedTimestamp}
       )
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
         description = EXCLUDED.description,
         domain = EXCLUDED.domain,
         parent_capability_id = EXCLUDED.parent_capability_id,
+        capability_kind = EXCLUDED.capability_kind,
+        collection_kind = EXCLUDED.collection_kind,
         business_unit = EXCLUDED.business_unit,
         owner_team = EXCLUDED.owner_team,
         business_outcome = EXCLUDED.business_outcome,
@@ -619,7 +1396,9 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
         team_names = EXCLUDED.team_names,
         stakeholders = EXCLUDED.stakeholders,
         additional_metadata = EXCLUDED.additional_metadata,
+        contract_draft = EXCLUDED.contract_draft,
         lifecycle = EXCLUDED.lifecycle,
+        phase_ownership_rules = EXCLUDED.phase_ownership_rules,
         execution_config = EXCLUDED.execution_config,
         status = EXCLUDED.status,
         special_agent_id = EXCLUDED.special_agent_id,
@@ -633,6 +1412,8 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
       capability.description,
       capability.domain || null,
       capability.parentCapabilityId || null,
+      normalizeCapabilityKind(capability.capabilityKind, capability.collectionKind),
+      capability.collectionKind || null,
       capability.businessUnit || null,
       capability.ownerTeam || null,
       capability.businessOutcome || null,
@@ -649,18 +1430,27 @@ const upsertCapabilityTx = async (client: PoolClient, capability: Capability) =>
       JSON.stringify(
         normalizeCapabilityDatabaseConfigs(capability.databaseConfigs),
       ),
-      capability.gitRepositories,
-      capability.localDirectories,
+      legacyLists.gitRepositories,
+      legacyLists.localDirectories,
       capability.teamNames,
       JSON.stringify(capability.stakeholders),
       JSON.stringify(capability.additionalMetadata),
+      JSON.stringify(normalizedContractDraft),
       JSON.stringify(normalizeCapabilityLifecycle(capability.lifecycle)),
+      JSON.stringify(normalizeCapabilityPhaseOwnershipRules(capability)),
       JSON.stringify(normalizeExecutionConfig(capability, capability.executionConfig)),
       capability.status,
       capability.specialAgentId || null,
       capability.isSystemCapability || false,
       capability.systemCapabilityRole || null,
     ],
+  );
+  await replaceCapabilityRepositoriesTx(client, capability.id, repositories);
+  await replaceCapabilityDependenciesTx(client, capability.id, normalizedDependencies);
+  await replaceCapabilitySharedReferencesTx(
+    client,
+    capability.id,
+    normalizedSharedReferences,
   );
 };
 
@@ -859,9 +1649,17 @@ const replaceMessagesTx = async (
           content,
           timestamp,
           agent_id,
-          agent_name
+          agent_name,
+          trace_id,
+          model,
+          session_id,
+          session_scope,
+          session_scope_id,
+          work_item_id,
+          run_id,
+          workflow_step_id
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       `,
       [
         capabilityId,
@@ -871,6 +1669,14 @@ const replaceMessagesTx = async (
         message.timestamp,
         message.agentId || null,
         message.agentName || null,
+        message.traceId || null,
+        message.model || null,
+        message.sessionId || null,
+        message.sessionScope || null,
+        message.sessionScopeId || null,
+        message.workItemId || null,
+        message.runId || null,
+        message.workflowStepId || null,
       ],
     );
   }
@@ -890,14 +1696,30 @@ const appendMessageTx = async (
         content,
         timestamp,
         agent_id,
-        agent_name
+        agent_name,
+        trace_id,
+        model,
+        session_id,
+        session_scope,
+        session_scope_id,
+        work_item_id,
+        run_id,
+        workflow_step_id
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       ON CONFLICT (capability_id, id) DO UPDATE SET
         content = EXCLUDED.content,
         timestamp = EXCLUDED.timestamp,
         agent_id = EXCLUDED.agent_id,
-        agent_name = EXCLUDED.agent_name
+        agent_name = EXCLUDED.agent_name,
+        trace_id = EXCLUDED.trace_id,
+        model = EXCLUDED.model,
+        session_id = EXCLUDED.session_id,
+        session_scope = EXCLUDED.session_scope,
+        session_scope_id = EXCLUDED.session_scope_id,
+        work_item_id = EXCLUDED.work_item_id,
+        run_id = EXCLUDED.run_id,
+        workflow_step_id = EXCLUDED.workflow_step_id
     `,
     [
       capabilityId,
@@ -907,6 +1729,14 @@ const appendMessageTx = async (
       message.timestamp,
       message.agentId || null,
       message.agentName || null,
+      message.traceId || null,
+      message.model || null,
+      message.sessionId || null,
+      message.sessionScope || null,
+      message.sessionScopeId || null,
+      message.workItemId || null,
+      message.runId || null,
+      message.workflowStepId || null,
     ],
   );
 };
@@ -986,6 +1816,7 @@ const replaceArtifactsTx = async (
           agent,
           created,
           template,
+          template_sections,
           documentation_status,
           is_learning_artifact,
           is_master_artifact,
@@ -1023,7 +1854,7 @@ const replaceArtifactsTx = async (
           updated_at
         )
         VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,${withUpdatedTimestamp}
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,${withUpdatedTimestamp}
         )
       `,
       [
@@ -1036,6 +1867,7 @@ const replaceArtifactsTx = async (
         artifact.agent,
         artifact.created,
         artifact.template || null,
+        JSON.stringify(artifact.templateSections || []),
         artifact.documentationStatus || null,
         artifact.isLearningArtifact ?? null,
         artifact.isMasterArtifact ?? null,
@@ -1234,6 +2066,17 @@ const replaceWorkItemsTx = async (
   workItems: WorkItem[],
 ) => {
   await client.query('DELETE FROM capability_work_items WHERE capability_id = $1', [capabilityId]);
+  await client.query(
+    'DELETE FROM capability_work_item_repository_assignments WHERE capability_id = $1',
+    [capabilityId],
+  );
+  await client.query('DELETE FROM capability_work_item_branches WHERE capability_id = $1', [
+    capabilityId,
+  ]);
+  await client.query(
+    'DELETE FROM capability_work_item_code_claims WHERE capability_id = $1',
+    [capabilityId],
+  );
 
   for (const item of workItems) {
     await client.query(
@@ -1249,6 +2092,10 @@ const replaceWorkItemsTx = async (
           workflow_id,
           current_step_id,
           assigned_agent_id,
+          phase_owner_team_id,
+          claim_owner_user_id,
+          watched_by_user_ids,
+          pending_handoff,
           status,
           priority,
           tags,
@@ -1256,10 +2103,11 @@ const replaceWorkItemsTx = async (
           blocker,
           active_run_id,
           last_run_id,
+          record_version,
           history,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,${withUpdatedTimestamp})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,${withUpdatedTimestamp})
       `,
       [
         capabilityId,
@@ -1272,6 +2120,10 @@ const replaceWorkItemsTx = async (
         item.workflowId,
         item.currentStepId || null,
         item.assignedAgentId || null,
+        item.phaseOwnerTeamId || null,
+        item.claimOwnerUserId || null,
+        item.watchedByUserIds || [],
+        item.pendingHandoff ? JSON.stringify(item.pendingHandoff) : null,
         item.status,
         item.priority,
         item.tags,
@@ -1279,9 +2131,95 @@ const replaceWorkItemsTx = async (
         item.blocker || null,
         item.activeRunId || null,
         item.lastRunId || null,
+        item.recordVersion || 1,
         JSON.stringify(item.history || []),
       ],
     );
+
+    for (const assignment of item.executionContext?.repositoryAssignments || []) {
+      await client.query(
+        `
+          INSERT INTO capability_work_item_repository_assignments (
+            capability_id,
+            work_item_id,
+            repository_id,
+            role,
+            checkout_required,
+            updated_at
+          )
+          VALUES ($1,$2,$3,$4,$5,${withUpdatedTimestamp})
+        `,
+        [
+          capabilityId,
+          item.id,
+          assignment.repositoryId,
+          assignment.role,
+          assignment.checkoutRequired,
+        ],
+      );
+    }
+
+    if (item.executionContext?.branch) {
+      const branch = item.executionContext.branch;
+      await client.query(
+        `
+          INSERT INTO capability_work_item_branches (
+            capability_id,
+            id,
+            work_item_id,
+            repository_id,
+            base_branch,
+            shared_branch,
+            created_by_user_id,
+            head_sha,
+            linked_pr_url,
+            status,
+            created_at,
+            updated_at
+          )
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,${withUpdatedTimestamp})
+        `,
+        [
+          capabilityId,
+          branch.id,
+          item.id,
+          branch.repositoryId,
+          branch.baseBranch,
+          branch.sharedBranch,
+          branch.createdByUserId || null,
+          branch.headSha || null,
+          branch.linkedPrUrl || null,
+          branch.status,
+          branch.createdAt,
+        ],
+      );
+    }
+
+    if (item.executionContext?.activeWriterUserId && item.executionContext.claimExpiresAt) {
+      await client.query(
+        `
+          INSERT INTO capability_work_item_code_claims (
+            capability_id,
+            work_item_id,
+            user_id,
+            team_id,
+            claim_type,
+            status,
+            claimed_at,
+            expires_at,
+            updated_at
+          )
+          VALUES ($1,$2,$3,$4,'WRITE','ACTIVE',NOW(),$5,${withUpdatedTimestamp})
+        `,
+        [
+          capabilityId,
+          item.id,
+          item.executionContext.activeWriterUserId,
+          null,
+          item.executionContext.claimExpiresAt,
+        ],
+      );
+    }
   }
 };
 
@@ -1541,7 +2479,8 @@ const repairWorkItemProjectionsTx = async (client: PoolClient) => {
 
 const seedCapabilityTx = async (client: PoolClient, capability: Capability) => {
   const ownerAgent = buildOwnerAgent(capability);
-  const defaultWorkflows = getDefaultCapabilityWorkflows(capability);
+  const defaultWorkflows =
+    capability.capabilityKind === 'COLLECTION' ? [] : getDefaultCapabilityWorkflows(capability);
 
   await upsertCapabilityTx(client, capability);
   await upsertWorkspaceMetaTx(client, capability.id, ownerAgent.id);
@@ -1552,7 +2491,9 @@ const seedCapabilityTx = async (client: PoolClient, capability: Capability) => {
   await replaceArtifactsTx(
     client,
     capability.id,
-    ARTIFACTS.filter(artifact => artifact.capabilityId === capability.id),
+    capability.capabilityKind === 'COLLECTION'
+      ? []
+      : ARTIFACTS.filter(artifact => artifact.capabilityId === capability.id),
   );
   await replaceTasksTx(
     client,
@@ -1572,7 +2513,9 @@ const seedCapabilityTx = async (client: PoolClient, capability: Capability) => {
   await replaceWorkItemsTx(
     client,
     capability.id,
-    WORK_ITEMS.filter(item => item.capabilityId === capability.id),
+    capability.capabilityKind === 'COLLECTION'
+      ? []
+      : WORK_ITEMS.filter(item => item.capabilityId === capability.id),
   );
 };
 
@@ -1598,12 +2541,25 @@ const getCapabilityByIdTx = async (
     `,
     [capabilityId],
   );
+  const [repositories, dependencies, sharedReferences, publishedSnapshots] = await Promise.all([
+    listCapabilityRepositoriesTx(client, capabilityId, {
+      gitRepositories: asStringArray(capabilityResult.rows[0].git_repositories),
+      localDirectories: asStringArray(capabilityResult.rows[0].local_directories),
+    }),
+    listCapabilityDependenciesTx(client, capabilityId),
+    listCapabilitySharedReferencesTx(client, capabilityId),
+    listCapabilityPublishedSnapshotsTx(client, capabilityId),
+  ]);
 
   const foundationCatalog = await getWorkspaceFoundationCatalogTx(client);
 
   return capabilityFromRow(
     capabilityResult.rows[0],
     mergeCapabilitySkillLibrary(skillsResult.rows.map(skillFromRow), foundationCatalog),
+    repositories,
+    dependencies,
+    sharedReferences,
+    publishedSnapshots,
     workspaceSettings,
   );
 };
@@ -1623,6 +2579,31 @@ const assertCapabilityEditableTx = async (
   }
 
   return capability;
+};
+
+const listCapabilitiesForArchitectureTx = async (
+  client: PoolClient,
+  options?: { includeSystem?: boolean },
+): Promise<Capability[]> => {
+  const includeSystem = Boolean(options?.includeSystem);
+  const result = await client.query<{ id: string }>(
+    `
+      SELECT id
+      FROM capabilities
+      ${includeSystem ? '' : 'WHERE COALESCE(is_system_capability, FALSE) = FALSE'}
+      ORDER BY created_at ASC, id ASC
+    `,
+  );
+
+  const capabilities: Capability[] = [];
+  for (const row of result.rows) {
+    const capability = await getCapabilityByIdTx(client, row.id);
+    if (capability) {
+      capabilities.push(capability);
+    }
+  }
+
+  return applyCapabilityArchitecture(capabilities);
 };
 
 const getCapabilityWorkspaceTx = async (
@@ -1705,6 +2686,10 @@ const getCapabilityWorkspaceTx = async (
     `,
     [capability.id],
   );
+  const workItemExecutionContexts = await buildWorkItemExecutionContextsTx(
+    client,
+    capability.id,
+  );
   const learningProfilesByAgent = await listAgentLearningProfilesTx(client, capability.id);
   const sessionSummariesByAgent = await listAgentSessionSummariesTx(client, capability.id);
 
@@ -1735,7 +2720,9 @@ const getCapabilityWorkspaceTx = async (
     tasks,
     executionLogs,
     learningUpdates: learningResult.rows.map(learningUpdateFromRow),
-    workItems: workItemResult.rows.map(workItemFromRow),
+    workItems: workItemResult.rows.map(row =>
+      workItemFromRow(row, workItemExecutionContexts.get(row.id)),
+    ),
     messages: messageResult.rows.map(messageFromRow),
     activeChatAgentId: workspaceResult.rows[0]?.active_chat_agent_id || undefined,
     createdAt: workspaceCreatedAt(workspaceResult.rows[0]),
@@ -1751,9 +2738,471 @@ const getCapabilityBundleTx = async (
     throw new Error(`Capability ${capabilityId} was not found.`);
   }
 
-  const workspace = await getCapabilityWorkspaceTx(client, capability);
-  return { capability, workspace };
+  const architectureCapabilities = await listCapabilitiesForArchitectureTx(client, {
+    includeSystem: false,
+  });
+  const enrichedCapability =
+    architectureCapabilities.find(item => item.id === capabilityId) || capability;
+
+  const workspace = await getCapabilityWorkspaceTx(client, enrichedCapability);
+  return { capability: enrichedCapability, workspace };
 };
+
+const buildSharedBranchName = (workItem: Pick<WorkItem, 'id' | 'title'>) => {
+  const slug = toStableSlug(workItem.title).toLowerCase() || 'work-item';
+  return `wi/${workItem.id.toLowerCase()}-${slug.slice(0, 40)}`;
+};
+
+export const getCapabilityRepositoriesRecord = async (
+  capabilityId: string,
+): Promise<CapabilityRepository[]> =>
+  transaction(async client => {
+    const capability = await getCapabilityByIdTx(client, capabilityId);
+    if (!capability) {
+      throw new Error(`Capability ${capabilityId} was not found.`);
+    }
+
+    return capability.repositories || [];
+  });
+
+export const updateCapabilityRepositoriesRecord = async (
+  capabilityId: string,
+  repositories: CapabilityRepository[],
+): Promise<CapabilityRepository[]> =>
+  transaction(async client => {
+    const capability = await assertCapabilityEditableTx(client, capabilityId);
+    const normalizedRepositories = normalizeCapabilityRepositories(
+      capabilityId,
+      repositories,
+      capability.gitRepositories,
+      capability.localDirectories,
+    );
+    const legacyLists = toLegacyRepositoryLists(normalizedRepositories);
+    await upsertCapabilityTx(client, {
+      ...capability,
+      repositories: normalizedRepositories,
+      gitRepositories: legacyLists.gitRepositories,
+      localDirectories: legacyLists.localDirectories,
+    });
+    return normalizedRepositories;
+  });
+
+export const getWorkItemExecutionContextRecord = async ({
+  capabilityId,
+  workItemId,
+}: {
+  capabilityId: string;
+  workItemId: string;
+}): Promise<WorkItemExecutionContext | null> =>
+  transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
+    const contexts = await buildWorkItemExecutionContextsTx(client, capabilityId);
+    return contexts.get(workItemId) || null;
+  });
+
+export const initializeWorkItemExecutionContextRecord = async ({
+  capabilityId,
+  workItemId,
+  actorUserId,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  actorUserId?: string;
+}): Promise<WorkItemExecutionContext> =>
+  transaction(async client => {
+    const bundle = await getCapabilityBundleTx(client, capabilityId);
+    const workItem = bundle.workspace.workItems.find(item => item.id === workItemId);
+    if (!workItem) {
+      throw new Error(`Work item ${workItemId} was not found.`);
+    }
+
+    const repositories = (bundle.capability.repositories || []).filter(
+      repository => repository.status !== 'ARCHIVED',
+    );
+    const primaryRepository =
+      repositories.find(repository => repository.isPrimary) || repositories[0];
+    if (!primaryRepository) {
+      throw new Error(
+        `${bundle.capability.name} does not have an approved repository configured yet.`,
+      );
+    }
+
+    const existingContexts = await buildWorkItemExecutionContextsTx(client, capabilityId);
+    const existing = existingContexts.get(workItemId);
+    if (existing?.repositoryAssignments.length && existing.branch) {
+      return existing;
+    }
+
+    await client.query(
+      `
+        INSERT INTO capability_work_item_repository_assignments (
+          capability_id,
+          work_item_id,
+          repository_id,
+          role,
+          checkout_required,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,${withUpdatedTimestamp})
+        ON CONFLICT (capability_id, work_item_id, repository_id) DO UPDATE SET
+          role = EXCLUDED.role,
+          checkout_required = EXCLUDED.checkout_required,
+          updated_at = ${withUpdatedTimestamp}
+      `,
+      [capabilityId, workItemId, primaryRepository.id, 'PRIMARY', true],
+    );
+
+    const branchId = `WIBR-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+    const nextBranch: WorkItemBranch = {
+      id: branchId,
+      workItemId,
+      repositoryId: primaryRepository.id,
+      baseBranch: primaryRepository.defaultBranch || 'main',
+      sharedBranch: buildSharedBranchName(workItem),
+      createdByUserId: actorUserId,
+      createdAt: new Date().toISOString(),
+      status: 'NOT_CREATED',
+    };
+
+    if (!existing?.branch) {
+      await client.query(
+        `
+          INSERT INTO capability_work_item_branches (
+            capability_id,
+            id,
+            work_item_id,
+            repository_id,
+            base_branch,
+            shared_branch,
+            created_by_user_id,
+            head_sha,
+            linked_pr_url,
+            status,
+            created_at,
+            updated_at
+          )
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,${withUpdatedTimestamp})
+        `,
+        [
+          capabilityId,
+          nextBranch.id,
+          workItemId,
+          nextBranch.repositoryId,
+          nextBranch.baseBranch,
+          nextBranch.sharedBranch,
+          nextBranch.createdByUserId || null,
+          null,
+          null,
+          nextBranch.status,
+          nextBranch.createdAt,
+        ],
+      );
+    }
+
+    const contexts = await buildWorkItemExecutionContextsTx(client, capabilityId);
+    return (
+      contexts.get(workItemId) || {
+        workItemId,
+        primaryRepositoryId: primaryRepository.id,
+        repositoryAssignments: [
+          {
+            workItemId,
+            repositoryId: primaryRepository.id,
+            role: 'PRIMARY',
+            checkoutRequired: true,
+          },
+        ],
+        branch: existing?.branch || nextBranch,
+        strategy: 'SHARED_BRANCH',
+      }
+    );
+  });
+
+export const updateWorkItemBranchRecord = async ({
+  capabilityId,
+  workItemId,
+  branch,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  branch: WorkItemBranch;
+}): Promise<WorkItemExecutionContext> =>
+  transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
+    await client.query(
+      `
+        INSERT INTO capability_work_item_branches (
+          capability_id,
+          id,
+          work_item_id,
+          repository_id,
+          base_branch,
+          shared_branch,
+          created_by_user_id,
+          head_sha,
+          linked_pr_url,
+          status,
+          created_at,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,${withUpdatedTimestamp})
+        ON CONFLICT (capability_id, id) DO UPDATE SET
+          repository_id = EXCLUDED.repository_id,
+          base_branch = EXCLUDED.base_branch,
+          shared_branch = EXCLUDED.shared_branch,
+          created_by_user_id = EXCLUDED.created_by_user_id,
+          head_sha = EXCLUDED.head_sha,
+          linked_pr_url = EXCLUDED.linked_pr_url,
+          status = EXCLUDED.status,
+          updated_at = ${withUpdatedTimestamp}
+      `,
+      [
+        capabilityId,
+        branch.id,
+        workItemId,
+        branch.repositoryId,
+        branch.baseBranch,
+        branch.sharedBranch,
+        branch.createdByUserId || null,
+        branch.headSha || null,
+        branch.linkedPrUrl || null,
+        branch.status,
+        branch.createdAt,
+      ],
+    );
+    const contexts = await buildWorkItemExecutionContextsTx(client, capabilityId);
+    const context = contexts.get(workItemId);
+    if (!context) {
+      throw new Error(`Execution context for ${workItemId} could not be rebuilt.`);
+    }
+    return context;
+  });
+
+export const upsertWorkItemCodeClaimRecord = async ({
+  capabilityId,
+  workItemId,
+  userId,
+  teamId,
+  claimType,
+  status,
+  expiresAt,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  userId: string;
+  teamId?: string;
+  claimType: WorkItemCodeClaim['claimType'];
+  status: WorkItemCodeClaim['status'];
+  expiresAt: string;
+}): Promise<WorkItemCodeClaim> =>
+  transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
+    const result = await client.query(
+      `
+        INSERT INTO capability_work_item_code_claims (
+          capability_id,
+          work_item_id,
+          user_id,
+          team_id,
+          claim_type,
+          status,
+          claimed_at,
+          expires_at,
+          released_at,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7,NULL,${withUpdatedTimestamp})
+        ON CONFLICT (capability_id, work_item_id, claim_type) DO UPDATE SET
+          user_id = EXCLUDED.user_id,
+          team_id = EXCLUDED.team_id,
+          status = EXCLUDED.status,
+          claimed_at = NOW(),
+          expires_at = EXCLUDED.expires_at,
+          released_at = NULL,
+          updated_at = ${withUpdatedTimestamp}
+        RETURNING *
+      `,
+      [capabilityId, workItemId, userId, teamId || null, claimType, status, expiresAt],
+    );
+    return workItemCodeClaimFromRow(result.rows[0]);
+  });
+
+export const releaseWorkItemCodeClaimRecord = async ({
+  capabilityId,
+  workItemId,
+  claimType,
+  userId,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  claimType: WorkItemCodeClaim['claimType'];
+  userId?: string;
+}): Promise<void> =>
+  transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
+    await client.query(
+      `
+        UPDATE capability_work_item_code_claims
+        SET
+          status = 'RELEASED',
+          released_at = NOW(),
+          updated_at = ${withUpdatedTimestamp}
+        WHERE capability_id = $1
+          AND work_item_id = $2
+          AND claim_type = $3
+          AND ($4::text IS NULL OR user_id = $4)
+          AND status = 'ACTIVE'
+      `,
+      [capabilityId, workItemId, claimType, userId || null],
+    );
+  });
+
+export const upsertWorkItemCheckoutSessionRecord = async ({
+  capabilityId,
+  session,
+}: {
+  capabilityId: string;
+  session: WorkItemCheckoutSession;
+}): Promise<WorkItemCheckoutSession> =>
+  transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
+    const result = await client.query(
+      `
+        INSERT INTO capability_work_item_checkout_sessions (
+          capability_id,
+          work_item_id,
+          user_id,
+          repository_id,
+          local_path,
+          branch,
+          last_seen_head_sha,
+          last_synced_at,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,${withUpdatedTimestamp})
+        ON CONFLICT (capability_id, work_item_id, user_id, repository_id) DO UPDATE SET
+          local_path = EXCLUDED.local_path,
+          branch = EXCLUDED.branch,
+          last_seen_head_sha = EXCLUDED.last_seen_head_sha,
+          last_synced_at = EXCLUDED.last_synced_at,
+          updated_at = ${withUpdatedTimestamp}
+        RETURNING *
+      `,
+      [
+        capabilityId,
+        session.workItemId,
+        session.userId,
+        session.repositoryId,
+        session.localPath || null,
+        session.branch,
+        session.lastSeenHeadSha || null,
+        session.lastSyncedAt || new Date().toISOString(),
+      ],
+    );
+    return workItemCheckoutSessionFromRow(result.rows[0]);
+  });
+
+export const createWorkItemHandoffPacketRecord = async ({
+  capabilityId,
+  packet,
+}: {
+  capabilityId: string;
+  packet: WorkItemHandoffPacket;
+}): Promise<WorkItemHandoffPacket> =>
+  transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
+    const result = await client.query(
+      `
+        INSERT INTO capability_work_item_handoff_packets (
+          capability_id,
+          id,
+          work_item_id,
+          from_user_id,
+          to_user_id,
+          from_team_id,
+          to_team_id,
+          summary,
+          open_questions,
+          blocking_dependencies,
+          recommended_next_step,
+          artifact_ids,
+          trace_ids,
+          accepted_at,
+          created_at,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,${withUpdatedTimestamp})
+        RETURNING *
+      `,
+      [
+        capabilityId,
+        packet.id,
+        packet.workItemId,
+        packet.fromUserId || null,
+        packet.toUserId || null,
+        packet.fromTeamId || null,
+        packet.toTeamId || null,
+        packet.summary,
+        JSON.stringify(packet.openQuestions || []),
+        JSON.stringify(packet.blockingDependencies || []),
+        packet.recommendedNextStep || null,
+        JSON.stringify(packet.artifactIds || []),
+        JSON.stringify(packet.traceIds || []),
+        packet.acceptedAt || null,
+        packet.createdAt,
+      ],
+    );
+    return workItemHandoffPacketFromRow(result.rows[0]);
+  });
+
+export const acceptWorkItemHandoffPacketRecord = async ({
+  capabilityId,
+  packetId,
+}: {
+  capabilityId: string;
+  packetId: string;
+}): Promise<WorkItemHandoffPacket> =>
+  transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
+    const result = await client.query(
+      `
+        UPDATE capability_work_item_handoff_packets
+        SET
+          accepted_at = NOW(),
+          updated_at = ${withUpdatedTimestamp}
+        WHERE capability_id = $1
+          AND id = $2
+        RETURNING *
+      `,
+      [capabilityId, packetId],
+    );
+    if (!result.rowCount) {
+      throw new Error(`Work item handoff ${packetId} was not found.`);
+    }
+    return workItemHandoffPacketFromRow(result.rows[0]);
+  });
+
+export const listWorkItemHandoffPacketsRecord = async ({
+  capabilityId,
+  workItemId,
+}: {
+  capabilityId: string;
+  workItemId: string;
+}): Promise<WorkItemHandoffPacket[]> =>
+  transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
+    const result = await client.query(
+      `
+        SELECT *
+        FROM capability_work_item_handoff_packets
+        WHERE capability_id = $1
+          AND work_item_id = $2
+        ORDER BY created_at DESC
+      `,
+      [capabilityId, workItemId],
+    );
+    return result.rows.map(workItemHandoffPacketFromRow);
+  });
 
 export const initializeSeedData = async () => {
   await transaction(async client => {
@@ -1877,24 +3326,31 @@ export const initializeSeedData = async () => {
 };
 
 export const fetchAppState = async (): Promise<AppState> => {
-  const workspaceSettings = await transaction(client => getWorkspaceSettingsTx(client));
-  const capabilitiesResult = await query<{ id: string }>(
-    `SELECT id
-     FROM capabilities
-     WHERE COALESCE(is_system_capability, FALSE) = FALSE
-     ORDER BY created_at ASC, id ASC`,
-  );
-  const bundles: CapabilityBundle[] = [];
+  return transaction(async client => {
+    const workspaceSettings = await getWorkspaceSettingsTx(client);
+    const capabilities = await listCapabilitiesForArchitectureTx(client, {
+      includeSystem: false,
+    });
+    const bundles: CapabilityBundle[] = [];
 
-  for (const row of capabilitiesResult.rows) {
-    bundles.push(await getCapabilityBundle(row.id as string));
-  }
+    for (const capability of capabilities) {
+      bundles.push({
+        capability,
+        workspace: await getCapabilityWorkspaceTx(client, capability),
+      });
+    }
 
-  return {
-    capabilities: bundles.map(bundle => bundle.capability),
-    capabilityWorkspaces: bundles.map(bundle => bundle.workspace),
-    workspaceSettings,
-  };
+    const workspaceOrganization = await syncWorkspaceOrganizationFromCapabilities(
+      bundles.map(bundle => bundle.capability),
+    );
+
+    return {
+      capabilities: bundles.map(bundle => bundle.capability),
+      capabilityWorkspaces: bundles.map(bundle => bundle.workspace),
+      workspaceSettings,
+      workspaceOrganization,
+    };
+  });
 };
 
 export const getWorkspaceSettings = async (): Promise<WorkspaceSettings> =>
@@ -2033,6 +3489,59 @@ export const initializeWorkspaceFoundations = async (): Promise<WorkspaceCatalog
 export const getCapabilityBundle = async (capabilityId: string): Promise<CapabilityBundle> =>
   transaction(client => getCapabilityBundleTx(client, capabilityId));
 
+export const publishCapabilityContractRecord = async ({
+  capabilityId,
+  publishedBy,
+}: {
+  capabilityId: string;
+  publishedBy: string;
+}): Promise<{ capability: Capability; snapshot: CapabilityPublishedSnapshot }> =>
+  transaction(async client => {
+    const capability = await assertCapabilityEditableTx(client, capabilityId);
+    const existingSnapshots = await listCapabilityPublishedSnapshotsTx(client, capabilityId);
+    const nextVersion = (existingSnapshots[0]?.publishVersion || 0) + 1;
+    const snapshot: CapabilityPublishedSnapshot = {
+      id: `PUB-${toStableSlug(capabilityId)}-${nextVersion}`,
+      capabilityId,
+      publishVersion: nextVersion,
+      publishedAt: new Date().toISOString(),
+      publishedBy,
+      supersedesSnapshotId: existingSnapshots[0]?.id,
+      contract: normalizeCapabilityContractDraft(
+        capability.contractDraft ?? createEmptyCapabilityContractDraft(),
+      ),
+    };
+
+    await createCapabilityPublishedSnapshotTx(client, capabilityId, snapshot);
+    const capabilities = await listCapabilitiesForArchitectureTx(client, {
+      includeSystem: false,
+    });
+    const nextCapability =
+      capabilities.find(item => item.id === capabilityId) ||
+      applyCapabilityArchitecture([
+        {
+          ...capability,
+          publishedSnapshots: [snapshot, ...(capability.publishedSnapshots || [])],
+        },
+      ])[0];
+
+    return { capability: nextCapability, snapshot };
+  });
+
+export const getCapabilityAlmExportRecord = async (
+  capabilityId: string,
+): Promise<CapabilityAlmExportPayload> =>
+  transaction(async client => {
+    const capabilities = await listCapabilitiesForArchitectureTx(client, {
+      includeSystem: false,
+    });
+    const capability = capabilities.find(item => item.id === capabilityId);
+    if (!capability) {
+      throw new Error(`Capability ${capabilityId} was not found.`);
+    }
+    return buildCapabilityAlmExport(capability, capabilities);
+  });
+
 export const getCapabilityArtifact = async (
   capabilityId: string,
   artifactId: string,
@@ -2113,6 +3622,7 @@ const buildCapabilityStarterSeed = async (
   capability: Capability,
 ) => {
   const foundationCatalog = await getWorkspaceFoundationCatalogTx(client);
+  const isCollectionCapability = capability.capabilityKind === 'COLLECTION';
   const foundationCapability = await getCapabilityByIdTx(
     client,
     SYSTEM_FOUNDATION_CAPABILITY_ID,
@@ -2134,12 +3644,14 @@ const buildCapabilityStarterSeed = async (
       persistedSkills: capability.skillLibrary,
       ownerAgent,
       agents: baseAgents,
-      workflows: getDefaultCapabilityWorkflows(nextCapability),
-      artifacts: materializeCapabilityStarterArtifacts({
-        capability: nextCapability,
-        agents: baseAgents,
-        foundationCatalog,
-      }),
+      workflows: isCollectionCapability ? [] : getDefaultCapabilityWorkflows(nextCapability),
+      artifacts: isCollectionCapability
+        ? []
+        : materializeCapabilityStarterArtifacts({
+            capability: nextCapability,
+            agents: baseAgents,
+            foundationCatalog,
+          }),
     };
   }
 
@@ -2182,18 +3694,22 @@ const buildCapabilityStarterSeed = async (
     persistedSkills: capability.skillLibrary,
     ownerAgent,
     agents: baseAgents,
-    workflows: foundationWorkspace.workflows.map(workflow =>
-      cloneFoundationWorkflowForCapability(workflow, nextCapability, agentIdMap),
-    ),
-    artifacts: foundationWorkspace.artifacts.map(artifact =>
-      cloneFoundationArtifactForCapability(
-        artifact,
-        nextCapability.id,
-        agentIdMap,
-        agentNameById,
-        createdAt,
-      ),
-    ),
+    workflows: isCollectionCapability
+      ? []
+      : foundationWorkspace.workflows.map(workflow =>
+          cloneFoundationWorkflowForCapability(workflow, nextCapability, agentIdMap),
+        ),
+    artifacts: isCollectionCapability
+      ? []
+      : foundationWorkspace.artifacts.map(artifact =>
+          cloneFoundationArtifactForCapability(
+            artifact,
+            nextCapability.id,
+            agentIdMap,
+            agentNameById,
+            createdAt,
+          ),
+        ),
   };
 };
 
@@ -2287,6 +3803,13 @@ export const updateCapabilityRecord = async (
         : existingWorkspace.activeChatAgentId,
       existingWorkspace.createdAt,
     );
+
+    if (mergedCapability.capabilityKind === 'COLLECTION') {
+      await replaceWorkflowsTx(client, capabilityId, [], mergedCapability);
+      await replaceTasksTx(client, capabilityId, []);
+      await replaceExecutionLogsTx(client, capabilityId, []);
+      await replaceWorkItemsTx(client, capabilityId, []);
+    }
 
     return getCapabilityBundleTx(client, capabilityId);
   });

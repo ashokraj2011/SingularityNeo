@@ -26,7 +26,7 @@ The product is strongest when a team wants to:
 
 - `Home` shows capability health, trust, readiness, and what matters now.
 - `Work` is the delivery workbench for operating one work item well.
-- `Team` shows standard agents, custom agents, skills, tools, and learning.
+- `Agents` shows standard agents, custom agents, skills, tools, and learning.
 - `Chat` gives capability-scoped and execution-aware collaboration.
 - `Evidence` provides artifacts, completed work, approvals, and flight recorder history.
 - `Designer` defines workflows, lifecycle lanes, and operating rules.
@@ -67,7 +67,7 @@ The platform supports capability-specific lifecycles, including organization-spe
 3. If the workflow pauses, review the wait, provide guidance, approve, or take control.
 4. Use `Chat` for direct collaboration with the relevant agent or the execution agent.
 5. Use `Evidence` to inspect artifacts, approvals, review packets, and flight recorder history.
-6. Use `Designer` or `Team` when the operating model itself needs to change.
+6. Use `Designer` or `Agents` when the operating model itself needs to change.
 
 ## Quick Start
 
@@ -125,6 +125,10 @@ This starts:
 - frontend at `http://localhost:3000`
 - API at `http://localhost:3001`
 
+For a split deployment with a remote Express server and a local Electron desktop client, see:
+
+- [Desktop + Control Plane Deployment](./docs/desktop-control-plane-deployment.md)
+
 ## First 10 Minutes
 
 If this is a fresh database or first run:
@@ -133,7 +137,7 @@ If this is a fresh database or first run:
 2. Confirm the Postgres connection
 3. Initialize the database objects and shared foundations
 4. Create or open a capability
-5. Review `Team`, `Designer`, and `Work`
+5. Review `Agents`, `Designer`, and `Work`
 
 If the workspace looks empty after DB setup, that usually means the shared foundations are loaded but no visible business capability has been created yet.
 
@@ -181,7 +185,7 @@ src/
   components/        shared UI and workspace shells
   context/           capability boot and workspace state
   lib/               lifecycle, workflow, UX, and client helpers
-  pages/             Home, Work, Team, Chat, Evidence, Designer, tools
+  pages/             Home, Work, Agents, Chat, Evidence, Designer, tools
   types.ts           shared application model
 
 server/
@@ -213,9 +217,9 @@ server/
 - review flight recorder history
 - generate or inspect review-ready outputs
 
-### Team
+### Agents
 
-`/team` is the operating model for collaborators and agents. It is where users:
+`/team` is the operating model for collaborators and agents. In the UI, this workspace is labeled `Agents`. It is where users:
 - inspect standard agents
 - review skills, tools, and learning
 - adjust models or role setup

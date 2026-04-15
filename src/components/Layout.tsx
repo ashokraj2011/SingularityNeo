@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
+  Building2,
   BarChart3,
   BrainCircuit,
   BookOpen,
@@ -40,13 +41,14 @@ import { SingularityHelpMenu } from './SingularityHelpMenu';
 const primaryNavItems = [
   { name: 'Home', shortName: 'Home', icon: LayoutDashboard, path: '/' },
   { name: 'Work', shortName: 'Work', icon: Trello, path: '/orchestrator' },
-  { name: 'Team', shortName: 'Team', icon: Users, path: '/team' },
+  { name: 'Agents', shortName: 'Agents', icon: Users, path: '/team' },
   { name: 'Chat', shortName: 'Chat', icon: MessageSquare, path: '/chat' },
   { name: 'Evidence', shortName: 'Evidence', icon: Wallet, path: '/ledger' },
   { name: 'Designer', shortName: 'Design', icon: Workflow, path: '/designer' },
 ] as const;
 
 const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
+  architecture: Building2,
   databases: Database,
   memory: BrainCircuit,
   'tool-access': ShieldCheck,
@@ -69,8 +71,9 @@ const advancedNavItems = ADVANCED_TOOL_DESCRIPTORS.map(tool => ({
 const workspaceNavItems = [...primaryNavItems, ...advancedNavItems] as const;
 
 const routeTitles: Record<string, string> = {
-  '/capabilities/new': 'Create Capability',
+  '/capabilities/new': 'On Board Capability',
   '/capabilities/metadata': 'Capability Metadata',
+  '/architecture': 'Architecture',
   '/capabilities/databases': 'Workspace Databases',
   '/workspace/databases': 'Workspace Databases',
   '/tool-access': 'Tool Access',
@@ -125,6 +128,10 @@ const Sidebar = ({
     return () => window.removeEventListener('mousedown', handlePointerDown);
   }, []);
 
+  useEffect(() => {
+    setIsCapabilityMenuOpen(false);
+  }, [isCollapsed]);
+
   const handleCapabilityStatusToggle = () => {
     void (async () => {
     const nextArchivedState = activeCapability.status !== 'ARCHIVED';
@@ -169,7 +176,7 @@ const Sidebar = ({
   return (
     <aside
       className={cn(
-        'shell-sidebar hidden lg:flex overflow-hidden transition-[width,padding] duration-200',
+        'shell-sidebar hidden lg:flex overflow-hidden',
         isCollapsed ? 'w-[5.5rem] px-3' : 'w-[17rem] px-4',
       )}
     >
@@ -444,10 +451,10 @@ const Sidebar = ({
             'enterprise-button enterprise-button-primary w-full disabled:cursor-not-allowed disabled:opacity-50',
             isCollapsed && 'px-0',
           )}
-          title="Create Capability"
+          title="On Board Capability"
         >
           <PlusCircle size={16} />
-          {!isCollapsed ? <span>Create Capability</span> : null}
+          {!isCollapsed ? <span>On Board Capability</span> : null}
         </button>
       </div>
 
@@ -547,12 +554,22 @@ const TopBar = ({
   onOpenHelp,
   onOpenMobileNav,
   onToggleSidebar,
+  currentActorName,
+  currentActorTeamLabel,
+  currentWorkspaceUserId,
+  workspaceUsers,
+  onChangeWorkspaceUser,
 }: {
   isSidebarCollapsed: boolean;
   onOpenCommandPalette: () => void;
   onOpenHelp: () => void;
   onOpenMobileNav: () => void;
   onToggleSidebar: () => void;
+  currentActorName: string;
+  currentActorTeamLabel?: string;
+  currentWorkspaceUserId?: string;
+  workspaceUsers: Array<{ id: string; name: string; title?: string }>;
+  onChangeWorkspaceUser: (userId: string) => void;
 }) => {
   const location = useLocation();
 
@@ -614,15 +631,26 @@ const TopBar = ({
               <span>Help</span>
             </button>
 
-            <div className="toolbar-shell min-w-[16rem] justify-between py-2.5">
-              <div className="min-w-0">
-                <p className="form-kicker">Current View</p>
-                <p className="mt-1 truncate text-sm font-semibold text-on-surface">
-                  {pageTitle}
+            <div className="toolbar-shell min-w-[18rem] justify-between gap-3 py-2.5">
+              <div className="min-w-0 flex-1">
+                <p className="form-kicker">Current Operator</p>
+                <select
+                  value={currentWorkspaceUserId || ''}
+                  onChange={event => onChangeWorkspaceUser(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-outline-variant/50 bg-surface-container-low px-2 py-1.5 text-sm font-semibold text-on-surface outline-none transition focus:border-primary/40"
+                >
+                  {workspaceUsers.map(user => (
+                    <option key={user.id} value={user.id}>
+                      {user.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 truncate text-xs font-medium text-secondary">
+                  {currentActorTeamLabel || currentActorName}
                 </p>
               </div>
-              <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-outline-variant/60 bg-surface-container-low text-sm font-bold text-primary">
-                A
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-outline-variant/60 bg-surface-container-low text-sm font-bold text-primary">
+                {currentActorName.slice(0, 1).toUpperCase()}
               </div>
             </div>
           </div>
@@ -639,14 +667,18 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     activeCapability,
     bootStatus,
     capabilities,
+    currentActorContext,
+    currentWorkspaceUserId,
     getCapabilityWorkspace,
     lastSyncError,
     preferredCapabilityId,
     retryInitialSync,
     setActiveCapability,
     setActiveChatAgent,
+    setCurrentWorkspaceUserId,
     setPreferredCapabilityId,
     updateCapabilityMetadata,
+    workspaceOrganization,
   } = useCapability();
   const { success } = useToast();
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
@@ -665,6 +697,13 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
   const [isHelpMenuOpen, setIsHelpMenuOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
   const commandInputRef = useRef<HTMLInputElement | null>(null);
+  const currentWorkspaceUser =
+    workspaceOrganization.users.find(user => user.id === currentWorkspaceUserId) ||
+    workspaceOrganization.users[0];
+  const currentActorTeamLabel =
+    workspaceOrganization.teams.find(team =>
+      currentActorContext.teamIds.includes(team.id),
+    )?.name || currentWorkspaceUser?.title;
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -858,6 +897,11 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
             onOpenHelp={() => setIsHelpMenuOpen(true)}
             onOpenMobileNav={() => setIsMobileNavOpen(true)}
             onToggleSidebar={() => setIsSidebarCollapsed(current => !current)}
+            currentActorName={currentActorContext.displayName}
+            currentActorTeamLabel={currentActorTeamLabel}
+            currentWorkspaceUserId={currentWorkspaceUserId}
+            workspaceUsers={workspaceOrganization.users}
+            onChangeWorkspaceUser={setCurrentWorkspaceUserId}
           />
         ) : null}
         <main className={cn('shell-main', isImmersiveRoute && 'shell-main-immersive')}>
@@ -916,7 +960,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                     onClick={() => navigate('/capabilities/new')}
                     className="enterprise-button enterprise-button-primary"
                   >
-                    Create Capability
+                    On Board Capability
                   </button>
                   <button
                     type="button"
@@ -1100,7 +1144,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                   }}
                   className="enterprise-button enterprise-button-primary w-full disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Create Capability
+                  On Board Capability
                 </button>
                 <button
                   type="button"

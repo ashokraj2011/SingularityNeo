@@ -17,20 +17,16 @@ import { useNavigate } from 'react-router-dom';
 import { COPILOT_MODEL_OPTIONS, SKILL_LIBRARY } from '../constants';
 import { useCapability } from '../context/CapabilityContext';
 import {
-  createCapabilityCodeBranch,
-  fetchCapabilityCodeWorkspaces,
-  type CodeWorkspaceStatus,
+  createCapabilityWorkItemSharedBranch,
+  initializeCapabilityWorkItemExecutionContext,
 } from '../lib/api';
 import { Skill } from '../types';
 
 const formatCurrency = (value: number) => `$${value.toFixed(4)}`;
 
-const buildDefaultBranchName = (capabilityId: string) =>
-  `codex/${capabilityId.toLowerCase()}-workspace`;
-
 const Studio = () => {
   const navigate = useNavigate();
-  const { activeCapability, getCapabilityWorkspace } = useCapability();
+  const { activeCapability, getCapabilityWorkspace, refreshCapabilityBundle } = useCapability();
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const capabilitySkills = useMemo(() => {
     const uniqueSkills = new Map<string, Skill>();
@@ -39,78 +35,65 @@ const Studio = () => {
     });
     return [...uniqueSkills.values()];
   }, [activeCapability.skillLibrary]);
-  const [codeWorkspaces, setCodeWorkspaces] = useState<CodeWorkspaceStatus[]>([]);
-  const [isLoadingCodeWorkspaces, setIsLoadingCodeWorkspaces] = useState(false);
   const [codeWorkspaceError, setCodeWorkspaceError] = useState('');
   const [codeWorkspaceMessage, setCodeWorkspaceMessage] = useState('');
-  const [branchDrafts, setBranchDrafts] = useState<Record<string, string>>({});
-  const [activeBranchPath, setActiveBranchPath] = useState('');
+  const [activeWorkItemActionId, setActiveWorkItemActionId] = useState('');
 
-  const loadCodeWorkspaces = async () => {
-    if (activeCapability.localDirectories.length === 0) {
-      setCodeWorkspaces([]);
-      setCodeWorkspaceError('');
-      return;
-    }
-
-    setIsLoadingCodeWorkspaces(true);
-    setCodeWorkspaceError('');
-
-    try {
-      const result = await fetchCapabilityCodeWorkspaces(activeCapability.id);
-      setCodeWorkspaces(result);
-    } catch (error) {
-      setCodeWorkspaceError(
-        error instanceof Error
-          ? error.message
-          : 'Unable to inspect capability code workspaces.',
-      );
-    } finally {
-      setIsLoadingCodeWorkspaces(false);
-    }
-  };
+  const workItemsWithExecutionContext = useMemo(
+    () =>
+      workspace.workItems.filter(workItem =>
+        Boolean(workItem.executionContext || workItem.status !== 'COMPLETED'),
+      ),
+    [workspace.workItems],
+  );
 
   useEffect(() => {
-    void loadCodeWorkspaces();
+    setCodeWorkspaceError('');
+    setCodeWorkspaceMessage('');
+    setActiveWorkItemActionId('');
   }, [activeCapability.id]);
 
-  const setBranchDraft = (directoryPath: string, value: string) => {
-    setBranchDrafts(prev => ({
-      ...prev,
-      [directoryPath]: value,
-    }));
-  };
-
-  const handleCreateBranch = async (directoryPath: string) => {
-    const branchName =
-      branchDrafts[directoryPath]?.trim() ||
-      buildDefaultBranchName(activeCapability.id);
-
-    setActiveBranchPath(directoryPath);
+  const handleInitializeExecutionContext = async (workItemId: string) => {
+    setActiveWorkItemActionId(`init-${workItemId}`);
     setCodeWorkspaceError('');
     setCodeWorkspaceMessage('');
 
     try {
-      const result = await createCapabilityCodeBranch(activeCapability.id, {
-        path: directoryPath,
-        branchName,
-      });
-
-      setCodeWorkspaces(prev =>
-        prev.map(workspaceStatus =>
-          workspaceStatus.path === result.path ? result : workspaceStatus,
-        ),
-      );
-      setBranchDraft(directoryPath, result.currentBranch || branchName);
-      setCodeWorkspaceMessage(`Created branch ${branchName} for ${directoryPath}.`);
+      await initializeCapabilityWorkItemExecutionContext(activeCapability.id, workItemId);
+      await refreshCapabilityBundle(activeCapability.id);
+      setCodeWorkspaceMessage(`Prepared shared execution context for ${workItemId}.`);
     } catch (error) {
       setCodeWorkspaceError(
         error instanceof Error
           ? error.message
-          : 'Unable to create the Git branch for this workspace.',
+          : 'Unable to initialize the shared work-item execution context.',
       );
     } finally {
-      setActiveBranchPath('');
+      setActiveWorkItemActionId('');
+    }
+  };
+
+  const handleCreateSharedBranch = async (workItemId: string) => {
+    setActiveWorkItemActionId(`branch-${workItemId}`);
+    setCodeWorkspaceError('');
+    setCodeWorkspaceMessage('');
+
+    try {
+      const result = await createCapabilityWorkItemSharedBranch(activeCapability.id, workItemId);
+      await refreshCapabilityBundle(activeCapability.id);
+      setCodeWorkspaceMessage(
+        `Shared branch ${
+          result.context.branch?.sharedBranch || 'created'
+        } is ready for ${workItemId}.`,
+      );
+    } catch (error) {
+      setCodeWorkspaceError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to create the shared work-item branch.',
+      );
+    } finally {
+      setActiveWorkItemActionId('');
     }
   };
 
@@ -148,7 +131,7 @@ const Studio = () => {
             className="inline-flex items-center gap-2 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
           >
             <Settings2 size={18} />
-            Open Agent Manager
+            Open Agents
           </button>
         </div>
       </header>
@@ -243,15 +226,16 @@ const Studio = () => {
                   <FolderCode size={20} />
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-primary">Code Workspaces</h3>
+                  <h3 className="text-lg font-bold text-primary">Shared Work Item Branches</h3>
                   <p className="text-[0.6875rem] text-secondary">
-                    Capability-approved local directories for branch work and
-                    code changes.
+                    Work items now own shared repo and branch context. Initialize
+                    the execution context here, then open Work to collaborate on
+                    the same branch with different stakeholders.
                   </p>
                 </div>
               </div>
               <button
-                onClick={() => void loadCodeWorkspaces()}
+                onClick={() => void refreshCapabilityBundle(activeCapability.id)}
                 className="inline-flex items-center gap-2 rounded-2xl border border-outline-variant/15 bg-white px-4 py-2.5 text-xs font-bold uppercase tracking-[0.18em] text-secondary transition-all hover:bg-surface-container-low"
               >
                 <RefreshCw size={14} />
@@ -272,54 +256,68 @@ const Studio = () => {
               </div>
             )}
 
-            {activeCapability.localDirectories.length === 0 ? (
+            {workItemsWithExecutionContext.length === 0 ? (
               <div className="rounded-3xl border border-dashed border-outline-variant/20 bg-surface-container-low p-6 text-sm text-secondary">
-                No local directories are configured for this capability yet.
-                Add them in capability metadata to inspect repos and create
-                branches from Studio.
+                No work items are ready for shared branch work yet. Onboard a
+                repository in capability metadata, then create a work item to
+                generate a shared execution context.
                 <button
-                  onClick={() => navigate('/capabilities/metadata')}
+                  onClick={() => navigate('/orchestrator')}
                   className="mt-4 flex items-center gap-2 font-bold text-primary"
                 >
-                  Open capability metadata
+                  Open workbench
                   <ArrowRight size={14} />
                 </button>
               </div>
-            ) : isLoadingCodeWorkspaces ? (
-              <div className="flex items-center gap-3 rounded-3xl border border-outline-variant/15 bg-surface-container-low p-6 text-sm text-secondary">
-                <LoaderCircle size={18} className="animate-spin text-primary" />
-                Inspecting configured code workspaces...
-              </div>
             ) : (
               <div className="space-y-4">
-                {codeWorkspaces.map(workspaceStatus => (
+                {workItemsWithExecutionContext.map(workItem => {
+                  const executionContext = workItem.executionContext;
+                  const branch = executionContext?.branch;
+                  const repository =
+                    activeCapability.repositories?.find(
+                      item =>
+                        item.id ===
+                        (executionContext?.primaryRepositoryId || branch?.repositoryId),
+                    ) || null;
+                  const hasSharedBranch = Boolean(branch);
+                  const branchIsActive = branch?.status === 'ACTIVE';
+                  const busyInit = activeWorkItemActionId === `init-${workItem.id}`;
+                  const busyBranch = activeWorkItemActionId === `branch-${workItem.id}`;
+
+                  return (
                   <div
-                    key={workspaceStatus.path}
+                    key={workItem.id}
                     className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-5"
                   >
                     <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="rounded-full bg-white px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">
-                            {workspaceStatus.isGitRepository ? 'Git Repo' : 'Directory'}
+                            {workItem.id}
                           </span>
-                          {workspaceStatus.currentBranch && (
+                          {branch?.sharedBranch && (
                             <span className="rounded-full bg-primary/10 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">
-                              {workspaceStatus.currentBranch}
+                              {branch.sharedBranch}
                             </span>
                           )}
                         </div>
-                        <p className="mt-3 break-all text-sm font-bold text-on-surface">
-                          {workspaceStatus.path}
+                        <p className="mt-3 text-sm font-bold text-on-surface">
+                          {workItem.title}
                         </p>
-                        {workspaceStatus.lastCommit && (
-                          <p className="mt-2 text-xs text-secondary">
-                            Last commit: {workspaceStatus.lastCommit}
+                        <p className="mt-2 text-xs leading-relaxed text-secondary">
+                          {repository
+                            ? `${repository.label} • base ${branch?.baseBranch || repository.defaultBranch}`
+                            : 'No repository is attached yet. Initialize the execution context to bind the primary repo.'}
+                        </p>
+                        {repository?.localRootHint && (
+                          <p className="mt-2 break-all text-xs text-secondary">
+                            Local root: {repository.localRootHint}
                           </p>
                         )}
-                        {workspaceStatus.error && (
-                          <p className="mt-2 text-xs font-medium text-red-600">
-                            {workspaceStatus.error}
+                        {executionContext?.activeWriterUserId && (
+                          <p className="mt-2 text-xs font-medium text-primary">
+                            Active writer: {executionContext.activeWriterUserId}
                           </p>
                         )}
                       </div>
@@ -327,57 +325,62 @@ const Studio = () => {
                       <div className="grid gap-3 sm:grid-cols-2 lg:min-w-[260px]">
                         <div className="rounded-2xl bg-white p-4">
                           <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                            Pending Changes
+                            Phase
                           </p>
                           <p className="mt-3 text-lg font-extrabold text-primary">
-                            {workspaceStatus.pendingChanges}
+                            {workItem.phase}
                           </p>
                         </div>
                         <div className="rounded-2xl bg-white p-4">
                           <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                            Directory Status
+                            Branch Status
                           </p>
                           <p className="mt-3 text-sm font-bold text-on-surface">
-                            {workspaceStatus.exists
-                              ? workspaceStatus.isGitRepository
-                                ? 'Ready'
-                                : 'Not a repository'
-                              : 'Missing'}
+                            {branchIsActive
+                              ? 'Active'
+                              : hasSharedBranch
+                              ? branch?.status || 'Prepared'
+                              : 'Not initialized'}
                           </p>
                         </div>
                       </div>
                     </div>
 
                     <div className="mt-4 flex flex-col gap-3 lg:flex-row">
-                      <input
-                        value={
-                          branchDrafts[workspaceStatus.path] ||
-                          buildDefaultBranchName(activeCapability.id)
-                        }
-                        onChange={event =>
-                          setBranchDraft(workspaceStatus.path, event.target.value)
-                        }
-                        className="flex-1 rounded-2xl border border-outline-variant/15 bg-white px-4 py-3 text-sm font-medium outline-none transition-all focus:border-primary/20 focus:ring-2 focus:ring-primary/10"
-                      />
                       <button
-                        onClick={() => void handleCreateBranch(workspaceStatus.path)}
-                        disabled={
-                          !workspaceStatus.exists ||
-                          !workspaceStatus.isGitRepository ||
-                          activeBranchPath === workspaceStatus.path
-                        }
+                        onClick={() => void handleInitializeExecutionContext(workItem.id)}
+                        disabled={busyInit}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-outline-variant/20 bg-white px-5 py-3 text-sm font-bold text-primary transition-all hover:bg-primary/5 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {busyInit ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <Settings2 size={16} />
+                        )}
+                        {hasSharedBranch ? 'Refresh context' : 'Initialize context'}
+                      </button>
+                      <button
+                        onClick={() => void handleCreateSharedBranch(workItem.id)}
+                        disabled={busyBranch || !repository?.localRootHint}
                         className="inline-flex items-center justify-center gap-2 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        {activeBranchPath === workspaceStatus.path ? (
+                        {busyBranch ? (
                           <LoaderCircle size={16} className="animate-spin" />
                         ) : (
                           <GitBranch size={16} />
                         )}
-                        Create Branch
+                        {branchIsActive ? 'Re-open branch locally' : 'Create shared branch'}
+                      </button>
+                      <button
+                        onClick={() => navigate(`/orchestrator?selected=${encodeURIComponent(workItem.id)}`)}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-outline-variant/20 bg-white px-5 py-3 text-sm font-bold text-secondary transition-all hover:bg-surface-container-high"
+                      >
+                        <ArrowRight size={16} />
+                        Open in Work
                       </button>
                     </div>
                   </div>
-                ))}
+                )})}
               </div>
             )}
           </section>
@@ -483,7 +486,7 @@ const Studio = () => {
               className="mt-5 flex w-full items-center justify-between rounded-2xl bg-white/10 px-4 py-3 text-left transition-all hover:bg-white/15"
             >
               <span className="text-sm font-bold">
-                Open Team Agent Manager
+                Open Agents
               </span>
               <ArrowRight size={16} />
             </button>

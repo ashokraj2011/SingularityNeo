@@ -29,26 +29,42 @@ import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { cn } from '../lib/utils';
 import {
+  fetchCapabilityAlmExport,
   clearRuntimeCredentials,
   detectCapabilityWorkspaceProfile,
   fetchRuntimeStatus,
+  publishCapabilityContract,
   updateRuntimeCredentials,
   type RuntimeStatus,
 } from '../lib/api';
 import {
   createLifecyclePhase,
   getLifecyclePhaseUsage,
+  getLifecyclePhaseLabel,
   moveLifecyclePhase,
   normalizeCapabilityLifecycle,
   remapWorkflowPhaseReferences,
   renameLifecyclePhase,
   retireLifecyclePhase,
 } from '../lib/capabilityLifecycle';
+import { normalizeCapabilityPhaseOwnershipRules } from '../lib/capabilityOwnership';
+import { toWorkspaceTeamId } from '../lib/workspaceOrganization';
 import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowGraph';
 import {
   Capability,
+  CapabilityAlmReference,
+  CapabilityCollectionKind,
+  CapabilityContractDraft,
+  CapabilityDependency,
   CapabilityMetadataEntry,
+  CapabilityPhaseOwnershipRule,
+  CapabilityRepository,
+  CapabilityPublishedSnapshot,
   CapabilityStakeholder,
+  FunctionalRequirementRecord,
+  NonFunctionalRequirementRecord,
+  ApiContractReference,
+  SoftwareVersionRecord,
   WorkspaceDetectionResult,
 } from '../types';
 import {
@@ -65,6 +81,252 @@ const textToList = (value: string) =>
     .split(/\n|,/)
     .map(item => item.trim())
     .filter(Boolean);
+
+const repositoriesToText = (repositories: CapabilityRepository[]) =>
+  repositories
+    .map(repository =>
+      [
+        repository.label,
+        repository.url,
+        repository.defaultBranch || 'main',
+        repository.localRootHint || '',
+        repository.isPrimary ? 'primary' : '',
+      ].join(' | '),
+    )
+    .join('\n');
+
+const textToRepositories = (
+  capabilityId: string,
+  value: string,
+): CapabilityRepository[] =>
+  value
+    .split('\n')
+    .map((line, index) => {
+      const [label = '', url = '', defaultBranch = '', localRootHint = '', flag = ''] = line
+        .split('|')
+        .map(part => part.trim());
+
+      if (!label && !url && !localRootHint) {
+        return null;
+      }
+
+      const normalizedUrl = url || localRootHint;
+      return {
+        id: `REPO-${capabilityId}-${index + 1}`,
+        capabilityId,
+        label: label || normalizedUrl.split('/').pop()?.replace(/\.git$/i, '') || `Repository ${index + 1}`,
+        url: normalizedUrl,
+        defaultBranch: defaultBranch || 'main',
+        localRootHint: localRootHint || undefined,
+        isPrimary: flag.toLowerCase() === 'primary' || index === 0,
+        status: 'ACTIVE',
+      } satisfies CapabilityRepository;
+    })
+    .filter(Boolean) as CapabilityRepository[];
+
+const dependencyListToText = (dependencies: CapabilityDependency[] = []) =>
+  dependencies
+    .map(dependency =>
+      [
+        dependency.targetCapabilityId,
+        dependency.dependencyKind,
+        dependency.criticality,
+        dependency.versionConstraint || '',
+        dependency.description || '',
+      ].join(' | '),
+    )
+    .join('\n');
+
+const textToDependencies = (
+  capabilityId: string,
+  value: string,
+): CapabilityDependency[] =>
+  value
+    .split('\n')
+    .map((line, index) => {
+      const [targetCapabilityId = '', dependencyKind = '', criticality = '', versionConstraint = '', description = ''] =
+        line.split('|').map(part => part.trim());
+
+      if (!targetCapabilityId && !description) {
+        return null;
+      }
+
+      return {
+        id: `DEP-${capabilityId}-${index + 1}`,
+        capabilityId,
+        targetCapabilityId,
+        dependencyKind:
+          (dependencyKind as CapabilityDependency['dependencyKind']) || 'FUNCTIONAL',
+        criticality:
+          (criticality as CapabilityDependency['criticality']) || 'MEDIUM',
+        versionConstraint: versionConstraint || undefined,
+        description,
+      } satisfies CapabilityDependency;
+    })
+    .filter(Boolean) as CapabilityDependency[];
+
+const requirementListToText = (
+  items: FunctionalRequirementRecord[] | NonFunctionalRequirementRecord[] = [],
+) =>
+  items
+    .map(item =>
+      [
+        item.title,
+        item.description,
+        'priority' in item ? item.priority || '' : item.category || '',
+        'target' in item ? item.target || '' : '',
+      ].join(' | '),
+    )
+    .join('\n');
+
+const textToFunctionalRequirements = (value: string): FunctionalRequirementRecord[] =>
+  value
+    .split('\n')
+    .map((line, index) => {
+      const [title = '', description = '', priority = ''] = line
+        .split('|')
+        .map(part => part.trim());
+      if (!title && !description) {
+        return null;
+      }
+      return {
+        id: `FR-${index + 1}`,
+        title: title || `Requirement ${index + 1}`,
+        description,
+        priority:
+          (priority as FunctionalRequirementRecord['priority']) || undefined,
+      } satisfies FunctionalRequirementRecord;
+    })
+    .filter(Boolean) as FunctionalRequirementRecord[];
+
+const textToNonFunctionalRequirements = (
+  value: string,
+): NonFunctionalRequirementRecord[] =>
+  value
+    .split('\n')
+    .map((line, index) => {
+      const [title = '', description = '', category = '', target = ''] = line
+        .split('|')
+        .map(part => part.trim());
+      if (!title && !description) {
+        return null;
+      }
+      return {
+        id: `NFR-${index + 1}`,
+        title: title || `Constraint ${index + 1}`,
+        description,
+        category:
+          (category as NonFunctionalRequirementRecord['category']) || 'OTHER',
+        target: target || undefined,
+      } satisfies NonFunctionalRequirementRecord;
+    })
+    .filter(Boolean) as NonFunctionalRequirementRecord[];
+
+const apiContractsToText = (items: ApiContractReference[] = []) =>
+  items
+    .map(item =>
+      [
+        item.name,
+        item.kind || '',
+        item.version || '',
+        item.pathOrChannel || '',
+        item.description || '',
+      ].join(' | '),
+    )
+    .join('\n');
+
+const textToApiContracts = (value: string): ApiContractReference[] =>
+  value
+    .split('\n')
+    .map((line, index) => {
+      const [name = '', kind = '', version = '', pathOrChannel = '', description = ''] =
+        line.split('|').map(part => part.trim());
+      if (!name && !description) {
+        return null;
+      }
+      return {
+        id: `API-${index + 1}`,
+        name: name || `Interface ${index + 1}`,
+        kind: (kind as ApiContractReference['kind']) || undefined,
+        version: version || undefined,
+        pathOrChannel: pathOrChannel || undefined,
+        description: description || undefined,
+      } satisfies ApiContractReference;
+    })
+    .filter(Boolean) as ApiContractReference[];
+
+const softwareVersionsToText = (items: SoftwareVersionRecord[] = []) =>
+  items
+    .map(item =>
+      [item.name, item.version, item.role || '', item.environment || '', item.notes || ''].join(
+        ' | ',
+      ),
+    )
+    .join('\n');
+
+const textToSoftwareVersions = (value: string): SoftwareVersionRecord[] =>
+  value
+    .split('\n')
+    .map((line, index) => {
+      const [name = '', version = '', role = '', environment = '', notes = ''] = line
+        .split('|')
+        .map(part => part.trim());
+      if (!name && !version) {
+        return null;
+      }
+      return {
+        id: `SW-${index + 1}`,
+        name: name || `Component ${index + 1}`,
+        version: version || 'unversioned',
+        role: role || undefined,
+        environment: environment || undefined,
+        notes: notes || undefined,
+      } satisfies SoftwareVersionRecord;
+    })
+    .filter(Boolean) as SoftwareVersionRecord[];
+
+const almReferencesToText = (items: CapabilityAlmReference[] = []) =>
+  items
+    .map(item => [item.system, item.label, item.externalId || '', item.url || '', item.description || ''].join(' | '))
+    .join('\n');
+
+const textToAlmReferences = (value: string): CapabilityAlmReference[] =>
+  value
+    .split('\n')
+    .map((line, index) => {
+      const [system = '', label = '', externalId = '', url = '', description = ''] = line
+        .split('|')
+        .map(part => part.trim());
+      if (!label && !externalId && !url) {
+        return null;
+      }
+      return {
+        id: `ALM-${index + 1}`,
+        system: (system as CapabilityAlmReference['system']) || 'OTHER',
+        label: label || `Reference ${index + 1}`,
+        externalId: externalId || undefined,
+        url: url || undefined,
+        description: description || undefined,
+      } satisfies CapabilityAlmReference;
+    })
+    .filter(Boolean) as CapabilityAlmReference[];
+
+const contractDraftToForm = (draft?: CapabilityContractDraft) => ({
+  contractOverview: draft?.overview || '',
+  contractBusinessIntent: draft?.businessIntent || '',
+  contractOwnershipModel: draft?.ownershipModel || '',
+  contractDeploymentFootprint: draft?.deploymentFootprint || '',
+  contractEvidenceAndReadiness: draft?.evidenceAndReadiness || '',
+  contractFunctionalRequirements: requirementListToText(
+    draft?.functionalRequirements || [],
+  ),
+  contractNonFunctionalRequirements: requirementListToText(
+    draft?.nonFunctionalRequirements || [],
+  ),
+  contractApiContracts: apiContractsToText(draft?.apiContracts || []),
+  contractSoftwareVersions: softwareVersionsToText(draft?.softwareVersions || []),
+  contractAlmReferences: almReferencesToText(draft?.almReferences || []),
+});
 
 const defaultStakeholderRoles = [
   'Development Manager',
@@ -154,11 +416,29 @@ export default function CapabilityMetadata() {
   const subCapabilities = capabilities.filter(
     capability => capability.parentCapabilityId === activeCapability.id,
   );
+  const ancestorCapabilityIds = new Set(activeCapability.hierarchyNode?.pathIds || [activeCapability.id]);
+  const candidateChildCapabilities = capabilities.filter(capability => {
+    if (capability.id === activeCapability.id) {
+      return false;
+    }
+    if (ancestorCapabilityIds.has(capability.id)) {
+      return false;
+    }
+    return true;
+  });
 
   const [form, setForm] = useState({
     name: activeCapability.name,
     domain: activeCapability.domain || '',
     parentCapabilityId: activeCapability.parentCapabilityId || '',
+    capabilityKind: activeCapability.capabilityKind || 'DELIVERY',
+    collectionKind: (activeCapability.collectionKind || '') as
+      | CapabilityCollectionKind
+      | '',
+    childCapabilityIds: subCapabilities.map(capability => capability.id),
+    sharedCapabilityIds: (activeCapability.sharedCapabilities || []).map(
+      reference => reference.memberCapabilityId,
+    ),
     businessUnit: activeCapability.businessUnit || '',
     ownerTeam: activeCapability.ownerTeam || '',
     description: activeCapability.description,
@@ -173,6 +453,8 @@ export default function CapabilityMetadata() {
     applications: listToText(activeCapability.applications),
     apis: listToText(activeCapability.apis),
     databases: listToText(activeCapability.databases),
+    repositoriesCatalog: repositoriesToText(activeCapability.repositories || []),
+    dependenciesText: dependencyListToText(activeCapability.dependencies || []),
     gitRepositories: listToText(activeCapability.gitRepositories),
     localDirectories: listToText(activeCapability.localDirectories),
     defaultWorkspacePath:
@@ -188,7 +470,31 @@ export default function CapabilityMetadata() {
       activeCapability.additionalMetadata.length > 0
         ? activeCapability.additionalMetadata
         : [createMetadataEntry()],
+    ...contractDraftToForm(activeCapability.contractDraft),
   });
+  const actsAsParentCapability =
+    form.capabilityKind === 'COLLECTION' ||
+    form.childCapabilityIds.length > 0 ||
+    form.sharedCapabilityIds.length > 0;
+  const availableChildCapabilities = useMemo(
+    () =>
+      candidateChildCapabilities.filter(
+        capability => capability.id !== form.parentCapabilityId,
+      ),
+    [candidateChildCapabilities, form.parentCapabilityId],
+  );
+  const availableSharedCapabilities = useMemo(
+    () =>
+      capabilities.filter(
+        capability =>
+          capability.id !== activeCapability.id &&
+          capability.id !== form.parentCapabilityId &&
+          !form.childCapabilityIds.includes(capability.id),
+      ),
+    [activeCapability.id, capabilities, form.childCapabilityIds, form.parentCapabilityId],
+  );
+  const [isPublishingContract, setIsPublishingContract] = useState(false);
+  const [almExportPreview, setAlmExportPreview] = useState('');
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeStatusError, setRuntimeStatusError] = useState('');
   const [runtimeTokenInput, setRuntimeTokenInput] = useState('');
@@ -206,6 +512,9 @@ export default function CapabilityMetadata() {
   const [lifecycleDraftWorkflows, setLifecycleDraftWorkflows] = useState(
     workspace.workflows,
   );
+  const [phaseOwnershipRulesDraft, setPhaseOwnershipRulesDraft] = useState<
+    CapabilityPhaseOwnershipRule[]
+  >(() => normalizeCapabilityPhaseOwnershipRules(activeCapability));
   const [pendingLifecycleDeletePhaseId, setPendingLifecycleDeletePhaseId] =
     useState<string | null>(null);
   const [lifecycleDeleteTargetPhaseId, setLifecycleDeleteTargetPhaseId] =
@@ -217,6 +526,16 @@ export default function CapabilityMetadata() {
       name: activeCapability.name,
       domain: activeCapability.domain || '',
       parentCapabilityId: activeCapability.parentCapabilityId || '',
+      capabilityKind: activeCapability.capabilityKind || 'DELIVERY',
+      collectionKind: (activeCapability.collectionKind || '') as
+        | CapabilityCollectionKind
+        | '',
+      childCapabilityIds: capabilities
+        .filter(capability => capability.parentCapabilityId === activeCapability.id)
+        .map(capability => capability.id),
+      sharedCapabilityIds: (activeCapability.sharedCapabilities || []).map(
+        reference => reference.memberCapabilityId,
+      ),
       businessUnit: activeCapability.businessUnit || '',
       ownerTeam: activeCapability.ownerTeam || '',
       description: activeCapability.description,
@@ -231,6 +550,8 @@ export default function CapabilityMetadata() {
       applications: listToText(activeCapability.applications),
       apis: listToText(activeCapability.apis),
       databases: listToText(activeCapability.databases),
+      repositoriesCatalog: repositoriesToText(activeCapability.repositories || []),
+      dependenciesText: dependencyListToText(activeCapability.dependencies || []),
       gitRepositories: listToText(activeCapability.gitRepositories),
       localDirectories: listToText(activeCapability.localDirectories),
       defaultWorkspacePath:
@@ -246,19 +567,22 @@ export default function CapabilityMetadata() {
         activeCapability.additionalMetadata.length > 0
           ? activeCapability.additionalMetadata
           : [createMetadataEntry()],
+      ...contractDraftToForm(activeCapability.contractDraft),
     });
     setSaveError('');
     setLastSavedAt('');
     setWorkspaceDetection(null);
     setWorkspaceDetectionDismissed(false);
+    setAlmExportPreview('');
   }, [activeCapability]);
 
   useEffect(() => {
     setLifecycleDraft(capabilityLifecycle);
     setLifecycleDraftWorkflows(workspace.workflows);
+    setPhaseOwnershipRulesDraft(normalizeCapabilityPhaseOwnershipRules(activeCapability));
     setPendingLifecycleDeletePhaseId(null);
     setLifecycleDeleteTargetPhaseId('');
-  }, [capabilityLifecycle, workspace.workflows]);
+  }, [activeCapability, capabilityLifecycle, workspace.workflows]);
 
   useEffect(() => {
     let isMounted = true;
@@ -326,17 +650,36 @@ export default function CapabilityMetadata() {
       { label: 'Stakeholders', value: filteredStakeholders.length },
       { label: 'Success Metrics', value: textToList(form.successMetrics).length },
       { label: 'Evidence Needs', value: textToList(form.requiredEvidenceKinds).length },
-      { label: 'Git Repos', value: textToList(form.gitRepositories).length },
+      { label: 'Direct children', value: form.childCapabilityIds.length },
+      { label: 'Shared capabilities', value: form.sharedCapabilityIds.length },
+      { label: 'Repos', value: textToRepositories(activeCapability.id, form.repositoriesCatalog).length },
       { label: 'Local Dirs', value: textToList(form.localDirectories).length },
     ],
     [
+      form.childCapabilityIds.length,
+      form.sharedCapabilityIds.length,
       filteredStakeholders.length,
-      form.gitRepositories,
       form.localDirectories,
+      form.repositoriesCatalog,
       form.requiredEvidenceKinds,
       form.successMetrics,
       form.teamNames,
+      activeCapability.id,
     ],
+  );
+  const phaseOwnershipTeamOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [form.ownerTeam.trim(), ...textToList(form.teamNames)]
+            .filter(Boolean)
+            .map(teamName => teamName.trim()),
+        ),
+      ).map(teamName => ({
+        id: toWorkspaceTeamId(teamName),
+        label: teamName,
+      })),
+    [form.ownerTeam, form.teamNames],
   );
   const approvedWorkspacePaths = useMemo(
     () =>
@@ -346,10 +689,19 @@ export default function CapabilityMetadata() {
             form.defaultWorkspacePath.trim(),
             ...textToList(form.localDirectories),
             ...textToList(form.allowedWorkspacePaths),
+            ...textToRepositories(activeCapability.id, form.repositoriesCatalog)
+              .map(repository => repository.localRootHint || '')
+              .filter(Boolean),
           ].filter(Boolean),
         ),
       ),
-    [form.allowedWorkspacePaths, form.defaultWorkspacePath, form.localDirectories],
+    [
+      activeCapability.id,
+      form.allowedWorkspacePaths,
+      form.defaultWorkspacePath,
+      form.localDirectories,
+      form.repositoriesCatalog,
+    ],
   );
   const workspaceDetectionSignature = useMemo(
     () =>
@@ -409,6 +761,40 @@ export default function CapabilityMetadata() {
   const setField = (field: keyof typeof form, value: string) => {
     setSaveError('');
     setForm(prev => ({ ...prev, [field]: value }));
+  };
+
+  const toggleChildCapabilitySelection = (childCapabilityId: string) => {
+    setSaveError('');
+    setForm(prev => {
+      const nextIds = new Set(prev.childCapabilityIds);
+      if (nextIds.has(childCapabilityId)) {
+        nextIds.delete(childCapabilityId);
+      } else {
+        nextIds.add(childCapabilityId);
+      }
+      return {
+        ...prev,
+        childCapabilityIds: [...nextIds],
+        sharedCapabilityIds: prev.sharedCapabilityIds.filter(id => id !== childCapabilityId),
+      };
+    });
+  };
+
+  const toggleSharedCapabilitySelection = (sharedCapabilityId: string) => {
+    setSaveError('');
+    setForm(prev => {
+      const nextIds = new Set(prev.sharedCapabilityIds);
+      if (nextIds.has(sharedCapabilityId)) {
+        nextIds.delete(sharedCapabilityId);
+      } else {
+        nextIds.add(sharedCapabilityId);
+      }
+      return {
+        ...prev,
+        sharedCapabilityIds: [...nextIds],
+        childCapabilityIds: prev.childCapabilityIds.filter(id => id !== sharedCapabilityId),
+      };
+    });
   };
 
   useEffect(() => {
@@ -485,45 +871,111 @@ export default function CapabilityMetadata() {
   const lifecycleDirty = lifecycleSnapshot !== activeLifecycleSnapshot;
 
   const formPayload = useMemo<Partial<Capability>>(
-    () => ({
-      name: form.name.trim(),
-      domain: form.domain.trim(),
-      parentCapabilityId: form.parentCapabilityId || undefined,
-      businessUnit: form.businessUnit.trim(),
-      ownerTeam: form.ownerTeam.trim() || undefined,
-      description: form.description.trim(),
-      businessOutcome: form.businessOutcome.trim() || undefined,
-      successMetrics: textToList(form.successMetrics),
-      definitionOfDone: form.definitionOfDone.trim() || undefined,
-      requiredEvidenceKinds: textToList(form.requiredEvidenceKinds),
-      operatingPolicySummary: form.operatingPolicySummary.trim() || undefined,
-      confluenceLink: form.confluenceLink.trim() || undefined,
-      jiraBoardLink: form.jiraBoardLink.trim() || undefined,
-      documentationNotes: form.documentationNotes.trim() || undefined,
-      applications: textToList(form.applications),
-      apis: textToList(form.apis),
-      databases: textToList(form.databases),
-      gitRepositories: textToList(form.gitRepositories),
-      localDirectories: textToList(form.localDirectories),
-      executionConfig: {
-        defaultWorkspacePath: form.defaultWorkspacePath.trim() || undefined,
-        allowedWorkspacePaths: textToList(form.allowedWorkspacePaths),
-        commandTemplates: form.commandTemplates,
-        deploymentTargets: form.deploymentTargets,
-      },
-      teamNames: textToList(form.teamNames),
-      stakeholders: filteredStakeholders,
-      additionalMetadata: filteredMetadataEntries,
-    }),
+    () => {
+      const repositories = textToRepositories(activeCapability.id, form.repositoriesCatalog);
+      const contractDraft: CapabilityContractDraft = {
+        overview: form.contractOverview.trim() || undefined,
+        businessIntent: form.contractBusinessIntent.trim() || undefined,
+        ownershipModel: form.contractOwnershipModel.trim() || undefined,
+        deploymentFootprint: form.contractDeploymentFootprint.trim() || undefined,
+        evidenceAndReadiness: form.contractEvidenceAndReadiness.trim() || undefined,
+        functionalRequirements: textToFunctionalRequirements(
+          form.contractFunctionalRequirements,
+        ),
+        nonFunctionalRequirements: textToNonFunctionalRequirements(
+          form.contractNonFunctionalRequirements,
+        ),
+        apiContracts: textToApiContracts(form.contractApiContracts),
+        softwareVersions: textToSoftwareVersions(form.contractSoftwareVersions),
+        almReferences: textToAlmReferences(form.contractAlmReferences),
+        sections: [],
+        additionalMetadata: filteredMetadataEntries,
+      };
+      return {
+        name: form.name.trim(),
+        domain: form.domain.trim(),
+        parentCapabilityId: form.parentCapabilityId || undefined,
+        capabilityKind: form.capabilityKind,
+        collectionKind:
+          form.capabilityKind === 'COLLECTION'
+            ? form.collectionKind || undefined
+            : undefined,
+        businessUnit: form.businessUnit.trim(),
+        ownerTeam: form.ownerTeam.trim() || undefined,
+        description: form.description.trim(),
+        businessOutcome: form.businessOutcome.trim() || undefined,
+        successMetrics: textToList(form.successMetrics),
+        definitionOfDone: form.definitionOfDone.trim() || undefined,
+        requiredEvidenceKinds: textToList(form.requiredEvidenceKinds),
+        operatingPolicySummary: form.operatingPolicySummary.trim() || undefined,
+        confluenceLink: form.confluenceLink.trim() || undefined,
+        jiraBoardLink: form.jiraBoardLink.trim() || undefined,
+        documentationNotes: form.documentationNotes.trim() || undefined,
+        applications: textToList(form.applications),
+        apis: textToList(form.apis),
+        databases: textToList(form.databases),
+        repositories,
+        dependencies: textToDependencies(activeCapability.id, form.dependenciesText),
+        sharedCapabilities:
+          form.capabilityKind === 'COLLECTION'
+            ? form.sharedCapabilityIds.map((memberCapabilityId, index) => ({
+                id: `SHARED-${activeCapability.id}-${index + 1}`,
+                collectionCapabilityId: activeCapability.id,
+                memberCapabilityId,
+                label:
+                  capabilities.find(capability => capability.id === memberCapabilityId)?.name ||
+                  undefined,
+              }))
+            : [],
+        contractDraft,
+        gitRepositories: Array.from(
+          new Set([
+            ...repositories.map(repository => repository.url).filter(Boolean),
+            ...textToList(form.gitRepositories),
+          ]),
+        ),
+        localDirectories: Array.from(
+          new Set([
+            ...repositories
+              .map(repository => repository.localRootHint || '')
+              .filter(Boolean),
+            ...textToList(form.localDirectories),
+          ]),
+        ),
+        executionConfig: {
+          defaultWorkspacePath: form.defaultWorkspacePath.trim() || undefined,
+          allowedWorkspacePaths: textToList(form.allowedWorkspacePaths),
+          commandTemplates: form.commandTemplates,
+          deploymentTargets: form.deploymentTargets,
+        },
+        teamNames: textToList(form.teamNames),
+        stakeholders: filteredStakeholders,
+        additionalMetadata: filteredMetadataEntries,
+        phaseOwnershipRules: phaseOwnershipRulesDraft,
+      };
+    },
     [
+      activeCapability.id,
+      capabilities,
       filteredMetadataEntries,
       filteredStakeholders,
       form.allowedWorkspacePaths,
       form.apis,
       form.applications,
       form.businessUnit,
+      form.capabilityKind,
       form.commandTemplates,
       form.confluenceLink,
+      form.contractAlmReferences,
+      form.contractApiContracts,
+      form.contractBusinessIntent,
+      form.contractDeploymentFootprint,
+      form.contractEvidenceAndReadiness,
+      form.contractFunctionalRequirements,
+      form.contractNonFunctionalRequirements,
+      form.contractOverview,
+      form.contractOwnershipModel,
+      form.contractSoftwareVersions,
       form.databases,
       form.defaultWorkspacePath,
       form.definitionOfDone,
@@ -538,9 +990,14 @@ export default function CapabilityMetadata() {
       form.operatingPolicySummary,
       form.ownerTeam,
       form.parentCapabilityId,
+      form.collectionKind,
+      form.sharedCapabilityIds,
+      form.dependenciesText,
+      form.repositoriesCatalog,
       form.requiredEvidenceKinds,
       form.successMetrics,
       form.teamNames,
+      phaseOwnershipRulesDraft,
     ],
   );
   const activeCapabilitySnapshot = useMemo(
@@ -549,6 +1006,12 @@ export default function CapabilityMetadata() {
         name: activeCapability.name,
         domain: activeCapability.domain || '',
         parentCapabilityId: activeCapability.parentCapabilityId || undefined,
+        childCapabilityIds: subCapabilities.map(capability => capability.id).sort(),
+        sharedCapabilityIds: (activeCapability.sharedCapabilities || [])
+          .map(reference => reference.memberCapabilityId)
+          .sort(),
+        capabilityKind: activeCapability.capabilityKind || 'DELIVERY',
+        collectionKind: activeCapability.collectionKind || undefined,
         businessUnit: activeCapability.businessUnit || '',
         ownerTeam: activeCapability.ownerTeam || undefined,
         description: activeCapability.description,
@@ -563,16 +1026,28 @@ export default function CapabilityMetadata() {
         applications: activeCapability.applications,
         apis: activeCapability.apis,
         databases: activeCapability.databases,
+        repositories: activeCapability.repositories || [],
+        dependencies: activeCapability.dependencies || [],
+        contractDraft: activeCapability.contractDraft,
         gitRepositories: activeCapability.gitRepositories,
         localDirectories: activeCapability.localDirectories,
         executionConfig: activeCapability.executionConfig,
         teamNames: activeCapability.teamNames,
         stakeholders: activeCapability.stakeholders.filter(hasStakeholderContent),
         additionalMetadata: activeCapability.additionalMetadata.filter(hasMetadataEntryContent),
+        phaseOwnershipRules: normalizeCapabilityPhaseOwnershipRules(activeCapability),
       }),
-    [activeCapability],
+    [activeCapability, subCapabilities],
   );
-  const formSnapshot = useMemo(() => JSON.stringify(formPayload), [formPayload]);
+  const formSnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        ...formPayload,
+        childCapabilityIds: [...form.childCapabilityIds].sort(),
+        sharedCapabilityIds: [...form.sharedCapabilityIds].sort(),
+      }),
+    [form.childCapabilityIds, form.sharedCapabilityIds, formPayload],
+  );
   const saveState =
     isSaving
       ? 'saving'
@@ -613,6 +1088,26 @@ export default function CapabilityMetadata() {
         (_stakeholder, stakeholderIndex) => stakeholderIndex !== index,
       ),
     }));
+  };
+
+  const updatePhaseOwnershipRule = (
+    phaseId: string,
+    field: keyof CapabilityPhaseOwnershipRule,
+    value: string | string[],
+  ) => {
+    setPhaseOwnershipRulesDraft(current =>
+      current.map(rule =>
+        rule.phaseId === phaseId
+          ? {
+              ...rule,
+              [field]:
+                typeof value === 'string'
+                  ? value || undefined
+                  : value,
+            }
+          : rule,
+      ),
+    );
   };
 
   const updateMetadataEntry = (
@@ -788,10 +1283,31 @@ export default function CapabilityMetadata() {
       setSaveError('');
       try {
         await updateCapabilityMetadata(activeCapability.id, formPayload);
+        const existingChildIds = new Set(subCapabilities.map(capability => capability.id));
+        const nextChildIds = new Set(form.childCapabilityIds);
+        const childAttachIds = [...nextChildIds].filter(id => !existingChildIds.has(id));
+        const childDetachIds = [...existingChildIds].filter(id => !nextChildIds.has(id));
+
+        if (childAttachIds.length > 0 || childDetachIds.length > 0) {
+          await Promise.all([
+            ...childAttachIds.map(childCapabilityId =>
+              updateCapabilityMetadata(childCapabilityId, {
+                parentCapabilityId: activeCapability.id,
+              }),
+            ),
+            ...childDetachIds.map(childCapabilityId =>
+              updateCapabilityMetadata(childCapabilityId, {
+                parentCapabilityId: undefined,
+              }),
+            ),
+          ]);
+        }
         setLastSavedAt(new Date().toISOString());
         success(
           'Capability metadata saved',
-          `${form.name.trim()} now reflects the latest business charter and execution governance details.`,
+          childAttachIds.length > 0 || childDetachIds.length > 0
+            ? `${form.name.trim()} now reflects the latest business charter and parent-child hierarchy updates.`
+            : `${form.name.trim()} now reflects the latest business charter and execution governance details.`,
         );
       } catch (error) {
         const message =
@@ -804,6 +1320,39 @@ export default function CapabilityMetadata() {
         setIsSaving(false);
       }
     })();
+  };
+
+  const handlePublishContract = async () => {
+    setIsPublishingContract(true);
+    try {
+      await updateCapabilityMetadata(activeCapability.id, formPayload);
+      const result = await publishCapabilityContract(activeCapability.id);
+      setLastSavedAt(new Date().toISOString());
+      success(
+        'Capability contract published',
+        `${activeCapability.name} is now published at version ${result.snapshot?.publishVersion || '?'}. Parent rollups and ALM exports will use this snapshot.`,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to publish the capability contract.';
+      showError('Capability publish failed', message);
+    } finally {
+      setIsPublishingContract(false);
+    }
+  };
+
+  const handlePreviewAlmExport = async () => {
+    try {
+      const payload = await fetchCapabilityAlmExport(activeCapability.id);
+      setAlmExportPreview(JSON.stringify(payload, null, 2));
+    } catch (error) {
+      showError(
+        'ALM export failed',
+        error instanceof Error
+          ? error.message
+          : 'Unable to build the ALM export preview.',
+      );
+    }
   };
 
   const handleStatusToggle = () => {
@@ -1035,6 +1584,27 @@ export default function CapabilityMetadata() {
 
               <label className="space-y-2">
                 <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Capability kind
+                </span>
+                <select
+                  value={form.capabilityKind}
+                  onChange={event =>
+                    setForm(prev => ({
+                      ...prev,
+                      capabilityKind: event.target.value as 'DELIVERY' | 'COLLECTION',
+                      collectionKind:
+                        event.target.value === 'COLLECTION' ? prev.collectionKind : '',
+                    }))
+                  }
+                  className="field-select"
+                >
+                  <option value="DELIVERY">Delivery</option>
+                  <option value="COLLECTION">Collection</option>
+                </select>
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
                   Business unit
                 </span>
                 <input
@@ -1064,6 +1634,31 @@ export default function CapabilityMetadata() {
                 </select>
               </label>
 
+              {form.capabilityKind === 'COLLECTION' ? (
+                <label className="space-y-2">
+                  <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                    Collection kind
+                  </span>
+                  <select
+                    value={form.collectionKind}
+                    onChange={event =>
+                      setForm(prev => ({
+                        ...prev,
+                        collectionKind: event.target.value as CapabilityCollectionKind | '',
+                      }))
+                    }
+                    className="field-select"
+                  >
+                    <option value="">Choose a collection layer</option>
+                    <option value="BUSINESS_DOMAIN">Business domain</option>
+                    <option value="PLATFORM_LAYER">Platform layer</option>
+                    <option value="ENTERPRISE_LAYER">Enterprise layer</option>
+                    <option value="CITY_PLAN">City plan</option>
+                    <option value="ALM_PORTFOLIO">ALM portfolio</option>
+                  </select>
+                </label>
+              ) : null}
+
               <label className="space-y-2">
                 <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
                   Owner team
@@ -1086,6 +1681,174 @@ export default function CapabilityMetadata() {
                   className="field-textarea h-28"
                 />
               </label>
+            </section>
+
+            <section className="grid gap-5">
+              <div className="flex items-center gap-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                  <Building2 size={24} />
+                </div>
+                <div>
+                  <h2 className="text-xl font-extrabold text-primary">
+                    Parent capability management
+                  </h2>
+                  <p className="text-sm text-secondary">
+                    Use this capability as a parent node and attach child capabilities directly
+                    from here. Selecting a child will re-parent it to this capability when you
+                    save.
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusBadge tone={actsAsParentCapability ? 'success' : 'neutral'}>
+                    {actsAsParentCapability ? 'Parent capability' : 'No child capabilities yet'}
+                  </StatusBadge>
+                  {form.capabilityKind === 'COLLECTION' ? (
+                    <StatusBadge tone="info">Collection nodes are natural parents</StatusBadge>
+                  ) : null}
+                </div>
+                <p className="mt-3 text-sm text-secondary">
+                  Single-parent hierarchy is enforced. If you select a capability that already
+                  belongs to another parent, Singulairy will move it under this parent when you
+                  save.
+                </p>
+
+                <div className="mt-5 grid gap-3 md:grid-cols-2">
+                  {availableChildCapabilities.length > 0 ? (
+                    availableChildCapabilities.map(capability => {
+                      const isSelected = form.childCapabilityIds.includes(capability.id);
+                      const currentParent =
+                        capability.parentCapabilityId &&
+                        capabilities.find(item => item.id === capability.parentCapabilityId);
+
+                      return (
+                        <label
+                          key={capability.id}
+                          className={cn(
+                            'flex cursor-pointer items-start gap-3 rounded-2xl border p-4 transition-all',
+                            isSelected
+                              ? 'border-primary/30 bg-primary/5'
+                              : 'border-outline-variant/15 bg-white hover:border-primary/20',
+                          )}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleChildCapabilitySelection(capability.id)}
+                            className="mt-1 h-4 w-4 rounded border-outline-variant text-primary focus:ring-primary"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-bold text-on-surface">
+                              {capability.name}
+                            </p>
+                            <p className="mt-1 text-xs text-secondary">
+                              {capability.capabilityKind === 'COLLECTION'
+                                ? capability.collectionKind || 'Collection'
+                                : capability.domain || capability.description}
+                            </p>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              <StatusBadge tone="info">
+                                {capability.capabilityKind || 'DELIVERY'}
+                              </StatusBadge>
+                              {currentParent && !isSelected ? (
+                                <StatusBadge tone="warning">
+                                  Current parent: {currentParent.name}
+                                </StatusBadge>
+                              ) : null}
+                              {isSelected ? (
+                                <StatusBadge tone="success">Will be attached here</StatusBadge>
+                              ) : null}
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })
+                  ) : (
+                    <div className="rounded-2xl border border-dashed border-outline-variant/30 bg-white p-5 text-sm text-secondary">
+                      No eligible child capabilities are available. Ancestors and this capability
+                      are excluded to keep the hierarchy cycle-free.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {form.capabilityKind === 'COLLECTION' ? (
+                <div className="rounded-3xl border border-outline-variant/15 bg-surface-container-low p-5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusBadge tone={form.sharedCapabilityIds.length ? 'brand' : 'neutral'}>
+                      {form.sharedCapabilityIds.length
+                        ? `${form.sharedCapabilityIds.length} shared capability reference${form.sharedCapabilityIds.length === 1 ? '' : 's'}`
+                        : 'No shared capability references yet'}
+                    </StatusBadge>
+                    <StatusBadge tone="info">
+                      Shared capabilities can appear in multiple collections
+                    </StatusBadge>
+                  </div>
+                  <p className="mt-3 text-sm text-secondary">
+                    Shared capabilities keep their own direct parent but are still visible in this
+                    collection’s architecture, rollups, and ALM views.
+                  </p>
+
+                  <div className="mt-5 grid gap-3 md:grid-cols-2">
+                    {availableSharedCapabilities.length > 0 ? (
+                      availableSharedCapabilities.map(capability => {
+                        const isSelected = form.sharedCapabilityIds.includes(capability.id);
+                        const currentParent =
+                          capability.parentCapabilityId &&
+                          capabilities.find(item => item.id === capability.parentCapabilityId);
+
+                        return (
+                          <label
+                            key={`shared-${capability.id}`}
+                            className={cn(
+                              'flex cursor-pointer items-start gap-3 rounded-2xl border p-4 transition-all',
+                              isSelected
+                                ? 'border-primary/30 bg-primary/5'
+                                : 'border-outline-variant/15 bg-white hover:border-primary/20',
+                            )}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleSharedCapabilitySelection(capability.id)}
+                              className="mt-1 h-4 w-4 rounded border-outline-variant text-primary focus:ring-primary"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-bold text-on-surface">
+                                {capability.name}
+                              </p>
+                              <p className="mt-1 text-xs text-secondary">
+                                {capability.capabilityKind === 'COLLECTION'
+                                  ? capability.collectionKind || 'Collection'
+                                  : capability.domain || capability.description}
+                              </p>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <StatusBadge tone="info">
+                                  {capability.capabilityKind || 'DELIVERY'}
+                                </StatusBadge>
+                                {currentParent ? (
+                                  <StatusBadge tone="neutral">
+                                    Direct parent: {currentParent.name}
+                                  </StatusBadge>
+                                ) : null}
+                                {isSelected ? (
+                                  <StatusBadge tone="success">Shared here</StatusBadge>
+                                ) : null}
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })
+                    ) : (
+                      <div className="rounded-2xl border border-dashed border-outline-variant/30 bg-white p-5 text-sm text-secondary">
+                        No additional capabilities are available for shared references right now.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
             </section>
 
             <section className="grid gap-5 md:grid-cols-2">
@@ -1183,6 +1946,176 @@ export default function CapabilityMetadata() {
                 </div>
                 <StatusBadge tone="neutral">Advanced controls</StatusBadge>
               </div>
+            </section>
+
+            <section className="grid gap-5 md:grid-cols-2">
+              <div className="md:col-span-2 flex items-center gap-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                  <Building2 size={24} />
+                </div>
+                <div>
+                  <h2 className="text-xl font-extrabold text-primary">
+                    Architecture dependencies and publishable contract
+                  </h2>
+                  <p className="text-sm text-secondary">
+                    Owners maintain the draft here. Parent layers and ALM rollups consume the
+                    published snapshot, not the live draft.
+                  </p>
+                </div>
+              </div>
+
+              <label className="space-y-2 md:col-span-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Dependencies
+                </span>
+                <textarea
+                  value={form.dependenciesText}
+                  onChange={event => setField('dependenciesText', event.target.value)}
+                  placeholder={'CAP-PAYMENTS | API | HIGH | 4 | Depends on the payments contract\nCAP-IDENTITY | FUNCTIONAL | MEDIUM |  | Needs identity availability'}
+                  className="field-textarea h-32"
+                />
+                <p className="text-xs text-secondary">
+                  One per line: target capability id | dependency kind | criticality | version
+                  constraint | description
+                </p>
+              </label>
+
+              <label className="space-y-2 md:col-span-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Contract overview
+                </span>
+                <textarea
+                  value={form.contractOverview}
+                  onChange={event => setField('contractOverview', event.target.value)}
+                  placeholder="Summarize the service boundary, operating scope, and what upstream and downstream teams can rely on."
+                  className="field-textarea h-28"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Business intent
+                </span>
+                <textarea
+                  value={form.contractBusinessIntent}
+                  onChange={event => setField('contractBusinessIntent', event.target.value)}
+                  className="field-textarea h-28"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Ownership model
+                </span>
+                <textarea
+                  value={form.contractOwnershipModel}
+                  onChange={event => setField('contractOwnershipModel', event.target.value)}
+                  className="field-textarea h-28"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Deployment footprint
+                </span>
+                <textarea
+                  value={form.contractDeploymentFootprint}
+                  onChange={event => setField('contractDeploymentFootprint', event.target.value)}
+                  className="field-textarea h-28"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Evidence and readiness
+                </span>
+                <textarea
+                  value={form.contractEvidenceAndReadiness}
+                  onChange={event => setField('contractEvidenceAndReadiness', event.target.value)}
+                  className="field-textarea h-28"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Functional requirements
+                </span>
+                <textarea
+                  value={form.contractFunctionalRequirements}
+                  onChange={event =>
+                    setField('contractFunctionalRequirements', event.target.value)
+                  }
+                  placeholder={'Expose settlement status | Must expose current settlement state | HIGH\nSupport reversal requests | Handle approved reversal requests | MEDIUM'}
+                  className="field-textarea h-32"
+                />
+                <p className="text-xs text-secondary">
+                  One per line: title | description | priority
+                </p>
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Non-functional requirements
+                </span>
+                <textarea
+                  value={form.contractNonFunctionalRequirements}
+                  onChange={event =>
+                    setField('contractNonFunctionalRequirements', event.target.value)
+                  }
+                  placeholder={'API latency | p95 under 200ms | PERFORMANCE | p95 < 200ms\nAudit retention | Keep records for 7 years | COMPLIANCE | 7 years'}
+                  className="field-textarea h-32"
+                />
+                <p className="text-xs text-secondary">
+                  One per line: title | description | category | target
+                </p>
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  API contracts
+                </span>
+                <textarea
+                  value={form.contractApiContracts}
+                  onChange={event => setField('contractApiContracts', event.target.value)}
+                  placeholder={'Payments API | REST | v4 | /payments | External payment orchestration\nSettlement events | EVENT | v2 | settlement.updated | Downstream status broadcast'}
+                  className="field-textarea h-32"
+                />
+                <p className="text-xs text-secondary">
+                  One per line: name | kind | version | path or channel | description
+                </p>
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Software inventory and versions
+                </span>
+                <textarea
+                  value={form.contractSoftwareVersions}
+                  onChange={event =>
+                    setField('contractSoftwareVersions', event.target.value)
+                  }
+                  placeholder={'payments-service | 2.4.1 | runtime | prod | Primary API service\npayments-ui | 1.8.0 | frontend | prod | Internal console'}
+                  className="field-textarea h-32"
+                />
+                <p className="text-xs text-secondary">
+                  One per line: name | version | role | environment | notes
+                </p>
+              </label>
+
+              <label className="space-y-2 md:col-span-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  ALM references
+                </span>
+                <textarea
+                  value={form.contractAlmReferences}
+                  onChange={event => setField('contractAlmReferences', event.target.value)}
+                  placeholder={'JIRA | Payments roadmap | PAY | https://jira.example.com/browse/PAY | Portfolio epic\nCONFLUENCE | Payments architecture | ARCH-12 | https://confluence.example.com/display/ARCH-12 | Living design page'}
+                  className="field-textarea h-28"
+                />
+                <p className="text-xs text-secondary">
+                  One per line: system | label | external id | url | description
+                </p>
+              </label>
             </section>
 
             <section className="grid gap-5 md:grid-cols-2">
@@ -1312,6 +2245,26 @@ export default function CapabilityMetadata() {
                     className="field-textarea mt-4 h-24 bg-white/70"
                   />
                 </div>
+              </label>
+
+              <label className="space-y-2 md:col-span-2">
+                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
+                  Shared repository catalog
+                </span>
+                <textarea
+                  value={form.repositoriesCatalog}
+                  onChange={event =>
+                    setField('repositoriesCatalog', event.target.value)
+                  }
+                  placeholder={
+                    'Payments Core | ssh://git.example.com/payments/payments-core.git | main | /Users/ashokraj/Documents/payments-core | primary\nGateway Adapter | ssh://git.example.com/payments/payment-gateway.git | develop | /Users/ashokraj/Documents/payment-gateway |'
+                  }
+                  className="field-textarea h-32"
+                />
+                <p className="text-xs leading-relaxed text-secondary">
+                  One repository per line: <code>Label | URL | default branch | local root | primary</code>.
+                  The first line is treated as primary if you do not mark one explicitly.
+                </p>
               </label>
 
               <label className="space-y-2 md:col-span-2">
@@ -1604,6 +2557,130 @@ export default function CapabilityMetadata() {
                   </div>
                   <div>
                     <h2 className="text-xl font-extrabold text-primary">
+                      Phase ownership
+                    </h2>
+                    <p className="text-sm text-secondary">
+                      Make ownership explicit for each lifecycle phase so work routing,
+                      approvals, and escalation can become team-aware.
+                    </p>
+                  </div>
+                </div>
+                <StatusBadge tone="brand">
+                  {phaseOwnershipRulesDraft.length} configured phase
+                  {phaseOwnershipRulesDraft.length === 1 ? '' : 's'}
+                </StatusBadge>
+              </div>
+
+              <div className="space-y-3">
+                {phaseOwnershipRulesDraft.map(rule => (
+                  <div
+                    key={rule.phaseId}
+                    className="grid gap-3 rounded-3xl border border-outline-variant/15 bg-surface-container-low p-4 md:grid-cols-2"
+                  >
+                    <div className="md:col-span-2">
+                      <p className="text-sm font-semibold text-on-surface">
+                        {getLifecyclePhaseLabel(activeCapability, rule.phaseId)}
+                      </p>
+                      <p className="mt-1 text-xs leading-relaxed text-secondary">
+                        Team ids are stored so ownership rules remain stable even if team labels evolve.
+                      </p>
+                    </div>
+                    <label className="space-y-2">
+                      <span className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                        Primary owner team
+                      </span>
+                      <select
+                        value={rule.primaryOwnerTeamId || ''}
+                        onChange={event =>
+                          updatePhaseOwnershipRule(
+                            rule.phaseId,
+                            'primaryOwnerTeamId',
+                            event.target.value,
+                          )
+                        }
+                        className="field-select bg-white"
+                      >
+                        <option value="">No explicit owner</option>
+                        {phaseOwnershipTeamOptions.map(option => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="space-y-2">
+                      <span className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                        Secondary owner teams
+                      </span>
+                      <input
+                        value={rule.secondaryOwnerTeamIds.join(', ')}
+                        onChange={event =>
+                          updatePhaseOwnershipRule(
+                            rule.phaseId,
+                            'secondaryOwnerTeamIds',
+                            event.target.value
+                              .split(',')
+                              .map(teamId => teamId.trim())
+                              .filter(Boolean),
+                          )
+                        }
+                        placeholder="TEAM-..., TEAM-..."
+                        className="field-input bg-white"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                        Approval teams
+                      </span>
+                      <input
+                        value={rule.approvalTeamIds.join(', ')}
+                        onChange={event =>
+                          updatePhaseOwnershipRule(
+                            rule.phaseId,
+                            'approvalTeamIds',
+                            event.target.value
+                              .split(',')
+                              .map(teamId => teamId.trim())
+                              .filter(Boolean),
+                          )
+                        }
+                        placeholder="TEAM-..., TEAM-..."
+                        className="field-input bg-white"
+                      />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
+                        Escalation teams
+                      </span>
+                      <input
+                        value={rule.escalationTeamIds.join(', ')}
+                        onChange={event =>
+                          updatePhaseOwnershipRule(
+                            rule.phaseId,
+                            'escalationTeamIds',
+                            event.target.value
+                              .split(',')
+                              .map(teamId => teamId.trim())
+                              .filter(Boolean),
+                          )
+                        }
+                        placeholder="TEAM-..., TEAM-..."
+                        className="field-input bg-white"
+                      />
+                    </label>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="grid gap-5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                    <Users size={24} />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-extrabold text-primary">
                       Leadership and stakeholders
                     </h2>
                     <p className="text-sm text-secondary">
@@ -1781,6 +2858,15 @@ export default function CapabilityMetadata() {
                         : 'No changes'}
               </StatusBadge>
               <button
+                type="button"
+                onClick={() => void handlePublishContract()}
+                disabled={!canSave || isPublishingContract || bootStatus !== 'ready'}
+                className="inline-flex items-center gap-2 rounded-2xl border border-primary/15 bg-primary/5 px-5 py-3 text-sm font-bold text-primary transition-all hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <WorkflowIcon size={16} />
+                {isPublishingContract ? 'Publishing...' : 'Publish contract'}
+              </button>
+              <button
                 type="submit"
                 disabled={!canSave || isSaving || bootStatus !== 'ready'}
                 className="inline-flex items-center gap-2 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
@@ -1790,10 +2876,10 @@ export default function CapabilityMetadata() {
               </button>
               <button
                 type="button"
-                onClick={() => navigate('/team')}
+                onClick={() => navigate('/architecture')}
                 className="inline-flex items-center gap-2 rounded-2xl border border-primary/15 bg-primary/5 px-5 py-3 text-sm font-bold text-primary transition-all hover:bg-primary/10"
               >
-                Team setup
+                Architecture view
                 <ArrowRight size={16} />
               </button>
             </div>
@@ -1982,6 +3068,24 @@ export default function CapabilityMetadata() {
               </p>
             </div>
             <div className="mt-4 space-y-4">
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge tone="info">
+                  {activeCapability.capabilityKind || 'DELIVERY'}
+                </StatusBadge>
+                {actsAsParentCapability ? (
+                  <StatusBadge tone="success">Parent capability</StatusBadge>
+                ) : null}
+                {activeCapability.collectionKind ? (
+                  <StatusBadge tone="warning">{activeCapability.collectionKind}</StatusBadge>
+                ) : null}
+                {activeCapability.publishedSnapshots?.[0] ? (
+                  <StatusBadge tone="success">
+                    v{activeCapability.publishedSnapshots[0].publishVersion}
+                  </StatusBadge>
+                ) : (
+                  <StatusBadge tone="warning">Unpublished</StatusBadge>
+                )}
+              </div>
               <div>
                 <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
                   Parent capability
@@ -2011,8 +3115,61 @@ export default function CapabilityMetadata() {
                   )}
                 </div>
               </div>
+              {activeCapability.rollupSummary ? (
+                <div className="rounded-2xl bg-surface-container-low p-4 text-sm text-secondary">
+                  <p className="font-bold text-on-surface">
+                    Rollup signals: {activeCapability.rollupSummary.directChildCount} direct
+                    children, {activeCapability.rollupSummary.descendantCount} descendants
+                  </p>
+                  <p className="mt-1">
+                    {activeCapability.rollupSummary.missingPublishCount} missing publishes,{' '}
+                    {activeCapability.rollupSummary.unresolvedDependencyCount} unresolved
+                    dependencies, {activeCapability.rollupSummary.versionMismatchCount} version
+                    mismatches.
+                  </p>
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => navigate('/architecture')}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  Open architecture
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handlePreviewAlmExport()}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  Preview ALM export
+                </button>
+              </div>
             </div>
           </div>
+
+          {almExportPreview ? (
+            <div className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-bold text-on-surface">ALM export preview</p>
+                  <p className="text-xs text-secondary">
+                    Normalized publish payload for rollups and external tooling.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAlmExportPreview('')}
+                  className="rounded-xl border border-outline-variant/15 px-3 py-1.5 text-xs font-bold text-secondary transition hover:bg-surface-container-low"
+                >
+                  Clear
+                </button>
+              </div>
+              <pre className="mt-4 max-h-72 overflow-auto rounded-2xl bg-surface-container-low p-4 text-xs text-secondary">
+                {almExportPreview}
+              </pre>
+            </div>
+          ) : null}
 
           <div className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
             <div className="flex items-center gap-2">

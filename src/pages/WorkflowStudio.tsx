@@ -90,6 +90,9 @@ import {
 import { cn } from '../lib/utils';
 import type {
   AgentArtifactExpectation,
+  ApprovalMode,
+  ApprovalPolicy,
+  ApprovalRuleTarget,
   ToolAdapterId,
   WorkItemPhase,
   Workflow,
@@ -97,6 +100,7 @@ import type {
   WorkflowNode,
   WorkflowNodeType,
   WorkflowPublishState,
+  WorkflowStepOwnershipRule,
 } from '../types';
 
 const NODE_TYPE_OPTIONS: Array<{
@@ -289,6 +293,73 @@ const cloneArtifactContract = (artifactContract?: WorkflowNode['artifactContract
           : undefined,
       }
     : undefined;
+
+const cloneApprovalPolicy = (approvalPolicy?: WorkflowNode['approvalPolicy']) =>
+  approvalPolicy
+    ? {
+        ...approvalPolicy,
+        targets: approvalPolicy.targets.map(target => ({ ...target })),
+      }
+    : undefined;
+
+const cloneOwnershipRule = (ownershipRule?: WorkflowNode['ownershipRule']) =>
+  ownershipRule
+    ? {
+        ...ownershipRule,
+        secondaryOwnerTeamIds: [...ownershipRule.secondaryOwnerTeamIds],
+        approvalTeamIds: [...ownershipRule.approvalTeamIds],
+        escalationTeamIds: [...ownershipRule.escalationTeamIds],
+      }
+    : undefined;
+
+const parseCommaList = (value: string) =>
+  value
+    .split(',')
+    .map(entry => entry.trim())
+    .filter(Boolean);
+
+const createDefaultApprovalPolicy = (node: Pick<WorkflowNode, 'id' | 'name'>): ApprovalPolicy => ({
+  id: `APPROVAL-${slugify(node.id || node.name || 'STEP')}`,
+  name: `${node.name} Approval`,
+  mode: 'ANY_ONE',
+  targets: [],
+  delegationAllowed: false,
+});
+
+const createDefaultOwnershipRule = (): WorkflowStepOwnershipRule => ({
+  secondaryOwnerTeamIds: [],
+  approvalTeamIds: [],
+  escalationTeamIds: [],
+  requireHandoffAcceptance: false,
+});
+
+const getApprovalPolicyTargetIds = (
+  approvalPolicy: ApprovalPolicy | undefined,
+  targetType: ApprovalRuleTarget,
+) =>
+  (approvalPolicy?.targets || [])
+    .filter(target => target.targetType === targetType)
+    .map(target => target.targetId);
+
+const toDateTimeLocalValue = (value?: string) => {
+  if (!value) {
+    return '';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+const toIsoDateTimeValue = (value: string) => {
+  if (!value.trim()) {
+    return undefined;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+};
 
 const getNodeArtifactInputs = (node: WorkflowNode) =>
   node.artifactContract?.requiredInputs?.length
@@ -633,9 +704,34 @@ export default function WorkflowStudio({
     getCapabilityWorkspace,
     setCapabilityWorkspaceContent,
     updateCapabilityMetadata,
+    workspaceOrganization,
   } = useCapability();
   const { success, info, warning } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
+  const workspaceTeamOptions = useMemo(
+    () =>
+      workspaceOrganization.teams.map(team => ({
+        id: team.id,
+        label: team.name,
+      })),
+    [workspaceOrganization.teams],
+  );
+  const workspaceUserOptions = useMemo(
+    () =>
+      workspaceOrganization.users.map(user => ({
+        id: user.id,
+        label: user.name,
+      })),
+    [workspaceOrganization.users],
+  );
+  const workspaceTeamNameById = useMemo(
+    () => new Map(workspaceTeamOptions.map(team => [team.id, team.label])),
+    [workspaceTeamOptions],
+  );
+  const workspaceUserNameById = useMemo(
+    () => new Map(workspaceUserOptions.map(user => [user.id, user.label])),
+    [workspaceUserOptions],
+  );
   const capabilityLifecycle = useMemo(
     () => normalizeCapabilityLifecycle(activeCapability.lifecycle),
     [activeCapability.lifecycle],
@@ -1008,6 +1104,8 @@ export default function WorkflowStudio({
           }
         : undefined,
       artifactContract: cloneArtifactContract(selectedNode.artifactContract),
+      approvalPolicy: cloneApprovalPolicy(selectedNode.approvalPolicy),
+      ownershipRule: cloneOwnershipRule(selectedNode.ownershipRule),
     });
   }, [selectedNode]);
 
@@ -1926,6 +2024,8 @@ export default function WorkflowStudio({
           exitCriteria: node.exitCriteria ? [...node.exitCriteria] : undefined,
           allowedToolIds: node.allowedToolIds ? [...node.allowedToolIds] : undefined,
           artifactContract: cloneArtifactContract(node.artifactContract),
+          approvalPolicy: cloneApprovalPolicy(node.approvalPolicy),
+          ownershipRule: cloneOwnershipRule(node.ownershipRule),
           etlConfig: node.etlConfig ? { ...node.etlConfig } : undefined,
           eventConfig: node.eventConfig ? { ...node.eventConfig } : undefined,
           alertConfig: node.alertConfig
@@ -2513,6 +2613,8 @@ export default function WorkflowStudio({
       exitCriteria: nodeToCopy.exitCriteria ? [...nodeToCopy.exitCriteria] : undefined,
       allowedToolIds: nodeToCopy.allowedToolIds ? [...nodeToCopy.allowedToolIds] : undefined,
       artifactContract: cloneArtifactContract(nodeToCopy.artifactContract),
+      approvalPolicy: cloneApprovalPolicy(nodeToCopy.approvalPolicy),
+      ownershipRule: cloneOwnershipRule(nodeToCopy.ownershipRule),
       etlConfig: nodeToCopy.etlConfig ? { ...nodeToCopy.etlConfig } : undefined,
       eventConfig: nodeToCopy.eventConfig ? { ...nodeToCopy.eventConfig } : undefined,
       alertConfig: nodeToCopy.alertConfig
@@ -3177,6 +3279,464 @@ export default function WorkflowStudio({
             className="enterprise-input"
           />
         </label>
+        <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                Approval Policy
+              </p>
+              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                Human approval steps can route to named users, teams, and capability roles. Workflow approval policy drives assignments; legacy approver roles remain as a compatibility fallback.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() =>
+                setNodeDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        approvalPolicy: current.approvalPolicy
+                          ? undefined
+                          : createDefaultApprovalPolicy(current),
+                      }
+                    : current,
+                )
+              }
+              className="enterprise-button enterprise-button-secondary"
+            >
+              {nodeDraft.approvalPolicy ? 'Clear policy' : 'Add policy'}
+            </button>
+          </div>
+        </div>
+        {nodeDraft.approvalPolicy && (
+          <>
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Policy Name</span>
+                <input
+                  value={nodeDraft.approvalPolicy.name}
+                  onChange={event =>
+                    setNodeDraft(current =>
+                      current
+                        ? {
+                            ...current,
+                            approvalPolicy: {
+                              ...(current.approvalPolicy || createDefaultApprovalPolicy(current)),
+                              name: event.target.value || `${current.name} Approval`,
+                            },
+                          }
+                        : current,
+                    )
+                  }
+                  className="enterprise-input"
+                />
+              </label>
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Approval Mode</span>
+                <select
+                  value={nodeDraft.approvalPolicy.mode}
+                  onChange={event =>
+                    setNodeDraft(current =>
+                      current
+                        ? {
+                            ...current,
+                            approvalPolicy: {
+                              ...(current.approvalPolicy || createDefaultApprovalPolicy(current)),
+                              mode: event.target.value as ApprovalMode,
+                            },
+                          }
+                        : current,
+                    )
+                  }
+                  className="enterprise-input"
+                >
+                  <option value="ANY_ONE">Any one approver</option>
+                  <option value="ALL_REQUIRED">All required</option>
+                  <option value="QUORUM">Quorum</option>
+                </select>
+              </label>
+            </div>
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Policy Description</span>
+              <textarea
+                rows={3}
+                value={nodeDraft.approvalPolicy.description || ''}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          approvalPolicy: {
+                            ...(current.approvalPolicy || createDefaultApprovalPolicy(current)),
+                            description: event.target.value || undefined,
+                          },
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input min-h-[6rem]"
+              />
+            </label>
+            <div className="grid gap-4 md:grid-cols-3">
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Minimum Approvals</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={nodeDraft.approvalPolicy.minimumApprovals || ''}
+                  onChange={event =>
+                    setNodeDraft(current =>
+                      current
+                        ? {
+                            ...current,
+                            approvalPolicy: {
+                              ...(current.approvalPolicy || createDefaultApprovalPolicy(current)),
+                              minimumApprovals: event.target.value
+                                ? Math.max(1, Number(event.target.value))
+                                : undefined,
+                            },
+                          }
+                        : current,
+                    )
+                  }
+                  className="enterprise-input"
+                />
+              </label>
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Escalate After (Minutes)</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={nodeDraft.approvalPolicy.escalationAfterMinutes || ''}
+                  onChange={event =>
+                    setNodeDraft(current =>
+                      current
+                        ? {
+                            ...current,
+                            approvalPolicy: {
+                              ...(current.approvalPolicy || createDefaultApprovalPolicy(current)),
+                              escalationAfterMinutes: event.target.value
+                                ? Math.max(1, Number(event.target.value))
+                                : undefined,
+                            },
+                          }
+                        : current,
+                    )
+                  }
+                  className="enterprise-input"
+                />
+              </label>
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Due By</span>
+                <input
+                  type="datetime-local"
+                  value={toDateTimeLocalValue(nodeDraft.approvalPolicy.dueAt)}
+                  onChange={event =>
+                    setNodeDraft(current =>
+                      current
+                        ? {
+                            ...current,
+                            approvalPolicy: {
+                              ...(current.approvalPolicy || createDefaultApprovalPolicy(current)),
+                              dueAt: toIsoDateTimeValue(event.target.value),
+                            },
+                          }
+                        : current,
+                    )
+                  }
+                  className="enterprise-input"
+                />
+              </label>
+            </div>
+            <label className="flex items-center gap-3 text-sm text-secondary">
+              <input
+                type="checkbox"
+                checked={Boolean(nodeDraft.approvalPolicy.delegationAllowed)}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          approvalPolicy: {
+                            ...(current.approvalPolicy || createDefaultApprovalPolicy(current)),
+                            delegationAllowed: event.target.checked,
+                          },
+                        }
+                      : current,
+                  )
+                }
+                className="h-4 w-4 rounded border-outline-variant/40 text-primary focus:ring-primary"
+              />
+              Allow delegated approval decisions for this step
+            </label>
+            <div className="grid gap-4 md:grid-cols-3">
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Approver Teams</span>
+                <select
+                  multiple
+                  value={getApprovalPolicyTargetIds(nodeDraft.approvalPolicy, 'TEAM')}
+                  onChange={event => {
+                    const teamIds = Array.from(event.target.selectedOptions).map(option => option.value);
+                    setNodeDraft(current => {
+                      if (!current) {
+                        return current;
+                      }
+                      const currentPolicy = current.approvalPolicy || createDefaultApprovalPolicy(current);
+                      const otherTargets = currentPolicy.targets.filter(target => target.targetType !== 'TEAM');
+                      return {
+                        ...current,
+                        approvalPolicy: {
+                          ...currentPolicy,
+                          targets: [
+                            ...otherTargets,
+                            ...teamIds.map(teamId => ({
+                              targetType: 'TEAM' as const,
+                              targetId: teamId,
+                              label: workspaceTeamNameById.get(teamId) || teamId,
+                            })),
+                          ],
+                        },
+                      };
+                    });
+                  }}
+                  className="enterprise-input min-h-[8rem]"
+                >
+                  {workspaceTeamOptions.map(team => (
+                    <option key={team.id} value={team.id}>
+                      {team.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Approver Users</span>
+                <select
+                  multiple
+                  value={getApprovalPolicyTargetIds(nodeDraft.approvalPolicy, 'USER')}
+                  onChange={event => {
+                    const userIds = Array.from(event.target.selectedOptions).map(option => option.value);
+                    setNodeDraft(current => {
+                      if (!current) {
+                        return current;
+                      }
+                      const currentPolicy = current.approvalPolicy || createDefaultApprovalPolicy(current);
+                      const otherTargets = currentPolicy.targets.filter(target => target.targetType !== 'USER');
+                      return {
+                        ...current,
+                        approvalPolicy: {
+                          ...currentPolicy,
+                          targets: [
+                            ...otherTargets,
+                            ...userIds.map(userId => ({
+                              targetType: 'USER' as const,
+                              targetId: userId,
+                              label: workspaceUserNameById.get(userId) || userId,
+                            })),
+                          ],
+                        },
+                      };
+                    });
+                  }}
+                  className="enterprise-input min-h-[8rem]"
+                >
+                  {workspaceUserOptions.map(user => (
+                    <option key={user.id} value={user.id}>
+                      {user.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                <span>Capability Roles</span>
+                <textarea
+                  rows={5}
+                  value={getApprovalPolicyTargetIds(nodeDraft.approvalPolicy, 'CAPABILITY_ROLE').join(', ')}
+                  onChange={event => {
+                    const roleIds = parseCommaList(event.target.value);
+                    setNodeDraft(current => {
+                      if (!current) {
+                        return current;
+                      }
+                      const currentPolicy = current.approvalPolicy || createDefaultApprovalPolicy(current);
+                      const otherTargets = currentPolicy.targets.filter(
+                        target => target.targetType !== 'CAPABILITY_ROLE',
+                      );
+                      return {
+                        ...current,
+                        approverRoles: roleIds,
+                        approvalPolicy: {
+                          ...currentPolicy,
+                          targets: [
+                            ...otherTargets,
+                            ...roleIds.map(roleId => ({
+                              targetType: 'CAPABILITY_ROLE' as const,
+                              targetId: roleId,
+                              label: roleId,
+                            })),
+                          ],
+                        },
+                      };
+                    });
+                  }}
+                  className="enterprise-input min-h-[8rem]"
+                />
+              </label>
+            </div>
+          </>
+        )}
+        <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+          <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+            Ownership & Routing
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-secondary">
+            Phase ownership sets the default queue. Step ownership overrides let you route a single step to a different team, define escalation teams, and require explicit handoff acceptance.
+          </p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Primary Owner Team Override</span>
+            <select
+              value={nodeDraft.ownershipRule?.primaryOwnerTeamId || ''}
+              onChange={event =>
+                setNodeDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        ownershipRule: {
+                          ...(current.ownershipRule || createDefaultOwnershipRule()),
+                          primaryOwnerTeamId: event.target.value || undefined,
+                        },
+                      }
+                    : current,
+                )
+              }
+              className="enterprise-input"
+            >
+              <option value="">Use phase default</option>
+              {workspaceTeamOptions.map(team => (
+                <option key={team.id} value={team.id}>
+                  {team.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Require Handoff Acceptance</span>
+            <div className="rounded-2xl border border-outline-variant/25 bg-white px-4 py-3">
+              <label className="flex items-center gap-3 text-sm text-secondary">
+                <input
+                  type="checkbox"
+                  checked={Boolean(nodeDraft.ownershipRule?.requireHandoffAcceptance)}
+                  onChange={event =>
+                    setNodeDraft(current =>
+                      current
+                        ? {
+                            ...current,
+                            ownershipRule: {
+                              ...(current.ownershipRule || createDefaultOwnershipRule()),
+                              requireHandoffAcceptance: event.target.checked,
+                            },
+                          }
+                        : current,
+                    )
+                  }
+                  className="h-4 w-4 rounded border-outline-variant/40 text-primary focus:ring-primary"
+                />
+                Receiving team must accept the handoff before this step becomes active
+              </label>
+            </div>
+          </label>
+        </div>
+        <div className="grid gap-4 md:grid-cols-3">
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Secondary Owner Teams</span>
+            <select
+              multiple
+              value={nodeDraft.ownershipRule?.secondaryOwnerTeamIds || []}
+              onChange={event =>
+                setNodeDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        ownershipRule: {
+                          ...(current.ownershipRule || createDefaultOwnershipRule()),
+                          secondaryOwnerTeamIds: Array.from(event.target.selectedOptions).map(
+                            option => option.value,
+                          ),
+                        },
+                      }
+                    : current,
+                )
+              }
+              className="enterprise-input min-h-[8rem]"
+            >
+              {workspaceTeamOptions.map(team => (
+                <option key={team.id} value={team.id}>
+                  {team.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Approval Teams</span>
+            <select
+              multiple
+              value={nodeDraft.ownershipRule?.approvalTeamIds || []}
+              onChange={event =>
+                setNodeDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        ownershipRule: {
+                          ...(current.ownershipRule || createDefaultOwnershipRule()),
+                          approvalTeamIds: Array.from(event.target.selectedOptions).map(
+                            option => option.value,
+                          ),
+                        },
+                      }
+                    : current,
+                )
+              }
+              className="enterprise-input min-h-[8rem]"
+            >
+              {workspaceTeamOptions.map(team => (
+                <option key={team.id} value={team.id}>
+                  {team.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+            <span>Escalation Teams</span>
+            <select
+              multiple
+              value={nodeDraft.ownershipRule?.escalationTeamIds || []}
+              onChange={event =>
+                setNodeDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        ownershipRule: {
+                          ...(current.ownershipRule || createDefaultOwnershipRule()),
+                          escalationTeamIds: Array.from(event.target.selectedOptions).map(
+                            option => option.value,
+                          ),
+                        },
+                      }
+                    : current,
+                )
+              }
+              className="enterprise-input min-h-[8rem]"
+            >
+              {workspaceTeamOptions.map(team => (
+                <option key={team.id} value={team.id}>
+                  {team.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
         <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
           <span>Allowed Tools</span>
           <select
@@ -3202,6 +3762,9 @@ export default function WorkflowStudio({
               </option>
             ))}
           </select>
+          <p className="text-[0.72rem] font-medium normal-case tracking-normal text-secondary">
+            This allowlist is the real execution gate for the step. Agent preferred tools stay advisory and do not bypass these permissions.
+          </p>
         </label>
         <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
           <span>Preferred Workspace Path</span>

@@ -1,8 +1,12 @@
 import {
+  ActorContext,
+  ApprovalAssignment,
+  ApprovalDecision,
   AgentTask,
   Artifact,
   Capability,
   CapabilityAgent,
+  CapabilityWorkspace,
   CompiledRequiredInputField,
   CompiledStepContext,
   CompiledWorkItemPlan,
@@ -37,6 +41,12 @@ import {
   compileWorkItemPlan,
 } from '../../src/lib/workflowRuntime';
 import {
+  buildCapabilityBriefing,
+  buildCapabilityBriefingPrompt,
+} from '../../src/lib/capabilityBriefing';
+import { buildAgentKnowledgeLens, buildAgentKnowledgePrompt } from '../../src/lib/agentKnowledge';
+import { compileStepOwnership, resolveWorkItemPhaseOwnerTeamId } from '../../src/lib/capabilityOwnership';
+import {
   getCapabilityBoardPhaseIds,
   getLifecyclePhaseLabel,
 } from '../../src/lib/capabilityLifecycle';
@@ -68,6 +78,8 @@ import { wakeAgentLearningWorker } from '../agentLearning/worker';
 import { buildMemoryContext, refreshCapabilityMemory } from '../memory';
 import { evaluateToolPolicy } from '../policy';
 import {
+  createApprovalAssignments,
+  createApprovalDecision,
   createRunEvent,
   createRunWait,
   createToolInvocation,
@@ -78,6 +90,7 @@ import {
   markOpenToolInvocationsAborted,
   releaseRunLease,
   resolveRunWait,
+  updateApprovalAssignmentsForWait,
   updateToolInvocation,
   updateRunWaitPayload,
   updateWorkflowRun,
@@ -112,6 +125,10 @@ const createLogId = () => `LOG-${Math.random().toString(36).slice(2, 10).toUpper
 const createArtifactId = () => `ART-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createLearningUpdateId = () =>
   `LEARN-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+const createApprovalAssignmentId = () =>
+  `APPROVAL-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+const createApprovalDecisionId = () =>
+  `APPDEC-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 
 type ExecutionDecision =
   | {
@@ -519,6 +536,141 @@ const createExecutionLog = ({
   costUsd,
   metadata,
 });
+
+const getActorDisplayName = (
+  actor?: ActorContext | null,
+  fallback = 'Capability Owner',
+) => normalizeString(actor?.displayName) || fallback;
+
+const getActorTeamIds = (actor?: ActorContext | null) =>
+  Array.from(new Set((actor?.teamIds || []).map(teamId => normalizeString(teamId)).filter(Boolean)));
+
+const canActorOperateWorkItem = ({
+  actor,
+  workItem,
+}: {
+  actor?: ActorContext | null;
+  workItem: WorkItem;
+}) => {
+  if (!actor?.userId && getActorTeamIds(actor).length === 0) {
+    return true;
+  }
+
+  if (actor?.userId && workItem.claimOwnerUserId && actor.userId === workItem.claimOwnerUserId) {
+    return true;
+  }
+
+  const actorTeamIds = getActorTeamIds(actor);
+  return Boolean(
+    actorTeamIds.length > 0 &&
+      workItem.phaseOwnerTeamId &&
+      actorTeamIds.includes(workItem.phaseOwnerTeamId),
+  );
+};
+
+const canActorApproveWait = ({
+  actor,
+  workItem,
+  wait,
+}: {
+  actor?: ActorContext | null;
+  workItem: WorkItem;
+  wait: RunWait;
+}) => {
+  if (!actor?.userId && getActorTeamIds(actor).length === 0) {
+    return true;
+  }
+
+  const actorTeamIds = getActorTeamIds(actor);
+  const pendingAssignments = (wait.approvalAssignments || []).filter(
+    assignment => assignment.status === 'PENDING',
+  );
+
+  if (pendingAssignments.length === 0) {
+    const ownershipTeams = wait.payload?.compiledStepContext?.ownership?.approvalTeamIds || [];
+    return Boolean(
+      actorTeamIds.some(teamId => ownershipTeams.includes(teamId)) ||
+        (workItem.phaseOwnerTeamId && actorTeamIds.includes(workItem.phaseOwnerTeamId)),
+    );
+  }
+
+  return pendingAssignments.some(assignment => {
+    if (assignment.targetType === 'USER') {
+      return Boolean(actor.userId) && (assignment.assignedUserId || assignment.targetId) === actor.userId;
+    }
+
+    if (assignment.targetType === 'TEAM') {
+      const teamId = assignment.assignedTeamId || assignment.targetId;
+      return actorTeamIds.includes(teamId);
+    }
+
+    return Boolean(actor.userId) || actorTeamIds.length > 0;
+  });
+};
+
+const buildApprovalAssignmentsForWait = ({
+  capability,
+  workItem,
+  step,
+  runId,
+  waitId,
+  waitMessage,
+}: {
+  capability: Capability;
+  workItem: WorkItem;
+  step: WorkflowStep;
+  runId: string;
+  waitId: string;
+  waitMessage: string;
+}) => {
+  const ownership = compileStepOwnership({ capability, step });
+  const policy = step.approvalPolicy;
+  const fallbackTeamIds =
+    ownership.approvalTeamIds.length > 0
+      ? ownership.approvalTeamIds
+      : workItem.phaseOwnerTeamId
+      ? [workItem.phaseOwnerTeamId]
+      : [];
+
+  const targets =
+    policy?.targets && policy.targets.length > 0
+      ? policy.targets
+      : step.approverRoles && step.approverRoles.length > 0
+      ? step.approverRoles.map(role => ({
+          targetType: 'CAPABILITY_ROLE' as const,
+          targetId: role,
+          label: role,
+        }))
+      : fallbackTeamIds.map(teamId => ({
+          targetType: 'TEAM' as const,
+          targetId: teamId,
+          label: teamId,
+        }));
+
+  const dueAt =
+    policy?.dueAt ||
+    (policy?.escalationAfterMinutes
+      ? new Date(Date.now() + policy.escalationAfterMinutes * 60_000).toISOString()
+      : undefined);
+
+  return targets.map(target => ({
+    id: createApprovalAssignmentId(),
+    capabilityId: capability.id,
+    runId,
+    waitId,
+    phase: step.phase,
+    stepName: step.name,
+    approvalPolicyId: policy?.id,
+    status: 'PENDING' as const,
+    targetType: target.targetType,
+    targetId: target.targetId,
+    assignedUserId: target.targetType === 'USER' ? target.targetId : undefined,
+    assignedTeamId: target.targetType === 'TEAM' ? target.targetId : undefined,
+    dueAt,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  })) satisfies ApprovalAssignment[];
+};
 
 const toFileSlug = (value: string) =>
   value
@@ -1244,6 +1396,7 @@ const requestStepDecision = async ({
   step,
   runStep,
   agent,
+  workspace,
   artifacts,
   compiledStepContext,
   compiledWorkItemPlan,
@@ -1256,6 +1409,7 @@ const requestStepDecision = async ({
   step: WorkflowStep;
   runStep: WorkflowRunStep;
   agent: CapabilityAgent;
+  workspace: CapabilityWorkspace;
   artifacts: Artifact[];
   compiledStepContext: CompiledStepContext;
   compiledWorkItemPlan: CompiledWorkItemPlan;
@@ -1273,6 +1427,17 @@ const requestStepDecision = async ({
   });
   const workspaceGuidance = approvedWorkspacePaths.length
     ? [
+        workItem.executionContext?.branch
+          ? `Shared work-item branch: ${workItem.executionContext.branch.sharedBranch} (base ${workItem.executionContext.branch.baseBranch}, status ${workItem.executionContext.branch.status})`
+          : null,
+        workItem.executionContext?.primaryRepositoryId
+          ? `Primary work-item repository: ${
+              capability.repositories?.find(
+                repository => repository.id === workItem.executionContext?.primaryRepositoryId,
+              )?.label ||
+              workItem.executionContext.primaryRepositoryId
+            }`
+          : null,
         capability.executionConfig.defaultWorkspacePath
           ? `Default approved workspace path: ${capability.executionConfig.defaultWorkspacePath}`
           : null,
@@ -1314,6 +1479,17 @@ const requestStepDecision = async ({
       .filter(Boolean)
       .join('\n'),
   });
+  const capabilityBriefingPrompt = buildCapabilityBriefingPrompt(
+    buildCapabilityBriefing(capability),
+  );
+  const agentKnowledgePrompt = buildAgentKnowledgePrompt(
+    buildAgentKnowledgeLens({
+      capability,
+      workspace,
+      agent,
+      workItemId: workItem.id,
+    }),
+  );
 
   const response = await invokeScopedCapabilitySession({
     capability,
@@ -1324,6 +1500,8 @@ const requestStepDecision = async ({
       'You are an execution engine inside a capability workflow. Return JSON only with no markdown.',
     memoryPrompt: memoryContext.prompt || undefined,
     prompt: [
+      `Capability briefing:\n${capabilityBriefingPrompt}`,
+      `Agent knowledge lens:\n${agentKnowledgePrompt}`,
       `Execution plan summary: ${compiledWorkItemPlan.planSummary}`,
       `Current workflow: ${workflow.name}`,
       `Current step: ${step.name}`,
@@ -1932,6 +2110,11 @@ const syncRunningProjection = async ({
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     phase: currentStep.phase,
+    phaseOwnerTeamId: resolveWorkItemPhaseOwnerTeamId({
+      capability,
+      phaseId: currentStep.phase,
+      step: currentStep,
+    }),
     currentStepId: currentStep.id,
     assignedAgentId: currentStep.agentId,
     status: 'ACTIVE',
@@ -1985,6 +2168,11 @@ const syncWaitingProjection = async ({
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     phase: currentStep.phase,
+    phaseOwnerTeamId: resolveWorkItemPhaseOwnerTeamId({
+      capability: projection.capability,
+      phaseId: currentStep.phase,
+      step: currentStep,
+    }),
     currentStepId: currentStep.id,
     assignedAgentId: currentStep.agentId,
     status: nextStatus,
@@ -2054,6 +2242,11 @@ const syncCompletedProjection = async ({
     ? {
         ...projection.workItem,
         phase: nextStep.phase,
+        phaseOwnerTeamId: resolveWorkItemPhaseOwnerTeamId({
+          capability: projection.capability,
+          phaseId: nextStep.phase,
+          step: nextStep,
+        }),
         currentStepId: nextStep.id,
         assignedAgentId: nextStep.agentId,
         status: getStepStatus(nextStep),
@@ -2158,6 +2351,11 @@ const syncFailedProjection = async ({
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     phase: currentStep.phase,
+    phaseOwnerTeamId: resolveWorkItemPhaseOwnerTeamId({
+      capability: projection.capability,
+      phaseId: currentStep.phase,
+      step: currentStep,
+    }),
     currentStepId: currentStep.id,
     assignedAgentId: currentStep.agentId,
     status: 'BLOCKED',
@@ -2770,12 +2968,14 @@ export const continueWorkflowStageControl = async ({
   conversation,
   carryForwardNote,
   resolvedBy,
+  actor,
 }: {
   capabilityId: string;
   workItemId: string;
   conversation: StageControlConversationEntry[];
   carryForwardNote?: string;
   resolvedBy: string;
+  actor?: ActorContext;
 }) => {
   const trimmedConversation = conversation.filter(entry => entry.content?.trim());
   const trimmedCarryForward = carryForwardNote?.trim();
@@ -2890,6 +3090,7 @@ export const continueWorkflowStageControl = async ({
         runId: runDetail.run.id,
         resolution: carryForward,
         resolvedBy,
+        actor,
       });
       return {
         action: 'APPROVED_WAIT' as const,
@@ -2905,6 +3106,7 @@ export const continueWorkflowStageControl = async ({
         runId: runDetail.run.id,
         resolution: carryForward,
         resolvedBy,
+        actor,
       });
       return {
         action: 'PROVIDED_INPUT' as const,
@@ -2919,6 +3121,7 @@ export const continueWorkflowStageControl = async ({
       runId: runDetail.run.id,
       resolution: carryForward,
       resolvedBy,
+      actor,
     });
     return {
       action: 'RESOLVED_CONFLICT' as const,
@@ -2940,6 +3143,7 @@ export const continueWorkflowStageControl = async ({
       restartFromPhase: projection.workItem.phase,
       guidance: carryForward,
       guidedBy: resolvedBy,
+      actor,
     });
     return {
       action: 'CANCELLED_AND_RESTARTED' as const,
@@ -2956,6 +3160,7 @@ export const continueWorkflowStageControl = async ({
       restartFromPhase: projection.workItem.phase,
       guidance: carryForward,
       guidedBy: resolvedBy,
+      actor,
     });
     return {
       action: 'RESTARTED' as const,
@@ -2971,6 +3176,7 @@ export const continueWorkflowStageControl = async ({
     restartFromPhase: projection.workItem.phase,
     guidance: carryForward,
     guidedBy: resolvedBy,
+    actor,
   });
   return {
     action: 'STARTED' as const,
@@ -3050,6 +3256,7 @@ export const createWorkItemRecord = async ({
   attachments,
   priority,
   tags,
+  actor,
 }: {
   capabilityId: string;
   title: string;
@@ -3060,6 +3267,7 @@ export const createWorkItemRecord = async ({
   attachments?: WorkItemAttachmentUpload[];
   priority: WorkItem['priority'];
   tags: string[];
+  actor?: ActorContext;
 }) => {
   const bundle = await getCapabilityBundle(capabilityId);
   if (bundle.capability.isSystemCapability) {
@@ -3096,6 +3304,12 @@ export const createWorkItemRecord = async ({
   if (!firstStep) {
     throw new Error(`Workflow ${workflow.name} does not define any executable nodes.`);
   }
+  const phaseOwnerTeamId = resolveWorkItemPhaseOwnerTeamId({
+    capability: bundle.capability,
+    phaseId: firstStep.phase,
+    step: firstStep,
+  });
+  const actorName = getActorDisplayName(actor, 'System');
 
   const nextWorkItem: WorkItem = {
     id: `WI-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
@@ -3104,6 +3318,7 @@ export const createWorkItemRecord = async ({
     taskType: normalizedTaskType,
     phaseStakeholders: normalizedPhaseStakeholders,
     phase: firstStep.phase,
+    phaseOwnerTeamId,
     capabilityId,
     workflowId,
     currentStepId: firstStep.id,
@@ -3111,9 +3326,10 @@ export const createWorkItemRecord = async ({
     status: getStepStatus(firstStep),
     priority,
     tags,
+    recordVersion: 1,
     history: [
       createHistoryEntry(
-        'System',
+        actorName,
         'Story created',
         `${getWorkItemTaskTypeLabel(normalizedTaskType)} work entered ${firstStep.name} in ${workflow.name}.${normalizedPhaseStakeholders.length > 0 ? ` Stakeholder sign-off was configured for ${normalizedPhaseStakeholders.length} phases.` : ''}${normalizedAttachments.length > 0 ? ` ${normalizedAttachments.length} supporting file${normalizedAttachments.length === 1 ? '' : 's'} were attached for agent context.` : ''}`,
         firstStep.phase,
@@ -3166,11 +3382,13 @@ export const moveWorkItemToPhaseControl = async ({
   workItemId,
   targetPhase,
   note,
+  actor,
 }: {
   capabilityId: string;
   workItemId: string;
   targetPhase: WorkItemPhase;
   note?: string;
+  actor?: ActorContext;
 }) => {
   if (await getActiveRunForWorkItem(capabilityId, workItemId)) {
     throw new Error(
@@ -3192,10 +3410,26 @@ export const moveWorkItemToPhaseControl = async ({
   const targetStep = targetNode
     ? projection.workflow.steps.find(step => step.id === targetNode.id)
     : undefined;
+  if (!canActorOperateWorkItem({ actor, workItem: projection.workItem })) {
+    throw new Error('Only the current phase owner can move this work item.');
+  }
+  const nextPhaseOwnerTeamId =
+    targetPhase === 'BACKLOG' || targetPhase === 'DONE'
+      ? resolveWorkItemPhaseOwnerTeamId({
+          capability: projection.capability,
+          phaseId: targetPhase,
+        })
+      : resolveWorkItemPhaseOwnerTeamId({
+          capability: projection.capability,
+          phaseId: targetPhase,
+          step: targetStep,
+        });
+  const actorName = getActorDisplayName(actor, 'User');
 
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     phase: targetPhase,
+    phaseOwnerTeamId: nextPhaseOwnerTeamId,
     currentStepId:
       targetPhase === 'BACKLOG' || targetPhase === 'DONE'
         ? undefined
@@ -3213,10 +3447,15 @@ export const moveWorkItemToPhaseControl = async ({
     pendingRequest: undefined,
     blocker: undefined,
     activeRunId: undefined,
+    claimOwnerUserId:
+      actor?.userId && targetPhase !== 'BACKLOG' && targetPhase !== 'DONE'
+        ? actor.userId
+        : undefined,
+    recordVersion: (projection.workItem.recordVersion || 1) + 1,
     history: [
       ...projection.workItem.history,
       createHistoryEntry(
-        'User',
+        actorName,
         'Board stage updated',
         note ||
           `Story was moved to ${targetPhase} from the delivery board.`,
@@ -3251,12 +3490,14 @@ export const startWorkflowExecution = async ({
   restartFromPhase,
   guidance,
   guidedBy,
+  actor,
 }: {
   capabilityId: string;
   workItemId: string;
   restartFromPhase?: WorkItemPhase;
   guidance?: string;
   guidedBy?: string;
+  actor?: ActorContext;
 }) => {
   const existingActiveRun = await getActiveRunForWorkItem(capabilityId, workItemId);
   if (existingActiveRun) {
@@ -3271,6 +3512,9 @@ export const startWorkflowExecution = async ({
     guidance,
     guidedBy,
   });
+  if (!canActorOperateWorkItem({ actor, workItem: projection.workItem })) {
+    throw new Error('Only the current phase owner can start or restart this phase.');
+  }
   if (
     restartFromPhase &&
     !getCapabilityBoardPhaseIds(projection.capability).includes(restartFromPhase)
@@ -3305,6 +3549,7 @@ const resolveRunWaitAndQueue = async ({
   resolution,
   resolvedBy,
   approvalDisposition = 'APPROVE',
+  actor,
 }: {
   capabilityId: string;
   runId: string;
@@ -3312,8 +3557,14 @@ const resolveRunWaitAndQueue = async ({
   resolution: string;
   resolvedBy: string;
   approvalDisposition?: 'APPROVE' | 'REQUEST_CHANGES';
+  actor?: ActorContext;
 }) => {
   const detail = await getWorkflowRunDetail(capabilityId, runId);
+  const projection = await resolveProjectionContext(
+    capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
   const openWait = [...detail.waits].reverse().find(wait => wait.status === 'OPEN');
   if (!openWait) {
     throw new Error(`Run ${runId} does not have an open wait to resolve.`);
@@ -3321,13 +3572,62 @@ const resolveRunWaitAndQueue = async ({
   if (openWait.type !== expectedType) {
     throw new Error(`Run ${runId} is waiting for ${openWait.type}, not ${expectedType}.`);
   }
+  if (
+    expectedType === 'APPROVAL' &&
+    !canActorApproveWait({ actor, workItem: projection.workItem, wait: openWait })
+  ) {
+    throw new Error('This approval is assigned to another user or team.');
+  }
+  if (
+    expectedType !== 'APPROVAL' &&
+    !canActorOperateWorkItem({ actor, workItem: projection.workItem })
+  ) {
+    throw new Error('Only the current phase owner can resolve this workflow wait.');
+  }
 
   await resolveRunWait({
     capabilityId,
     waitId: openWait.id,
     resolution,
     resolvedBy,
+    resolvedByActorUserId: actor?.userId,
+    resolvedByActorTeamIds: getActorTeamIds(actor),
   });
+  if (expectedType === 'APPROVAL') {
+    await updateApprovalAssignmentsForWait({
+      capabilityId,
+      waitId: openWait.id,
+      status:
+        approvalDisposition === 'REQUEST_CHANGES'
+          ? 'REQUEST_CHANGES'
+          : ('APPROVED' as const),
+    });
+    await createApprovalDecision({
+      id: createApprovalDecisionId(),
+      capabilityId,
+      runId,
+      waitId: openWait.id,
+      assignmentId: (openWait.approvalAssignments || []).find(assignment => {
+        if (!actor?.userId && getActorTeamIds(actor).length === 0) {
+          return true;
+        }
+        if (assignment.targetType === 'USER') {
+          return (assignment.assignedUserId || assignment.targetId) === actor?.userId;
+        }
+        if (assignment.targetType === 'TEAM') {
+          const teamId = assignment.assignedTeamId || assignment.targetId;
+          return getActorTeamIds(actor).includes(teamId);
+        }
+        return true;
+      })?.id,
+      disposition: approvalDisposition,
+      actorUserId: actor?.userId,
+      actorDisplayName: getActorDisplayName(actor, resolvedBy),
+      actorTeamIds: getActorTeamIds(actor),
+      comment: resolution,
+      createdAt: new Date().toISOString(),
+    });
+  }
 
   const currentStep = getCurrentWorkflowStep(detail);
   const currentRunStep = getCurrentRunStep(detail);
@@ -3415,11 +3715,6 @@ const resolveRunWaitAndQueue = async ({
     }),
   );
 
-  const projection = await resolveProjectionContext(
-    capabilityId,
-    detail.run.workItemId,
-    detail.run.workflowSnapshot,
-  );
   const nextDetail = await getWorkflowRunDetail(capabilityId, nextRun.id);
   const interactionArtifact = buildHumanInteractionArtifact({
     detail,
@@ -3529,6 +3824,8 @@ const resolveRunWaitAndQueue = async ({
       waitId: openWait.id,
       waitType: expectedType,
       resolvedBy,
+      actorUserId: actor?.userId,
+      actorTeamIds: getActorTeamIds(actor),
       approvalDisposition:
         expectedType === 'APPROVAL' ? approvalDisposition : undefined,
       artifactId: interactionArtifact.id,
@@ -3583,11 +3880,13 @@ export const approveWorkflowRun = async ({
   runId,
   resolution,
   resolvedBy,
+  actor,
 }: {
   capabilityId: string;
   runId: string;
   resolution: string;
   resolvedBy: string;
+  actor?: ActorContext;
 }) =>
   resolveRunWaitAndQueue({
     capabilityId,
@@ -3595,6 +3894,7 @@ export const approveWorkflowRun = async ({
     expectedType: 'APPROVAL',
     resolution,
     resolvedBy,
+    actor,
   });
 
 export const requestChangesWorkflowRun = async ({
@@ -3602,11 +3902,13 @@ export const requestChangesWorkflowRun = async ({
   runId,
   resolution,
   resolvedBy,
+  actor,
 }: {
   capabilityId: string;
   runId: string;
   resolution: string;
   resolvedBy: string;
+  actor?: ActorContext;
 }) => {
   const detail = await getWorkflowRunDetail(capabilityId, runId);
   const openWait = [...detail.waits].reverse().find(wait => wait.status === 'OPEN');
@@ -3621,6 +3923,7 @@ export const requestChangesWorkflowRun = async ({
     resolution,
     resolvedBy,
     approvalDisposition: 'REQUEST_CHANGES',
+    actor,
   });
 };
 
@@ -3629,11 +3932,13 @@ export const provideWorkflowRunInput = async ({
   runId,
   resolution,
   resolvedBy,
+  actor,
 }: {
   capabilityId: string;
   runId: string;
   resolution: string;
   resolvedBy: string;
+  actor?: ActorContext;
 }) =>
   resolveRunWaitAndQueue({
     capabilityId,
@@ -3641,6 +3946,7 @@ export const provideWorkflowRunInput = async ({
     expectedType: 'INPUT',
     resolution,
     resolvedBy,
+    actor,
   });
 
 export const resolveWorkflowRunConflict = async ({
@@ -3648,11 +3954,13 @@ export const resolveWorkflowRunConflict = async ({
   runId,
   resolution,
   resolvedBy,
+  actor,
 }: {
   capabilityId: string;
   runId: string;
   resolution: string;
   resolvedBy: string;
+  actor?: ActorContext;
 }) =>
   resolveRunWaitAndQueue({
     capabilityId,
@@ -3660,6 +3968,7 @@ export const resolveWorkflowRunConflict = async ({
     expectedType: 'CONFLICT_RESOLUTION',
     resolution,
     resolvedBy,
+    actor,
   });
 
 export const cancelWorkflowRun = async ({
@@ -3721,12 +4030,14 @@ export const restartWorkflowRun = async ({
   restartFromPhase,
   guidance,
   guidedBy,
+  actor,
 }: {
   capabilityId: string;
   runId: string;
   restartFromPhase?: WorkItemPhase;
   guidance?: string;
   guidedBy?: string;
+  actor?: ActorContext;
 }) => {
   const latest = await getWorkflowRunDetail(capabilityId, runId);
   return startWorkflowExecution({
@@ -3736,6 +4047,7 @@ export const restartWorkflowRun = async ({
       restartFromPhase || latest.run.restartFromPhase || latest.run.currentPhase,
     guidance,
     guidedBy,
+    actor,
   });
 };
 
@@ -3756,14 +4068,11 @@ const completeRunWithWait = async ({
 }) => {
   const currentRunStep = runStepOverride || getCurrentRunStep(detail);
   const currentStep = getCurrentWorkflowStep(detail);
-  const projection =
-    waitType === 'CONFLICT_RESOLUTION'
-      ? await resolveProjectionContext(
-          detail.run.capabilityId,
-          detail.run.workItemId,
-          detail.run.workflowSnapshot,
-        )
-      : null;
+  const projection = await resolveProjectionContext(
+    detail.run.capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
   const contrarianReviewer = projection
     ? findContrarianReviewerAgent(projection.workspace.agents)
     : undefined;
@@ -3777,6 +4086,7 @@ const completeRunWithWait = async ({
     status: 'OPEN',
     message: waitMessage,
     requestedBy: currentRunStep.agentId,
+    approvalPolicyId: currentStep.approvalPolicy?.id,
     payload: {
       stepName: currentRunStep.name,
       ...(waitPayload || {}),
@@ -3786,6 +4096,19 @@ const completeRunWithWait = async ({
           : undefined,
     },
   });
+  if (waitType === 'APPROVAL') {
+    const assignments = buildApprovalAssignmentsForWait({
+      capability: projection.capability,
+      workItem: projection.workItem,
+      step: currentStep,
+      runId: detail.run.id,
+      waitId: wait.id,
+      waitMessage,
+    });
+    if (assignments.length > 0) {
+      wait.approvalAssignments = await createApprovalAssignments(assignments);
+    }
+  }
   const waitingRunStep = await updateWorkflowRunStep({
     ...currentRunStep,
     status: 'WAITING',
@@ -4275,6 +4598,7 @@ const executeAutomatedStep = async (
       step,
       runStep: currentRunStep,
       agent,
+      workspace: projection.workspace,
       artifacts: projection.workspace.artifacts,
       compiledStepContext,
       compiledWorkItemPlan,
@@ -4500,6 +4824,7 @@ const executeAutomatedStep = async (
         const result = await executeTool({
           capability: projection.capability,
           agent,
+          workItem: projection.workItem,
           toolId: decision.toolCall.toolId,
           args: decision.toolCall.args || {},
           requireApprovedDeployment: hasApprovedDeployment,

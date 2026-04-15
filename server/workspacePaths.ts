@@ -13,6 +13,9 @@ export const getCapabilityWorkspaceRoots = (capability?: Partial<Capability>) =>
         capability?.executionConfig?.defaultWorkspacePath,
         ...(capability?.executionConfig?.allowedWorkspacePaths || []),
         ...(capability?.localDirectories || []),
+        ...((capability?.repositories || [])
+          .map(repository => repository.localRootHint)
+          .filter(Boolean) as string[]),
       ]
         .map(value => normalizeDirectoryPath(value))
         .filter(Boolean),

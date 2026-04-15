@@ -52,6 +52,19 @@ export interface CapabilityStakeholder {
   teamName?: string;
 }
 
+export type CapabilityRepositoryStatus = 'ACTIVE' | 'ARCHIVED';
+
+export interface CapabilityRepository {
+  id: string;
+  capabilityId: string;
+  label: string;
+  url: string;
+  defaultBranch: string;
+  localRootHint?: string;
+  isPrimary: boolean;
+  status?: CapabilityRepositoryStatus;
+}
+
 export interface WorkItemPhaseStakeholder {
   role: string;
   name: string;
@@ -142,6 +155,101 @@ export interface WorkspaceConnectorSettings {
   github: WorkspaceGithubConnectorSettings;
   jira: WorkspaceJiraConnectorSettings;
   confluence: WorkspaceConfluenceConnectorSettings;
+}
+
+export type WorkspaceUserStatus = 'ACTIVE' | 'INVITED' | 'DISABLED';
+export type WorkspaceTeamMembershipRole =
+  | 'LEAD'
+  | 'MEMBER'
+  | 'APPROVER'
+  | 'VIEWER';
+export type CapabilityAccessRole = 'OWNER' | 'OPERATOR' | 'APPROVER' | 'VIEWER';
+export type ExternalIdentityProvider = 'GITHUB' | 'JIRA' | 'CONFLUENCE' | 'SSO';
+export type NotificationChannel = 'INBOX' | 'EMAIL' | 'SLACK' | 'TEAMS';
+export type NotificationTrigger =
+  | 'APPROVAL_REQUESTED'
+  | 'PHASE_ENTERED'
+  | 'SLA_BREACHED'
+  | 'REQUEST_CHANGES'
+  | 'CONFLICT_NEEDS_RESOLUTION'
+  | 'HANDOFF_ACCEPTANCE_REQUIRED';
+
+export interface WorkspaceUser {
+  id: string;
+  name: string;
+  email: string;
+  title?: string;
+  status: WorkspaceUserStatus;
+  teamIds: string[];
+}
+
+export interface WorkspaceTeam {
+  id: string;
+  name: string;
+  description?: string;
+  memberUserIds: string[];
+  capabilityIds: string[];
+}
+
+export interface WorkspaceMembership {
+  id: string;
+  userId: string;
+  teamId: string;
+  role: WorkspaceTeamMembershipRole;
+}
+
+export interface CapabilityMembership {
+  id: string;
+  capabilityId: string;
+  userId: string;
+  teamId?: string;
+  role: CapabilityAccessRole;
+}
+
+export interface ExternalIdentityLink {
+  id: string;
+  userId: string;
+  provider: ExternalIdentityProvider;
+  externalId: string;
+  username?: string;
+  displayName?: string;
+  profileUrl?: string;
+}
+
+export interface UserPreference {
+  userId: string;
+  defaultCapabilityId?: string;
+  lastSelectedTeamId?: string;
+  workbenchView?: 'MY_QUEUE' | 'TEAM_QUEUE' | 'ATTENTION' | 'WATCHING';
+}
+
+export interface NotificationRule {
+  id: string;
+  trigger: NotificationTrigger;
+  channels: NotificationChannel[];
+  teamId?: string;
+  userId?: string;
+  capabilityId?: string;
+  immediate: boolean;
+  digest: boolean;
+}
+
+export interface WorkspaceOrganization {
+  users: WorkspaceUser[];
+  teams: WorkspaceTeam[];
+  memberships: WorkspaceMembership[];
+  capabilityMemberships: CapabilityMembership[];
+  externalIdentityLinks: ExternalIdentityLink[];
+  userPreferences: UserPreference[];
+  notificationRules: NotificationRule[];
+  currentUserId?: string;
+}
+
+export interface ActorContext {
+  userId?: string;
+  displayName: string;
+  teamIds: string[];
+  actedOnBehalfOfStakeholderIds?: string[];
 }
 
 export interface WorkspaceSettings {
@@ -330,6 +438,10 @@ export interface CapabilityOnboardingDraft {
   name: string;
   domain: string;
   parentCapabilityId: string;
+  capabilityKind: CapabilityKind;
+  collectionKind?: CapabilityCollectionKind;
+  childCapabilityIds: string[];
+  sharedCapabilityIds: string[];
   businessUnit: string;
   ownerTeam: string;
   description: string;
@@ -446,12 +558,238 @@ export interface CapabilityLifecycle {
 
 export type CapabilitySystemRole = 'FOUNDATION';
 
+export interface CapabilityPhaseOwnershipRule {
+  phaseId: WorkflowPhaseId;
+  primaryOwnerTeamId?: string;
+  secondaryOwnerTeamIds: string[];
+  approvalTeamIds: string[];
+  escalationTeamIds: string[];
+}
+
+export type CapabilityKind = 'DELIVERY' | 'COLLECTION';
+
+export type CapabilityCollectionKind =
+  | 'BUSINESS_DOMAIN'
+  | 'PLATFORM_LAYER'
+  | 'ENTERPRISE_LAYER'
+  | 'CITY_PLAN'
+  | 'ALM_PORTFOLIO';
+
+export type CapabilityDependencyKind =
+  | 'FUNCTIONAL'
+  | 'API'
+  | 'DATA'
+  | 'PLATFORM'
+  | 'OPERATIONAL';
+
+export type CapabilityDependencyCriticality =
+  | 'LOW'
+  | 'MEDIUM'
+  | 'HIGH'
+  | 'CRITICAL';
+
+export interface CapabilityDependency {
+  id: string;
+  capabilityId: string;
+  targetCapabilityId: string;
+  dependencyKind: CapabilityDependencyKind;
+  description: string;
+  criticality: CapabilityDependencyCriticality;
+  versionConstraint?: string;
+}
+
+export interface CapabilitySharedReference {
+  id: string;
+  collectionCapabilityId: string;
+  memberCapabilityId: string;
+  label?: string;
+}
+
+export interface FunctionalRequirementRecord {
+  id: string;
+  title: string;
+  description: string;
+  priority?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  status?: 'DRAFT' | 'ACTIVE' | 'DONE';
+  linkedArtifactIds?: string[];
+}
+
+export interface NonFunctionalRequirementRecord {
+  id: string;
+  category:
+    | 'PERFORMANCE'
+    | 'RELIABILITY'
+    | 'SECURITY'
+    | 'COMPLIANCE'
+    | 'OBSERVABILITY'
+    | 'SCALABILITY'
+    | 'OPERABILITY'
+    | 'OTHER';
+  title: string;
+  description: string;
+  target?: string;
+}
+
+export interface ApiContractReference {
+  id: string;
+  name: string;
+  kind?: 'REST' | 'GRAPHQL' | 'EVENT' | 'RPC' | 'FILE' | 'OTHER';
+  version?: string;
+  provider?: string;
+  consumer?: string;
+  pathOrChannel?: string;
+  description?: string;
+}
+
+export interface SoftwareVersionRecord {
+  id: string;
+  name: string;
+  version: string;
+  role?: string;
+  repository?: string;
+  environment?: string;
+  notes?: string;
+}
+
+export interface CapabilityAlmReference {
+  id: string;
+  system: 'JIRA' | 'CONFLUENCE' | 'GITHUB' | 'ADO' | 'SERVICE_NOW' | 'OTHER';
+  label: string;
+  url?: string;
+  externalId?: string;
+  description?: string;
+}
+
+export interface CapabilityContractSection {
+  id: string;
+  title: string;
+  summary?: string;
+  body?: string;
+  items?: string[];
+  references?: string[];
+}
+
+export interface CapabilityContractDraft {
+  overview?: string;
+  businessIntent?: string;
+  ownershipModel?: string;
+  deploymentFootprint?: string;
+  evidenceAndReadiness?: string;
+  functionalRequirements: FunctionalRequirementRecord[];
+  nonFunctionalRequirements: NonFunctionalRequirementRecord[];
+  apiContracts: ApiContractReference[];
+  softwareVersions: SoftwareVersionRecord[];
+  almReferences: CapabilityAlmReference[];
+  sections: CapabilityContractSection[];
+  additionalMetadata: CapabilityMetadataEntry[];
+  lastEditedAt?: string;
+  lastEditedBy?: string;
+}
+
+export interface CapabilityPublishedSnapshot {
+  id: string;
+  capabilityId: string;
+  publishVersion: number;
+  publishedAt: string;
+  publishedBy: string;
+  supersedesSnapshotId?: string;
+  contract: CapabilityContractDraft;
+}
+
+export interface CapabilityRollupWarning {
+  id: string;
+  severity: 'INFO' | 'WARN' | 'ERROR';
+  kind:
+    | 'MISSING_PUBLISH'
+    | 'STALE_PUBLISH'
+    | 'UNRESOLVED_DEPENDENCY'
+    | 'VERSION_MISMATCH'
+    | 'CYCLE'
+    | 'INVALID_PARENT';
+  message: string;
+  relatedCapabilityId?: string;
+  relatedSnapshotId?: string;
+}
+
+export interface CapabilityRollupChildSummary {
+  capabilityId: string;
+  capabilityName: string;
+  capabilityKind: CapabilityKind;
+  collectionKind?: CapabilityCollectionKind;
+  latestPublishedVersion?: number;
+  latestPublishedAt?: string;
+  dependencyCount: number;
+  warningCount: number;
+}
+
+export interface CapabilityRollupSummary {
+  capabilityId: string;
+  directChildCount: number;
+  sharedCapabilityCount: number;
+  descendantCount: number;
+  dependencyCount: number;
+  latestPublishedVersion?: number;
+  latestPublishedAt?: string;
+  missingPublishCount: number;
+  stalePublishCount: number;
+  unresolvedDependencyCount: number;
+  versionMismatchCount: number;
+  directChildren: CapabilityRollupChildSummary[];
+  sharedCapabilities: CapabilityRollupChildSummary[];
+  warnings: CapabilityRollupWarning[];
+  dependencyHeatmap: Array<{
+    targetCapabilityId: string;
+    targetCapabilityName?: string;
+    count: number;
+    criticality: CapabilityDependencyCriticality;
+  }>;
+  functionalRequirementCount: number;
+  nonFunctionalRequirementCount: number;
+  apiContractCount: number;
+  softwareVersionCount: number;
+}
+
+export interface CapabilityHierarchyNode {
+  capabilityId: string;
+  name: string;
+  capabilityKind: CapabilityKind;
+  collectionKind?: CapabilityCollectionKind;
+  parentCapabilityId?: string;
+  childIds: string[];
+  sharedCapabilityIds: string[];
+  depth: number;
+  pathIds: string[];
+  pathLabels: string[];
+  latestPublishedVersion?: number;
+  warningCount: number;
+}
+
+export interface CapabilityAlmExportPayload {
+  capabilityId: string;
+  capabilityName: string;
+  capabilityKind: CapabilityKind;
+  collectionKind?: CapabilityCollectionKind;
+  hierarchy: CapabilityHierarchyNode;
+  latestPublishedSnapshot?: CapabilityPublishedSnapshot;
+  dependencies: CapabilityDependency[];
+  rollupSummary: CapabilityRollupSummary;
+}
+
+export interface CapabilityArchitectureSnapshot {
+  capability: Capability;
+  hierarchy: CapabilityHierarchyNode;
+  rollupSummary?: CapabilityRollupSummary;
+  relatedCapabilities: Capability[];
+}
+
 export interface Capability {
   id: string;
   name: string;
   description: string;
   domain?: string;
   parentCapabilityId?: string;
+  capabilityKind?: CapabilityKind;
+  collectionKind?: CapabilityCollectionKind;
   businessUnit?: string;
   ownerTeam?: string;
   businessOutcome?: string;
@@ -468,10 +806,20 @@ export interface Capability {
   databaseConfigs?: CapabilityDatabaseConfig[];
   gitRepositories: string[];
   localDirectories: string[];
+  repositories?: CapabilityRepository[];
   teamNames: string[];
   stakeholders: CapabilityStakeholder[];
   additionalMetadata: CapabilityMetadataEntry[];
+  dependencies?: CapabilityDependency[];
+  sharedCapabilities?: CapabilitySharedReference[];
+  contractDraft?: CapabilityContractDraft;
+  publishedSnapshots?: CapabilityPublishedSnapshot[];
+  parentPublishedSnapshot?: CapabilityPublishedSnapshot;
+  parentExpectationSummary?: string[];
+  rollupSummary?: CapabilityRollupSummary;
+  hierarchyNode?: CapabilityHierarchyNode;
   lifecycle: CapabilityLifecycle;
+  phaseOwnershipRules?: CapabilityPhaseOwnershipRule[];
   executionConfig: CapabilityExecutionConfig;
   status: Status;
   specialAgentId?: string;
@@ -583,6 +931,48 @@ export interface AgentLearningProfileDetail {
   sessions: AgentSessionSummary[];
 }
 
+export type AgentKnowledgeFreshness =
+  | 'FRESH'
+  | 'ACTIVE'
+  | 'STALE'
+  | 'NOT_STARTED'
+  | 'ERROR';
+
+export type AgentKnowledgeConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
+
+export interface LearningDelta {
+  id: string;
+  timestamp: string;
+  triggerType?: LearningUpdate['triggerType'];
+  insight: string;
+  sourceLogIds: string[];
+  relatedWorkItemId?: string;
+  relatedRunId?: string;
+}
+
+export interface KnowledgeSourceSummary {
+  id: string;
+  kind: 'SKILL' | 'METADATA' | 'ARTIFACT' | 'LEARNING' | 'SESSION';
+  label: string;
+  summary?: string;
+  linkedArtifactId?: string;
+  freshnessSignal?: string;
+  confidenceSignal?: string;
+}
+
+export interface AgentKnowledgeLens {
+  agentId: string;
+  summary: string;
+  freshnessSignal: AgentKnowledgeFreshness;
+  confidenceSignal: AgentKnowledgeConfidence;
+  baseRoleKnowledge: string[];
+  capabilityKnowledge: string[];
+  liveExecutionLearning: string[];
+  provenance: KnowledgeSourceSummary[];
+  deltas: LearningDelta[];
+  contextBlock?: string;
+}
+
 export interface CapabilityAgent {
   id: string;
   capabilityId: string;
@@ -619,6 +1009,14 @@ export interface CapabilityChatMessage {
   timestamp: string;
   agentId?: string;
   agentName?: string;
+  traceId?: string;
+  model?: string;
+  sessionId?: string;
+  sessionScope?: AgentSessionScope;
+  sessionScopeId?: string;
+  workItemId?: string;
+  runId?: string;
+  workflowStepId?: string;
 }
 
 export interface WorkPackage {
@@ -688,6 +1086,22 @@ export type ArtifactKind =
 
 export type ArtifactContentFormat = 'TEXT' | 'MARKDOWN' | 'JSON';
 
+export type ArtifactTemplateSectionType =
+  | 'FREE_TEXT'
+  | 'DECISION_BOX'
+  | 'CHANGE_LOG'
+  | 'LEARNING_RECORD'
+  | 'CHECKLIST'
+  | 'CUSTOM';
+
+export interface ArtifactTemplateSection {
+  id: string;
+  title: string;
+  type: ArtifactTemplateSectionType;
+  required: boolean;
+  content?: string;
+}
+
 export interface Artifact {
   id: string;
   name: string;
@@ -698,6 +1112,7 @@ export interface Artifact {
   agent: string;
   created: string;
   template?: string;
+  templateSections?: ArtifactTemplateSection[];
   documentationStatus?: 'PENDING' | 'SYNCED' | 'FAILED';
   isLearningArtifact?: boolean;
   isMasterArtifact?: boolean;
@@ -822,6 +1237,35 @@ export interface WorkflowArtifactContract {
   notes?: string;
 }
 
+export type ApprovalRuleTarget = 'USER' | 'TEAM' | 'CAPABILITY_ROLE';
+export type ApprovalMode = 'ANY_ONE' | 'ALL_REQUIRED' | 'QUORUM';
+
+export interface ApprovalPolicyTarget {
+  targetType: ApprovalRuleTarget;
+  targetId: string;
+  label?: string;
+}
+
+export interface ApprovalPolicy {
+  id: string;
+  name: string;
+  description?: string;
+  mode: ApprovalMode;
+  targets: ApprovalPolicyTarget[];
+  minimumApprovals?: number;
+  delegationAllowed: boolean;
+  dueAt?: string;
+  escalationAfterMinutes?: number;
+}
+
+export interface WorkflowStepOwnershipRule {
+  primaryOwnerTeamId?: string;
+  secondaryOwnerTeamIds: string[];
+  approvalTeamIds: string[];
+  escalationTeamIds: string[];
+  requireHandoffAcceptance?: boolean;
+}
+
 export type RequiredInputFieldSource =
   | 'WORK_ITEM'
   | 'CAPABILITY'
@@ -868,6 +1312,14 @@ export interface ExecutionBoundary {
   escalationTriggers: string[];
 }
 
+export interface CompiledStepOwnership {
+  phaseOwnerTeamId?: string;
+  stepOwnerTeamId?: string;
+  approvalTeamIds: string[];
+  escalationTeamIds: string[];
+  requireHandoffAcceptance: boolean;
+}
+
 export interface CompiledStepContext {
   compiledAt: string;
   stepId: string;
@@ -887,6 +1339,7 @@ export interface CompiledStepContext {
   completionChecklist: string[];
   memoryBoundary: string[];
   nextActions: string[];
+  ownership?: CompiledStepOwnership;
   handoffContext?: string;
   resolvedWaitContext?: string;
 }
@@ -935,6 +1388,8 @@ export interface WorkflowNode {
   eventConfig?: WorkflowEventConfig;
   alertConfig?: WorkflowAlertConfig;
   artifactContract?: WorkflowArtifactContract;
+  approvalPolicy?: ApprovalPolicy;
+  ownershipRule?: WorkflowStepOwnershipRule;
   requiredInputs?: RequiredInputField[];
   completionGates?: string[];
   executionBoundary?: Partial<ExecutionBoundary>;
@@ -986,6 +1441,8 @@ export interface WorkflowStep {
   preferredWorkspacePath?: string;
   executionNotes?: string;
   artifactContract?: WorkflowArtifactContract;
+  approvalPolicy?: ApprovalPolicy;
+  ownershipRule?: WorkflowStepOwnershipRule;
   requiredInputs?: RequiredInputField[];
   completionGates?: string[];
   executionBoundary?: Partial<ExecutionBoundary>;
@@ -1025,6 +1482,85 @@ export interface ExecutionLog {
   latencyMs?: number;
   costUsd?: number;
   metadata?: Record<string, any>;
+}
+
+export interface CapabilityBriefingSection {
+  id: string;
+  label: string;
+  summary: string;
+  items: string[];
+  tone?: 'brand' | 'info' | 'warning' | 'neutral';
+}
+
+export interface CapabilityBriefing {
+  capabilityId: string;
+  title: string;
+  purpose: string;
+  outcome: string;
+  capabilityKind?: CapabilityKind;
+  collectionKind?: CapabilityCollectionKind;
+  definitionOfDone?: string;
+  ownerTeam?: string;
+  hierarchyLabel?: string;
+  parentCapabilityName?: string;
+  latestPublishedVersion?: number;
+  stakeholderSummary: string[];
+  linkedSystems: string[];
+  repoSummary: string[];
+  activeConstraints: string[];
+  evidencePriorities: string[];
+  dependencySummary: string[];
+  parentExpectations: string[];
+  sections: CapabilityBriefingSection[];
+}
+
+export type CapabilityInteractionType =
+  | 'CHAT'
+  | 'TOOL'
+  | 'RUN_EVENT'
+  | 'WAIT'
+  | 'APPROVAL'
+  | 'LEARNING';
+
+export interface CapabilityInteractionRecord {
+  id: string;
+  capabilityId: string;
+  interactionType: CapabilityInteractionType;
+  timestamp: string;
+  title: string;
+  summary: string;
+  level: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS' | 'NEUTRAL';
+  actorLabel?: string;
+  agentId?: string;
+  agentName?: string;
+  workItemId?: string;
+  runId?: string;
+  runStepId?: string;
+  workflowStepId?: string;
+  traceId?: string;
+  toolId?: ToolAdapterId;
+  sessionId?: string;
+  sessionScope?: AgentSessionScope;
+  sessionScopeId?: string;
+  artifactIds?: string[];
+  linkedArtifactId?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface CapabilityInteractionFeed {
+  capabilityId: string;
+  scope: 'CAPABILITY' | 'WORK_ITEM';
+  scopeId?: string;
+  generatedAt: string;
+  records: CapabilityInteractionRecord[];
+  summary: {
+    totalCount: number;
+    chatCount: number;
+    toolCount: number;
+    waitCount: number;
+    approvalCount: number;
+    learningCount: number;
+  };
 }
 
 export interface LearningUpdate {
@@ -1085,6 +1621,74 @@ export type WorkItemTaskType =
   | 'SECURITY_FINDING'
   | 'REHYDRATION';
 
+export interface WorkItemRepositoryAssignment {
+  workItemId: string;
+  repositoryId: string;
+  role: 'PRIMARY' | 'SUPPORTING';
+  checkoutRequired: boolean;
+}
+
+export interface WorkItemBranch {
+  id: string;
+  workItemId: string;
+  repositoryId: string;
+  baseBranch: string;
+  sharedBranch: string;
+  createdByUserId?: string;
+  createdAt: string;
+  headSha?: string;
+  linkedPrUrl?: string;
+  status: 'NOT_CREATED' | 'ACTIVE' | 'MERGED' | 'ABANDONED';
+}
+
+export interface WorkItemExecutionContext {
+  workItemId: string;
+  primaryRepositoryId?: string;
+  repositoryAssignments: WorkItemRepositoryAssignment[];
+  branch?: WorkItemBranch;
+  activeWriterUserId?: string;
+  claimExpiresAt?: string;
+  strategy: 'SHARED_BRANCH';
+}
+
+export interface WorkItemCodeClaim {
+  workItemId: string;
+  userId: string;
+  teamId?: string;
+  claimType: 'WRITE' | 'REVIEW';
+  status: 'ACTIVE' | 'RELEASED' | 'EXPIRED';
+  claimedAt: string;
+  expiresAt: string;
+  releasedAt?: string;
+}
+
+export interface WorkItemCheckoutSession {
+  workItemId: string;
+  userId: string;
+  repositoryId: string;
+  localPath?: string;
+  branch: string;
+  lastSeenHeadSha?: string;
+  lastSyncedAt?: string;
+}
+
+export interface WorkItemHandoffPacket {
+  id: string;
+  workItemId: string;
+  fromUserId?: string;
+  toUserId?: string;
+  fromTeamId?: string;
+  toTeamId?: string;
+  summary: string;
+  openQuestions: string[];
+  blockingDependencies: string[];
+  recommendedNextStep?: string;
+  artifactIds: string[];
+  traceIds: string[];
+  createdAt: string;
+  acceptedAt?: string;
+}
+
 export interface WorkItem {
   id: string;
   title: string;
@@ -1092,6 +1696,10 @@ export interface WorkItem {
   taskType?: WorkItemTaskType;
   phaseStakeholders?: WorkItemPhaseStakeholderAssignment[];
   phase: WorkItemPhase;
+  phaseOwnerTeamId?: string;
+  claimOwnerUserId?: string;
+  watchedByUserIds?: string[];
+  pendingHandoff?: PhaseHandoffPacket;
   capabilityId: string;
   workflowId: string;
   currentStepId?: string;
@@ -1103,6 +1711,8 @@ export interface WorkItem {
   blocker?: WorkItemBlocker;
   activeRunId?: string;
   lastRunId?: string;
+  recordVersion?: number;
+  executionContext?: WorkItemExecutionContext;
   history: WorkItemHistoryEntry[];
 }
 
@@ -1291,11 +1901,18 @@ export interface RunWait {
   status: RunWaitStatus;
   message: string;
   requestedBy: string;
+  requestedByActorUserId?: string;
+  requestedByActorTeamIds?: string[];
   resolution?: string;
   resolvedBy?: string;
+  resolvedByActorUserId?: string;
+  resolvedByActorTeamIds?: string[];
+  approvalPolicyId?: string;
   payload?: RunWaitPayload;
   createdAt: string;
   resolvedAt?: string;
+  approvalAssignments?: ApprovalAssignment[];
+  approvalDecisions?: ApprovalDecision[];
 }
 
 export interface WorkflowRunDetail {
@@ -1330,10 +1947,14 @@ export interface HumanInteractionRecord {
   status: RunWaitStatus;
   message: string;
   requestedBy: string;
+  requestedByActorUserId?: string;
+  requestedByActorTeamIds?: string[];
   requestedByName?: string;
   createdAt: string;
   resolution?: string;
   resolvedBy?: string;
+  resolvedByActorUserId?: string;
+  resolvedByActorTeamIds?: string[];
   resolvedByName?: string;
   resolvedAt?: string;
   artifactId?: string;
@@ -1672,6 +2293,103 @@ export interface StageControlContinueResponse {
   run: WorkflowRun;
 }
 
+export type ApprovalAssignmentStatus =
+  | 'PENDING'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'REQUEST_CHANGES'
+  | 'DELEGATED'
+  | 'CANCELLED';
+
+export type ApprovalDecisionDisposition =
+  | 'APPROVE'
+  | 'REJECT'
+  | 'REQUEST_CHANGES'
+  | 'DELEGATE';
+
+export interface ApprovalAssignment {
+  id: string;
+  capabilityId: string;
+  runId: string;
+  waitId: string;
+  phase?: WorkItemPhase;
+  stepName?: string;
+  approvalPolicyId?: string;
+  status: ApprovalAssignmentStatus;
+  targetType: ApprovalRuleTarget;
+  targetId: string;
+  assignedUserId?: string;
+  assignedTeamId?: string;
+  dueAt?: string;
+  delegatedToUserId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ApprovalDecision {
+  id: string;
+  capabilityId: string;
+  runId: string;
+  waitId: string;
+  assignmentId?: string;
+  disposition: ApprovalDecisionDisposition;
+  actorUserId?: string;
+  actorDisplayName: string;
+  actorTeamIds: string[];
+  comment?: string;
+  createdAt: string;
+}
+
+export interface WorkItemClaim {
+  capabilityId: string;
+  workItemId: string;
+  userId: string;
+  teamId?: string;
+  status: 'ACTIVE' | 'RELEASED' | 'EXPIRED';
+  claimedAt: string;
+  expiresAt: string;
+  releasedAt?: string;
+}
+
+export interface WorkItemPresence {
+  capabilityId: string;
+  workItemId: string;
+  userId: string;
+  teamId?: string;
+  viewContext?: string;
+  lastSeenAt: string;
+}
+
+export interface OwnershipTransferRecord {
+  id: string;
+  capabilityId: string;
+  workItemId: string;
+  fromPhase?: WorkItemPhase;
+  toPhase: WorkItemPhase;
+  fromTeamId?: string;
+  toTeamId?: string;
+  transferredByUserId?: string;
+  transferredByName: string;
+  summary: string;
+  createdAt: string;
+}
+
+export interface PhaseHandoffPacket {
+  id: string;
+  capabilityId: string;
+  workItemId: string;
+  fromPhase: WorkItemPhase;
+  toPhase: WorkItemPhase;
+  fromTeamId?: string;
+  toTeamId?: string;
+  acceptanceChecklist: string[];
+  openQuestions: string[];
+  blockingDependencies: string[];
+  receivingTeamAcceptedAt?: string;
+  receivingTeamAcceptedByUserId?: string;
+  summary?: string;
+}
+
 export type ConnectorSyncStatus = 'READY' | 'NEEDS_CONFIGURATION' | 'ERROR';
 
 export interface GithubConnectorRepositoryContext {
@@ -1925,6 +2643,7 @@ export interface ChatStreamEvent {
 
 export interface CapabilityWorkspace {
   capabilityId: string;
+  briefing: CapabilityBriefing;
   agents: CapabilityAgent[];
   workflows: Workflow[];
   artifacts: Artifact[];

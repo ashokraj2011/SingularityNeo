@@ -37,6 +37,7 @@ import {
 } from '../lib/api';
 import type {
   Capability,
+  CapabilityCollectionKind,
   CapabilityOnboardingDraft,
   CommandTemplateValidationResult,
   ConnectorValidationResult,
@@ -82,6 +83,10 @@ const createDraft = (): CapabilityOnboardingDraft => ({
   name: '',
   domain: '',
   parentCapabilityId: '',
+  capabilityKind: 'DELIVERY',
+  collectionKind: undefined,
+  childCapabilityIds: [],
+  sharedCapabilityIds: [],
   businessUnit: '',
   ownerTeam: '',
   description: '',
@@ -132,7 +137,13 @@ type StepId = (typeof steps)[number]['id'];
 
 export default function CapabilitySetup() {
   const navigate = useNavigate();
-  const { bootStatus, capabilities, createCapability, lastSyncError } =
+  const {
+    bootStatus,
+    capabilities,
+    createCapability,
+    updateCapabilityMetadata,
+    lastSyncError,
+  } =
     useCapability();
   const { success, error: showError } = useToast();
   const [activeStepId, setActiveStepId] = useState<StepId>('profile');
@@ -162,6 +173,44 @@ export default function CapabilitySetup() {
     const suffix = slugify(draft.name || 'CAPABILITY');
     return `AGENT-${suffix}-OWNER`;
   }, [draft.name]);
+  const isCollectionCapability = draft.capabilityKind === 'COLLECTION';
+  const parentCapability = useMemo(
+    () =>
+      capabilities.find(capability => capability.id === draft.parentCapabilityId) || null,
+    [capabilities, draft.parentCapabilityId],
+  );
+  const selectedChildCapabilityIds = useMemo(
+    () => new Set(draft.childCapabilityIds),
+    [draft.childCapabilityIds],
+  );
+  const directChildCandidates = useMemo(() => {
+    const ancestorIds = new Set<string>();
+    let cursor = parentCapability;
+    while (cursor) {
+      ancestorIds.add(cursor.id);
+      cursor =
+        capabilities.find(capability => capability.id === cursor?.parentCapabilityId) || null;
+    }
+
+    return capabilities.filter(capability => {
+      if (capability.id === draft.parentCapabilityId) {
+        return false;
+      }
+      if (ancestorIds.has(capability.id)) {
+        return false;
+      }
+      return true;
+    });
+  }, [capabilities, draft.parentCapabilityId, parentCapability]);
+  const sharedCapabilityCandidates = useMemo(
+    () =>
+      capabilities.filter(
+        capability =>
+          capability.id !== draft.parentCapabilityId &&
+          !selectedChildCapabilityIds.has(capability.id),
+      ),
+    [capabilities, draft.parentCapabilityId, selectedChildCapabilityIds],
+  );
 
   const approvedWorkspacePaths = useMemo(
     () =>
@@ -263,6 +312,32 @@ export default function CapabilitySetup() {
   const updateDraft = (updates: Partial<CapabilityOnboardingDraft>) => {
     setSubmitError('');
     setDraft(current => ({ ...current, ...updates }));
+  };
+
+  const toggleDraftIdSelection = (
+    field: 'childCapabilityIds' | 'sharedCapabilityIds',
+    value: string,
+  ) => {
+    setSubmitError('');
+    setDraft(current => {
+      const next = new Set(current[field]);
+      if (next.has(value)) {
+        next.delete(value);
+      } else {
+        next.add(value);
+      }
+      return {
+        ...current,
+        [field]: [...next],
+        ...(field === 'childCapabilityIds'
+          ? {
+              sharedCapabilityIds: current.sharedCapabilityIds.filter(id => id !== value),
+            }
+          : {
+              childCapabilityIds: current.childCapabilityIds.filter(id => id !== value),
+            }),
+      };
+    });
   };
 
   useEffect(() => {
@@ -433,6 +508,11 @@ export default function CapabilitySetup() {
       name: draft.name.trim(),
       domain: draft.domain.trim(),
       parentCapabilityId: draft.parentCapabilityId || undefined,
+      capabilityKind: draft.capabilityKind,
+      collectionKind:
+        draft.capabilityKind === 'COLLECTION'
+          ? draft.collectionKind || undefined
+          : undefined,
       businessUnit: draft.businessUnit.trim(),
       ownerTeam: draft.ownerTeam.trim() || undefined,
       description: draft.description.trim(),
@@ -467,6 +547,31 @@ export default function CapabilitySetup() {
 
     try {
       const bundle = await createCapability(capability);
+      if (draft.childCapabilityIds.length > 0 || draft.sharedCapabilityIds.length > 0) {
+        await Promise.all([
+          ...draft.childCapabilityIds.map(childCapabilityId =>
+            updateCapabilityMetadata(childCapabilityId, {
+              parentCapabilityId: bundle.capability.id,
+            }),
+          ),
+          ...(draft.sharedCapabilityIds.length > 0
+            ? [
+                updateCapabilityMetadata(bundle.capability.id, {
+                  sharedCapabilities: draft.sharedCapabilityIds.map(
+                    (memberCapabilityId, index) => ({
+                      id: `SHARED-${bundle.capability.id}-${index + 1}`,
+                      collectionCapabilityId: bundle.capability.id,
+                      memberCapabilityId,
+                      label:
+                        capabilities.find(capability => capability.id === memberCapabilityId)
+                          ?.name || undefined,
+                    }),
+                  ),
+                }),
+              ]
+            : []),
+        ]);
+      }
       success(
         'Capability created',
         `${bundle.capability.name} is ready on Capability Home.`,
@@ -619,6 +724,57 @@ export default function CapabilitySetup() {
                 </div>
 
                 <div className="grid gap-5 md:grid-cols-2">
+                  <label className="space-y-2">
+                    <span className="form-kicker">Capability kind</span>
+                    <select
+                      value={draft.capabilityKind}
+                      onChange={event =>
+                        updateDraft({
+                          capabilityKind: event.target.value as 'DELIVERY' | 'COLLECTION',
+                          collectionKind:
+                            event.target.value === 'COLLECTION'
+                              ? draft.collectionKind || 'BUSINESS_DOMAIN'
+                              : undefined,
+                          childCapabilityIds:
+                            event.target.value === 'COLLECTION'
+                              ? draft.childCapabilityIds
+                              : [],
+                          sharedCapabilityIds:
+                            event.target.value === 'COLLECTION'
+                              ? draft.sharedCapabilityIds
+                              : [],
+                        })
+                      }
+                      className="field-select"
+                    >
+                      <option value="DELIVERY">Delivery capability</option>
+                      <option value="COLLECTION">Collection capability</option>
+                    </select>
+                  </label>
+                  <label className="space-y-2">
+                    <span className="form-kicker">Collection type</span>
+                    <select
+                      value={draft.collectionKind || ''}
+                      onChange={event =>
+                        updateDraft({
+                          collectionKind: event.target.value as CapabilityCollectionKind,
+                        })
+                      }
+                      disabled={!isCollectionCapability}
+                      className="field-select disabled:opacity-50"
+                    >
+                      <option value="">
+                        {isCollectionCapability
+                          ? 'Choose collection type'
+                          : 'Only used for collection capabilities'}
+                      </option>
+                      <option value="BUSINESS_DOMAIN">Business domain</option>
+                      <option value="PLATFORM_LAYER">Platform layer</option>
+                      <option value="ENTERPRISE_LAYER">Enterprise layer</option>
+                      <option value="CITY_PLAN">City plan</option>
+                      <option value="ALM_PORTFOLIO">ALM portfolio</option>
+                    </select>
+                  </label>
                   <label className="space-y-2 md:col-span-2">
                     <span className="form-kicker">Capability name</span>
                     <input
@@ -688,6 +844,166 @@ export default function CapabilitySetup() {
                     </select>
                   </label>
                 </div>
+
+                {isCollectionCapability ? (
+                  <div className="rounded-3xl border border-primary/10 bg-primary/5 px-5 py-4">
+                    <div className="flex items-start gap-3">
+                      <Layers size={18} className="mt-0.5 text-primary" />
+                      <p className="text-sm leading-relaxed text-secondary">
+                        Collection capabilities are architecture-first. We focus on hierarchy,
+                        shared capability reuse, contracts, and rollups. Git repos, local
+                        workspaces, and execution setup stay optional and out of the main path.
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
+
+                {isCollectionCapability ? (
+                  <div className="space-y-5">
+                    <div className="rounded-3xl border border-outline-variant/20 bg-surface-container-low p-5">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <p className="form-kicker">Direct children</p>
+                          <h3 className="mt-2 text-lg font-bold text-on-surface">
+                            Capabilities this collection owns directly
+                          </h3>
+                          <p className="mt-2 text-sm leading-relaxed text-secondary">
+                            These capabilities will be re-parented under this collection after
+                            creation. The tree stays single-parent.
+                          </p>
+                        </div>
+                        <StatusBadge tone={draft.childCapabilityIds.length ? 'success' : 'neutral'}>
+                          {draft.childCapabilityIds.length
+                            ? `${draft.childCapabilityIds.length} selected`
+                            : 'Optional'}
+                        </StatusBadge>
+                      </div>
+                      <div className="mt-5 grid gap-3 md:grid-cols-2">
+                        {directChildCandidates.length > 0 ? (
+                          directChildCandidates.map(capability => {
+                            const isSelected = draft.childCapabilityIds.includes(capability.id);
+                            const currentParent =
+                              capability.parentCapabilityId &&
+                              capabilities.find(
+                                item => item.id === capability.parentCapabilityId,
+                              );
+
+                            return (
+                              <label
+                                key={`child-${capability.id}`}
+                                className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-4 transition-all ${
+                                  isSelected
+                                    ? 'border-primary/30 bg-white'
+                                    : 'border-outline-variant/15 bg-white hover:border-primary/20'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() =>
+                                    toggleDraftIdSelection('childCapabilityIds', capability.id)
+                                  }
+                                  className="mt-1 h-4 w-4 rounded border-outline-variant text-primary focus:ring-primary"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-bold text-on-surface">
+                                    {capability.name}
+                                  </p>
+                                  <div className="mt-2 flex flex-wrap gap-2">
+                                    <StatusBadge tone="info">
+                                      {capability.capabilityKind || 'DELIVERY'}
+                                    </StatusBadge>
+                                    {currentParent && !isSelected ? (
+                                      <StatusBadge tone="warning">
+                                        Current parent: {currentParent.name}
+                                      </StatusBadge>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              </label>
+                            );
+                          })
+                        ) : (
+                          <div className="rounded-2xl border border-dashed border-outline-variant/25 bg-white p-4 text-sm text-secondary md:col-span-2">
+                            No eligible capabilities are available for direct parenting yet.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="rounded-3xl border border-outline-variant/20 bg-surface-container-low p-5">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <p className="form-kicker">Shared capabilities</p>
+                          <h3 className="mt-2 text-lg font-bold text-on-surface">
+                            Capabilities this collection reuses
+                          </h3>
+                          <p className="mt-2 text-sm leading-relaxed text-secondary">
+                            Shared capabilities stay under their own direct parent and can be
+                            referenced by multiple collections.
+                          </p>
+                        </div>
+                        <StatusBadge
+                          tone={draft.sharedCapabilityIds.length ? 'brand' : 'neutral'}
+                        >
+                          {draft.sharedCapabilityIds.length
+                            ? `${draft.sharedCapabilityIds.length} selected`
+                            : 'Optional'}
+                        </StatusBadge>
+                      </div>
+                      <div className="mt-5 grid gap-3 md:grid-cols-2">
+                        {sharedCapabilityCandidates.length > 0 ? (
+                          sharedCapabilityCandidates.map(capability => {
+                            const isSelected = draft.sharedCapabilityIds.includes(capability.id);
+                            return (
+                              <label
+                                key={`shared-${capability.id}`}
+                                className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-4 transition-all ${
+                                  isSelected
+                                    ? 'border-primary/30 bg-white'
+                                    : 'border-outline-variant/15 bg-white hover:border-primary/20'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() =>
+                                    toggleDraftIdSelection('sharedCapabilityIds', capability.id)
+                                  }
+                                  className="mt-1 h-4 w-4 rounded border-outline-variant text-primary focus:ring-primary"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-bold text-on-surface">
+                                    {capability.name}
+                                  </p>
+                                  <p className="mt-1 text-xs text-secondary">
+                                    {capability.capabilityKind === 'COLLECTION'
+                                      ? capability.collectionKind || 'Collection'
+                                      : capability.domain || capability.description}
+                                  </p>
+                                  <div className="mt-2 flex flex-wrap gap-2">
+                                    <StatusBadge tone="info">
+                                      {capability.capabilityKind || 'DELIVERY'}
+                                    </StatusBadge>
+                                    {capability.parentCapabilityId ? (
+                                      <StatusBadge tone="neutral">
+                                        Shared from existing tree
+                                      </StatusBadge>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              </label>
+                            );
+                          })
+                        ) : (
+                          <div className="rounded-2xl border border-dashed border-outline-variant/25 bg-white p-4 text-sm text-secondary md:col-span-2">
+                            No remaining capabilities are available for shared references yet.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
 
                 <AdvancedDisclosure
                   title="Business charter details"
@@ -770,27 +1086,28 @@ export default function CapabilitySetup() {
                   <div className="flex items-start gap-3">
                     <GitBranch size={18} className="mt-0.5 text-primary" />
                     <p className="text-sm leading-relaxed text-secondary">
-                      Give the owning agent a repo, docs, or an approved local
-                      path if you want useful initial learning right away. You
-                      can also create the capability now and attach sources
-                      later from Metadata.
+                      {isCollectionCapability
+                        ? 'Collections usually start from architecture notes, ALM links, and published child contracts. Technical sources stay optional unless you want this layer grounded in reference repos too.'
+                        : 'Give the owning agent a repo, docs, or an approved local path if you want useful initial learning right away. You can also create the capability now and attach sources later from Metadata.'}
                     </p>
                   </div>
                 </div>
 
-                <label className="space-y-2 block">
-                  <span className="form-kicker">GitHub repositories</span>
-                  <textarea
-                    value={listToText(draft.githubRepositories)}
-                    onChange={event =>
-                      updateDraft({
-                        githubRepositories: textToList(event.target.value),
-                      })
-                    }
-                    placeholder={'https://github.com/org/service-a\nssh://git.example.com/platform/service-b.git'}
-                    className="field-textarea h-32"
-                  />
-                </label>
+                {!isCollectionCapability ? (
+                  <label className="space-y-2 block">
+                    <span className="form-kicker">GitHub repositories</span>
+                    <textarea
+                      value={listToText(draft.githubRepositories)}
+                      onChange={event =>
+                        updateDraft({
+                          githubRepositories: textToList(event.target.value),
+                        })
+                      }
+                      placeholder={'https://github.com/org/service-a\nssh://git.example.com/platform/service-b.git'}
+                      className="field-textarea h-32"
+                    />
+                  </label>
+                ) : null}
 
                 <div className="grid gap-5 md:grid-cols-2">
                   <label className="space-y-2">
@@ -875,207 +1192,246 @@ export default function CapabilitySetup() {
                   </div>
                 )}
 
-                <AdvancedDisclosure
-                  title="Approved workspace paths"
-                  description="Optional now. Add them when you want agents to read, write, or run commands inside a local codebase."
-                  storageKey="capability-setup-workspace-paths"
-                  badge={
-                    <StatusBadge tone={approvedWorkspacePaths.length ? 'brand' : 'neutral'}>
-                      {approvedWorkspacePaths.length
-                        ? `${approvedWorkspacePaths.length} path${approvedWorkspacePaths.length === 1 ? '' : 's'}`
-                        : 'Optional'}
-                    </StatusBadge>
-                  }
-                >
-                  <div className="space-y-5">
-                    <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4">
-                      <div className="flex items-start gap-3">
-                        <FolderCode size={18} className="mt-0.5 text-amber-800" />
-                        <p className="text-sm leading-relaxed text-amber-900">
-                          Agents can read, write, and run commands only inside
-                          approved local paths. Leave this empty for a planning
-                          or discovery-first capability.
-                        </p>
+                {!isCollectionCapability ? (
+                  <AdvancedDisclosure
+                    title="Approved workspace paths"
+                    description="Optional now. Add them when you want agents to read, write, or run commands inside a local codebase."
+                    storageKey="capability-setup-workspace-paths"
+                    badge={
+                      <StatusBadge tone={approvedWorkspacePaths.length ? 'brand' : 'neutral'}>
+                        {approvedWorkspacePaths.length
+                          ? `${approvedWorkspacePaths.length} path${approvedWorkspacePaths.length === 1 ? '' : 's'}`
+                          : 'Optional'}
+                      </StatusBadge>
+                    }
+                  >
+                    <div className="space-y-5">
+                      <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4">
+                        <div className="flex items-start gap-3">
+                          <FolderCode size={18} className="mt-0.5 text-amber-800" />
+                          <p className="text-sm leading-relaxed text-amber-900">
+                            Agents can read, write, and run commands only inside
+                            approved local paths. Leave this empty for a planning
+                            or discovery-first capability.
+                          </p>
+                        </div>
+                      </div>
+                      <label className="space-y-2 block">
+                        <span className="form-kicker">Default workspace path</span>
+                        <input
+                          value={draft.defaultWorkspacePath}
+                          onChange={event =>
+                            updateDraft({ defaultWorkspacePath: event.target.value })
+                          }
+                          placeholder="/Users/ashokraj/Documents/workDir/service"
+                          className="field-input"
+                        />
+                      </label>
+                      <div className="grid gap-5 md:grid-cols-2">
+                        <label className="space-y-2">
+                          <span className="form-kicker">Local code directories</span>
+                          <textarea
+                            value={listToText(draft.localDirectories)}
+                            onChange={event =>
+                              updateDraft({
+                                localDirectories: textToList(event.target.value),
+                              })
+                            }
+                            className="field-textarea h-36"
+                          />
+                        </label>
+                        <label className="space-y-2">
+                          <span className="form-kicker">Additional allowed paths</span>
+                          <textarea
+                            value={listToText(draft.allowedWorkspacePaths)}
+                            onChange={event =>
+                              updateDraft({
+                                allowedWorkspacePaths: textToList(event.target.value),
+                              })
+                            }
+                            className="field-textarea h-36"
+                          />
+                        </label>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void validateWorkspacePaths()}
+                        disabled={approvedWorkspacePaths.length === 0}
+                        className="enterprise-button enterprise-button-secondary disabled:opacity-50"
+                      >
+                        {isValidating === 'workspace'
+                          ? 'Validating'
+                          : 'Validate approved paths'}
+                      </button>
+                      <div className="space-y-2">
+                        {approvedWorkspacePaths.length === 0 ? (
+                          <div className="rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm text-secondary">
+                            No local path is configured yet. The capability can
+                            still be created and used for chat, planning, and
+                            discovery before execution is enabled.
+                          </div>
+                        ) : (
+                          approvedWorkspacePaths.map(path => {
+                            const validation = pathValidation[path];
+
+                            return (
+                              <div
+                                key={path}
+                                className="flex items-start justify-between gap-3 rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3"
+                              >
+                                <div>
+                                  <p className="break-all text-sm font-semibold text-on-surface">
+                                    {path}
+                                  </p>
+                                  <p className="mt-1 text-xs text-secondary">
+                                    {validation?.message || 'Not validated yet.'}
+                                  </p>
+                                </div>
+                                <StatusBadge
+                                  tone={validation?.valid ? 'success' : 'warning'}
+                                >
+                                  {validation?.valid ? 'Approved' : 'Check'}
+                                </StatusBadge>
+                              </div>
+                            );
+                          })
+                        )}
                       </div>
                     </div>
-                    <label className="space-y-2 block">
-                      <span className="form-kicker">Default workspace path</span>
-                      <input
-                        value={draft.defaultWorkspacePath}
-                        onChange={event =>
-                          updateDraft({ defaultWorkspacePath: event.target.value })
-                        }
-                        placeholder="/Users/ashokraj/Documents/workDir/service"
-                        className="field-input"
-                      />
-                    </label>
-                    <div className="grid gap-5 md:grid-cols-2">
-                      <label className="space-y-2">
-                        <span className="form-kicker">Local code directories</span>
-                        <textarea
-                          value={listToText(draft.localDirectories)}
-                          onChange={event =>
-                            updateDraft({
-                              localDirectories: textToList(event.target.value),
-                            })
-                          }
-                          className="field-textarea h-36"
-                        />
-                      </label>
-                      <label className="space-y-2">
-                        <span className="form-kicker">Additional allowed paths</span>
-                        <textarea
-                          value={listToText(draft.allowedWorkspacePaths)}
-                          onChange={event =>
-                            updateDraft({
-                              allowedWorkspacePaths: textToList(event.target.value),
-                            })
-                          }
-                          className="field-textarea h-36"
-                        />
-                      </label>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void validateWorkspacePaths()}
-                      disabled={approvedWorkspacePaths.length === 0}
-                      className="enterprise-button enterprise-button-secondary disabled:opacity-50"
-                    >
-                      {isValidating === 'workspace'
-                        ? 'Validating'
-                        : 'Validate approved paths'}
-                    </button>
-                    <div className="space-y-2">
-                      {approvedWorkspacePaths.length === 0 ? (
-                        <div className="rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm text-secondary">
-                          No local path is configured yet. The capability can
-                          still be created and used for chat, planning, and
-                          discovery before execution is enabled.
-                        </div>
-                      ) : (
-                        approvedWorkspacePaths.map(path => {
-                          const validation = pathValidation[path];
-
-                          return (
-                            <div
-                              key={path}
-                              className="flex items-start justify-between gap-3 rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3"
-                            >
-                              <div>
-                                <p className="break-all text-sm font-semibold text-on-surface">
-                                  {path}
-                                </p>
-                                <p className="mt-1 text-xs text-secondary">
-                                  {validation?.message || 'Not validated yet.'}
-                                </p>
-                              </div>
-                              <StatusBadge
-                                tone={validation?.valid ? 'success' : 'warning'}
-                              >
-                                {validation?.valid ? 'Approved' : 'Check'}
-                              </StatusBadge>
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-                </AdvancedDisclosure>
+                  </AdvancedDisclosure>
+                ) : null}
               </div>
             )}
 
             {activeStepId === 'execution' && (
               <div className="space-y-6">
-                <div className="rounded-3xl border border-primary/10 bg-primary/5 px-5 py-4 text-sm leading-relaxed text-secondary">
-                  Skip this if you only need learning, chat, or planning first.
-                  Command templates and deployment targets can be refined once
-                  the owning agent understands the codebase and your operating
-                  model more clearly.
-                </div>
-
-                <WorkspaceProfileRecommendationCard
-                  detection={workspaceDetection}
-                  currentTemplates={draft.commandTemplates}
-                  currentTargets={draft.deploymentTargets}
-                  dismissed={workspaceDetectionDismissed}
-                  onUseRecommendedSetup={applyRecommendedSetup}
-                  onKeepCurrentSetup={() => setWorkspaceDetectionDismissed(true)}
-                  onRefresh={() => void detectWorkspaceProfile()}
-                />
-
-                {approvedWorkspacePaths.length > 0 && !workspaceDetection && (
-                  <div className="rounded-3xl border border-outline-variant/20 bg-surface-container-low px-5 py-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <p className="form-kicker">Detected workspace profile</p>
-                        <p className="mt-2 text-sm leading-relaxed text-secondary">
-                          Validate or refresh the approved workspace paths to infer Java, Python, or Node execution setup from the local codebase.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => void detectWorkspaceProfile()}
-                        className="enterprise-button enterprise-button-secondary"
-                      >
-                        {isValidating === 'workspace-profile'
-                          ? 'Detecting'
-                          : 'Refresh detection'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <AdvancedDisclosure
-                  title="Command templates"
-                  description="Turn execution into named, approved actions when you are ready for build, test, docs, or deployment work."
-                  storageKey="capability-setup-command-templates"
-                  badge={
-                    <StatusBadge tone={hasMeaningfulExecutionCommandTemplate(draft.commandTemplates) ? 'success' : 'neutral'}>
-                      {hasMeaningfulExecutionCommandTemplate(draft.commandTemplates)
-                        ? 'Configured'
-                        : 'Optional'}
-                    </StatusBadge>
-                  }
-                >
-                  <CommandTemplateEditor
-                    templates={draft.commandTemplates}
-                    allowedWorkspacePaths={approvedWorkspacePaths}
-                    validationResults={commandValidation}
-                    onChange={commandTemplates => updateDraft({ commandTemplates })}
-                    onValidate={template => void validateCommand(template)}
-                  />
-                </AdvancedDisclosure>
-
-                <AdvancedDisclosure
-                  title="Deployment targets"
-                  description="Define approval-gated release targets when this capability is ready to ship changes."
-                  storageKey="capability-setup-deployment-targets"
-                  badge={
-                    <StatusBadge tone={draft.deploymentTargets.length ? 'brand' : 'neutral'}>
-                      {draft.deploymentTargets.length
-                        ? `${draft.deploymentTargets.length} target${draft.deploymentTargets.length === 1 ? '' : 's'}`
-                        : 'Optional'}
-                    </StatusBadge>
-                  }
-                >
+                {isCollectionCapability ? (
                   <div className="space-y-5">
-                    <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-relaxed text-amber-900">
-                      Deployment remains approval-gated. A deployment target
-                      only defines where and how release execution can happen
-                      after human approval.
+                    <div className="rounded-3xl border border-primary/10 bg-primary/5 px-5 py-4 text-sm leading-relaxed text-secondary">
+                      Collection capabilities do not own execution runs, so command templates,
+                      workspace commands, and deployment targets are intentionally skipped here.
+                      If you later want technical reference material, you can still add docs or
+                      repos from Capability Metadata without turning this collection into an
+                      execution lane.
                     </div>
-                    <DeploymentTargetEditor
-                      targets={draft.deploymentTargets}
-                      commandTemplates={draft.commandTemplates}
-                      allowedWorkspacePaths={approvedWorkspacePaths}
-                      validationResults={deploymentValidation}
-                      onChange={deploymentTargets =>
-                        updateDraft({ deploymentTargets })
-                      }
-                      onValidate={target => void validateDeployment(target)}
-                    />
+                    <div className="rounded-3xl border border-outline-variant/20 bg-surface-container-low p-5">
+                      <p className="form-kicker">Collection structure</p>
+                      <div className="mt-4 grid gap-3 md:grid-cols-3">
+                        <div className="rounded-2xl bg-white px-4 py-3">
+                          <p className="form-kicker">Direct children</p>
+                          <p className="mt-2 text-lg font-extrabold text-primary">
+                            {draft.childCapabilityIds.length}
+                          </p>
+                        </div>
+                        <div className="rounded-2xl bg-white px-4 py-3">
+                          <p className="form-kicker">Shared capabilities</p>
+                          <p className="mt-2 text-lg font-extrabold text-primary">
+                            {draft.sharedCapabilityIds.length}
+                          </p>
+                        </div>
+                        <div className="rounded-2xl bg-white px-4 py-3">
+                          <p className="form-kicker">Collection kind</p>
+                          <p className="mt-2 text-sm font-bold text-on-surface">
+                            {draft.collectionKind || 'Choose on Start step'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                </AdvancedDisclosure>
+                ) : (
+                  <>
+                    <div className="rounded-3xl border border-primary/10 bg-primary/5 px-5 py-4 text-sm leading-relaxed text-secondary">
+                      Skip this if you only need learning, chat, or planning first.
+                      Command templates and deployment targets can be refined once
+                      the owning agent understands the codebase and your operating
+                      model more clearly.
+                    </div>
+
+                    <WorkspaceProfileRecommendationCard
+                      detection={workspaceDetection}
+                      currentTemplates={draft.commandTemplates}
+                      currentTargets={draft.deploymentTargets}
+                      dismissed={workspaceDetectionDismissed}
+                      onUseRecommendedSetup={applyRecommendedSetup}
+                      onKeepCurrentSetup={() => setWorkspaceDetectionDismissed(true)}
+                      onRefresh={() => void detectWorkspaceProfile()}
+                    />
+
+                    {approvedWorkspacePaths.length > 0 && !workspaceDetection && (
+                      <div className="rounded-3xl border border-outline-variant/20 bg-surface-container-low px-5 py-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <p className="form-kicker">Detected workspace profile</p>
+                            <p className="mt-2 text-sm leading-relaxed text-secondary">
+                              Validate or refresh the approved workspace paths to infer Java, Python, or Node execution setup from the local codebase.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void detectWorkspaceProfile()}
+                            className="enterprise-button enterprise-button-secondary"
+                          >
+                            {isValidating === 'workspace-profile'
+                              ? 'Detecting'
+                              : 'Refresh detection'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <AdvancedDisclosure
+                      title="Command templates"
+                      description="Turn execution into named, approved actions when you are ready for build, test, docs, or deployment work."
+                      storageKey="capability-setup-command-templates"
+                      badge={
+                        <StatusBadge tone={hasMeaningfulExecutionCommandTemplate(draft.commandTemplates) ? 'success' : 'neutral'}>
+                          {hasMeaningfulExecutionCommandTemplate(draft.commandTemplates)
+                            ? 'Configured'
+                            : 'Optional'}
+                        </StatusBadge>
+                      }
+                    >
+                      <CommandTemplateEditor
+                        templates={draft.commandTemplates}
+                        allowedWorkspacePaths={approvedWorkspacePaths}
+                        validationResults={commandValidation}
+                        onChange={commandTemplates => updateDraft({ commandTemplates })}
+                        onValidate={template => void validateCommand(template)}
+                      />
+                    </AdvancedDisclosure>
+
+                    <AdvancedDisclosure
+                      title="Deployment targets"
+                      description="Define approval-gated release targets when this capability is ready to ship changes."
+                      storageKey="capability-setup-deployment-targets"
+                      badge={
+                        <StatusBadge tone={draft.deploymentTargets.length ? 'brand' : 'neutral'}>
+                          {draft.deploymentTargets.length
+                            ? `${draft.deploymentTargets.length} target${draft.deploymentTargets.length === 1 ? '' : 's'}`
+                            : 'Optional'}
+                        </StatusBadge>
+                      }
+                    >
+                      <div className="space-y-5">
+                        <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-relaxed text-amber-900">
+                          Deployment remains approval-gated. A deployment target
+                          only defines where and how release execution can happen
+                          after human approval.
+                        </div>
+                        <DeploymentTargetEditor
+                          targets={draft.deploymentTargets}
+                          commandTemplates={draft.commandTemplates}
+                          allowedWorkspacePaths={approvedWorkspacePaths}
+                          validationResults={deploymentValidation}
+                          onChange={deploymentTargets =>
+                            updateDraft({ deploymentTargets })
+                          }
+                          onValidate={target => void validateDeployment(target)}
+                        />
+                      </div>
+                    </AdvancedDisclosure>
+                  </>
+                )}
               </div>
             )}
 
@@ -1089,6 +1445,13 @@ export default function CapabilitySetup() {
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     {[
                       ['Capability', draft.name || 'Unnamed'],
+                      ['Kind', draft.capabilityKind],
+                      [
+                        'Collection type',
+                        draft.capabilityKind === 'COLLECTION'
+                          ? draft.collectionKind || 'Choose on Start step'
+                          : 'Not a collection',
+                      ],
                       ['Purpose', draft.description || 'Missing'],
                       ['Owner team', draft.ownerTeam || 'Can be inferred later'],
                       ['Learning sources', String(
@@ -1104,8 +1467,14 @@ export default function CapabilitySetup() {
                       ],
                       [
                         'Execution setup',
-                        hasExecutionSetup ? 'Partially configured' : 'Planning-first',
+                        draft.capabilityKind === 'COLLECTION'
+                          ? 'Collection nodes stay non-executable'
+                          : hasExecutionSetup
+                          ? 'Partially configured'
+                          : 'Planning-first',
                       ],
+                      ['Direct children', String(draft.childCapabilityIds.length)],
+                      ['Shared capabilities', String(draft.sharedCapabilityIds.length)],
                       ['Approved paths', String(approvedWorkspacePaths.length)],
                       ['Deployment targets', String(draft.deploymentTargets.length)],
                       ['Owner agent', ownerAgentId],
@@ -1126,18 +1495,27 @@ export default function CapabilitySetup() {
                 <div className="rounded-3xl border border-primary/10 bg-primary/5 px-5 py-4">
                   <p className="form-kicker">What happens next</p>
                   <div className="mt-3 space-y-2 text-sm leading-relaxed text-secondary">
-                    <p>1. We create the capability and owning agent.</p>
-                    <p>2. The team learns from any repos, docs, and paths you attached.</p>
-                    <p>3. You can refine the business contract, commands, and release setup later from Metadata and Designer.</p>
+                    {isCollectionCapability ? (
+                      <>
+                        <p>1. We create the collection capability and owning agent.</p>
+                        <p>2. Direct children are attached into the architecture tree.</p>
+                        <p>3. Shared capabilities are linked as reusable collection members without changing their own parent chain.</p>
+                      </>
+                    ) : (
+                      <>
+                        <p>1. We create the capability and owning agent.</p>
+                        <p>2. The team learns from any repos, docs, and paths you attached.</p>
+                        <p>3. You can refine the business contract, commands, and release setup later from Metadata and Designer.</p>
+                      </>
+                    )}
                   </div>
                 </div>
 
                 {!hasGroundingSource && (
                   <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-relaxed text-amber-900">
-                    No learning sources are attached yet. The capability can
-                    still be created, but the owning agent will only start from
-                    the charter until you connect code, docs, or workspace
-                    paths.
+                    {isCollectionCapability
+                      ? 'No architecture sources are attached yet. The collection can still be created, and you can enrich it later with ALM links, documentation, and published child contracts.'
+                      : 'No learning sources are attached yet. The capability can still be created, but the owning agent will only start from the charter until you connect code, docs, or workspace paths.'}
                   </div>
                 )}
 

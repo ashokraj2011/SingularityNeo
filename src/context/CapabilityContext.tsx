@@ -1,5 +1,6 @@
 import React, { createContext, ReactNode, useContext, useEffect, useRef, useState } from 'react';
 import {
+  ActorContext,
   AgentOutputRecord,
   AgentLearningProfile,
   AgentUsage,
@@ -8,6 +9,7 @@ import {
   CapabilityChatMessage,
   CapabilityWorkspace,
   Skill,
+  WorkspaceOrganization,
   WorkspaceSettings,
 } from '../types';
 import {
@@ -32,9 +34,11 @@ import {
   type CreateCapabilityInput,
   fetchAppState,
   fetchCapabilityBundle,
+  setCurrentActorContext,
   replaceCapabilityWorkspaceContentRecord,
   removeCapabilitySkillRecord,
   setActiveChatAgentRecord,
+  updateWorkspaceUserPreferenceRecord,
   updateCapabilityAgentRecord,
   updateCapabilityAgentModelsRecord,
   updateCapabilityRecord,
@@ -42,11 +46,28 @@ import {
   type AppState,
 } from '../lib/api';
 import { createDefaultCapabilityLifecycle } from '../lib/capabilityLifecycle';
+import {
+  applyCapabilityArchitecture,
+  createEmptyCapabilityContractDraft,
+  normalizeCapabilityCollectionKind,
+  normalizeCapabilityContractDraft,
+  normalizeCapabilityDependencies,
+  normalizeCapabilityKind,
+  normalizeCapabilityPublishedSnapshots,
+  normalizeCapabilitySharedReferences,
+} from '../lib/capabilityArchitecture';
+import { buildCapabilityBriefing } from '../lib/capabilityBriefing';
 import { getDefaultCapabilityWorkflows } from '../lib/standardWorkflow';
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowGraph';
 import { normalizeWorkspaceConnectorSettings } from '../lib/workspaceConnectors';
 import { WORKSPACE_AGENT_TEMPLATES } from '../lib/workspaceFoundations';
+import {
+  buildActorContextFromOrganization,
+  getCurrentWorkspaceUser,
+  normalizeWorkspaceOrganization,
+  seedWorkspaceOrganizationFromCapabilities,
+} from '../lib/workspaceOrganization';
 import {
   getLegacyArtifactListsFromContract,
   normalizeAgentOperatingContract,
@@ -76,6 +97,10 @@ interface CapabilityContextType {
   capabilities: Capability[];
   capabilityWorkspaces: CapabilityWorkspace[];
   workspaceSettings: WorkspaceSettings;
+  workspaceOrganization: WorkspaceOrganization;
+  currentActorContext: ActorContext;
+  currentWorkspaceUserId?: string;
+  setCurrentWorkspaceUserId: (userId: string) => void;
   createCapability: (capability: CreateCapabilityInput) => Promise<CapabilityBundle>;
   getCapabilityWorkspace: (capabilityId: string) => CapabilityWorkspace;
   updateCapabilityMetadata: (
@@ -130,6 +155,8 @@ const EMPTY_CAPABILITY: Capability = {
   domain: '',
   businessUnit: '',
   description: '',
+  capabilityKind: 'DELIVERY',
+  collectionKind: undefined,
   businessOutcome: '',
   successMetrics: [],
   definitionOfDone: '',
@@ -140,9 +167,13 @@ const EMPTY_CAPABILITY: Capability = {
   databases: [],
   gitRepositories: [],
   localDirectories: [],
+  repositories: [],
   teamNames: [],
   stakeholders: [],
   additionalMetadata: [],
+  dependencies: [],
+  contractDraft: createEmptyCapabilityContractDraft(),
+  publishedSnapshots: [],
   lifecycle: createDefaultCapabilityLifecycle(),
   executionConfig: {
     defaultWorkspacePath: undefined,
@@ -161,6 +192,7 @@ const EMPTY_WORKSPACE_SETTINGS: WorkspaceSettings = {
   connectors: normalizeWorkspaceConnectorSettings(),
 };
 const DEFAULT_CAPABILITY_PREFERENCE_KEY = 'singularity.workspace.defaultCapabilityId';
+const DEFAULT_WORKSPACE_USER_KEY = 'singularity.workspace.currentUserId';
 
 const createDefaultAgentLearningProfile = (): AgentLearningProfile => ({
   status: 'NOT_STARTED',
@@ -198,6 +230,22 @@ const getAvailableCapabilitySkillIds = (capability: Capability) =>
 
 const normalizeCapability = (capability: Capability): Capability => ({
   ...capability,
+  capabilityKind: normalizeCapabilityKind(
+    capability.capabilityKind,
+    capability.collectionKind,
+  ),
+  collectionKind: normalizeCapabilityCollectionKind(capability.collectionKind),
+  repositories: capability.repositories || [],
+  dependencies: normalizeCapabilityDependencies(capability.id, capability.dependencies),
+  sharedCapabilities: normalizeCapabilitySharedReferences(
+    capability.id,
+    capability.sharedCapabilities,
+  ),
+  contractDraft: normalizeCapabilityContractDraft(capability.contractDraft),
+  publishedSnapshots: normalizeCapabilityPublishedSnapshots(
+    capability.id,
+    capability.publishedSnapshots,
+  ),
   skillLibrary: (capability.skillLibrary || []).map(skill => normalizeSkill(skill)),
 });
 
@@ -616,31 +664,45 @@ const buildCapabilityWorkspace = (
 ): CapabilityWorkspace => {
   const normalizedCapability = normalizeCapability(capability);
   const ownerAgent = buildOwnerAgent(normalizedCapability);
-  const defaultWorkflows = getDefaultCapabilityWorkflows(normalizedCapability).map(workflow =>
-    buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)),
-  );
+  const isCollectionCapability = normalizedCapability.capabilityKind === 'COLLECTION';
+  const defaultWorkflows = isCollectionCapability
+    ? []
+    : getDefaultCapabilityWorkflows(normalizedCapability).map(workflow =>
+        buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)),
+      );
   return {
     capabilityId: normalizedCapability.id,
+    briefing: buildCapabilityBriefing(normalizedCapability),
     agents: includeSeedData
       ? buildSeededAgents(normalizedCapability, ownerAgent)
       : buildBaseAgents(normalizedCapability, ownerAgent),
     workflows: defaultWorkflows,
     artifacts: includeSeedData
-      ? ARTIFACTS.filter(artifact => artifact.capabilityId === normalizedCapability.id)
+      ? isCollectionCapability
+        ? []
+        : ARTIFACTS.filter(artifact => artifact.capabilityId === normalizedCapability.id)
       : [],
     tasks: includeSeedData
-      ? AGENT_TASKS.filter(task => task.capabilityId === normalizedCapability.id)
+      ? isCollectionCapability
+        ? []
+        : AGENT_TASKS.filter(task => task.capabilityId === normalizedCapability.id)
       : [],
     executionLogs: includeSeedData
-      ? EXECUTION_LOGS.filter(log => log.capabilityId === normalizedCapability.id)
+      ? isCollectionCapability
+        ? []
+        : EXECUTION_LOGS.filter(log => log.capabilityId === normalizedCapability.id)
       : [],
     learningUpdates: includeSeedData
-      ? LEARNING_UPDATES.filter(
-          update => update.capabilityId === normalizedCapability.id,
-        ).map(update => normalizeLearningUpdate(update))
+      ? isCollectionCapability
+        ? []
+        : LEARNING_UPDATES.filter(
+            update => update.capabilityId === normalizedCapability.id,
+          ).map(update => normalizeLearningUpdate(update))
       : [],
     workItems: includeSeedData
-      ? WORK_ITEMS.filter(item => item.capabilityId === normalizedCapability.id)
+      ? isCollectionCapability
+        ? []
+        : WORK_ITEMS.filter(item => item.capabilityId === normalizedCapability.id)
       : [],
     messages: [buildWelcomeMessage(capability, ownerAgent)],
     activeChatAgentId: ownerAgent.id,
@@ -659,9 +721,11 @@ const upsertWorkspace = (items: CapabilityWorkspace[], next: CapabilityWorkspace
     : [...items, next];
 
 const mergeCapabilities = (persistedCapabilities: Capability[]) =>
-  persistedCapabilities.map(normalizeCapability).reduce(
-    (items, capability) => upsertCapability(items, capability),
-    DEMO_MODE_ENABLED ? [...CAPABILITIES] : [],
+  applyCapabilityArchitecture(
+    persistedCapabilities.map(normalizeCapability).reduce(
+      (items, capability) => upsertCapability(items, capability),
+      DEMO_MODE_ENABLED ? [...CAPABILITIES] : [],
+    ),
   );
 
 const upsertCapabilitySkill = (skills: Skill[], nextSkill: Skill) =>
@@ -702,6 +766,7 @@ const normalizeWorkspace = (
     ...seededWorkspace,
     ...workspace,
     capabilityId: normalizedCapability.id,
+    briefing: buildCapabilityBriefing(normalizedCapability),
     agents: mergeWorkspaceAgents(
       normalizedCapability,
       nextOwnerAgent,
@@ -747,6 +812,7 @@ const readInitialState = () => {
     DEFAULT_CAPABILITY_PREFERENCE_KEY,
     '',
   );
+  const workspaceOrganization = normalizeWorkspaceOrganization();
 
   return {
     capabilities,
@@ -758,6 +824,7 @@ const readInitialState = () => {
       buildCapabilityWorkspace(capability, true),
     ),
     workspaceSettings: EMPTY_WORKSPACE_SETTINGS,
+    workspaceOrganization,
   };
 };
 
@@ -774,8 +841,18 @@ const normalizeAppState = (
       ),
     ),
   );
+  const workspaceOrganization = normalizeWorkspaceOrganization(
+    state.workspaceOrganization,
+  );
+  const currentUserPreference =
+    workspaceOrganization.userPreferences.find(
+      preference => preference.userId === workspaceOrganization.currentUserId,
+    ) || null;
   const nextActiveCapability =
-    getPreferredActiveCapability(nextCapabilities, preferredActiveCapabilityId) ||
+    getPreferredActiveCapability(
+      nextCapabilities,
+      currentUserPreference?.defaultCapabilityId || preferredActiveCapabilityId,
+    ) ||
     EMPTY_CAPABILITY;
 
   return {
@@ -783,6 +860,7 @@ const normalizeAppState = (
     activeCapability: nextActiveCapability,
     capabilityWorkspaces: nextWorkspaces,
     workspaceSettings: state.workspaceSettings || EMPTY_WORKSPACE_SETTINGS,
+    workspaceOrganization,
   };
 };
 
@@ -804,6 +882,15 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
   const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings>(
     initialState.workspaceSettings,
   );
+  const [workspaceOrganization, setWorkspaceOrganization] = useState<WorkspaceOrganization>(
+    initialState.workspaceOrganization,
+  );
+  const [currentWorkspaceUserId, setCurrentWorkspaceUserIdState] = useState<string>(
+    readViewPreference(
+      DEFAULT_WORKSPACE_USER_KEY,
+      initialState.workspaceOrganization.currentUserId || '',
+    ) || initialState.workspaceOrganization.currentUserId || '',
+  );
   const [mutationStatusByCapability, setMutationStatusByCapability] = useState<
     Record<string, { status: 'idle' | 'pending' | 'error'; error?: string }>
   >({});
@@ -812,6 +899,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
   const activeCapabilityRef = useRef(activeCapability);
   const preferredCapabilityIdRef = useRef(preferredCapabilityId);
   const capabilityWorkspacesRef = useRef(capabilityWorkspaces);
+  const workspaceOrganizationRef = useRef(workspaceOrganization);
 
   useEffect(() => {
     capabilitiesRef.current = capabilities;
@@ -828,6 +916,44 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     capabilityWorkspacesRef.current = capabilityWorkspaces;
   }, [capabilityWorkspaces]);
+
+  useEffect(() => {
+    workspaceOrganizationRef.current = workspaceOrganization;
+  }, [workspaceOrganization]);
+
+  useEffect(() => {
+    const normalizedOrganization = normalizeWorkspaceOrganization({
+      ...workspaceOrganization,
+      currentUserId:
+        currentWorkspaceUserId || workspaceOrganization.currentUserId || undefined,
+    });
+    setCurrentActorContext(buildActorContextFromOrganization(normalizedOrganization));
+  }, [currentWorkspaceUserId, workspaceOrganization]);
+
+  useEffect(() => {
+    const selectedUserId =
+      currentWorkspaceUserId || workspaceOrganization.currentUserId || '';
+    if (!selectedUserId) {
+      return;
+    }
+
+    const selectedPreference = workspaceOrganization.userPreferences.find(
+      preference => preference.userId === selectedUserId,
+    );
+    const preferredId = selectedPreference?.defaultCapabilityId || '';
+    if (!preferredId || preferredId === preferredCapabilityIdRef.current) {
+      return;
+    }
+
+    setPreferredCapabilityIdState(preferredId);
+    const nextActiveCapability = getPreferredActiveCapability(
+      capabilitiesRef.current,
+      preferredId,
+    );
+    if (nextActiveCapability) {
+      setActiveCapabilityState(nextActiveCapability);
+    }
+  }, [currentWorkspaceUserId, workspaceOrganization.currentUserId, workspaceOrganization.userPreferences]);
 
   const setMutationStatus = (
     capabilityId: string,
@@ -883,10 +1009,15 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
       capabilityWorkspacesRef.current,
       normalizedWorkspace,
     );
+    const nextWorkspaceOrganization = seedWorkspaceOrganizationFromCapabilities(
+      nextCapabilities,
+      workspaceOrganizationRef.current,
+    );
     const currentActiveCapability = activeCapabilityRef.current;
 
     setCapabilities(nextCapabilities);
     setCapabilityWorkspaces(nextWorkspaces);
+    setWorkspaceOrganization(nextWorkspaceOrganization);
 
     if (
       options?.activateCapabilityId === normalizedCapability.id ||
@@ -939,6 +1070,13 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
       setCapabilities(nextState.capabilities);
       setCapabilityWorkspaces(nextState.capabilityWorkspaces);
       setWorkspaceSettings(nextState.workspaceSettings);
+      setWorkspaceOrganization(nextState.workspaceOrganization);
+      setCurrentWorkspaceUserIdState(
+        readViewPreference(
+          DEFAULT_WORKSPACE_USER_KEY,
+          nextState.workspaceOrganization.currentUserId || '',
+        ) || nextState.workspaceOrganization.currentUserId || '',
+      );
       setActiveCapabilityState(nextState.activeCapability);
       setLastSyncError('');
       setBootStatus('ready');
@@ -955,6 +1093,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
         setCapabilities([]);
         setCapabilityWorkspaces([]);
         setWorkspaceSettings(EMPTY_WORKSPACE_SETTINGS);
+        setWorkspaceOrganization(normalizeWorkspaceOrganization());
         setActiveCapabilityState(EMPTY_CAPABILITY);
       }
       return false;
@@ -1275,6 +1414,43 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     const nextValue = capabilityId || '';
     setPreferredCapabilityIdState(nextValue);
     writeViewPreference(DEFAULT_CAPABILITY_PREFERENCE_KEY, nextValue || null);
+    const currentUser = getCurrentWorkspaceUser({
+      ...workspaceOrganizationRef.current,
+      currentUserId:
+        currentWorkspaceUserId || workspaceOrganizationRef.current.currentUserId,
+    });
+    if (currentUser?.id) {
+      void updateWorkspaceUserPreferenceRecord(currentUser.id, {
+        userId: currentUser.id,
+        defaultCapabilityId: nextValue || undefined,
+      }).catch(() => undefined);
+      setWorkspaceOrganization(current => ({
+        ...current,
+        userPreferences: [
+          ...current.userPreferences.filter(pref => pref.userId !== currentUser.id),
+          {
+            userId: currentUser.id,
+            defaultCapabilityId: nextValue || undefined,
+            lastSelectedTeamId:
+              current.userPreferences.find(pref => pref.userId === currentUser.id)
+                ?.lastSelectedTeamId,
+            workbenchView:
+              current.userPreferences.find(pref => pref.userId === currentUser.id)
+                ?.workbenchView || 'MY_QUEUE',
+          },
+        ],
+      }));
+    }
+  };
+
+  const setCurrentWorkspaceUserId = (userId: string) => {
+    const nextUserId = userId.trim();
+    setCurrentWorkspaceUserIdState(nextUserId);
+    writeViewPreference(DEFAULT_WORKSPACE_USER_KEY, nextUserId || null);
+    setWorkspaceOrganization(current => ({
+      ...current,
+      currentUserId: nextUserId || current.currentUserId,
+    }));
   };
 
   const refreshCapabilityBundle = async (capabilityId: string) => {
@@ -1306,6 +1482,11 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     void refreshCapabilityBundle(activeCapability.id);
   }, [activeCapability.id]);
 
+  const currentActorContext = buildActorContextFromOrganization({
+    ...workspaceOrganization,
+    currentUserId: currentWorkspaceUserId || workspaceOrganization.currentUserId,
+  });
+
   return (
     <CapabilityContext.Provider
       value={{
@@ -1321,6 +1502,11 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
         capabilities,
         capabilityWorkspaces,
         workspaceSettings,
+        workspaceOrganization,
+        currentActorContext,
+        currentWorkspaceUserId:
+          currentWorkspaceUserId || workspaceOrganization.currentUserId,
+        setCurrentWorkspaceUserId,
         createCapability,
         getCapabilityWorkspace,
         updateCapabilityMetadata,

@@ -476,17 +476,23 @@ export const listLedgerArtifacts = async (
     ),
   ]);
 
-  const workItemsById = new Map(
-    workItemResult.rows.map(row => [
-      String(row.id),
-      {
-        id: String(row.id),
-        title: String(row.title),
-      } as WorkItem,
-    ]),
+  const workItemsById = new Map<string, WorkItem>(
+    workItemResult.rows.map(row => {
+      const workItemRow = row as { id: string; title: string };
+      return [
+        String(workItemRow.id),
+        {
+          id: String(workItemRow.id),
+          title: String(workItemRow.title),
+        } as WorkItem,
+      ];
+    }),
   );
-  const taskTitleByWorkItemId = new Map(
-    taskResult.rows.map(row => [String(row.work_item_id), String(row.title)]),
+  const taskTitleByWorkItemId = new Map<string, string>(
+    taskResult.rows.map(row => {
+      const taskRow = row as { work_item_id: string; title: string };
+      return [String(taskRow.work_item_id), String(taskRow.title)];
+    }),
   );
 
   const runs = runsResult.rows.map(workflowRunSummaryFromRow);
@@ -506,8 +512,11 @@ export const listLedgerArtifacts = async (
   });
 
   const runsById = new Map(runs.map(run => [run.id, run]));
-  const agentsById = new Map(
-    agentResult.rows.map(row => [String(row.id), String(row.name)]),
+  const agentsById = new Map<string, string>(
+    agentResult.rows.map(row => {
+      const agentRow = row as { id: string; name: string };
+      return [String(agentRow.id), String(agentRow.name)];
+    }),
   );
 
   return buildLedgerArtifactRecords({

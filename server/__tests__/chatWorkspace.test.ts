@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDefaultCapabilityLifecycle } from '../../src/lib/capabilityLifecycle';
+import { buildCapabilityBriefing } from '../../src/lib/capabilityBriefing';
 import type {
   Capability,
   CapabilityAgent,
@@ -13,6 +14,7 @@ import {
   buildWorkItemStageControlBriefing,
   buildLiveWorkspaceBriefing,
   maybeHandleCapabilityChatAction,
+  resolveMentionedWorkItem,
 } from '../chatWorkspace';
 import { getStandardAgentContract } from '../../src/constants';
 import { getWorkflowRunDetail } from '../execution/repository';
@@ -141,6 +143,7 @@ const buildWorkItem = (): WorkItem => ({
 
 const buildWorkspace = (): CapabilityWorkspace => ({
   capabilityId: 'CAP-CHAT',
+  briefing: buildCapabilityBriefing(buildCapability()),
   agents: [
     {
       id: 'AGENT-OWNER',
@@ -414,6 +417,24 @@ describe('chat workspace bridge', () => {
     expect(result.content).toContain('Suggested chat options:');
     expect(result.content).toContain('approve RUN-123: approve and continue');
     expect(buildWorkItemExplainDetail).toHaveBeenCalledWith('CAP-CHAT', 'WI-123');
+  });
+
+  it('keeps referenced work item resolution available without hijacking log interpretation chat', async () => {
+    const bundle = buildBundle();
+    const resolved = resolveMentionedWorkItem(
+      bundle,
+      'interpret the latest logs for WI-123 and tell me the likely root cause',
+    );
+
+    expect(resolved.workItem?.id).toBe('WI-123');
+
+    const result = await maybeHandleCapabilityChatAction({
+      bundle,
+      agent: executionAgent,
+      message: 'interpret the latest logs for WI-123 and tell me the likely root cause',
+    });
+
+    expect(result).toEqual({ handled: false });
   });
 
   it('builds a stage-control briefing from the current run step contract', async () => {

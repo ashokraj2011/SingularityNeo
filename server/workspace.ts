@@ -30,6 +30,7 @@ import {
   normalizeAgentSessionSummary,
   normalizeLearningUpdate,
 } from '../src/lib/agentRuntime';
+import { buildCapabilityBriefing } from '../src/lib/capabilityBriefing';
 import { WORKSPACE_AGENT_TEMPLATES } from '../src/lib/workspaceFoundations';
 
 const DEFAULT_AGENT_PROVIDER = 'GitHub Copilot SDK' as const;
@@ -476,6 +477,7 @@ export const materializeWorkspace = (
 
   return {
     capabilityId: capability.id,
+    briefing: buildCapabilityBriefing(capability),
     agents,
     workflows: workspace.workflows,
     artifacts: workspace.artifacts,

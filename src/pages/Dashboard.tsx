@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowRight,
   Bot,
+  Building2,
   BriefcaseBusiness,
   CheckCircle2,
   ClipboardCheck,
@@ -43,6 +44,7 @@ import {
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
 const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
+  architecture: Building2,
   databases: Database,
   memory: Database,
   'tool-access': ShieldCheck,
@@ -315,7 +317,7 @@ const Dashboard = () => {
               onClick={() => navigate('/team')}
               className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white"
             >
-              <p className="text-sm font-semibold text-on-surface">Open Team</p>
+              <p className="text-sm font-semibold text-on-surface">Open Agents</p>
               <p className="mt-1 text-xs leading-relaxed text-secondary">
                 Collaborators, readiness, learning refresh, and chat handoff.
               </p>

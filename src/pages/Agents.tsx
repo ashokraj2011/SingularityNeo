@@ -16,10 +16,13 @@ import {
   X,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import AgentKnowledgeLensPanel from '../components/AgentKnowledgeLensPanel';
+import CapabilityBriefingPanel from '../components/CapabilityBriefingPanel';
 import { COPILOT_MODEL_OPTIONS, SKILL_LIBRARY, getStandardAgentContract } from '../constants';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { fetchRuntimeStatus, refreshAgentLearningProfile, type RuntimeStatus } from '../lib/api';
+import { buildAgentKnowledgeLens } from '../lib/agentKnowledge';
 import {
   getLegacyArtifactListsFromContract,
   normalizeAgentOperatingContract,
@@ -49,8 +52,8 @@ import { AdvancedDisclosure } from '../components/WorkspaceUI';
 
 type AgentDetailTab = 'overview' | 'learning' | 'skills' | 'tools' | 'sessions' | 'usage';
 
-const TEAM_DETAIL_TAB_KEY = 'singularity.team.detail-tab';
-const getTeamSelectionKey = (capabilityId: string) =>
+const AGENTS_DETAIL_TAB_KEY = 'singularity.team.detail-tab';
+const getAgentSelectionKey = (capabilityId: string) =>
   `singularity.team.selected-agent.${capabilityId}`;
 
 const splitLines = (value: string) =>
@@ -119,7 +122,7 @@ const getAvailableSkills = (capabilitySkills: Skill[]) => {
 };
 
 const defaultInspectorTab = (): AgentDetailTab => {
-  return readViewPreference<AgentDetailTab>(TEAM_DETAIL_TAB_KEY, 'overview', {
+  return readViewPreference<AgentDetailTab>(AGENTS_DETAIL_TAB_KEY, 'overview', {
     allowed: ['overview', 'learning', 'skills', 'tools', 'sessions', 'usage'] as const,
   });
 };
@@ -389,7 +392,7 @@ const getComparableSelectedAgent = (
     agent ? agentToForm(agent) : createAgentForm(capabilityName, fallbackSkills, fallbackModel),
   );
 
-export default function Team() {
+export default function Agents() {
   const navigate = useNavigate();
   const {
     activeCapability,
@@ -461,6 +464,17 @@ export default function Team() {
     'gpt-4.1-mini';
   const selectedAgent =
     workspace.agents.find(agent => agent.id === selectedAgentId) || ownerAgent || null;
+  const selectedAgentKnowledgeLens = useMemo(
+    () =>
+      selectedAgent
+        ? buildAgentKnowledgeLens({
+            capability: activeCapability,
+            workspace,
+            agent: selectedAgent,
+          })
+        : null,
+    [activeCapability, selectedAgent, workspace],
+  );
 
   const learningReadyCount = useMemo(
     () => workspace.agents.filter(agent => agent.learningProfile.status === 'READY').length,
@@ -636,7 +650,7 @@ export default function Team() {
     }
 
     const storedAgentId = readViewPreference(
-      getTeamSelectionKey(activeCapability.id),
+      getAgentSelectionKey(activeCapability.id),
       '',
     );
     if (storedAgentId && workspace.agents.some(agent => agent.id === storedAgentId)) {
@@ -664,7 +678,7 @@ export default function Team() {
       return;
     }
 
-    writeViewPreference(getTeamSelectionKey(activeCapability.id), selectedAgentId);
+    writeViewPreference(getAgentSelectionKey(activeCapability.id), selectedAgentId);
   }, [activeCapability.id, selectedAgentId]);
 
   useEffect(() => {
@@ -672,7 +686,7 @@ export default function Team() {
       return;
     }
 
-    writeViewPreference(TEAM_DETAIL_TAB_KEY, detailTab);
+    writeViewPreference(AGENTS_DETAIL_TAB_KEY, detailTab);
   }, [detailTab]);
 
   const selectAgent = (agentId: string) => {
@@ -990,6 +1004,12 @@ export default function Team() {
 
         return (
           <div className="space-y-5">
+            <CapabilityBriefingPanel
+              briefing={workspace.briefing}
+              compact
+              title="Capability brain"
+            />
+
             <section className="team-profile-hero">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                 <div>
@@ -1585,6 +1605,10 @@ export default function Team() {
     if (detailTab === 'learning') {
       return (
         <div className="space-y-4">
+          {selectedAgentKnowledgeLens ? (
+            <AgentKnowledgeLensPanel lens={selectedAgentKnowledgeLens} />
+          ) : null}
+
           <div className="grid gap-3 sm:grid-cols-4">
             {[
               {
@@ -1996,7 +2020,7 @@ export default function Team() {
             <Users size={20} />
           </div>
           <div className="min-w-0">
-            <p className="form-kicker">Capability Team</p>
+            <p className="form-kicker">Capability Agents</p>
             <h1 className="truncate text-2xl font-extrabold tracking-tight text-primary">
               {activeCapability.name}
             </h1>
@@ -2019,7 +2043,7 @@ export default function Team() {
           <input
             value={searchQuery}
             onChange={event => setSearchQuery(event.target.value)}
-            placeholder="Search collaborators"
+            placeholder="Search agents"
             className="enterprise-input pl-10"
           />
         </label>
@@ -2060,7 +2084,7 @@ export default function Team() {
           <div>
             <p className="font-semibold">Capability sync is not fully ready</p>
             <p className="mt-1">
-              Team actions stay read-only until the capability bundle is synchronized with the backend.
+              Agent changes stay read-only until the capability bundle is synchronized with the backend.
             </p>
           </div>
         </div>
@@ -2100,7 +2124,7 @@ export default function Team() {
               ) : (
                 <EmptyState
                   title="No owner agent found"
-                  description="This capability needs an owning agent before the rest of the team can be managed."
+                  description="This capability needs an owning agent before the rest of the agents can be managed."
                   icon={Crown}
                 />
               )}
@@ -2270,7 +2294,7 @@ export default function Team() {
           <ModalShell
             eyebrow="Bulk Model Update"
             title={`Change all collaborator models in ${activeCapability.name}`}
-            description="Apply one runtime model across the full capability team instead of editing each agent individually."
+            description="Apply one runtime model across all capability agents instead of editing each agent individually."
             actions={
               <button
                 type="button"
@@ -2321,7 +2345,7 @@ export default function Team() {
 
               <div className="flex flex-col gap-3 border-t border-outline-variant/40 pt-6 lg:flex-row lg:items-center lg:justify-between">
                 <p className="text-sm text-secondary">
-                  Bulk updates keep the capability consistent when you want the whole team on the same lower-cost or higher-quality model.
+                  Bulk updates keep the capability consistent when you want all agents on the same lower-cost or higher-quality model.
                 </p>
                 <div className="flex flex-wrap gap-2">
                   <button

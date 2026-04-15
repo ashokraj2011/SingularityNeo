@@ -20,6 +20,7 @@ import {
   fetchCapabilityWorkflowRunEvents,
   fetchRunConsoleSnapshot,
 } from '../lib/api';
+import { createApiEventSource } from '../lib/desktop';
 import { useCapability } from '../context/CapabilityContext';
 import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
 import {
@@ -158,7 +159,7 @@ const RunConsole = () => {
         );
       });
 
-    eventSource = new EventSource(
+    eventSource = createApiEventSource(
       `/api/capabilities/${encodeURIComponent(activeCapability.id)}/runs/${encodeURIComponent(selectedRunId)}/stream`,
     );
 

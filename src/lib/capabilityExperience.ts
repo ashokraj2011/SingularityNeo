@@ -85,6 +85,7 @@ export interface CapabilityOutcomeContract {
 }
 
 export type AdvancedToolId =
+  | 'architecture'
   | 'databases'
   | 'memory'
   | 'tool-access'
@@ -122,6 +123,13 @@ export interface CapabilityExperienceModel {
 }
 
 export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
+  {
+    id: 'architecture',
+    label: 'Architecture',
+    shortName: 'Arch',
+    path: '/architecture',
+    description: 'Review the capability hierarchy, published contracts, dependency graph, and ALM rollups.',
+  },
   {
     id: 'databases',
     label: 'Database Setup',
@@ -441,9 +449,9 @@ const buildProofItems = (
           sourceCount > 0),
       proofSignal:
         sourceCount > 0
-          ? `${sourceCount} learned source references are grounding the team.`
-          : 'Refresh learning so the team can ground decisions in capability memory.',
-      actionLabel: 'Review team learning',
+          ? `${sourceCount} learned source references are grounding the agents.`
+          : 'Refresh learning so the agents can ground decisions in capability memory.',
+      actionLabel: 'Review agent learning',
       path: '/team',
     },
     {
@@ -694,7 +702,7 @@ const buildReadinessItems = (
           : ownerAgent
           ? 'IN_PROGRESS'
           : 'NEEDS_SETUP',
-      actionLabel: 'Open team',
+      actionLabel: 'Open agents',
       path: '/team',
     },
     {
@@ -708,7 +716,7 @@ const buildReadinessItems = (
         : hasPendingLearning
         ? 'IN_PROGRESS'
         : 'NEEDS_SETUP',
-      actionLabel: hasLearningError || hasStaleLearning ? 'Refresh learning' : 'Review team',
+      actionLabel: hasLearningError || hasStaleLearning ? 'Refresh learning' : 'Review agents',
       path: '/team',
     },
     {

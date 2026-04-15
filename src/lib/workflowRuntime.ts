@@ -15,6 +15,7 @@ import type {
   WorkItem,
 } from '../types';
 import { getCapabilityBoardPhaseIds } from './capabilityLifecycle';
+import { compileStepOwnership } from './capabilityOwnership';
 
 type CompileStepContextArgs = {
   capability: Capability;
@@ -348,6 +349,7 @@ export const compileStepContext = ({
           ? 'Pause for approval if the step or policy requires operator sign-off.'
           : 'Complete the step when the output and evidence checklist are satisfied.',
       ];
+  const ownership = compileStepOwnership({ capability, step });
 
   return {
     compiledAt,
@@ -374,6 +376,7 @@ export const compileStepContext = ({
     completionChecklist,
     memoryBoundary,
     nextActions,
+    ownership,
     handoffContext: hasText(handoffContext) ? handoffContext : undefined,
     resolvedWaitContext: hasText(resolvedWaitContext)
       ? resolvedWaitContext

@@ -46,7 +46,7 @@ const PRIMARY_WORKSPACES: Array<{
     icon: Trello,
   },
   {
-    title: 'Team',
+    title: 'Agents',
     path: '/team',
     description:
       'See who can help, what each agent is responsible for, and whether skills, tools, and learning are in good shape.',
@@ -123,7 +123,7 @@ const DAILY_FLOW: Array<{
   {
     title: '3. Check the people and agents',
     description:
-      'Review Team so the owner and specialist agents have the right skills, tools, and learning for this capability.',
+      'Review Agents so the owner and specialist agents have the right skills, tools, and learning for this capability.',
   },
   {
     title: '4. Run the work through Work and Chat',
@@ -255,7 +255,7 @@ export const SingularityHelpMenu = ({
             />
             <p className="text-sm leading-relaxed text-secondary">
               If something looks surprising, first check which capability is active. Home,
-              Work, Team, Chat, Designer, and Evidence all follow that same selected capability.
+              Work, Agents, Chat, Designer, and Evidence all follow that same selected capability.
             </p>
           </SectionCard>
         </div>

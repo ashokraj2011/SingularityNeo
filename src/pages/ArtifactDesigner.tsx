@@ -27,7 +27,13 @@ import {
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
-import { Artifact, CapabilityWorkspace } from '../types';
+import {
+  Artifact,
+  ArtifactTemplateSection,
+  ArtifactTemplateSectionType,
+  CapabilityWorkspace,
+} from '../types';
+import ArtifactPreview from '../components/ArtifactPreview';
 
 type ArtifactDraft = {
   name: string;
@@ -42,14 +48,72 @@ type ArtifactDraft = {
   decisions: string;
   changes: string;
   learningInsights: string;
+  sections: ArtifactTemplateSection[];
 };
 
 const createArtifactId = () => `ART-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+const createArtifactSectionId = () =>
+  `ASEC-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 const splitDraftLines = (value: string) =>
   value
     .split(/\n|,/)
     .map(item => item.trim())
     .filter(Boolean);
+
+const SECTION_TYPE_LABELS: Record<ArtifactTemplateSectionType, string> = {
+  FREE_TEXT: 'Free text',
+  DECISION_BOX: 'Decision box',
+  CHANGE_LOG: 'Change log',
+  LEARNING_RECORD: 'Learning record',
+  CHECKLIST: 'Checklist',
+  CUSTOM: 'Custom',
+};
+
+const createArtifactSection = (
+  title = 'New Section',
+  type: ArtifactTemplateSectionType = 'CUSTOM',
+  required = false,
+  content = '',
+): ArtifactTemplateSection => ({
+  id: createArtifactSectionId(),
+  title,
+  type,
+  required,
+  content,
+});
+
+const buildDefaultArtifactSections = (artifact?: Artifact): ArtifactTemplateSection[] => {
+  if (artifact?.templateSections?.length) {
+    return artifact.templateSections;
+  }
+
+  const decisions = (artifact?.decisions || []).join('\n');
+  const changes = (artifact?.changes || []).join('\n');
+  const learningInsights = (artifact?.learningInsights || []).join('\n');
+
+  return [
+    createArtifactSection('Title & Status', 'FREE_TEXT', true, artifact?.name || ''),
+    createArtifactSection(
+      'Context & Rationale',
+      'FREE_TEXT',
+      true,
+      artifact?.description || '',
+    ),
+    createArtifactSection('Strategic Decisions', 'DECISION_BOX', true, decisions),
+    createArtifactSection('System Changes', 'CHANGE_LOG', true, changes),
+    createArtifactSection('Agent Learning Insights', 'LEARNING_RECORD', false, learningInsights),
+  ];
+};
+
+const sectionsToDraftField = (
+  sections: ArtifactTemplateSection[],
+  type: ArtifactTemplateSectionType,
+) =>
+  sections
+    .filter(section => section.type === type)
+    .map(section => section.content || '')
+    .filter(Boolean)
+    .join('\n');
 
 const buildArtifactDraft = (artifact?: Artifact, fallbackAgentId = ''): ArtifactDraft => ({
   name: artifact?.name || '',
@@ -64,6 +128,7 @@ const buildArtifactDraft = (artifact?: Artifact, fallbackAgentId = ''): Artifact
   decisions: (artifact?.decisions || []).join('\n'),
   changes: (artifact?.changes || []).join('\n'),
   learningInsights: (artifact?.learningInsights || []).join('\n'),
+  sections: buildDefaultArtifactSections(artifact),
 });
 
 const getCreatedLabel = () =>
@@ -83,6 +148,66 @@ const DOCUMENTATION_STATUS_HELP: Record<
     'Synced means the template is aligned with the latest documentation or published reference and is ready to reuse.',
   FAILED:
     'Failed means the documentation update or alignment is known to be broken and needs manual attention before teams rely on it.',
+};
+
+const ARTIFACT_ROLE_HELP: Record<NonNullable<Artifact['direction']>, string> = {
+  INPUT:
+    'Input to agent means this document is primarily consumed by the connected agent as starting context.',
+  OUTPUT:
+    'Output from agent means this document is primarily expected to be produced or published by the connected agent.',
+};
+
+const getArtifactRoleLabel = (direction: NonNullable<Artifact['direction']>) =>
+  direction === 'INPUT' ? 'Input to agent' : 'Output from agent';
+
+const buildDraftPreviewMarkdown = ({
+  artifactDraft,
+  agentName,
+}: {
+  artifactDraft: ArtifactDraft;
+  agentName?: string;
+}) => {
+  const lines = [
+    `# ${artifactDraft.name.trim() || 'Untitled Artifact'}`,
+    '',
+    `- Category: ${artifactDraft.type || 'Unspecified'}`,
+    `- Version: ${artifactDraft.version || 'v1.0.0'}`,
+    `- Artifact role: ${getArtifactRoleLabel(artifactDraft.direction)}`,
+    `- Connected agent: ${agentName || artifactDraft.connectedAgentId || 'Unassigned'}`,
+    `- Documentation status: ${artifactDraft.documentationStatus}`,
+  ];
+
+  if (artifactDraft.description.trim()) {
+    lines.push('', '## Description', '', artifactDraft.description.trim());
+  }
+
+  if (artifactDraft.template.trim()) {
+    lines.push('', '## Template Key', '', artifactDraft.template.trim());
+  }
+
+  if (artifactDraft.sections.length > 0) {
+    lines.push('', '## Template Sections');
+    artifactDraft.sections.forEach(section => {
+      lines.push(
+        '',
+        `### ${section.title || 'Untitled Section'}`,
+        '',
+        `- Type: ${SECTION_TYPE_LABELS[section.type]}`,
+        `- Required: ${section.required ? 'Yes' : 'No'}`,
+      );
+
+      if (section.content?.trim()) {
+        lines.push('', section.content.trim());
+      }
+    });
+  }
+
+  const governanceRules = splitDraftLines(artifactDraft.governanceRules);
+  if (governanceRules.length > 0) {
+    lines.push('', '## Governance Rules', '', ...governanceRules.map(item => `- ${item}`));
+  }
+
+  return lines.join('\n').trim();
 };
 
 const buildDerivedArtifacts = (workspace: CapabilityWorkspace) => {
@@ -234,6 +359,32 @@ const ArtifactDesigner = () => {
     setSelectedArtifactId(artifactId);
   };
 
+  const handleAddSection = () => {
+    setArtifactDraft(current => ({
+      ...current,
+      sections: [...current.sections, createArtifactSection()],
+    }));
+  };
+
+  const handleSectionChange = (
+    sectionId: string,
+    updates: Partial<ArtifactTemplateSection>,
+  ) => {
+    setArtifactDraft(current => ({
+      ...current,
+      sections: current.sections.map(section =>
+        section.id === sectionId ? { ...section, ...updates } : section,
+      ),
+    }));
+  };
+
+  const handleRemoveSection = (sectionId: string) => {
+    setArtifactDraft(current => ({
+      ...current,
+      sections: current.sections.filter(section => section.id !== sectionId),
+    }));
+  };
+
   const handleSaveTemplate = async () => {
     if (!artifactDraft.name.trim()) {
       return;
@@ -250,14 +401,28 @@ const ArtifactDesigner = () => {
       agent: producerAgent?.name || artifactDraft.connectedAgentId || 'Capability Agent',
       created: isCreatingNew ? getCreatedLabel() : selectedArtifact?.created || getCreatedLabel(),
       template: artifactDraft.template.trim() || undefined,
+      templateSections: artifactDraft.sections.map(section => ({
+        id: section.id,
+        title: section.title.trim() || 'Untitled Section',
+        type: section.type,
+        required: Boolean(section.required),
+        content: section.content?.trim() || undefined,
+      })),
       documentationStatus: artifactDraft.documentationStatus,
       description: artifactDraft.description.trim() || undefined,
       direction: artifactDraft.direction,
       connectedAgentId: artifactDraft.connectedAgentId || undefined,
       sourceWorkflowId: selectedArtifact?.sourceWorkflowId,
-      decisions: splitDraftLines(artifactDraft.decisions),
-      changes: splitDraftLines(artifactDraft.changes),
-      learningInsights: splitDraftLines(artifactDraft.learningInsights),
+      decisions: splitDraftLines(
+        sectionsToDraftField(artifactDraft.sections, 'DECISION_BOX') || artifactDraft.decisions,
+      ),
+      changes: splitDraftLines(
+        sectionsToDraftField(artifactDraft.sections, 'CHANGE_LOG') || artifactDraft.changes,
+      ),
+      learningInsights: splitDraftLines(
+        sectionsToDraftField(artifactDraft.sections, 'LEARNING_RECORD') ||
+          artifactDraft.learningInsights,
+      ),
       governanceRules: splitDraftLines(artifactDraft.governanceRules),
       isLearningArtifact: selectedArtifact?.isLearningArtifact,
       isMasterArtifact: selectedArtifact?.isMasterArtifact,
@@ -360,6 +525,27 @@ const ArtifactDesigner = () => {
     agent: artifactDraft.connectedAgentId || 'Capability Agent',
     created: getCreatedLabel(),
   };
+  const connectedAgentName =
+    workspace.agents.find(agent => agent.id === artifactDraft.connectedAgentId)?.name ||
+    artifactDraft.connectedAgentId ||
+    artifactPreview.agent;
+  const artifactDocumentPreview = selectedArtifact?.contentJson
+    ? {
+        format: 'JSON',
+        content: JSON.stringify(selectedArtifact.contentJson, null, 2),
+      }
+    : selectedArtifact?.contentText?.trim()
+    ? {
+        format: selectedArtifact.contentFormat || 'TEXT',
+        content: selectedArtifact.contentText,
+      }
+    : {
+        format: 'MARKDOWN',
+        content: buildDraftPreviewMarkdown({
+          artifactDraft,
+          agentName: connectedAgentName,
+        }),
+      };
 
   return (
     <div className="flex flex-col h-[calc(100vh-160px)] gap-6">
@@ -573,7 +759,7 @@ const ArtifactDesigner = () => {
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Direction</label>
+                      <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Artifact Role</label>
                       <select
                         value={artifactDraft.direction}
                         onChange={event =>
@@ -584,9 +770,12 @@ const ArtifactDesigner = () => {
                         }
                         className="w-full bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none transition-all appearance-none"
                       >
-                        <option value="INPUT">INPUT</option>
-                        <option value="OUTPUT">OUTPUT</option>
+                        <option value="INPUT">Input to agent</option>
+                        <option value="OUTPUT">Output from agent</option>
                       </select>
+                      <p className="text-xs leading-relaxed text-secondary">
+                        {ARTIFACT_ROLE_HELP[artifactDraft.direction]}
+                      </p>
                     </div>
                     <div className="space-y-2">
                       <label className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">Documentation Status</label>
@@ -665,6 +854,30 @@ const ArtifactDesigner = () => {
                       </div>
                     </section>
                   </div>
+
+                  <section className="space-y-4">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <h3 className="text-sm font-bold text-on-surface flex items-center gap-2 uppercase tracking-widest">
+                          <BookOpen size={16} className="text-primary" />
+                          Document Preview
+                        </h3>
+                        <p className="mt-1 text-sm text-secondary">
+                          Preview the saved document when content exists, or a live generated preview from the current draft while you edit.
+                        </p>
+                      </div>
+                      <div className="rounded-full bg-primary/5 px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.16em] text-primary">
+                        {artifactDocumentPreview.format}
+                      </div>
+                    </div>
+                    <div className="rounded-3xl border border-outline-variant/15 bg-surface-container-low px-5 py-5">
+                      <ArtifactPreview
+                        format={artifactDocumentPreview.format}
+                        content={artifactDocumentPreview.content}
+                        emptyLabel="This artifact does not have previewable content yet."
+                      />
+                    </div>
+                  </section>
                 </motion.div>
               )}
 
@@ -681,65 +894,125 @@ const ArtifactDesigner = () => {
                       <h2 className="text-xl font-extrabold text-on-surface tracking-tight">Artifact Structure</h2>
                       <p className="text-sm text-secondary font-medium">Define the data blocks and validation rules for this artifact.</p>
                     </div>
-                    <button className="px-4 py-2 bg-primary text-white text-xs font-bold rounded-xl flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleAddSection}
+                      className="px-4 py-2 bg-primary text-white text-xs font-bold rounded-xl flex items-center gap-2"
+                    >
                       <Plus size={14} /> Add Section
                     </button>
                   </div>
 
                   <div className="space-y-3">
-                    {[
-                      { title: 'Title & Status', type: 'Free Text', req: true, icon: FileText },
-                      { title: 'Context & Rationale', type: 'Free Text', req: true, icon: Compass },
-                      { title: 'Strategic Decisions', type: 'Decision Box', req: true, icon: ShieldCheck, data: splitDraftLines(artifactDraft.decisions) },
-                      { title: 'System Changes', type: 'Change Log', req: true, icon: History, data: splitDraftLines(artifactDraft.changes) },
-                      { title: 'Agent Learning Insights', type: 'Learning Record', req: false, icon: Sparkles, data: splitDraftLines(artifactDraft.learningInsights) },
-                    ].map((section, i) => (
-                      <div key={i} className="flex items-center gap-4 p-4 bg-surface-container-low rounded-2xl border border-outline-variant/5 group hover:border-primary/20 transition-all">
-                        <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-outline group-hover:text-primary transition-colors shadow-sm">
-                          <section.icon size={20} />
-                        </div>
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-0.5">
-                            <p className="text-sm font-bold text-on-surface">{section.title}</p>
-                            {section.req && <span className="text-[0.5rem] font-bold text-primary uppercase tracking-widest bg-primary/5 px-1.5 py-0.5 rounded border border-primary/10">Required</span>}
+                    {artifactDraft.sections.map(section => (
+                      <div
+                        key={section.id}
+                        className="space-y-4 rounded-2xl border border-outline-variant/10 bg-surface-container-low p-4 transition-all hover:border-primary/20"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-outline shadow-sm">
+                              {section.type === 'DECISION_BOX' ? (
+                                <ShieldCheck size={18} />
+                              ) : section.type === 'CHANGE_LOG' ? (
+                                <History size={18} />
+                              ) : section.type === 'LEARNING_RECORD' ? (
+                                <Sparkles size={18} />
+                              ) : section.type === 'CHECKLIST' ? (
+                                <CheckCircle2 size={18} />
+                              ) : section.type === 'FREE_TEXT' ? (
+                                <Compass size={18} />
+                              ) : (
+                                <FileText size={18} />
+                              )}
+                            </div>
+                            <div>
+                              <p className="text-sm font-bold text-on-surface">
+                                {section.title || 'Untitled Section'}
+                              </p>
+                              <p className="text-[0.625rem] font-medium uppercase tracking-tighter text-secondary">
+                                {SECTION_TYPE_LABELS[section.type]}
+                              </p>
+                            </div>
                           </div>
-                          <p className="text-[0.625rem] text-secondary font-medium uppercase tracking-tighter">{section.type}</p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button className="p-2 text-slate-300 hover:text-primary transition-colors">
-                            <Settings2 size={16} />
-                          </button>
-                          <button className="p-2 text-slate-300 hover:text-error transition-colors">
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveSection(section.id)}
+                            className="rounded-lg p-2 text-slate-300 transition-colors hover:text-error"
+                            aria-label={`Remove ${section.title || 'section'}`}
+                          >
                             <X size={16} />
                           </button>
-                          <div className="p-2 text-slate-300 cursor-grab active:cursor-grabbing">
-                            <MoreVertical size={16} />
-                          </div>
                         </div>
+
+                        <div className="grid gap-4 md:grid-cols-[minmax(0,1.3fr)_minmax(0,0.8fr)_auto]">
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>Section Title</span>
+                            <input
+                              value={section.title}
+                              onChange={event =>
+                                handleSectionChange(section.id, { title: event.target.value })
+                              }
+                              className="enterprise-input"
+                            />
+                          </label>
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>Section Type</span>
+                            <select
+                              value={section.type}
+                              onChange={event =>
+                                handleSectionChange(section.id, {
+                                  type: event.target.value as ArtifactTemplateSectionType,
+                                })
+                              }
+                              className="enterprise-input"
+                            >
+                              {Object.entries(SECTION_TYPE_LABELS).map(([value, label]) => (
+                                <option key={value} value={value}>
+                                  {label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="flex items-end gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <input
+                              type="checkbox"
+                              checked={section.required}
+                              onChange={event =>
+                                handleSectionChange(section.id, { required: event.target.checked })
+                              }
+                              className="h-4 w-4 rounded border-outline-variant/40"
+                            />
+                            <span className="pb-1">Required</span>
+                          </label>
+                        </div>
+
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Section Content</span>
+                          <textarea
+                            rows={section.type === 'FREE_TEXT' ? 5 : 4}
+                            value={section.content || ''}
+                            onChange={event =>
+                              handleSectionChange(section.id, { content: event.target.value })
+                            }
+                            placeholder="Describe what this section should contain or provide starter content."
+                            className="enterprise-input min-h-[8rem]"
+                          />
+                        </label>
                       </div>
                     ))}
                   </div>
 
-                  <div className="grid gap-4 pt-4">
-                    <textarea
-                      value={artifactDraft.decisions}
-                      onChange={event => setArtifactDraft(prev => ({ ...prev, decisions: event.target.value }))}
-                      placeholder="Strategic decisions, one per line"
-                      className="h-28 w-full resize-none rounded-2xl border border-outline-variant/20 bg-white px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                    />
-                    <textarea
-                      value={artifactDraft.changes}
-                      onChange={event => setArtifactDraft(prev => ({ ...prev, changes: event.target.value }))}
-                      placeholder="System changes, one per line"
-                      className="h-28 w-full resize-none rounded-2xl border border-outline-variant/20 bg-white px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                    />
-                    <textarea
-                      value={artifactDraft.learningInsights}
-                      onChange={event => setArtifactDraft(prev => ({ ...prev, learningInsights: event.target.value }))}
-                      placeholder="Learning insights, one per line"
-                      className="h-28 w-full resize-none rounded-2xl border border-outline-variant/20 bg-white px-4 py-3 text-sm outline-none transition-all focus:ring-2 focus:ring-primary/20"
-                    />
-                  </div>
+                  {artifactDraft.sections.length === 0 ? (
+                    <div className="rounded-2xl border-2 border-dashed border-outline-variant/20 px-6 py-10 text-center">
+                      <p className="text-xs font-bold uppercase tracking-widest text-slate-400">
+                        No sections yet
+                      </p>
+                      <p className="mt-2 text-sm leading-relaxed text-secondary">
+                        Add a section to define the structure and expected content for this artifact template.
+                      </p>
+                    </div>
+                  ) : null}
                 </motion.div>
               )}
 

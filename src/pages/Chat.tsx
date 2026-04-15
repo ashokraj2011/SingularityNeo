@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
   Bot,
@@ -6,6 +7,7 @@ import {
   Cpu,
   Database,
   Forward,
+  GitBranch,
   History,
   LoaderCircle,
   MessageSquareText,
@@ -27,20 +29,38 @@ import {
   type RuntimeStatus,
   type RuntimeUsage,
 } from '../lib/api';
+import AgentKnowledgeLensPanel from '../components/AgentKnowledgeLensPanel';
+import CapabilityBriefingPanel from '../components/CapabilityBriefingPanel';
 import { EmptyState, StatusBadge } from '../components/EnterpriseUI';
+import InteractionTimeline from '../components/InteractionTimeline';
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
-import type { AgentSessionSummary, CapabilityChatMessage, MemoryReference } from '../types';
+import type {
+  AgentSessionSummary,
+  CapabilityChatMessage,
+  MemoryReference,
+  WorkItem,
+} from '../types';
+import { buildAgentKnowledgeLens } from '../lib/agentKnowledge';
+import { buildCapabilityInteractionFeed } from '../lib/interactionFeed';
 import { cn } from '../lib/utils';
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import {
   buildCapabilityExperience,
   getAgentHealth,
 } from '../lib/capabilityExperience';
+import { isDesktopRuntime } from '../lib/desktop';
 
 type SessionMode = 'resume' | 'fresh';
-type InspectorTab = 'agent' | 'learning' | 'memory' | 'session' | 'diagnostics';
+type InspectorTab =
+  | 'agent'
+  | 'briefing'
+  | 'learning'
+  | 'timeline'
+  | 'memory'
+  | 'session'
+  | 'diagnostics';
 type MessageDeliveryState = 'clean' | 'recovered' | 'interrupted';
 
 type ChatMessageAnnotation = {
@@ -122,7 +142,7 @@ const defaultInspectorOpen = () => {
 
 const defaultInspectorTab = (): InspectorTab => {
   return readViewPreference<InspectorTab>(INSPECTOR_TAB_KEY, 'agent', {
-    allowed: ['agent', 'learning', 'memory', 'session'] as const,
+    allowed: ['agent', 'briefing', 'learning', 'timeline', 'memory', 'session', 'diagnostics'] as const,
   });
 };
 
@@ -217,6 +237,20 @@ const formatChatRuntimeError = (value: string) => {
   return value;
 };
 
+const getRuntimeDisplayLabel = () => (isDesktopRuntime() ? 'desktop runtime' : 'backend runtime');
+
+const getRuntimeOwnerLabel = () => (isDesktopRuntime() ? 'desktop app' : 'Express runtime');
+
+const WORK_ITEM_BRANCH_STATUS_PRIORITY: Record<WorkItem['status'], number> = {
+  ACTIVE: 0,
+  BLOCKED: 0,
+  PENDING_APPROVAL: 1,
+  COMPLETED: 2,
+};
+
+const getExecutionContextPriority = (item: WorkItem) =>
+  WORK_ITEM_BRANCH_STATUS_PRIORITY[item.status] ?? 99;
+
 const resizeComposer = (element: HTMLTextAreaElement | null) => {
   if (!element) {
     return;
@@ -227,6 +261,7 @@ const resizeComposer = (element: HTMLTextAreaElement | null) => {
 };
 
 const Chat = () => {
+  const navigate = useNavigate();
   const {
     activeCapability,
     appendCapabilityMessage,
@@ -296,6 +331,46 @@ const Chat = () => {
     [activeCapability, runtimeStatus, workspace],
   );
   const activeAgentHealth = getAgentHealth(activeAgent);
+  const activeKnowledgeLens = useMemo(
+    () =>
+      activeAgent
+        ? buildAgentKnowledgeLens({
+            capability: activeCapability,
+            workspace,
+            agent: activeAgent,
+          })
+        : null,
+    [activeAgent, activeCapability, workspace],
+  );
+  const interactionFeed = useMemo(
+    () =>
+      buildCapabilityInteractionFeed({
+        capability: activeCapability,
+        workspace,
+        agentId: activeAgent?.id,
+      }),
+    [activeAgent?.id, activeCapability, workspace],
+  );
+  const workItemsWithExecutionContext = useMemo(
+    () =>
+      [...workspace.workItems]
+        .filter(
+          item =>
+            item.executionContext &&
+            (item.executionContext.branch || item.executionContext.primaryRepositoryId),
+        )
+        .sort((left, right) => getExecutionContextPriority(left) - getExecutionContextPriority(right)),
+    [workspace.workItems],
+  );
+  const activeExecutionItem = workItemsWithExecutionContext[0] || null;
+  const activeExecutionBranch = activeExecutionItem?.executionContext?.branch || null;
+  const activeExecutionRepository =
+    activeCapability.repositories?.find(
+      repository =>
+        repository.id ===
+        (activeExecutionBranch?.repositoryId ||
+          activeExecutionItem?.executionContext?.primaryRepositoryId),
+    ) || null;
   const hasPendingLearning = useMemo(
     () =>
       workspace.agents.some(agent =>
@@ -375,7 +450,7 @@ const Chat = () => {
         setConfigError(
           nextError instanceof Error
             ? nextError.message
-            : 'Unable to load backend runtime configuration.',
+            : `Unable to load ${getRuntimeDisplayLabel()} configuration.`,
         );
       });
 
@@ -517,7 +592,7 @@ const Chat = () => {
             deliveryState === 'clean'
               ? `Completed streamed capability chat response with ${model || activeAgent?.model}.`
               : deliveryState === 'recovered'
-                ? `Recovered a streamed draft for ${activeAgent?.name || 'the active agent'} after the backend stream ended early.`
+                ? `Recovered a streamed draft for ${activeAgent?.name || 'the active agent'} after the ${getRuntimeDisplayLabel()} stream ended early.`
                 : `Preserved an interrupted streamed draft for ${activeAgent?.name || 'the active agent'}.`,
           traceId,
           metadata: {
@@ -554,7 +629,7 @@ const Chat = () => {
 
     if (!runtimeStatus?.configured) {
       setError(
-        'The backend runtime is not configured yet. Set COPILOT_CLI_URL for a headless Copilot CLI server or add GITHUB_MODELS_TOKEN to .env.local, then restart npm run dev.',
+        `The ${getRuntimeDisplayLabel()} is not configured yet. Set COPILOT_CLI_URL for a headless Copilot CLI server or add GITHUB_MODELS_TOKEN to .env.local, then restart the ${isDesktopRuntime() ? 'desktop app' : 'dev server'}.`,
       );
       return;
     }
@@ -596,6 +671,8 @@ const Chat = () => {
         role: 'user',
         content: userContent,
         timestamp: userTimestamp,
+        sessionScope: 'GENERAL_CHAT',
+        sessionScopeId: activeCapability.id,
       });
 
       const streamResult = await streamCapabilityChat(
@@ -650,7 +727,7 @@ const Chat = () => {
         }
 
         throw new Error(
-          streamResult.error || 'The backend runtime did not return a response.',
+          streamResult.error || `The ${getRuntimeDisplayLabel()} did not return a response.`,
         );
       }
 
@@ -671,6 +748,11 @@ const Chat = () => {
         timestamp: formatTimestamp(new Date(createdAt)),
         agentId: activeAgent.id,
         agentName: activeAgent.name,
+        traceId: streamResult.completeEvent?.traceId,
+        model: streamResult.completeEvent?.model || activeAgent.model,
+        sessionId: streamResult.completeEvent?.sessionId,
+        sessionScope: streamResult.completeEvent?.sessionScope,
+        sessionScopeId: streamResult.completeEvent?.sessionScopeId,
       });
 
       persistMessageAnnotation(agentMessageId, {
@@ -737,7 +819,7 @@ const Chat = () => {
       const normalizedError =
         nextError instanceof Error
           ? formatChatRuntimeError(nextError.message)
-          : 'The backend runtime could not complete this request.';
+          : `The ${getRuntimeDisplayLabel()} could not complete this request.`;
       const rawRuntimeError =
         nextError instanceof Error ? nextError.message : normalizedError;
       const retryAfterMs =
@@ -816,6 +898,11 @@ const Chat = () => {
     : generalChatSession
       ? `Resuming ${formatSessionScope(generalChatSession.scope).toLowerCase()} context`
       : 'First chat session for this agent';
+  const branchContextSummary = activeExecutionItem
+    ? activeExecutionBranch?.sharedBranch
+      ? `${activeExecutionItem.id} is collaborating on ${activeExecutionBranch.sharedBranch}.`
+      : `${activeExecutionItem.id} has an execution context but the shared branch has not been created yet.`
+    : 'No work item has claimed shared branch context yet.';
 
   const suggestedPrompts = useMemo(() => {
     const isExecutionAgent =
@@ -974,7 +1061,7 @@ const Chat = () => {
 
   const openDiagnosticsPanel = () => {
     setInspectorOpen(true);
-    setInspectorTab('session');
+    setInspectorTab('diagnostics');
     setDiagnosticsOpenSignal(value => value + 1);
     writeViewPreference('singularity.chat.diagnostics.open', 'open');
   };
@@ -1014,9 +1101,12 @@ const Chat = () => {
       icon: React.ComponentType<{ size?: number; className?: string }>;
     }> = [
       { id: 'agent', label: 'Agent', icon: Bot },
+      { id: 'briefing', label: 'Briefing', icon: Sparkles },
       { id: 'learning', label: 'Learning', icon: Brain },
+      { id: 'timeline', label: 'Timeline', icon: MessageSquareText },
       { id: 'memory', label: 'Memory', icon: Database },
       { id: 'session', label: 'Session', icon: History },
+      { id: 'diagnostics', label: 'Diagnostics', icon: ShieldCheck },
     ];
 
     const diagnosticsContent = (
@@ -1116,6 +1206,78 @@ const Chat = () => {
           </div>
 
           <div className="workspace-surface">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="workspace-section-title">Shared branch context</p>
+                <p className="workspace-section-copy">
+                  Chat follows the live work-item collaboration lane instead of assuming one shared local workspace.
+                </p>
+              </div>
+              <StatusBadge tone={activeExecutionBranch ? 'brand' : 'neutral'}>
+                {workItemsWithExecutionContext.length} active lane
+                {workItemsWithExecutionContext.length === 1 ? '' : 's'}
+              </StatusBadge>
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div className="workspace-meta-card">
+                <p className="workspace-meta-label">Leading work item</p>
+                <p className="workspace-meta-value">
+                  {activeExecutionItem?.id || 'No work item context yet'}
+                </p>
+                <p className="mt-1 text-xs text-secondary">
+                  {activeExecutionItem?.title ||
+                    'Create or initialize a work-item execution context to anchor collaboration.'}
+                </p>
+              </div>
+              <div className="workspace-meta-card">
+                <p className="workspace-meta-label">Shared branch</p>
+                <p className="workspace-meta-value">
+                  {activeExecutionBranch?.sharedBranch || 'Not created yet'}
+                </p>
+                <p className="mt-1 text-xs text-secondary">
+                  {activeExecutionRepository
+                    ? `${activeExecutionRepository.label} · base ${
+                        activeExecutionBranch?.baseBranch ||
+                        activeExecutionRepository.defaultBranch
+                      }${activeExecutionRepository.localRootHint ? ` · ${activeExecutionRepository.localRootHint}` : ''}`
+                    : branchContextSummary}
+                </p>
+              </div>
+            </div>
+            {workItemsWithExecutionContext.length > 1 ? (
+              <div className="mt-4 space-y-2">
+                {workItemsWithExecutionContext.slice(0, 3).map(item => {
+                  const branch = item.executionContext?.branch;
+                  const repository = activeCapability.repositories?.find(
+                    candidate =>
+                      candidate.id ===
+                      (branch?.repositoryId || item.executionContext?.primaryRepositoryId),
+                  );
+                  return (
+                    <div
+                      key={item.id}
+                      className="flex items-center justify-between gap-3 rounded-2xl border border-outline-variant/30 bg-surface-container-low/40 px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-on-surface">
+                          {item.id} · {item.title}
+                        </p>
+                        <p className="truncate text-xs text-secondary">
+                          {branch?.sharedBranch ||
+                            `${repository?.label || 'Repository context ready'} · branch pending`}
+                        </p>
+                      </div>
+                      <StatusBadge tone={branch?.status === 'ACTIVE' ? 'success' : 'warning'}>
+                        {branch?.status === 'ACTIVE' ? 'Ready' : 'Needs branch'}
+                      </StatusBadge>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="workspace-surface">
             <p className="workspace-section-title">Attached skills</p>
             <div className="mt-3 flex flex-wrap gap-2">
               {attachedSkills && attachedSkills.length > 0 ? (
@@ -1134,7 +1296,15 @@ const Chat = () => {
               )}
             </div>
           </div>
+
+          <CapabilityBriefingPanel
+            briefing={workspace.briefing}
+            compact
+            title="Capability brain"
+          />
         </div>
+      ) : inspectorTab === 'briefing' ? (
+        <CapabilityBriefingPanel briefing={workspace.briefing} title="Capability brain" />
       ) : inspectorTab === 'learning' ? (
         <div className="space-y-4">
           <div className="workspace-surface">
@@ -1174,33 +1344,9 @@ const Chat = () => {
             </p>
           </div>
 
-          <div className="workspace-surface">
-            <p className="workspace-section-title">Highlights</p>
-            <div className="mt-3 space-y-2">
-              {activeAgent.learningProfile.highlights.length > 0 ? (
-                activeAgent.learningProfile.highlights.map(highlight => (
-                  <div
-                    key={highlight}
-                    className="rounded-2xl border border-outline-variant/40 bg-surface-container-low px-3 py-2 text-sm text-secondary"
-                  >
-                    {highlight}
-                  </div>
-                ))
-              ) : (
-                <p className="text-sm text-secondary">
-                  No learning highlights are available yet.
-                </p>
-              )}
-            </div>
-          </div>
-
-          <div className="workspace-surface">
-            <p className="workspace-section-title">Context block</p>
-            <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-secondary">
-              {activeAgent.learningProfile.contextBlock ||
-                'The reusable Copilot context block will appear here after learning completes.'}
-            </p>
-          </div>
+          {activeKnowledgeLens ? (
+            <AgentKnowledgeLensPanel lens={activeKnowledgeLens} />
+          ) : null}
 
           {activeAgent.learningProfile.lastError ? (
             <div className="workspace-inline-alert workspace-inline-alert-danger">
@@ -1212,6 +1358,13 @@ const Chat = () => {
             </div>
           ) : null}
         </div>
+      ) : inspectorTab === 'timeline' ? (
+        <InteractionTimeline
+          feed={interactionFeed}
+          maxItems={16}
+          title="Capability interaction timeline"
+          onOpenRun={runId => navigate(`/run-console?runId=${encodeURIComponent(runId)}`)}
+        />
       ) : inspectorTab === 'memory' ? (
         <div className="space-y-4">
           <div className="workspace-surface">
@@ -1504,9 +1657,16 @@ const Chat = () => {
                 {lastSessionSnapshot?.sessionId ? (
                   <StatusBadge tone="success">Resuming saved session</StatusBadge>
                 ) : null}
+                {activeExecutionItem ? (
+                  <StatusBadge tone={activeExecutionBranch ? 'brand' : 'warning'}>
+                    <GitBranch size={12} className="mr-1 inline-flex" />
+                    {activeExecutionBranch?.sharedBranch || `${activeExecutionItem.id} branch pending`}
+                  </StatusBadge>
+                ) : null}
               </div>
               <div className="flex flex-wrap items-center gap-3 text-xs text-secondary">
                 <span>{commandStripSummary}</span>
+                <span>{branchContextSummary}</span>
                 <span>
                   {searchQuery
                     ? `${filteredMessages.length} match${filteredMessages.length === 1 ? '' : 'es'}`
@@ -1597,11 +1757,11 @@ const Chat = () => {
                       <p className="font-semibold">
                         {runtimeStatus?.configured
                           ? 'Runtime metadata needs attention'
-                          : 'Backend runtime is not configured'}
+                          : `${getRuntimeOwnerLabel()} is not configured`}
                       </p>
                       <p className="mt-1">
                         {configError ||
-                          'The Express runtime needs a working Copilot connection before chat can complete.'}
+                          `${getRuntimeOwnerLabel()} needs a working Copilot connection before chat can complete.`}
                       </p>
                     </div>
                     <button

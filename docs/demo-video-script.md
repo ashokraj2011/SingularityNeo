@@ -13,7 +13,7 @@ Show that Singularity Neo helps a team:
 
 Recommended video length:
 - `4 to 6 minutes` for a concise overview
-- `7 to 9 minutes` if you want to include more Team, Chat, and Evidence depth
+- `7 to 9 minutes` if you want to include more Agents, Chat, and Evidence depth
 
 ## Before You Record
 
@@ -27,7 +27,7 @@ Prepare the screen:
 Prepare the data:
 - use one capability with meaningful name and description
 - make sure the workflow already exists in Designer
-- keep a few agents visible in Team
+- keep a few agents visible in Agents
 - have at least one work item in Work
 - have at least one artifact or completed item in Evidence
 
@@ -41,7 +41,7 @@ Recommended recording setup on macOS:
 
 1. `Home`
 2. `Designer`
-3. `Team`
+3. `Agents`
 4. `Chat`
 5. `Work`
 6. `Evidence`
@@ -93,7 +93,7 @@ Optional extra line:
 
 > This makes the capability adaptable. Teams are not forced into one fixed SDLC.
 
-### 3. Move to Team
+### 3. Move to Agents
 
 What to show:
 - owner row
@@ -102,7 +102,7 @@ What to show:
 
 What to say:
 
-> Team shows the collaborators inside this capability, including the owning agent and supporting specialist agents.  
+> Agents shows the collaborators inside this capability, including the owning agent and supporting specialist agents.
 > Each agent is scoped to the capability, can learn from its memory and artifacts, and can then be used directly in collaboration.  
 > The goal here is clarity: who can help, who is ready, and which agent to bring into the conversation.
 
@@ -174,7 +174,7 @@ If you want a very short clip:
 > Singularity Neo is a capability-centered enterprise workspace.  
 > Home shows what matters now.  
 > Designer defines the workflow and lifecycle.  
-> Team shows who can help.  
+> Agents shows who can help.
 > Chat enables grounded collaboration with agents.  
 > Work moves delivery through approvals and blockers.  
 > Evidence and Flight Recorder show exactly what was produced and why.

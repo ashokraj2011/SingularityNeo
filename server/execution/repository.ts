@@ -1,5 +1,7 @@
 import type { PoolClient } from 'pg';
 import {
+  ApprovalAssignment,
+  ApprovalDecision,
   RunEvent,
   RunWait,
   ToolInvocation,
@@ -9,6 +11,8 @@ import {
   WorkflowRunStep,
   WorkflowRunStatus,
   WorkItem,
+  WorkItemClaim,
+  WorkItemPresence,
   WorkItemPhase,
 } from '../../src/types';
 import { query, transaction } from '../db';
@@ -27,6 +31,9 @@ const asIso = (value: unknown) =>
 
 const asJson = <T>(value: unknown, fallback: T): T =>
   value && typeof value === 'object' ? (value as T) : fallback;
+
+const asStringArray = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter(item => typeof item === 'string') : [];
 
 const serializeJson = (value: unknown, fallback?: unknown) => {
   if (value === undefined) {
@@ -150,6 +157,59 @@ const eventFromRow = (row: Record<string, any>): RunEvent => ({
   details: row.details || undefined,
 });
 
+const approvalAssignmentFromRow = (row: Record<string, any>): ApprovalAssignment => ({
+  id: row.id,
+  capabilityId: row.capability_id,
+  runId: row.run_id,
+  waitId: row.wait_id,
+  phase: row.phase || undefined,
+  stepName: row.step_name || undefined,
+  approvalPolicyId: row.approval_policy_id || undefined,
+  status: row.status,
+  targetType: row.target_type,
+  targetId: row.target_id,
+  assignedUserId: row.assigned_user_id || undefined,
+  assignedTeamId: row.assigned_team_id || undefined,
+  dueAt: row.due_at ? asIso(row.due_at) : undefined,
+  delegatedToUserId: row.delegated_to_user_id || undefined,
+  createdAt: asIso(row.created_at),
+  updatedAt: asIso(row.updated_at),
+});
+
+const approvalDecisionFromRow = (row: Record<string, any>): ApprovalDecision => ({
+  id: row.id,
+  capabilityId: row.capability_id,
+  runId: row.run_id,
+  waitId: row.wait_id,
+  assignmentId: row.assignment_id || undefined,
+  disposition: row.disposition,
+  actorUserId: row.actor_user_id || undefined,
+  actorDisplayName: row.actor_display_name,
+  actorTeamIds: asStringArray(row.actor_team_ids),
+  comment: row.comment || undefined,
+  createdAt: asIso(row.created_at),
+});
+
+const workItemClaimFromRow = (row: Record<string, any>): WorkItemClaim => ({
+  capabilityId: row.capability_id,
+  workItemId: row.work_item_id,
+  userId: row.user_id,
+  teamId: row.team_id || undefined,
+  status: row.status,
+  claimedAt: asIso(row.claimed_at),
+  expiresAt: asIso(row.expires_at),
+  releasedAt: row.released_at ? asIso(row.released_at) : undefined,
+});
+
+const workItemPresenceFromRow = (row: Record<string, any>): WorkItemPresence => ({
+  capabilityId: row.capability_id,
+  workItemId: row.work_item_id,
+  userId: row.user_id,
+  teamId: row.team_id || undefined,
+  viewContext: row.view_context || undefined,
+  lastSeenAt: asIso(row.last_seen_at),
+});
+
 const waitFromRow = (row: Record<string, any>): RunWait => ({
   id: row.id,
   capabilityId: row.capability_id,
@@ -161,8 +221,13 @@ const waitFromRow = (row: Record<string, any>): RunWait => ({
   status: row.status,
   message: row.message,
   requestedBy: row.requested_by,
+  requestedByActorUserId: row.requested_by_actor_user_id || undefined,
+  requestedByActorTeamIds: asStringArray(row.requested_by_actor_team_ids),
   resolution: row.resolution || undefined,
   resolvedBy: row.resolved_by || undefined,
+  resolvedByActorUserId: row.resolved_by_actor_user_id || undefined,
+  resolvedByActorTeamIds: asStringArray(row.resolved_by_actor_team_ids),
+  approvalPolicyId: row.approval_policy_id || undefined,
   payload: row.payload || undefined,
   createdAt: asIso(row.created_at),
   resolvedAt: row.resolved_at ? asIso(row.resolved_at) : undefined,
@@ -208,6 +273,33 @@ const getRunDetailTx = async (
     `,
     [capabilityId, runId],
   );
+  const waitIds = waitResult.rows.map(row => String(row.id)).filter(Boolean);
+  const [assignmentResult, decisionResult] = waitIds.length
+    ? await Promise.all([
+        client.query(
+          `
+            SELECT *
+            FROM capability_approval_assignments
+            WHERE capability_id = $1
+              AND run_id = $2
+              AND wait_id = ANY($3::text[])
+            ORDER BY created_at ASC, id ASC
+          `,
+          [capabilityId, runId, waitIds],
+        ),
+        client.query(
+          `
+            SELECT *
+            FROM capability_approval_decisions
+            WHERE capability_id = $1
+              AND run_id = $2
+              AND wait_id = ANY($3::text[])
+            ORDER BY created_at ASC, id ASC
+          `,
+          [capabilityId, runId, waitIds],
+        ),
+      ])
+    : [{ rows: [] }, { rows: [] }];
 
   if (!runResult.rowCount) {
     throw new Error(`Workflow run ${runId} was not found.`);
@@ -216,7 +308,16 @@ const getRunDetailTx = async (
   return {
     run: runFromRow(runResult.rows[0]),
     steps: stepResult.rows.map(stepFromRow),
-    waits: waitResult.rows.map(waitFromRow),
+    waits: waitResult.rows.map(row => {
+      const wait = waitFromRow(row);
+      wait.approvalAssignments = assignmentResult.rows
+        .filter(assignment => assignment.wait_id === wait.id)
+        .map(approvalAssignmentFromRow);
+      wait.approvalDecisions = decisionResult.rows
+        .filter(decision => decision.wait_id === wait.id)
+        .map(approvalDecisionFromRow);
+      return wait;
+    }),
     toolInvocations: toolResult.rows.map(toolFromRow),
   };
 };
@@ -717,12 +818,17 @@ export const createRunWait = async (
         span_id,
         resolution,
         resolved_by,
+        requested_by_actor_user_id,
+        requested_by_actor_team_ids,
+        resolved_by_actor_user_id,
+        resolved_by_actor_team_ids,
+        approval_policy_id,
         payload,
         created_at,
         resolved_at,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
       RETURNING *
     `,
     [
@@ -738,6 +844,11 @@ export const createRunWait = async (
       wait.spanId || null,
       wait.resolution || null,
       wait.resolvedBy || null,
+      wait.requestedByActorUserId || null,
+      wait.requestedByActorTeamIds || [],
+      wait.resolvedByActorUserId || null,
+      wait.resolvedByActorTeamIds || [],
+      wait.approvalPolicyId || null,
       serializeJson(wait.payload),
       wait.createdAt || new Date().toISOString(),
       wait.resolvedAt || null,
@@ -752,11 +863,15 @@ export const resolveRunWait = async ({
   waitId,
   resolution,
   resolvedBy,
+  resolvedByActorUserId,
+  resolvedByActorTeamIds,
 }: {
   capabilityId: string;
   waitId: string;
   resolution: string;
   resolvedBy: string;
+  resolvedByActorUserId?: string;
+  resolvedByActorTeamIds?: string[];
 }): Promise<RunWait> => {
   const result = await query(
     `
@@ -765,12 +880,21 @@ export const resolveRunWait = async ({
         status = 'RESOLVED',
         resolution = $3,
         resolved_by = $4,
+        resolved_by_actor_user_id = $5,
+        resolved_by_actor_team_ids = $6,
         resolved_at = NOW(),
         updated_at = NOW()
       WHERE capability_id = $1 AND id = $2
       RETURNING *
     `,
-    [capabilityId, waitId, resolution, resolvedBy],
+    [
+      capabilityId,
+      waitId,
+      resolution,
+      resolvedBy,
+      resolvedByActorUserId || null,
+      resolvedByActorTeamIds || [],
+    ],
   );
 
   if (!result.rowCount) {
@@ -778,6 +902,252 @@ export const resolveRunWait = async ({
   }
 
   return waitFromRow(result.rows[0]);
+};
+
+export const createApprovalAssignments = async (
+  assignments: ApprovalAssignment[],
+): Promise<ApprovalAssignment[]> => {
+  const created: ApprovalAssignment[] = [];
+
+  for (const assignment of assignments) {
+    const result = await query(
+      `
+        INSERT INTO capability_approval_assignments (
+          capability_id,
+          id,
+          run_id,
+          wait_id,
+          phase,
+          step_name,
+          approval_policy_id,
+          status,
+          target_type,
+          target_id,
+          assigned_user_id,
+          assigned_team_id,
+          due_at,
+          delegated_to_user_id,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+        RETURNING *
+      `,
+      [
+        assignment.capabilityId,
+        assignment.id,
+        assignment.runId,
+        assignment.waitId,
+        assignment.phase || null,
+        assignment.stepName || null,
+        assignment.approvalPolicyId || null,
+        assignment.status,
+        assignment.targetType,
+        assignment.targetId,
+        assignment.assignedUserId || null,
+        assignment.assignedTeamId || null,
+        assignment.dueAt || null,
+        assignment.delegatedToUserId || null,
+      ],
+    );
+    created.push(approvalAssignmentFromRow(result.rows[0]));
+  }
+
+  return created;
+};
+
+export const updateApprovalAssignmentsForWait = async ({
+  capabilityId,
+  waitId,
+  status,
+}: {
+  capabilityId: string;
+  waitId: string;
+  status: ApprovalAssignment['status'];
+}) => {
+  await query(
+    `
+      UPDATE capability_approval_assignments
+      SET
+        status = $3,
+        updated_at = NOW()
+      WHERE capability_id = $1
+        AND wait_id = $2
+        AND status = 'PENDING'
+    `,
+    [capabilityId, waitId, status],
+  );
+};
+
+export const createApprovalDecision = async (
+  decision: ApprovalDecision,
+): Promise<ApprovalDecision> => {
+  const result = await query(
+    `
+      INSERT INTO capability_approval_decisions (
+        capability_id,
+        id,
+        run_id,
+        wait_id,
+        assignment_id,
+        disposition,
+        actor_user_id,
+        actor_display_name,
+        actor_team_ids,
+        comment,
+        created_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      RETURNING *
+    `,
+    [
+      decision.capabilityId,
+      decision.id,
+      decision.runId,
+      decision.waitId,
+      decision.assignmentId || null,
+      decision.disposition,
+      decision.actorUserId || null,
+      decision.actorDisplayName,
+      decision.actorTeamIds,
+      decision.comment || null,
+      decision.createdAt || new Date().toISOString(),
+    ],
+  );
+
+  return approvalDecisionFromRow(result.rows[0]);
+};
+
+export const listActiveWorkItemClaims = async (
+  capabilityId: string,
+  workItemId?: string,
+): Promise<WorkItemClaim[]> => {
+  const result = await query(
+    `
+      SELECT *
+      FROM capability_work_item_claims
+      WHERE capability_id = $1
+        AND status = 'ACTIVE'
+        AND ($2::text IS NULL OR work_item_id = $2)
+      ORDER BY claimed_at DESC
+    `,
+    [capabilityId, workItemId || null],
+  );
+
+  return result.rows.map(workItemClaimFromRow);
+};
+
+export const upsertWorkItemClaim = async (
+  claim: WorkItemClaim,
+): Promise<WorkItemClaim> => {
+  const result = await query(
+    `
+      INSERT INTO capability_work_item_claims (
+        capability_id,
+        work_item_id,
+        user_id,
+        team_id,
+        status,
+        claimed_at,
+        expires_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      ON CONFLICT (capability_id, work_item_id) DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        team_id = EXCLUDED.team_id,
+        status = EXCLUDED.status,
+        claimed_at = EXCLUDED.claimed_at,
+        expires_at = EXCLUDED.expires_at,
+        released_at = NULL,
+        updated_at = NOW()
+      RETURNING *
+    `,
+    [
+      claim.capabilityId,
+      claim.workItemId,
+      claim.userId,
+      claim.teamId || null,
+      claim.status,
+      claim.claimedAt,
+      claim.expiresAt,
+    ],
+  );
+
+  return result.rowCount ? workItemClaimFromRow(result.rows[0]) : claim;
+};
+
+export const releaseWorkItemClaim = async ({
+  capabilityId,
+  workItemId,
+  userId,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  userId: string;
+}) => {
+  await query(
+    `
+      UPDATE capability_work_item_claims
+      SET
+        status = 'RELEASED',
+        released_at = NOW()
+      WHERE capability_id = $1
+        AND work_item_id = $2
+        AND user_id = $3
+        AND status = 'ACTIVE'
+    `,
+    [capabilityId, workItemId, userId],
+  );
+};
+
+export const upsertWorkItemPresence = async (
+  presence: WorkItemPresence,
+): Promise<WorkItemPresence> => {
+  const result = await query(
+    `
+      INSERT INTO capability_work_item_presence (
+        capability_id,
+        work_item_id,
+        user_id,
+        team_id,
+        view_context,
+        last_seen_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6)
+      ON CONFLICT (capability_id, work_item_id, user_id) DO UPDATE SET
+        team_id = EXCLUDED.team_id,
+        view_context = EXCLUDED.view_context,
+        last_seen_at = EXCLUDED.last_seen_at
+      RETURNING *
+    `,
+    [
+      presence.capabilityId,
+      presence.workItemId,
+      presence.userId,
+      presence.teamId || null,
+      presence.viewContext || null,
+      presence.lastSeenAt,
+    ],
+  );
+
+  return workItemPresenceFromRow(result.rows[0]);
+};
+
+export const listWorkItemPresence = async (
+  capabilityId: string,
+  workItemId?: string,
+): Promise<WorkItemPresence[]> => {
+  const result = await query(
+    `
+      SELECT *
+      FROM capability_work_item_presence
+      WHERE capability_id = $1
+        AND ($2::text IS NULL OR work_item_id = $2)
+      ORDER BY last_seen_at DESC
+    `,
+    [capabilityId, workItemId || null],
+  );
+
+  return result.rows.map(workItemPresenceFromRow);
 };
 
 export const updateRunWaitPayload = async ({

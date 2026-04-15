@@ -7,6 +7,7 @@ import {
   CapabilityAgent,
   CapabilityExecutionCommandTemplate,
   ToolAdapterId,
+  WorkItem,
 } from '../../src/types';
 import { runSandboxedCommand, type SandboxProfile, summarizeSandboxFailure } from '../sandbox';
 import {
@@ -31,6 +32,7 @@ export type ToolExecutionResult = {
 type ToolExecutionContext = {
   capability: Capability;
   agent: CapabilityAgent;
+  workItem?: WorkItem;
   requireApprovedDeployment?: boolean;
 };
 
@@ -196,13 +198,21 @@ const searchWorkspaceFilesFallback = async ({
 
 const resolveWorkspacePath = (
   capability: Capability,
+  workItem?: WorkItem,
   preferredPath?: string,
 ) => {
   const allowed = getCapabilityWorkspaceRoots(capability);
   const configuredDefault = normalizeDirectoryPath(
     capability.executionConfig.defaultWorkspacePath || '',
   );
-  const defaultPath = configuredDefault || allowed[0] || '';
+  const workItemRepositoryId =
+    workItem?.executionContext?.primaryRepositoryId ||
+    workItem?.executionContext?.branch?.repositoryId;
+  const workItemRepositoryRoot = normalizeDirectoryPath(
+    (capability.repositories || []).find(repository => repository.id === workItemRepositoryId)
+      ?.localRootHint || '',
+  );
+  const defaultPath = workItemRepositoryRoot || configuredDefault || allowed[0] || '';
   const requestedPath = normalizeDirectoryPath(preferredPath || '');
   const candidate = requestedPath || defaultPath;
 
@@ -389,13 +399,14 @@ export const resolveDeploymentTarget = (
 
 const executeCommandTemplate = async (
   capability: Capability,
+  workItem: WorkItem | undefined,
   template: CapabilityExecutionCommandTemplate,
   workspacePath?: string,
   sandboxProfile: SandboxProfile = 'workspace',
 ) => {
   const workingDirectory = template.workingDirectory
-    ? resolveWorkspacePath(capability, template.workingDirectory)
-    : resolveWorkspacePath(capability, workspacePath);
+    ? resolveWorkspacePath(capability, workItem, template.workingDirectory)
+    : resolveWorkspacePath(capability, workItem, workspacePath);
   const result = await runSandboxedCommand({
     command: template.command,
     cwd: workingDirectory,
@@ -432,8 +443,12 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     description: 'List files inside an approved workspace path.',
     usageExample: '{"path":"src"}',
     retryable: true,
-    execute: async ({ capability }, args) => {
-      const workspacePath = resolveWorkspacePath(capability, args.workspacePath || args.path);
+    execute: async ({ capability, workItem }, args) => {
+      const workspacePath = resolveWorkspacePath(
+        capability,
+        workItem,
+        args.workspacePath || args.path,
+      );
       const result = await runProcess('rg', ['--files', workspacePath], workspacePath);
       const files = result.exitCode === 0
         ? result.stdout.split('\n').filter(Boolean).slice(0, 200)
@@ -463,8 +478,8 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     description: 'Read a text file from an approved workspace path.',
     usageExample: '{"path":"src/main/java/App.java"}',
     retryable: true,
-    execute: async ({ capability }, args) => {
-      const workspacePath = resolveWorkspacePath(capability, args.workspacePath);
+    execute: async ({ capability, workItem }, args) => {
+      const workspacePath = resolveWorkspacePath(capability, workItem, args.workspacePath);
       const targetPath = resolvePathWithinWorkspace(
         workspacePath,
         getRequiredStringArg(args, 'path', 'workspace_read'),
@@ -488,10 +503,10 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     description: 'Search within an approved workspace for a string or regex pattern.',
     usageExample: '{"pattern":"Operator","path":"src"}',
     retryable: true,
-    execute: async ({ capability }, args) => {
+    execute: async ({ capability, workItem }, args) => {
       const pattern = getRequiredStringArg(args, 'pattern', 'workspace_search');
 
-      const workspacePath = resolveWorkspacePath(capability, args.workspacePath);
+      const workspacePath = resolveWorkspacePath(capability, workItem, args.workspacePath);
       const scopePath = args.path
         ? resolvePathWithinWorkspace(workspacePath, String(args.path))
         : workspacePath;
@@ -523,8 +538,8 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     id: 'git_status',
     description: 'Inspect git status for an approved workspace repository.',
     retryable: true,
-    execute: async ({ capability }, args) => {
-      const workspacePath = resolveWorkspacePath(capability, args.workspacePath);
+    execute: async ({ capability, workItem }, args) => {
+      const workspacePath = resolveWorkspacePath(capability, workItem, args.workspacePath);
       const result = await runProcess(
         'git',
         ['-C', workspacePath, 'status', '--short', '--branch'],
@@ -548,8 +563,8 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     description: 'Write a text file inside an approved workspace path.',
     usageExample: '{"path":"src/main/java/App.java","content":"..."}',
     retryable: false,
-    execute: async ({ capability }, args) => {
-      const workspacePath = resolveWorkspacePath(capability, args.workspacePath);
+    execute: async ({ capability, workItem }, args) => {
+      const workspacePath = resolveWorkspacePath(capability, workItem, args.workspacePath);
       const targetPath = resolvePathWithinWorkspace(
         workspacePath,
         getRequiredStringArg(args, 'path', 'workspace_write'),
@@ -573,9 +588,10 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     description: 'Run the approved build command template.',
     usageExample: '{"templateId":"build"}',
     retryable: true,
-    execute: async ({ capability }, args) =>
+    execute: async ({ capability, workItem }, args) =>
       executeCommandTemplate(
         capability,
+        workItem,
         resolveCommandTemplate(capability, String(args.templateId || 'build')),
         args.workspacePath,
         'build',
@@ -586,9 +602,10 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     description: 'Run the approved test command template.',
     usageExample: '{"templateId":"test"}',
     retryable: true,
-    execute: async ({ capability }, args) =>
+    execute: async ({ capability, workItem }, args) =>
       executeCommandTemplate(
         capability,
+        workItem,
         resolveCommandTemplate(capability, String(args.templateId || 'test')),
         args.workspacePath,
         'test',
@@ -599,9 +616,10 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     description: 'Run the approved docs command template.',
     usageExample: '{"templateId":"docs"}',
     retryable: true,
-    execute: async ({ capability }, args) =>
+    execute: async ({ capability, workItem }, args) =>
       executeCommandTemplate(
         capability,
+        workItem,
         resolveCommandTemplate(capability, String(args.templateId || 'docs')),
         args.workspacePath,
         'docs',
@@ -613,7 +631,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       'Execute an approved deployment target using a named command template after approval.',
     usageExample: '{"targetId":"staging"}',
     retryable: false,
-    execute: async ({ capability, requireApprovedDeployment }, args) => {
+    execute: async ({ capability, workItem, requireApprovedDeployment }, args) => {
       if (!requireApprovedDeployment) {
         throw new Error(
           'Deployment commands are approval-gated and cannot run until the release approval step is resolved.',
@@ -634,6 +652,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
 
       return executeCommandTemplate(
         capability,
+        workItem,
         template,
         target.workspacePath || args.workspacePath,
         'deploy',
@@ -659,19 +678,21 @@ export const listToolDescriptions = (toolIds: ToolAdapterId[]) =>
 export const executeTool = async ({
   capability,
   agent,
+  workItem,
   toolId,
   args,
   requireApprovedDeployment,
 }: {
   capability: Capability;
   agent: CapabilityAgent;
+  workItem?: WorkItem;
   toolId: ToolAdapterId;
   args: Record<string, any>;
   requireApprovedDeployment?: boolean;
 }) => {
   const adapter = getToolAdapter(toolId);
   const result = await adapter.execute(
-    { capability, agent, requireApprovedDeployment },
+    { capability, agent, workItem, requireApprovedDeployment },
     args,
   );
 
