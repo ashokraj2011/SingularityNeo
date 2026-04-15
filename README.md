@@ -287,6 +287,7 @@ Recommended:
 ## Additional Docs
 
 - [Competitive positioning and product gap assessment](./docs/research/competitive-positioning.md)
+- [Capability Mermaid diagrams](./docs/capability-mermaid-diagrams.md)
 - [Demo video script](./docs/demo-video-script.md)
 - [SQL schema and seed exports](./docs/sql/)
 
