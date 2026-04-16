@@ -30,6 +30,7 @@ import CapabilityBriefingPanel from '../components/CapabilityBriefingPanel';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
 import InteractionTimeline from '../components/InteractionTimeline';
+import MarkdownContent from '../components/MarkdownContent';
 import StageControlModal from '../components/StageControlModal';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
@@ -366,6 +367,24 @@ const getSelectedRunWait = (runDetail: WorkflowRunDetail | null) =>
   (Array.isArray(runDetail?.waits) ? [...runDetail.waits] : [])
     .reverse()
     .find(wait => wait.status === 'OPEN') || null;
+
+const normalizeMarkdownishText = (value?: string) => {
+  const normalized = String(value || '').replace(/\r\n/g, '\n');
+  if (!normalized.trim()) {
+    return '';
+  }
+
+  return normalized
+    .split('\n')
+    .map(line =>
+      line
+        .replace(/^\s*•\s*/, '- ')
+        .replace(/^\s*(\d+)\)\s+/, '$1. ')
+        .trimEnd(),
+    )
+    .join('\n')
+    .trim();
+};
 
 const getAttentionReason = ({
   blocker,
@@ -900,6 +919,7 @@ const Orchestrator = () => {
   >([]);
   const dockUploadsRef = useRef(dockUploads);
   const dockThreadRef = useRef<HTMLDivElement | null>(null);
+  const dockTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const dockStickToBottomRef = useRef(true);
   const dockRequestRef = useRef(0);
   const selectionFocusRef = useRef<WorkbenchSelectionFocus | null>(null);
@@ -927,6 +947,12 @@ const Orchestrator = () => {
         }
       });
     };
+  }, []);
+
+  const focusDockComposer = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      dockTextareaRef.current?.focus();
+    });
   }, []);
 
   const workflowsById = useMemo(
@@ -3860,6 +3886,15 @@ const Orchestrator = () => {
   };
 
   if (view === 'list') {
+    const handleDockFieldChipClick = (label: string) => {
+      setDockInput(prev => {
+        const trimmed = prev.trimEnd();
+        const next = trimmed ? `${trimmed}\n` : '';
+        return `${next}- ${label}: `;
+      });
+      focusDockComposer();
+    };
+
     const attentionById = new Map(attentionItems.map(entry => [entry.item.id, entry]));
     const remainingItems = filteredWorkItems
       .filter(item => !attentionById.has(item.id))
@@ -4123,7 +4158,12 @@ const Orchestrator = () => {
                       <button
                         key={entry.item.id}
                         type="button"
-                        onClick={() => selectWorkItem(entry.item.id)}
+                        onClick={() => {
+                          selectWorkItem(entry.item.id);
+                          if (attention?.callToAction) {
+                            focusDockComposer();
+                          }
+                        }}
                         className={cn(
                           'orchestrator-navigator-item',
                           selectedWorkItemId === entry.item.id && 'orchestrator-navigator-item-active',
@@ -4154,7 +4194,10 @@ const Orchestrator = () => {
                         </div>
                         {attention?.attentionReason ? (
                           <p className="mt-3 line-clamp-2 text-xs leading-relaxed text-secondary">
-                            {attention.attentionReason}
+                            {compactMarkdownPreview(
+                              normalizeMarkdownishText(attention.attentionReason),
+                              180,
+                            )}
                           </p>
                         ) : null}
                       </button>
@@ -4301,22 +4344,29 @@ const Orchestrator = () => {
                     </div>
                     <StatusBadge tone="warning">{formatEnumLabel(selectedOpenWait.type)}</StatusBadge>
                   </div>
-                  <p className="mt-3 text-sm leading-relaxed text-secondary">
-                    {selectedOpenWait.message}
-                  </p>
+                  <div className="mt-3 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
+                    <MarkdownContent content={normalizeMarkdownishText(selectedOpenWait.message)} />
+                  </div>
 
-                  {dockMissingFields.length > 0 ? (
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {dockMissingFields.map(field => (
-                        <span
-                          key={field.id}
-                          className="rounded-full border border-outline-variant/30 bg-white/85 px-3 py-1 text-xs font-semibold text-on-surface"
-                        >
-                          {field.label}
-                        </span>
-                      ))}
-                    </div>
-                  ) : null}
+	                  {dockMissingFields.length > 0 ? (
+	                    <div className="mt-4">
+	                      <p className="text-xs leading-relaxed text-secondary">
+	                        Click a chip to add it to your response.
+	                      </p>
+	                      <div className="mt-2 flex flex-wrap gap-2">
+	                        {dockMissingFields.map(field => (
+	                          <button
+	                            key={field.id}
+	                            type="button"
+	                            onClick={() => handleDockFieldChipClick(field.label)}
+	                            className="rounded-full border border-outline-variant/30 bg-white/85 px-3 py-1 text-xs font-semibold text-on-surface"
+	                          >
+	                            {field.label}
+	                          </button>
+	                        ))}
+	                      </div>
+	                    </div>
+	                  ) : null}
 
                   {waitRequiresApprovedWorkspace ? (
                     <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
@@ -4481,20 +4531,29 @@ const Orchestrator = () => {
                   addDockUploadFiles(event.dataTransfer.files);
                 }}
               >
-                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-secondary">
-                  {selectedOpenWait ? 'Resolve wait mode' : 'Ask copilot'}
-                </p>
-                <textarea
-                  value={dockInput}
-                  onChange={event => setDockInput(event.target.value)}
-                  placeholder={resolutionPlaceholder}
-                  className="mt-3 min-h-[5.5rem] w-full resize-none rounded-2xl border border-outline-variant/35 bg-surface-container-low/35 px-4 py-3 text-sm leading-6 text-on-surface shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] focus:border-primary/40 focus:outline-none"
-                />
-
-                {dockUploads.length > 0 ? (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {dockUploads.map(upload => (
-                      <div
+	                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-secondary">
+	                  {selectedOpenWait ? 'Resolve wait mode' : 'Ask copilot'}
+	                </p>
+		                <textarea
+		                  ref={dockTextareaRef}
+		                  value={dockInput}
+		                  onChange={event => setDockInput(event.target.value)}
+		                  placeholder={resolutionPlaceholder}
+		                  className="mt-3 min-h-[5.5rem] w-full resize-none rounded-2xl border border-outline-variant/35 bg-surface-container-low/35 px-4 py-3 text-sm leading-6 text-on-surface shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] focus:border-primary/40 focus:outline-none"
+		                />
+		                {selectedOpenWait &&
+		                dockResolutionRequired &&
+		                !dockInput.trim() &&
+		                !waitOnlyRequestsApprovedWorkspace ? (
+		                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+		                    Add a short response above to enable “{actionButtonLabel}”.
+		                  </p>
+		                ) : null}
+	
+	                {dockUploads.length > 0 ? (
+	                  <div className="mt-3 flex flex-wrap gap-2">
+	                    {dockUploads.map(upload => (
+	                      <div
                         key={upload.id}
                         className="flex items-center gap-2 rounded-2xl border border-outline-variant/30 bg-white px-3 py-2 text-xs font-semibold text-on-surface"
                       >
