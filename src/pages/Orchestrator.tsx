@@ -4546,7 +4546,7 @@ const Orchestrator = () => {
 		                !dockInput.trim() &&
 		                !waitOnlyRequestsApprovedWorkspace ? (
 		                  <p className="mt-2 text-xs leading-relaxed text-secondary">
-		                    Add a short response above to enable “{actionButtonLabel}”.
+		                    Add a short response above to enable "{actionButtonLabel}".
 		                  </p>
 		                ) : null}
 	
