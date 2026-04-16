@@ -4367,6 +4367,24 @@ const Orchestrator = () => {
                       <MessageSquareText size={16} />
                       Open full chat
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActionError('');
+                        setCancelWorkItemNote('');
+                        setIsCancelWorkItemOpen(true);
+                      }}
+                      disabled={
+                        !canControlWorkItems ||
+                        busyAction !== null ||
+                        selectedWorkItem.status === 'COMPLETED' ||
+                        selectedWorkItem.status === 'CANCELLED'
+                      }
+                      className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <X size={16} />
+                      Cancel work item
+                    </button>
                   </div>
                 </div>
 
