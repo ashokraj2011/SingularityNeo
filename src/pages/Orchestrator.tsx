@@ -4319,21 +4319,21 @@ const Orchestrator = () => {
             )}
           </main>
 
-          <aside className="workspace-surface overflow-hidden p-0">
-            <div className="border-b border-outline-variant/25 px-5 pb-4 pt-5">
-              <p className="form-kicker">Copilot Dock</p>
-              <h2 className="mt-1 text-lg font-bold text-on-surface">Unblock here</h2>
-              <p className="mt-1 text-sm leading-relaxed text-secondary">
-                Upload evidence, ask questions, and resolve pending requests without switching screens.
-              </p>
-            </div>
-
-            <div className="flex h-full flex-col px-5 py-4">
-              {!selectedWorkItem ? (
-                <div className="workspace-meta-card">
-                  Select a work item to see pending requests and start a focused copilot thread.
-                </div>
-              ) : selectedOpenWait ? (
+	          <aside className="workspace-surface flex min-h-0 flex-col overflow-hidden p-0">
+	            <div className="border-b border-outline-variant/25 px-5 pb-4 pt-5">
+	              <p className="form-kicker">Copilot Dock</p>
+	              <h2 className="mt-1 text-lg font-bold text-on-surface">Unblock here</h2>
+	              <p className="mt-1 text-sm leading-relaxed text-secondary">
+	                Upload evidence, ask questions, and resolve pending requests without switching screens.
+	              </p>
+	            </div>
+	
+	            <div className="flex min-h-0 flex-1 flex-col px-5 py-4">
+	              {!selectedWorkItem ? (
+	                <div className="workspace-meta-card">
+	                  Select a work item to see pending requests and start a focused copilot thread.
+	                </div>
+	              ) : selectedOpenWait ? (
                 <div className="workspace-meta-card border-amber-200/80 bg-amber-50/50">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
@@ -4462,15 +4462,15 @@ const Orchestrator = () => {
                 </div>
               )}
 
-              <div
-                ref={dockThreadRef}
-                className="orchestrator-stage-chat-thread mt-4 flex-1"
-                onScroll={event => {
-                  const target = event.currentTarget;
-                  const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
-                  dockStickToBottomRef.current = distanceFromBottom < 48;
-                }}
-              >
+	              <div
+	                ref={dockThreadRef}
+	                className="orchestrator-stage-chat-thread orchestrator-stage-chat-thread-dock flex-1"
+	                onScroll={event => {
+	                  const target = event.currentTarget;
+	                  const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+	                  dockStickToBottomRef.current = distanceFromBottom < 48;
+	                }}
+	              >
                 {dockMessages.length === 0 && !dockDraft ? (
                   <div className="orchestrator-stage-chat-empty">
                     This work item does not have a copilot thread yet. Ask a question or upload evidence to start one.

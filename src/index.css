@@ -673,9 +673,13 @@
     @apply bg-[linear-gradient(180deg,rgba(255,255,255,0.99),rgba(246,248,252,0.98))];
   }
 
-  .orchestrator-stage-chat-thread {
-    @apply mt-4 max-h-[28rem] space-y-3 overflow-y-auto rounded-[1.5rem] border border-outline-variant/28 bg-slate-950/95 px-4 py-4;
-  }
+	  .orchestrator-stage-chat-thread {
+	    @apply mt-4 max-h-[28rem] space-y-3 overflow-y-auto rounded-[1.5rem] border border-outline-variant/28 bg-slate-950/95 px-4 py-4;
+	  }
+
+	  .orchestrator-stage-chat-thread-dock {
+	    @apply max-h-none min-h-0;
+	  }
 
   .orchestrator-stage-chat-empty {
     @apply rounded-[1.25rem] border border-dashed border-white/15 bg-white/5 px-4 py-4 text-sm leading-relaxed text-slate-200;
