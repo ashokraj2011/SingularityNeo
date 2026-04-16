@@ -1652,6 +1652,26 @@ const Orchestrator = () => {
       selectedRequestedInputFields.every(field => field.id === 'approved-workspace'),
   );
 
+  const preferredApprovedWorkspaceRoot = useMemo(() => {
+    const fallback = approvedWorkspaceRoots[0] || '';
+    const configuredDefault = String(activeCapability.executionConfig.defaultWorkspacePath || '').trim();
+    return configuredDefault || fallback;
+  }, [activeCapability.executionConfig.defaultWorkspacePath, approvedWorkspaceRoots]);
+
+  useEffect(() => {
+    if (!waitRequiresApprovedWorkspace) {
+      return;
+    }
+
+    if (approvedWorkspaceDraft.trim()) {
+      return;
+    }
+
+    if (preferredApprovedWorkspaceRoot) {
+      setApprovedWorkspaceDraft(preferredApprovedWorkspaceRoot);
+    }
+  }, [approvedWorkspaceDraft, preferredApprovedWorkspaceRoot, selectedWorkItemId, waitRequiresApprovedWorkspace]);
+
   useEffect(() => {
     const focus = selectionFocusRef.current;
     if (!focus || detailTab !== 'operate') {
@@ -2695,28 +2715,19 @@ const Orchestrator = () => {
     }
   };
 
-  const handleApproveWorkspacePath = async (options?: { unblock?: boolean }) => {
-    const requestedPath = approvedWorkspaceDraft.trim();
-    if (!requestedPath) {
-      showError(
-        'Workspace path required',
-        'Paste a local directory path to approve it for this capability.',
-      );
-      return;
-    }
+	  const handleApproveWorkspacePath = async (options?: { unblock?: boolean }) => {
+	    const requestedPath = approvedWorkspaceDraft.trim();
+	    if (!requestedPath) {
+	      showError(
+	        'Workspace path required',
+	        'Paste a local directory path to approve it for this capability.',
+	      );
+	      return;
+	    }
 
-    if (
-      !requirePermission(
-        canEditCapability,
-        'This operator cannot update capability execution policy. Switch Current Operator to a role with capability edit rights (for example Workspace Operator).',
-      )
-    ) {
-      return;
-    }
-
-    if (
-      options?.unblock &&
-      !requirePermission(
+	    if (
+	      options?.unblock &&
+	      !requirePermission(
         canControlWorkItems,
         'This operator cannot unblock workflow waits for the selected run.',
       )
@@ -2732,31 +2743,52 @@ const Orchestrator = () => {
 
         if (!validation.valid || !validation.normalizedPath) {
           throw new Error(validation.message || 'Workspace path could not be validated.');
-        }
+	        }
 
-        const normalizedPath = validation.normalizedPath;
-        const nextAllowedPaths = Array.from(
-          new Set([
-            ...(activeCapability.executionConfig.allowedWorkspacePaths || []),
-            normalizedPath,
-          ]),
-        );
-        const nextDefaultWorkspacePath =
-          activeCapability.executionConfig.defaultWorkspacePath?.trim() ||
-          normalizedPath;
+	        const normalizedPath = validation.normalizedPath;
+	        const alreadyApproved = approvedWorkspaceRoots.some(root => {
+	          if (!root) {
+	            return false;
+	          }
+	          if (normalizedPath === root) {
+	            return true;
+	          }
+	          return normalizedPath.startsWith(`${root}/`);
+	        });
 
-        await updateCapabilityMetadata(activeCapability.id, {
-          executionConfig: {
-            ...activeCapability.executionConfig,
-            defaultWorkspacePath: nextDefaultWorkspacePath,
-            allowedWorkspacePaths: nextAllowedPaths,
-          },
-        });
+	        if (!alreadyApproved) {
+	          if (
+	            !requirePermission(
+	              canEditCapability,
+	              'This operator cannot update capability execution policy. Switch Current Operator to a role with capability edit rights (for example Workspace Operator).',
+	            )
+	          ) {
+	            throw new Error('Permission required to approve additional workspace paths.');
+	          }
 
-        setApprovedWorkspaceDraft(normalizedPath);
-        setResolutionNote(current =>
-          current.trim() ? current : `Approved workspace path: ${normalizedPath}`,
-        );
+	          const nextAllowedPaths = Array.from(
+	            new Set([
+	              ...(activeCapability.executionConfig.allowedWorkspacePaths || []),
+	              normalizedPath,
+	            ]),
+	          );
+	          const nextDefaultWorkspacePath =
+	            activeCapability.executionConfig.defaultWorkspacePath?.trim() ||
+	            normalizedPath;
+
+	          await updateCapabilityMetadata(activeCapability.id, {
+	            executionConfig: {
+	              ...activeCapability.executionConfig,
+	              defaultWorkspacePath: nextDefaultWorkspacePath,
+	              allowedWorkspacePaths: nextAllowedPaths,
+	            },
+	          });
+	        }
+
+	        setApprovedWorkspaceDraft(normalizedPath);
+	        setResolutionNote(current =>
+	          current.trim() ? current : `Approved workspace path: ${normalizedPath}`,
+	        );
 
         if (options?.unblock && currentRun && selectedOpenWait?.type === 'INPUT' && selectedWorkItem) {
           await provideCapabilityWorkflowRunInput(activeCapability.id, currentRun.id, {
@@ -3206,7 +3238,12 @@ const Orchestrator = () => {
       return;
     }
 
-    const resolution = resolutionNote.trim() || actionButtonLabel;
+	    const trimmedResolutionNote = resolutionNote.trim();
+	    const fallbackResolution =
+	      waitOnlyRequestsApprovedWorkspace && preferredApprovedWorkspaceRoot
+	        ? `Approved workspace path: ${preferredApprovedWorkspaceRoot}`
+	        : actionButtonLabel;
+	    const resolution = trimmedResolutionNote || fallbackResolution;
 
     await withAction(
       'resolve',
@@ -3287,9 +3324,16 @@ const Orchestrator = () => {
       return;
     }
 
-    const resolution = dockInput.trim() || actionButtonLabel;
-    const resolutionRequired =
-      selectedOpenWait.type === 'INPUT' || selectedOpenWait.type === 'CONFLICT_RESOLUTION';
+	    const trimmedDockInput = dockInput.trim();
+	    const fallbackApprovedWorkspaceRoot =
+	      approvedWorkspaceDraft.trim() || preferredApprovedWorkspaceRoot;
+	    const fallbackResolution =
+	      waitOnlyRequestsApprovedWorkspace && fallbackApprovedWorkspaceRoot
+	        ? `Approved workspace path: ${fallbackApprovedWorkspaceRoot}`
+	        : actionButtonLabel;
+	    const resolution = trimmedDockInput || fallbackResolution;
+	    const resolutionRequired =
+	      selectedOpenWait.type === 'INPUT' || selectedOpenWait.type === 'CONFLICT_RESOLUTION';
 
     if (resolutionRequired && !dockInput.trim() && !waitOnlyRequestsApprovedWorkspace) {
       setActionError('Add the missing details before unblocking this workflow stage.');
@@ -4368,93 +4412,127 @@ const Orchestrator = () => {
 	                    </div>
 	                  ) : null}
 
-                  {waitRequiresApprovedWorkspace ? (
-                    <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
-                      <p className="workspace-meta-label">Approved workspace path</p>
-                      {hasApprovedWorkspaceConfigured ? (
-                        <>
-                          <p className="mt-2 text-xs leading-relaxed text-secondary">
-                            Configured roots:
-                          </p>
-                          <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
-                            {approvedWorkspaceRoots.slice(0, 4).map(root => (
-                              <li key={root} className="font-mono text-[0.72rem]">
-                                {root}
-                              </li>
-                            ))}
-                          </ul>
-                        </>
-                      ) : (
-                        <>
-                          <p className="mt-2 text-xs leading-relaxed text-secondary">
-                            Add a local directory path that tools are allowed to read and write.
-                          </p>
-                          <input
-                            value={approvedWorkspaceDraft}
-                            onChange={event => setApprovedWorkspaceDraft(event.target.value)}
-                            placeholder="/Users/you/projects/my-repo"
-                            className="mt-3 field-input font-mono text-[0.8rem]"
-                          />
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            {selectedExecutionRepository?.localRootHint ? (
-                              <button
-                                type="button"
-                                onClick={() => setApprovedWorkspaceDraft(selectedExecutionRepository.localRootHint || '')}
-                                className="enterprise-button enterprise-button-secondary"
-                              >
-                                Use repo root hint
-                              </button>
-                            ) : null}
-                            {activeCapability.localDirectories.slice(0, 2).map(root => (
-                              <button
-                                key={root}
-                                type="button"
-                                onClick={() => setApprovedWorkspaceDraft(root)}
-                                className="enterprise-button enterprise-button-secondary"
-                              >
-                                {root}
-                              </button>
-                            ))}
-                          </div>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() => void handleApproveWorkspacePath({ unblock: true })}
-                              disabled={busyAction !== null}
-                              className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                              {busyAction === 'approveWorkspacePath' ? (
-                                <LoaderCircle size={16} className="animate-spin" />
-                              ) : (
-                                <ShieldCheck size={16} />
-                              )}
-                              Approve and continue
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void handleApproveWorkspacePath()}
-                              disabled={busyAction !== null}
-                              className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                              Approve only
-                            </button>
-                          </div>
-                          {approvedWorkspaceValidation ? (
-                            <p
-                              className={cn(
-                                'mt-2 text-xs font-medium',
-                                approvedWorkspaceValidation.valid
-                                  ? 'text-emerald-700'
-                                  : 'text-amber-800',
-                              )}
-                            >
-                              {approvedWorkspaceValidation.message}
-                            </p>
-                          ) : null}
-                        </>
-                      )}
-                    </div>
-                  ) : null}
+	                  {waitRequiresApprovedWorkspace ? (
+	                    <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
+	                      <p className="workspace-meta-label">Approved workspace path</p>
+	                      {hasApprovedWorkspaceConfigured ? (
+	                        <>
+	                          <p className="mt-2 text-xs leading-relaxed text-secondary">
+	                            Configured roots:
+	                          </p>
+	                          <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
+	                            {approvedWorkspaceRoots.slice(0, 4).map(root => (
+	                              <li key={root} className="font-mono text-[0.72rem]">
+	                                {root}
+	                              </li>
+	                            ))}
+	                          </ul>
+	                        </>
+	                      ) : (
+	                        <p className="mt-2 text-xs leading-relaxed text-secondary">
+	                          No approved workspace paths are configured yet.
+	                        </p>
+	                      )}
+
+	                      <p className="mt-3 text-xs leading-relaxed text-secondary">
+	                        {hasApprovedWorkspaceConfigured
+	                          ? 'Add another path if this work item needs a different codebase.'
+	                          : 'Add a local directory path that tools are allowed to read and write.'}
+	                      </p>
+	                      <input
+	                        value={approvedWorkspaceDraft}
+	                        onChange={event => {
+	                          setApprovedWorkspaceDraft(event.target.value);
+	                          setApprovedWorkspaceValidation(null);
+	                        }}
+	                        placeholder="/Users/you/projects/my-repo"
+	                        className="mt-3 field-input font-mono text-[0.8rem]"
+	                      />
+	                      <div className="mt-3 flex flex-wrap gap-2">
+	                        {selectedExecutionRepository?.localRootHint ? (
+	                          <button
+	                            type="button"
+	                            onClick={() => {
+	                              setApprovedWorkspaceDraft(selectedExecutionRepository.localRootHint || '');
+	                              setApprovedWorkspaceValidation(null);
+	                              focusDockComposer();
+	                            }}
+	                            className="enterprise-button enterprise-button-secondary"
+	                          >
+	                            Use repo root hint
+	                          </button>
+	                        ) : null}
+	                        {approvedWorkspaceRoots.slice(0, 2).map(root => (
+	                          <button
+	                            key={root}
+	                            type="button"
+	                            onClick={() => {
+	                              setApprovedWorkspaceDraft(root);
+	                              setApprovedWorkspaceValidation(null);
+	                              focusDockComposer();
+	                            }}
+	                            className="enterprise-button enterprise-button-secondary"
+	                          >
+	                            {root}
+	                          </button>
+	                        ))}
+	                        {activeCapability.localDirectories.slice(0, 2).map(root => (
+	                          <button
+	                            key={root}
+	                            type="button"
+	                            onClick={() => {
+	                              setApprovedWorkspaceDraft(root);
+	                              setApprovedWorkspaceValidation(null);
+	                              focusDockComposer();
+	                            }}
+	                            className="enterprise-button enterprise-button-secondary"
+	                          >
+	                            {root}
+	                          </button>
+	                        ))}
+	                      </div>
+	                      <div className="mt-3 flex flex-wrap gap-2">
+	                        <button
+	                          type="button"
+	                          onClick={() => void handleApproveWorkspacePath({ unblock: true })}
+	                          disabled={busyAction !== null}
+	                          className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+	                        >
+	                          {busyAction === 'approveWorkspacePath' ? (
+	                            <LoaderCircle size={16} className="animate-spin" />
+	                          ) : (
+	                            <ShieldCheck size={16} />
+	                          )}
+	                          Approve and continue
+	                        </button>
+	                        <button
+	                          type="button"
+	                          onClick={() => void handleApproveWorkspacePath()}
+	                          disabled={busyAction !== null}
+	                          className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+	                        >
+	                          Approve only
+	                        </button>
+	                      </div>
+	                      {approvedWorkspaceValidation ? (
+	                        <p
+	                          className={cn(
+	                            'mt-2 text-xs font-medium',
+	                            approvedWorkspaceValidation.valid
+	                              ? 'text-emerald-700'
+	                              : 'text-amber-800',
+	                          )}
+	                        >
+	                          {approvedWorkspaceValidation.message}
+	                        </p>
+	                      ) : null}
+	                      {!canEditCapability ? (
+	                        <p className="mt-2 text-xs font-medium text-amber-800">
+	                          Approving new paths requires capability edit access. Switch Current Operator to a workspace admin if needed.
+	                        </p>
+	                      ) : null}
+	                    </div>
+	                  ) : null}
                 </div>
               ) : (
                 <div className="workspace-meta-card">
@@ -6618,19 +6696,21 @@ const Orchestrator = () => {
                       </div>
                     )}
 
-                    {selectedOpenWait && (
-                      <div className="workspace-inline-alert workspace-inline-alert-warning">
-                        <Clock3 size={18} className="mt-0.5 shrink-0" />
-                        <div>
-                          <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em]">
-                            Waiting for {formatEnumLabel(selectedOpenWait.type)}
-                          </p>
-                          <p className="mt-2 text-sm leading-relaxed">
-                            {selectedOpenWait.message}
-                          </p>
-                        </div>
-                      </div>
-                    )}
+	                    {selectedOpenWait && (
+	                      <div className="workspace-inline-alert workspace-inline-alert-warning">
+	                        <Clock3 size={18} className="mt-0.5 shrink-0" />
+	                        <div>
+	                          <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em]">
+	                            Waiting for {formatEnumLabel(selectedOpenWait.type)}
+	                          </p>
+	                          <div className="mt-2 rounded-2xl border border-outline-variant/25 bg-white/90 px-4 py-3">
+	                            <MarkdownContent
+	                              content={normalizeMarkdownishText(selectedOpenWait.message)}
+	                            />
+	                          </div>
+	                        </div>
+	                      </div>
+	                    )}
 
 	                    {selectedOpenWait?.type === 'INPUT' && (
 	                      <div
@@ -6669,102 +6749,129 @@ const Orchestrator = () => {
 	                          ) : null}
 	                        </div>
 
-                          {waitRequiresApprovedWorkspace ? (
-                            <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
-                              <p className="workspace-meta-label">Approved workspace path</p>
-                              {hasApprovedWorkspaceConfigured ? (
-                                <>
-                                  <p className="mt-2 text-xs leading-relaxed text-secondary">
-                                    Configured roots for this capability:
-                                  </p>
-                                  <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
-                                    {approvedWorkspaceRoots.slice(0, 4).map(root => (
-                                      <li key={root} className="font-mono text-[0.72rem]">
-                                        {root}
-                                      </li>
-                                    ))}
-                                  </ul>
-                                  {approvedWorkspaceRoots.length > 4 ? (
-                                    <p className="mt-2 text-xs text-secondary">
-                                      +{approvedWorkspaceRoots.length - 4} more
-                                    </p>
-                                  ) : null}
-                                  {waitOnlyRequestsApprovedWorkspace ? (
-                                    <div className="mt-3 flex flex-wrap gap-2">
-                                      <button
-                                        type="button"
-                                        onClick={() => void handleResolveWait()}
-                                        disabled={!canControlWorkItems || busyAction !== null}
-                                        className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
-                                      >
-                                        {busyAction === 'resolve' ? (
-                                          <LoaderCircle size={16} className="animate-spin" />
-                                        ) : (
-                                          <ArrowRight size={16} />
-                                        )}
-                                        Continue run
-                                      </button>
-                                    </div>
-                                  ) : null}
-                                </>
-                              ) : (
-                                <>
-                                  <p className="mt-2 text-xs leading-relaxed text-secondary">
-                                    Add a readable local directory so the engine can safely run workspace tools.
-                                  </p>
-                                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                                    <input
-                                      value={approvedWorkspaceDraft}
-                                      onChange={event => {
-                                        setApprovedWorkspaceDraft(event.target.value);
-                                        setApprovedWorkspaceValidation(null);
-                                      }}
-                                      placeholder="/path/to/your/repo"
-                                      className="field-input min-w-[16rem] flex-1 bg-white"
-                                    />
-                                    <button
-                                      type="button"
-                                      onClick={() => void handleApproveWorkspacePath({ unblock: true })}
-                                      disabled={busyAction !== null}
-                                      className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
-                                    >
-                                      {busyAction === 'approveWorkspacePath' ? (
-                                        <LoaderCircle size={16} className="animate-spin" />
-                                      ) : (
-                                        <ShieldCheck size={16} />
-                                      )}
-                                      Approve and continue
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => void handleApproveWorkspacePath()}
-                                      disabled={busyAction !== null}
-                                      className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
-                                    >
-                                      Approve only
-                                    </button>
-                                  </div>
-                                  {approvedWorkspaceValidation ? (
-                                    <p
-                                      className={cn(
-                                        'mt-2 text-xs font-medium',
-                                        approvedWorkspaceValidation.valid
-                                          ? 'text-emerald-700'
-                                          : 'text-amber-800',
-                                      )}
-                                    >
-                                      {approvedWorkspaceValidation.message}
-                                    </p>
-                                  ) : null}
-                                  {!canEditCapability ? (
-                                    <p className="mt-2 text-xs font-medium text-amber-800">
-                                      Switch Current Operator (top right) to a workspace admin to approve paths.
-                                    </p>
-                                  ) : null}
-                                </>
-                              )}
-                            </div>
-                          ) : null}
+	                          {waitRequiresApprovedWorkspace ? (
+	                            <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
+	                              <p className="workspace-meta-label">Approved workspace path</p>
+	                              {hasApprovedWorkspaceConfigured ? (
+	                                <>
+	                                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+	                                    Configured roots for this capability:
+	                                  </p>
+	                                  <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
+	                                    {approvedWorkspaceRoots.slice(0, 4).map(root => (
+	                                      <li key={root} className="font-mono text-[0.72rem]">
+	                                        {root}
+	                                      </li>
+	                                    ))}
+	                                  </ul>
+	                                  {approvedWorkspaceRoots.length > 4 ? (
+	                                    <p className="mt-2 text-xs text-secondary">
+	                                      +{approvedWorkspaceRoots.length - 4} more
+	                                    </p>
+	                                  ) : null}
+	                                </>
+	                              ) : (
+	                                <p className="mt-2 text-xs leading-relaxed text-secondary">
+	                                  No approved workspace paths are configured yet.
+	                                </p>
+	                              )}
+
+	                              <p className="mt-3 text-xs leading-relaxed text-secondary">
+	                                {hasApprovedWorkspaceConfigured
+	                                  ? 'Add another local directory path if this work item needs a different codebase.'
+	                                  : 'Add a readable local directory so the engine can safely run workspace tools.'}
+	                              </p>
+	                              <div className="mt-3 flex flex-wrap items-center gap-2">
+	                                <input
+	                                  value={approvedWorkspaceDraft}
+	                                  onChange={event => {
+	                                    setApprovedWorkspaceDraft(event.target.value);
+	                                    setApprovedWorkspaceValidation(null);
+	                                  }}
+	                                  placeholder="/path/to/your/repo"
+	                                  className="field-input min-w-[16rem] flex-1 bg-white"
+	                                />
+	                                <button
+	                                  type="button"
+	                                  onClick={() => void handleApproveWorkspacePath({ unblock: true })}
+	                                  disabled={busyAction !== null}
+	                                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+	                                >
+	                                  {busyAction === 'approveWorkspacePath' ? (
+	                                    <LoaderCircle size={16} className="animate-spin" />
+	                                  ) : (
+	                                    <ShieldCheck size={16} />
+	                                  )}
+	                                  Approve and continue
+	                                </button>
+	                                <button
+	                                  type="button"
+	                                  onClick={() => void handleApproveWorkspacePath()}
+	                                  disabled={busyAction !== null}
+	                                  className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+	                                >
+	                                  Approve only
+	                                </button>
+	                              </div>
+	                              <div className="mt-3 flex flex-wrap gap-2">
+	                                {selectedExecutionRepository?.localRootHint ? (
+	                                  <button
+	                                    type="button"
+	                                    onClick={() => {
+	                                      setApprovedWorkspaceDraft(selectedExecutionRepository.localRootHint || '');
+	                                      setApprovedWorkspaceValidation(null);
+	                                    }}
+	                                    className="enterprise-button enterprise-button-secondary"
+	                                  >
+	                                    Use repo root hint
+	                                  </button>
+	                                ) : null}
+	                                {approvedWorkspaceRoots.slice(0, 2).map(root => (
+	                                  <button
+	                                    key={root}
+	                                    type="button"
+	                                    onClick={() => {
+	                                      setApprovedWorkspaceDraft(root);
+	                                      setApprovedWorkspaceValidation(null);
+	                                    }}
+	                                    className="enterprise-button enterprise-button-secondary"
+	                                  >
+	                                    {root}
+	                                  </button>
+	                                ))}
+	                                {activeCapability.localDirectories.slice(0, 2).map(root => (
+	                                  <button
+	                                    key={root}
+	                                    type="button"
+	                                    onClick={() => {
+	                                      setApprovedWorkspaceDraft(root);
+	                                      setApprovedWorkspaceValidation(null);
+	                                    }}
+	                                    className="enterprise-button enterprise-button-secondary"
+	                                  >
+	                                    {root}
+	                                  </button>
+	                                ))}
+	                              </div>
+	                              {approvedWorkspaceValidation ? (
+	                                <p
+	                                  className={cn(
+	                                    'mt-2 text-xs font-medium',
+	                                    approvedWorkspaceValidation.valid
+	                                      ? 'text-emerald-700'
+	                                      : 'text-amber-800',
+	                                  )}
+	                                >
+	                                  {approvedWorkspaceValidation.message}
+	                                </p>
+	                              ) : null}
+	                              {!canEditCapability ? (
+	                                <p className="mt-2 text-xs font-medium text-amber-800">
+	                                  Approving new paths requires capability edit access. Switch Current Operator (top right) to a workspace admin if needed.
+	                                </p>
+	                              ) : null}
+	                            </div>
+	                          ) : null}
 	
 	                        {renderStructuredInputs(
 	                          selectedRequestedInputFields,
