@@ -4311,14 +4311,15 @@ const Orchestrator = () => {
                       {WORK_ITEM_STATUS_META[selectedWorkItem.status].label}
                     </StatusBadge>
                     <div
-                      draggable={canControlWorkItems}
-                      onDragStart={event => {
-                        event.dataTransfer.setData(
-                          'application/x-singularity-work-item',
-                          selectedWorkItem.id,
-                        );
-                        event.dataTransfer.setData('text/plain', selectedWorkItem.id);
-                      }}
+	                      draggable={canControlWorkItems}
+	                      onDragStart={event => {
+	                        event.dataTransfer.effectAllowed = 'move';
+	                        event.dataTransfer.setData('text/plain', selectedWorkItem.id);
+	                        event.dataTransfer.setData(
+	                          'application/x-singularity-work-item',
+	                          selectedWorkItem.id,
+	                        );
+	                      }}
                       className={cn(
                         'inline-flex items-center gap-2 rounded-full border border-outline-variant/30 bg-white px-3 py-2 text-xs font-semibold text-on-surface shadow-sm',
                         canControlWorkItems ? 'cursor-grab' : 'cursor-default opacity-60',
@@ -4373,18 +4374,19 @@ const Orchestrator = () => {
                         });
                       }}
                       onDragOver={event => event.preventDefault()}
-                      onDrop={event => {
-                        event.preventDefault();
-                        if (!selectedWorkItem || !canControlWorkItems) {
-                          return;
-                        }
+	                      onDrop={event => {
+	                        event.preventDefault();
+	                        if (!selectedWorkItem || !canControlWorkItems) {
+	                          return;
+	                        }
 
-                        const draggedId = event.dataTransfer.getData(
-                          'application/x-singularity-work-item',
-                        );
-                        if (!draggedId || draggedId !== selectedWorkItem.id) {
-                          return;
-                        }
+	                        const draggedId =
+	                          event.dataTransfer.getData('application/x-singularity-work-item') ||
+	                          event.dataTransfer.getData('text/plain');
+	                        const normalizedDraggedId = draggedId.trim();
+	                        if (!normalizedDraggedId || normalizedDraggedId !== selectedWorkItem.id) {
+	                          return;
+	                        }
 
                         setActionError('');
                         setPhaseMoveNote('');
