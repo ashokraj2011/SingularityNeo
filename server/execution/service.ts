@@ -99,6 +99,7 @@ import {
   updateToolInvocation,
   updateRunWaitPayload,
   updateWorkflowRun,
+  updateWorkflowRunControl,
   updateWorkflowRunStep,
 } from './repository';
 import {
@@ -3414,26 +3415,40 @@ export const moveWorkItemToPhaseControl = async ({
   workItemId,
   targetPhase,
   note,
+  cancelRunIfPresent,
   actor,
 }: {
   capabilityId: string;
   workItemId: string;
   targetPhase: WorkItemPhase;
   note?: string;
+  cancelRunIfPresent?: boolean;
   actor?: ActorContext;
 }) => {
-  if (await getActiveRunForWorkItem(capabilityId, workItemId)) {
-    throw new Error(
-      'This work item already has an active or waiting run. Cancel or complete it before moving the board card.',
-    );
-  }
-
-  const projection = await resolveProjectionContext(capabilityId, workItemId);
+  let projection = await resolveProjectionContext(capabilityId, workItemId);
   if (!getCapabilityBoardPhaseIds(projection.capability).includes(targetPhase)) {
     throw new Error(
       `Phase ${targetPhase} is not part of ${projection.capability.name}'s lifecycle.`,
     );
   }
+
+  const activeRun = await getActiveRunForWorkItem(capabilityId, workItemId);
+  if (activeRun) {
+    if (!cancelRunIfPresent) {
+      throw new Error(
+        'This work item already has an active or waiting run. Cancel or complete it before moving the board card.',
+      );
+    }
+
+    await cancelWorkflowRun({
+      capabilityId,
+      runId: activeRun.id,
+      note: `Cancelled due to phase change to ${getLifecyclePhaseLabel(projection.capability, targetPhase)}.`,
+    });
+
+    projection = await resolveProjectionContext(capabilityId, workItemId);
+  }
+
   const targetNode =
     targetPhase === 'BACKLOG' || targetPhase === 'DONE'
       ? undefined
@@ -3442,9 +3457,6 @@ export const moveWorkItemToPhaseControl = async ({
   const targetStep = targetNode
     ? projection.workflow.steps.find(step => step.id === targetNode.id)
     : undefined;
-  if (!canActorOperateWorkItem({ actor, workItem: projection.workItem })) {
-    throw new Error('Only the current phase owner can move this work item.');
-  }
   const nextPhaseOwnerTeamId =
     targetPhase === 'BACKLOG' || targetPhase === 'DONE'
       ? resolveWorkItemPhaseOwnerTeamId({
@@ -3645,6 +3657,9 @@ const resolveRunWaitAndQueue = async ({
   actor?: ActorContext;
 }) => {
   const detail = await getWorkflowRunDetail(capabilityId, runId);
+  if (detail.run.status === 'PAUSED') {
+    throw new Error('Resume this run before resolving its wait.');
+  }
   const projection = await resolveProjectionContext(
     capabilityId,
     detail.run.workItemId,
@@ -4070,7 +4085,7 @@ export const cancelWorkflowRun = async ({
     cancelOpenWaitsForRun({ capabilityId, runId }),
     markOpenToolInvocationsAborted({ capabilityId, runId }),
   ]);
-  await updateWorkflowRun({
+  await updateWorkflowRunControl({
     ...detail.run,
     status: 'CANCELLED',
     leaseOwner: undefined,
@@ -4117,6 +4132,220 @@ export const cancelWorkflowRun = async ({
         agentId: projection.workItem.assignedAgentId || 'SYSTEM',
         message: note || 'Run cancelled by user.',
         level: 'WARN',
+        runId,
+        traceId: detail.run.traceId,
+      }),
+    ],
+  });
+
+  return getWorkflowRunDetail(capabilityId, runId);
+};
+
+const getRunStatusForWaitType = (waitType: RunWaitType): WorkflowRun['status'] => {
+  if (waitType === 'APPROVAL') {
+    return 'WAITING_APPROVAL';
+  }
+  if (waitType === 'INPUT') {
+    return 'WAITING_INPUT';
+  }
+  return 'WAITING_CONFLICT';
+};
+
+const getWorkItemStatusForWaitType = (waitType: RunWaitType): WorkItemStatus =>
+  waitType === 'APPROVAL' ? 'PENDING_APPROVAL' : 'BLOCKED';
+
+export const pauseWorkflowRun = async ({
+  capabilityId,
+  runId,
+  note,
+  actor,
+}: {
+  capabilityId: string;
+  runId: string;
+  note?: string;
+  actor?: ActorContext;
+}) => {
+  const detail = await getWorkflowRunDetail(capabilityId, runId);
+  if (
+    detail.run.status === 'CANCELLED' ||
+    detail.run.status === 'COMPLETED' ||
+    detail.run.status === 'FAILED'
+  ) {
+    return detail;
+  }
+  if (detail.run.status === 'PAUSED') {
+    return detail;
+  }
+
+  const actorName = getActorDisplayName(actor, 'User');
+  const pauseNote = note?.trim() || 'Execution paused by user.';
+
+  await updateWorkflowRunControl({
+    ...detail.run,
+    status: 'PAUSED',
+    leaseOwner: undefined,
+    leaseExpiresAt: undefined,
+  });
+  await releaseRunLease({ capabilityId, runId });
+
+  const projection = await resolveProjectionContext(
+    capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
+  const nextWorkItem: WorkItem = {
+    ...projection.workItem,
+    status: 'PAUSED',
+    recordVersion: (projection.workItem.recordVersion || 1) + 1,
+    history: [
+      ...projection.workItem.history,
+      createHistoryEntry(
+        actorName,
+        'Execution paused',
+        pauseNote,
+        projection.workItem.phase,
+        'PAUSED',
+      ),
+    ],
+  };
+
+  await persistProjection({
+    capabilityId,
+    workspace: projection.workspace,
+    workItem: nextWorkItem,
+    workflow: projection.workflow,
+    logsToAppend: [
+      createExecutionLog({
+        capabilityId,
+        taskId: projection.workItem.id,
+        agentId: projection.workItem.assignedAgentId || 'SYSTEM',
+        message: pauseNote,
+        level: 'WARN',
+        runId,
+        traceId: detail.run.traceId,
+      }),
+    ],
+  });
+
+  return getWorkflowRunDetail(capabilityId, runId);
+};
+
+export const resumeWorkflowRun = async ({
+  capabilityId,
+  runId,
+  note,
+  actor,
+}: {
+  capabilityId: string;
+  runId: string;
+  note?: string;
+  actor?: ActorContext;
+}) => {
+  const detail = await getWorkflowRunDetail(capabilityId, runId);
+  if (detail.run.status !== 'PAUSED') {
+    return detail;
+  }
+
+  const actorName = getActorDisplayName(actor, 'User');
+  const resumeNote = note?.trim() || 'Execution resumed by user.';
+  const openWait = [...detail.waits].reverse().find(wait => wait.status === 'OPEN') || null;
+
+  const projection = await resolveProjectionContext(
+    capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
+
+  if (openWait) {
+    const waitType = openWait.type;
+    const nextRunStatus = getRunStatusForWaitType(waitType);
+    const nextWorkItemStatus = getWorkItemStatusForWaitType(waitType);
+
+    await updateWorkflowRunControl({
+      ...detail.run,
+      status: nextRunStatus,
+      pauseReason: waitType,
+      currentWaitId: openWait.id,
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+    });
+
+    const nextWorkItem: WorkItem = {
+      ...projection.workItem,
+      status: nextWorkItemStatus,
+      recordVersion: (projection.workItem.recordVersion || 1) + 1,
+      history: [
+        ...projection.workItem.history,
+        createHistoryEntry(
+          actorName,
+          'Execution resumed',
+          resumeNote,
+          projection.workItem.phase,
+          nextWorkItemStatus,
+        ),
+      ],
+    };
+
+    await persistProjection({
+      capabilityId,
+      workspace: projection.workspace,
+      workItem: nextWorkItem,
+      workflow: projection.workflow,
+      logsToAppend: [
+        createExecutionLog({
+          capabilityId,
+          taskId: projection.workItem.id,
+          agentId: projection.workItem.assignedAgentId || 'SYSTEM',
+          message: resumeNote,
+          level: 'INFO',
+          runId,
+          traceId: detail.run.traceId,
+        }),
+      ],
+    });
+
+    return getWorkflowRunDetail(capabilityId, runId);
+  }
+
+  await updateWorkflowRunControl({
+    ...detail.run,
+    status: 'QUEUED',
+    pauseReason: undefined,
+    currentWaitId: undefined,
+    leaseOwner: undefined,
+    leaseExpiresAt: undefined,
+  });
+
+  const nextWorkItem: WorkItem = {
+    ...projection.workItem,
+    status: 'ACTIVE',
+    pendingRequest: undefined,
+    blocker: undefined,
+    recordVersion: (projection.workItem.recordVersion || 1) + 1,
+    history: [
+      ...projection.workItem.history,
+      createHistoryEntry(
+        actorName,
+        'Execution resumed',
+        resumeNote,
+        projection.workItem.phase,
+        'ACTIVE',
+      ),
+    ],
+  };
+
+  await persistProjection({
+    capabilityId,
+    workspace: projection.workspace,
+    workItem: nextWorkItem,
+    workflow: projection.workflow,
+    logsToAppend: [
+      createExecutionLog({
+        capabilityId,
+        taskId: projection.workItem.id,
+        agentId: projection.workItem.assignedAgentId || 'SYSTEM',
+        message: resumeNote,
+        level: 'INFO',
         runId,
         traceId: detail.run.traceId,
       }),
@@ -4251,7 +4480,8 @@ const completeRunWithWait = async ({
   artifacts?: Artifact[];
   runStepOverride?: WorkflowRunStep;
 }) => {
-  if ((await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED') {
+  const waitRunStatus = await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id);
+  if (waitRunStatus === 'CANCELLED' || waitRunStatus === 'PAUSED') {
     return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
   }
 
@@ -4601,7 +4831,9 @@ const executeAutomatedStep = async (
   detail: WorkflowRunDetail,
 ): Promise<WorkflowRunDetail> => {
   if (
-    (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+    ['CANCELLED', 'PAUSED'].includes(
+      await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
+    )
   ) {
     return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
   }
@@ -4758,7 +4990,9 @@ const executeAutomatedStep = async (
 
   if (compiledStepContext.missingInputs.length > 0) {
     if (
-      (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+      ['CANCELLED', 'PAUSED'].includes(
+        await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
+      )
     ) {
       return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
     }
@@ -4793,7 +5027,9 @@ const executeAutomatedStep = async (
 
   for (let iteration = 0; iteration < MAX_AGENT_TOOL_LOOPS; iteration += 1) {
     if (
-      (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+      ['CANCELLED', 'PAUSED'].includes(
+        await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
+      )
     ) {
       return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
     }
@@ -4815,7 +5051,9 @@ const executeAutomatedStep = async (
     const decision = decisionEnvelope.decision;
 
     if (
-      (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+      ['CANCELLED', 'PAUSED'].includes(
+        await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
+      )
     ) {
       return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
     }
@@ -4911,11 +5149,13 @@ const executeAutomatedStep = async (
     }
 
     if (decision.action === 'invoke_tool') {
-      if (
-        (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
-      ) {
-        return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
-      }
+    if (
+      ['CANCELLED', 'PAUSED'].includes(
+        await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
+      )
+    ) {
+      return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+    }
 
       const allowedToolIds = step.allowedToolIds || [];
       if (!allowedToolIds.includes(decision.toolCall.toolId)) {
@@ -4971,7 +5211,9 @@ const executeAutomatedStep = async (
 
       if (policyDecision.decision === 'REQUIRE_APPROVAL') {
         if (
-          (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+          ['CANCELLED', 'PAUSED'].includes(
+            await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
+          )
         ) {
           return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
         }
@@ -5238,7 +5480,9 @@ const executeAutomatedStep = async (
 
       if (codeDiffArtifact) {
         if (
-          (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+          ['CANCELLED', 'PAUSED'].includes(
+            await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
+          )
         ) {
           return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
         }
@@ -5358,7 +5602,9 @@ const executeAutomatedStep = async (
           : decision.wait.type;
 
       if (
-        (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+        ['CANCELLED', 'PAUSED'].includes(
+          await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
+        )
       ) {
         return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
       }
@@ -5423,7 +5669,11 @@ const executeAutomatedStep = async (
     }
   }
 
-  if ((await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED') {
+  if (
+    ['CANCELLED', 'PAUSED'].includes(
+      await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
+    )
+  ) {
     return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
   }
 
@@ -5482,7 +5732,7 @@ export const processWorkflowRun = async (
       currentDetail.run.capabilityId,
       currentDetail.run.id,
     );
-    if (latestStatus === 'CANCELLED') {
+    if (latestStatus === 'CANCELLED' || latestStatus === 'PAUSED') {
       return getWorkflowRunDetail(currentDetail.run.capabilityId, currentDetail.run.id);
     }
 
@@ -5566,6 +5816,7 @@ export const processWorkflowRun = async (
       currentDetail.run.status === 'WAITING_APPROVAL' ||
       currentDetail.run.status === 'WAITING_INPUT' ||
       currentDetail.run.status === 'WAITING_CONFLICT' ||
+      currentDetail.run.status === 'PAUSED' ||
       currentDetail.run.status === 'CANCELLED'
     ) {
       return currentDetail;

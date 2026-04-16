@@ -12,6 +12,7 @@ import {
   List,
   LoaderCircle,
   MessageSquareText,
+  Pause,
   Play,
   Plus,
   RefreshCw,
@@ -61,7 +62,9 @@ import {
   initializeCapabilityWorkItemExecutionContext,
   listCapabilityWorkflowRuns,
   moveCapabilityWorkItem,
+  pauseCapabilityWorkflowRun,
   provideCapabilityWorkflowRunInput,
+  resumeCapabilityWorkflowRun,
   validateOnboardingWorkspacePath,
   releaseCapabilityWorkItemControl,
   releaseCapabilityWorkItemWriteControl,
@@ -144,6 +147,7 @@ const RUN_STATUS_META: Record<
 > = {
   QUEUED: { label: 'Queued', accent: 'bg-slate-100 text-slate-700' },
   RUNNING: { label: 'Running', accent: 'bg-primary/10 text-primary' },
+  PAUSED: { label: 'Paused', accent: 'bg-slate-200 text-slate-700' },
   WAITING_APPROVAL: { label: 'Waiting Approval', accent: 'bg-amber-100 text-amber-700' },
   WAITING_INPUT: { label: 'Waiting Input', accent: 'bg-orange-100 text-orange-700' },
   WAITING_CONFLICT: { label: 'Waiting Conflict', accent: 'bg-red-100 text-red-700' },
@@ -158,6 +162,7 @@ const WORK_ITEM_STATUS_META: Record<
 > = {
   ACTIVE: { label: 'Active', accent: 'bg-primary/10 text-primary' },
   BLOCKED: { label: 'Blocked', accent: 'bg-red-100 text-red-700' },
+  PAUSED: { label: 'Paused', accent: 'bg-slate-200 text-slate-700' },
   PENDING_APPROVAL: { label: 'Pending Approval', accent: 'bg-amber-100 text-amber-700' },
   COMPLETED: { label: 'Completed', accent: 'bg-emerald-100 text-emerald-700' },
   CANCELLED: { label: 'Cancelled', accent: 'bg-slate-200 text-slate-700' },
@@ -166,6 +171,7 @@ const WORK_ITEM_STATUS_META: Record<
 const ACTIVE_RUN_STATUSES: WorkflowRun['status'][] = [
   'QUEUED',
   'RUNNING',
+  'PAUSED',
   'WAITING_APPROVAL',
   'WAITING_INPUT',
   'WAITING_CONFLICT',
@@ -259,7 +265,13 @@ type WorkNavigatorSection = {
   helper: string;
   items: WorkNavigatorItem[];
 };
-type WorkbenchQueueView = 'ALL_WORK' | 'MY_QUEUE' | 'TEAM_QUEUE' | 'ATTENTION' | 'WATCHING';
+type WorkbenchQueueView =
+  | 'ALL_WORK'
+  | 'MY_QUEUE'
+  | 'TEAM_QUEUE'
+  | 'ATTENTION'
+  | 'PAUSED'
+  | 'WATCHING';
 type WorkbenchSelectionFocus = 'INPUT' | 'APPROVAL' | 'RESOLUTION';
 
 const STORAGE_KEYS = {
@@ -882,6 +894,11 @@ const Orchestrator = () => {
   const [resolutionNote, setResolutionNote] = useState('');
   const [isCancelWorkItemOpen, setIsCancelWorkItemOpen] = useState(false);
   const [cancelWorkItemNote, setCancelWorkItemNote] = useState('');
+  const [phaseMoveRequest, setPhaseMoveRequest] = useState<{
+    workItemId: string;
+    targetPhase: WorkItemPhase;
+  } | null>(null);
+  const [phaseMoveNote, setPhaseMoveNote] = useState('');
   const [isDiffReviewOpen, setIsDiffReviewOpen] = useState(false);
   const [isApprovalReviewOpen, setIsApprovalReviewOpen] = useState(false);
   const [isApprovalReviewHydrated, setIsApprovalReviewHydrated] = useState(false);
@@ -1427,9 +1444,12 @@ const Orchestrator = () => {
           : queueView === 'TEAM_QUEUE'
           ? Boolean(item.phaseOwnerTeamId && actorTeamIds.includes(item.phaseOwnerTeamId))
           : queueView === 'ATTENTION'
-          ? item.status === 'BLOCKED' ||
-            item.status === 'PENDING_APPROVAL' ||
-            Boolean(item.pendingRequest)
+          ? item.status !== 'PAUSED' &&
+            (item.status === 'BLOCKED' ||
+              item.status === 'PENDING_APPROVAL' ||
+              Boolean(item.pendingRequest))
+          : queueView === 'PAUSED'
+          ? item.status === 'PAUSED'
           : Boolean(actorUserId && item.watchedByUserIds?.includes(actorUserId));
 
       return (
@@ -1458,10 +1478,11 @@ const Orchestrator = () => {
       filteredWorkItems
         .filter(
           item =>
-            item.blocker?.status === 'OPEN' ||
-            Boolean(item.pendingRequest) ||
-            item.status === 'BLOCKED' ||
-            item.status === 'PENDING_APPROVAL',
+            item.status !== 'PAUSED' &&
+            (item.blocker?.status === 'OPEN' ||
+              Boolean(item.pendingRequest) ||
+              item.status === 'BLOCKED' ||
+              item.status === 'PENDING_APPROVAL'),
         )
         .map(item => {
           const workflow = workflowsById.get(item.workflowId) || null;
@@ -1471,7 +1492,7 @@ const Orchestrator = () => {
             getAttentionReason({
               blocker: item.blocker,
               pendingRequest: item.pendingRequest,
-            }) || 'This work item is paused and needs operator attention.';
+            }) || 'This work item needs operator attention.';
           const attentionLabel = getAttentionLabel({
             blocker: item.blocker,
             pendingRequest: item.pendingRequest,
@@ -1594,6 +1615,16 @@ const Orchestrator = () => {
         items: filteredWorkItems
           .filter(item => item.status !== 'COMPLETED' && item.phase !== 'DONE')
           .filter(item => item.status !== 'CANCELLED')
+          .filter(item => item.status !== 'PAUSED')
+          .slice(0, 12)
+          .map(buildNavigatorItem),
+      },
+      {
+        id: 'paused',
+        title: 'Paused',
+        helper: 'Items intentionally paused. Resume them when you are ready to re-enter the flow.',
+        items: filteredWorkItems
+          .filter(item => item.status === 'PAUSED')
           .slice(0, 12)
           .map(buildNavigatorItem),
       },
@@ -1609,6 +1640,9 @@ const Orchestrator = () => {
 
   const selectedWorkItem =
     workItems.find(item => item.id === selectedWorkItemId) || null;
+  const phaseMoveItem = phaseMoveRequest
+    ? workItems.find(item => item.id === phaseMoveRequest.workItemId) || null
+    : null;
   const selectedWorkflow = selectedWorkItem
     ? workflowsById.get(selectedWorkItem.workflowId) || null
     : null;
@@ -3680,6 +3714,64 @@ const Orchestrator = () => {
     );
   };
 
+  const handlePauseRunById = async ({
+    runId,
+    workItemId,
+    workItemTitle,
+  }: {
+    runId: string;
+    workItemId?: string;
+    workItemTitle?: string;
+  }) => {
+    if (!requirePermission(canControlWorkItems, 'This operator cannot pause runs.')) {
+      return;
+    }
+
+    await withAction(
+      `pause-${workItemId || runId}`,
+      async () => {
+        await pauseCapabilityWorkflowRun(activeCapability.id, runId, {
+          note: resolutionNote.trim() || 'Execution paused from the inbox.',
+        });
+        setResolutionNote('');
+        await refreshSelection(workItemId === selectedWorkItemId ? workItemId : undefined);
+      },
+      {
+        title: 'Execution paused',
+        description: workItemTitle ? `${workItemTitle} is paused.` : undefined,
+      },
+    );
+  };
+
+  const handleResumeRunById = async ({
+    runId,
+    workItemId,
+    workItemTitle,
+  }: {
+    runId: string;
+    workItemId?: string;
+    workItemTitle?: string;
+  }) => {
+    if (!requirePermission(canControlWorkItems, 'This operator cannot resume runs.')) {
+      return;
+    }
+
+    await withAction(
+      `resume-${workItemId || runId}`,
+      async () => {
+        await resumeCapabilityWorkflowRun(activeCapability.id, runId, {
+          note: resolutionNote.trim() || 'Execution resumed from the inbox.',
+        });
+        setResolutionNote('');
+        await refreshSelection(workItemId === selectedWorkItemId ? workItemId : undefined);
+      },
+      {
+        title: 'Execution resumed',
+        description: workItemTitle ? `${workItemTitle} re-entered the queue.` : undefined,
+      },
+    );
+  };
+
   const handleCancelWorkItem = async () => {
     if (
       !selectedWorkItem ||
@@ -3712,7 +3804,11 @@ const Orchestrator = () => {
     );
   };
 
-  const handleMoveWorkItem = async (workItemId: string, targetPhase: WorkItemPhase) => {
+  const handleMoveWorkItem = async (
+    workItemId: string,
+    targetPhase: WorkItemPhase,
+    options?: { cancelRunIfPresent?: boolean; note?: string },
+  ) => {
     const item = workItems.find(current => current.id === workItemId);
     if (
       !item ||
@@ -3727,13 +3823,60 @@ const Orchestrator = () => {
       async () => {
         await moveCapabilityWorkItem(activeCapability.id, workItemId, {
           targetPhase,
-          note: `Story moved to ${getPhaseMeta(targetPhase).label} from the orchestration board.`,
+          cancelRunIfPresent: options?.cancelRunIfPresent,
+          note:
+            options?.note ||
+            `Story moved to ${getPhaseMeta(targetPhase).label} from the orchestration board.`,
         });
         await refreshSelection(selectedWorkItemId === workItemId ? workItemId : undefined);
       },
       {
         title: 'Work item moved',
         description: `${item.title} moved to ${getPhaseMeta(targetPhase).label}.`,
+      },
+    );
+  };
+
+  const handleConfirmPhaseMove = async () => {
+    if (
+      !phaseMoveRequest ||
+      !requirePermission(canControlWorkItems, 'This operator cannot move work items across phases.')
+    ) {
+      return;
+    }
+
+    const item = workItems.find(current => current.id === phaseMoveRequest.workItemId);
+    if (!item) {
+      setPhaseMoveRequest(null);
+      setPhaseMoveNote('');
+      return;
+    }
+
+    if (item.phase === phaseMoveRequest.targetPhase) {
+      setPhaseMoveRequest(null);
+      setPhaseMoveNote('');
+      return;
+    }
+
+    const targetLabel = getPhaseMeta(phaseMoveRequest.targetPhase).label;
+    const note =
+      phaseMoveNote.trim() || `Phase changed to ${targetLabel} from the phase rail.`;
+
+    await withAction(
+      `move-${item.id}`,
+      async () => {
+        await moveCapabilityWorkItem(activeCapability.id, item.id, {
+          targetPhase: phaseMoveRequest.targetPhase,
+          cancelRunIfPresent: true,
+          note,
+        });
+        setPhaseMoveRequest(null);
+        setPhaseMoveNote('');
+        await refreshSelection(selectedWorkItemId === item.id ? item.id : undefined);
+      },
+      {
+        title: 'Work item moved',
+        description: `${item.title} moved to ${targetLabel}.`,
       },
     );
   };
@@ -4030,6 +4173,8 @@ const Orchestrator = () => {
 
     const dockCanResolveWait = Boolean(
       selectedOpenWait &&
+        selectedWorkItem?.status !== 'PAUSED' &&
+        currentRun?.status !== 'PAUSED' &&
         (selectedOpenWait.type === 'APPROVAL' ? canDecideApprovals : canControlWorkItems) &&
         (!dockResolutionRequired || Boolean(dockInput.trim()) || waitOnlyRequestsApprovedWorkspace) &&
         !(
@@ -4121,6 +4266,8 @@ const Orchestrator = () => {
                   ? 'Current team queue'
                   : queueView === 'ATTENTION'
                   ? 'Attention queue'
+                  : queueView === 'PAUSED'
+                  ? 'Paused queue'
                   : 'Watching queue'}
               </span>
               <span className="orchestrator-commandbar-footnote-copy">
@@ -4171,6 +4318,7 @@ const Orchestrator = () => {
                     ['MY_QUEUE', 'Mine'],
                     ['TEAM_QUEUE', 'Team'],
                     ['ATTENTION', 'Approvals'],
+                    ['PAUSED', 'Paused'],
                     ['WATCHING', 'Watching'],
                   ].map(([value, label]) => (
                     <button
@@ -4209,6 +4357,7 @@ const Orchestrator = () => {
                   <option value="ALL">All statuses</option>
 	                  <option value="ACTIVE">Active</option>
 	                  <option value="BLOCKED">Blocked</option>
+                    <option value="PAUSED">Paused</option>
 	                  <option value="PENDING_APPROVAL">Pending approval</option>
 	                  <option value="COMPLETED">Completed</option>
 	                  <option value="CANCELLED">Cancelled</option>
@@ -4247,19 +4396,29 @@ const Orchestrator = () => {
                         : 'View');
 
                     return (
-                      <button
+                      <div
                         key={entry.item.id}
-                        type="button"
                         onClick={() => {
                           selectWorkItem(entry.item.id);
                           if (attention?.callToAction) {
                             focusDockComposer();
                           }
                         }}
+                        onKeyDown={event => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            selectWorkItem(entry.item.id);
+                            if (attention?.callToAction) {
+                              focusDockComposer();
+                            }
+                          }
+                        }}
                         className={cn(
                           'orchestrator-navigator-item',
                           selectedWorkItemId === entry.item.id && 'orchestrator-navigator-item-active',
                         )}
+                        role="button"
+                        tabIndex={0}
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
@@ -4279,6 +4438,69 @@ const Orchestrator = () => {
                             <StatusBadge tone="warning">{attention.attentionLabel}</StatusBadge>
                           ) : null}
                         </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {entry.item.activeRunId && entry.item.status !== 'PAUSED' ? (
+                            <button
+                              type="button"
+                              onClick={event => {
+                                event.stopPropagation();
+                                void handlePauseRunById({
+                                  runId: entry.item.activeRunId || '',
+                                  workItemId: entry.item.id,
+                                  workItemTitle: entry.item.title,
+                                });
+                              }}
+                              disabled={!canControlWorkItems || busyAction !== null}
+                              className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {busyAction === `pause-${entry.item.id}` ? (
+                                <LoaderCircle size={14} className="animate-spin" />
+                              ) : (
+                                <Pause size={14} />
+                              )}
+                              Pause
+                            </button>
+                          ) : null}
+                          {entry.item.activeRunId && entry.item.status === 'PAUSED' ? (
+                            <button
+                              type="button"
+                              onClick={event => {
+                                event.stopPropagation();
+                                void handleResumeRunById({
+                                  runId: entry.item.activeRunId || '',
+                                  workItemId: entry.item.id,
+                                  workItemTitle: entry.item.title,
+                                });
+                              }}
+                              disabled={!canControlWorkItems || busyAction !== null}
+                              className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {busyAction === `resume-${entry.item.id}` ? (
+                                <LoaderCircle size={14} className="animate-spin" />
+                              ) : (
+                                <Play size={14} />
+                              )}
+                              Resume
+                            </button>
+                          ) : null}
+                          {entry.item.status !== 'COMPLETED' && entry.item.status !== 'CANCELLED' ? (
+                            <button
+                              type="button"
+                              onClick={event => {
+                                event.stopPropagation();
+                                selectWorkItem(entry.item.id);
+                                setActionError('');
+                                setCancelWorkItemNote('');
+                                setIsCancelWorkItemOpen(true);
+                              }}
+                              disabled={!canControlWorkItems || busyAction !== null}
+                              className="enterprise-button enterprise-button-danger px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <X size={14} />
+                              Cancel
+                            </button>
+                          ) : null}
+                        </div>
                         <div className="mt-3 space-y-1 text-xs leading-relaxed text-secondary">
                           <p>{entry.meta.currentStepName}</p>
                           <p>{entry.meta.agentName}</p>
@@ -4292,7 +4514,7 @@ const Orchestrator = () => {
                             )}
                           </p>
                         ) : null}
-                      </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -4335,6 +4557,102 @@ const Orchestrator = () => {
                     {selectedWorkItem.description || 'No description was captured for this work item.'}
                   </p>
 
+                  <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-surface-container-low/35 px-4 py-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="workspace-meta-label">Phase rail</p>
+                        <p className="mt-2 text-xs leading-relaxed text-secondary">
+                          Click a phase to move this work item. Phase changes cancel any in-flight run first.
+                        </p>
+                      </div>
+                      <div
+                        draggable={canControlWorkItems}
+                        onDragStart={event => {
+                          event.dataTransfer.setData(
+                            'application/x-singularity-work-item',
+                            selectedWorkItem.id,
+                          );
+                          event.dataTransfer.setData('text/plain', selectedWorkItem.id);
+                        }}
+                        className={cn(
+                          'inline-flex items-center gap-2 rounded-full border border-outline-variant/30 bg-white px-3 py-1 text-xs font-semibold text-on-surface',
+                          canControlWorkItems ? 'cursor-grab' : 'cursor-default opacity-60',
+                        )}
+                        title={
+                          canControlWorkItems
+                            ? 'Drag this chip onto a phase dot to move the work item.'
+                            : undefined
+                        }
+                      >
+                        <FileCode size={14} className="text-secondary" />
+                        Drag {selectedWorkItem.id}
+                      </div>
+                    </div>
+
+                    <div className="relative mt-4 flex items-center justify-between gap-2">
+                      <div className="absolute left-2 right-2 top-1/2 h-px -translate-y-1/2 bg-outline-variant/30" />
+                      {lifecycleBoardPhases.map(phase => {
+                        const isCurrent = phase === selectedWorkItem.phase;
+                        const targetLabel = getPhaseMeta(phase).label;
+                        return (
+                          <button
+                            key={phase}
+                            type="button"
+                            disabled={!canControlWorkItems || busyAction !== null || isCurrent}
+                            onClick={() => {
+                              setActionError('');
+                              setPhaseMoveNote('');
+                              setPhaseMoveRequest({
+                                workItemId: selectedWorkItem.id,
+                                targetPhase: phase,
+                              });
+                            }}
+                            onDragOver={event => event.preventDefault()}
+                            onDrop={event => {
+                              event.preventDefault();
+                              const draggedId = event.dataTransfer.getData(
+                                'application/x-singularity-work-item',
+                              );
+                              if (!draggedId || draggedId !== selectedWorkItem.id) {
+                                return;
+                              }
+
+                              setActionError('');
+                              setPhaseMoveNote('');
+                              setPhaseMoveRequest({
+                                workItemId: selectedWorkItem.id,
+                                targetPhase: phase,
+                              });
+                            }}
+                            className={cn(
+                              'relative z-10 h-4 w-4 rounded-full border transition',
+                              isCurrent
+                                ? 'border-primary bg-primary'
+                                : 'border-outline-variant/40 bg-white hover:border-primary/60',
+                              (!canControlWorkItems || busyAction !== null) &&
+                                'cursor-not-allowed opacity-60',
+                            )}
+                            aria-label={`Move to ${targetLabel}`}
+                            title={`Move to ${targetLabel}`}
+                          >
+                            <span className="sr-only">{targetLabel}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-3 flex items-start justify-between gap-2 text-[0.7rem] font-semibold text-secondary">
+                      {lifecycleBoardPhases.map(phase => (
+                        <span
+                          key={phase}
+                          className="w-0 flex-1 text-center leading-tight"
+                        >
+                          {getPhaseMeta(phase).label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
                   <div className="mt-4 flex flex-wrap gap-2">
                     {canStartExecution ? (
                       <button
@@ -4367,6 +4685,48 @@ const Orchestrator = () => {
                       <MessageSquareText size={16} />
                       Open full chat
                     </button>
+                    {currentRunIsActive && currentRun && currentRun.status !== 'PAUSED' ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void handlePauseRunById({
+                            runId: currentRun.id,
+                            workItemId: selectedWorkItem.id,
+                            workItemTitle: selectedWorkItem.title,
+                          })
+                        }
+                        disabled={!canControlWorkItems || busyAction !== null}
+                        className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busyAction === `pause-${selectedWorkItem.id}` ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <Pause size={16} />
+                        )}
+                        Pause
+                      </button>
+                    ) : null}
+                    {currentRun && currentRun.status === 'PAUSED' ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void handleResumeRunById({
+                            runId: currentRun.id,
+                            workItemId: selectedWorkItem.id,
+                            workItemTitle: selectedWorkItem.title,
+                          })
+                        }
+                        disabled={!canControlWorkItems || busyAction !== null}
+                        className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busyAction === `resume-${selectedWorkItem.id}` ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <Play size={16} />
+                        )}
+                        Resume
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => {
@@ -4438,30 +4798,69 @@ const Orchestrator = () => {
 	              </p>
 	            </div>
 	
-	            <div className="flex min-h-0 flex-1 flex-col px-5 py-4">
-	              {!selectedWorkItem ? (
-	                <div className="workspace-meta-card">
-	                  Select a work item to see pending requests and start a focused copilot thread.
-	                </div>
-	              ) : selectedOpenWait ? (
-                <div className="workspace-meta-card border-amber-200/80 bg-amber-50/50">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <p className="workspace-meta-label">Pending request</p>
-                      <p className="mt-2 text-sm font-semibold text-on-surface">
-                        {selectedAttentionLabel}
-                      </p>
-                    </div>
-                    <StatusBadge tone="warning">{formatEnumLabel(selectedOpenWait.type)}</StatusBadge>
-                  </div>
-                  <div className="mt-3 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
-                    <MarkdownContent content={normalizeMarkdownishText(selectedOpenWait.message)} />
-                  </div>
+		            <div className="flex min-h-0 flex-1 flex-col px-5 py-4">
+		              {!selectedWorkItem ? (
+		                <div className="workspace-meta-card">
+		                  Select a work item to see pending requests and start a focused copilot thread.
+		                </div>
+		              ) : (
+                    <>
+                      {selectedWorkItem.status === 'PAUSED' && currentRun?.status === 'PAUSED' ? (
+                        <div className="workspace-meta-card border-slate-200 bg-slate-50/60">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <p className="workspace-meta-label">Paused</p>
+                              <p className="mt-2 text-sm font-semibold text-on-surface">
+                                Execution is paused
+                              </p>
+                              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                                Resume to continue, or to resolve pending requests.
+                              </p>
+                            </div>
+                            {currentRun ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleResumeRunById({
+                                    runId: currentRun.id,
+                                    workItemId: selectedWorkItem.id,
+                                    workItemTitle: selectedWorkItem.title,
+                                  })
+                                }
+                                disabled={!canControlWorkItems || busyAction !== null}
+                                className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                {busyAction === `resume-${selectedWorkItem.id}` ? (
+                                  <LoaderCircle size={14} className="animate-spin" />
+                                ) : (
+                                  <Play size={14} />
+                                )}
+                                Resume
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : null}
 
-	                  {dockMissingFields.length > 0 ? (
-	                    <div className="mt-4">
-	                      <p className="text-xs leading-relaxed text-secondary">
-	                        Click a chip to add it to your response.
+                      {selectedOpenWait ? (
+                        <div className="workspace-meta-card border-amber-200/80 bg-amber-50/50">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <p className="workspace-meta-label">Pending request</p>
+                              <p className="mt-2 text-sm font-semibold text-on-surface">
+                                {selectedAttentionLabel}
+                              </p>
+                            </div>
+                            <StatusBadge tone="warning">{formatEnumLabel(selectedOpenWait.type)}</StatusBadge>
+                          </div>
+                          <div className="mt-3 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
+                            <MarkdownContent content={normalizeMarkdownishText(selectedOpenWait.message)} />
+                          </div>
+
+		                  {dockMissingFields.length > 0 ? (
+		                    <div className="mt-4">
+		                      <p className="text-xs leading-relaxed text-secondary">
+		                        Click a chip to add it to your response.
 	                      </p>
 	                      <div className="mt-2 flex flex-wrap gap-2">
 	                        {dockMissingFields.map(field => (
@@ -4592,19 +4991,21 @@ const Orchestrator = () => {
 	                          {approvedWorkspaceValidation.message}
 	                        </p>
 	                      ) : null}
-	                      {!canEditCapability ? (
-	                        <p className="mt-2 text-xs font-medium text-amber-800">
-	                          Approving new paths requires capability edit access. Switch Current Operator to a workspace admin if needed.
-	                        </p>
-	                      ) : null}
-	                    </div>
-	                  ) : null}
-                </div>
-              ) : (
-                <div className="workspace-meta-card">
-                  No open approval, input, or conflict wait is attached to the selected work item right now.
-                </div>
-              )}
+		                      {!canEditCapability ? (
+		                        <p className="mt-2 text-xs font-medium text-amber-800">
+		                          Approving new paths requires capability edit access. Switch Current Operator to a workspace admin if needed.
+		                        </p>
+		                      ) : null}
+		                    </div>
+		                  ) : null}
+                        </div>
+                      ) : (
+                        <div className="workspace-meta-card">
+                          No open approval, input, or conflict wait is attached to the selected work item right now.
+                        </div>
+                      )}
+                    </>
+                  )}
 
 	              <div
 	                ref={dockThreadRef}
@@ -5076,13 +5477,14 @@ const Orchestrator = () => {
             <div className="orchestrator-toolbar-row orchestrator-toolbar-row-secondary">
               <div className="orchestrator-filter-strip">
                 <div className="orchestrator-view-toggle" aria-label="Choose work queue">
-                  {[
-                    ['ALL_WORK', 'All work'],
-                    ['MY_QUEUE', 'My queue'],
-                    ['TEAM_QUEUE', 'Team queue'],
-                    ['ATTENTION', 'Needs approval'],
-                    ['WATCHING', 'Watching'],
-                  ].map(([value, label]) => (
+	                  {[
+	                    ['ALL_WORK', 'All work'],
+	                    ['MY_QUEUE', 'My queue'],
+	                    ['TEAM_QUEUE', 'Team queue'],
+	                    ['ATTENTION', 'Needs approval'],
+	                    ['PAUSED', 'Paused'],
+	                    ['WATCHING', 'Watching'],
+	                  ].map(([value, label]) => (
                     <button
                       key={value}
                       type="button"
@@ -5115,13 +5517,14 @@ const Orchestrator = () => {
                   }
                   className="field-select"
                 >
-                  <option value="ALL">All statuses</option>
-	                  <option value="ACTIVE">Active</option>
-	                  <option value="BLOCKED">Blocked</option>
-	                  <option value="PENDING_APPROVAL">Pending approval</option>
-	                  <option value="COMPLETED">Completed</option>
-	                  <option value="CANCELLED">Cancelled</option>
-	                </select>
+	                  <option value="ALL">All statuses</option>
+		                  <option value="ACTIVE">Active</option>
+		                  <option value="BLOCKED">Blocked</option>
+                    <option value="PAUSED">Paused</option>
+		                  <option value="PENDING_APPROVAL">Pending approval</option>
+		                  <option value="COMPLETED">Completed</option>
+		                  <option value="CANCELLED">Cancelled</option>
+		                </select>
                 <select
                   value={priorityFilter}
                   onChange={event =>
@@ -5174,6 +5577,8 @@ const Orchestrator = () => {
                   ? 'Current team queue'
                   : queueView === 'ATTENTION'
                   ? 'Attention queue'
+                  : queueView === 'PAUSED'
+                  ? 'Paused queue'
                   : 'Watching queue'}
               </span>
               <span className="orchestrator-commandbar-footnote-copy">
@@ -8718,6 +9123,97 @@ const Orchestrator = () => {
               </div>
             )}
           </motion.aside>
+        </div>
+      )}
+
+      {phaseMoveRequest && phaseMoveItem && (
+        <div className="fixed inset-0 z-[92] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-12 backdrop-blur-sm">
+          <button
+            type="button"
+            aria-label="Close phase change dialog"
+            onClick={() => {
+              setPhaseMoveRequest(null);
+              setPhaseMoveNote('');
+            }}
+            className="absolute inset-0"
+          />
+          <ModalShell
+            title={`Move phase · ${phaseMoveItem.title}`}
+            eyebrow="Phase Change"
+            description="Moving a work item will cancel any in-flight run first, then place the story back onto the selected lifecycle phase."
+            className="relative z-[1] w-full max-w-2xl"
+            actions={
+              <button
+                type="button"
+                onClick={() => {
+                  setPhaseMoveRequest(null);
+                  setPhaseMoveNote('');
+                }}
+                className="workspace-list-action"
+              >
+                <X size={14} />
+              </button>
+            }
+          >
+            <div className="space-y-4">
+              <div className="workspace-meta-card border-amber-200 bg-amber-50 text-amber-900">
+                <p className="text-sm font-semibold">Safety check</p>
+                <p className="mt-1 text-sm leading-relaxed">
+                  This will cancel the current run (if any) before moving from{' '}
+                  <span className="font-semibold">
+                    {getPhaseMeta(phaseMoveItem.phase).label}
+                  </span>{' '}
+                  to{' '}
+                  <span className="font-semibold">
+                    {getPhaseMeta(phaseMoveRequest.targetPhase).label}
+                  </span>
+                  .
+                </p>
+              </div>
+
+              <label className="block space-y-2">
+                <span className="field-label">Move note (optional)</span>
+                <textarea
+                  value={phaseMoveNote}
+                  onChange={event => setPhaseMoveNote(event.target.value)}
+                  placeholder="Why are we changing phases?"
+                  className="field-textarea bg-white"
+                />
+              </label>
+
+              {actionError ? (
+                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+                  {actionError}
+                </div>
+              ) : null}
+
+              <div className="flex flex-wrap items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPhaseMoveRequest(null);
+                    setPhaseMoveNote('');
+                  }}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  Keep current phase
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleConfirmPhaseMove()}
+                  disabled={busyAction !== null || !canControlWorkItems}
+                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busyAction === `move-${phaseMoveItem.id}` ? (
+                    <LoaderCircle size={16} className="animate-spin" />
+                  ) : (
+                    <ArrowRight size={16} />
+                  )}
+                  Move phase
+                </button>
+              </div>
+            </div>
+          </ModalShell>
         </div>
       )}
 

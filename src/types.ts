@@ -1705,6 +1705,7 @@ export interface LearningUpdate {
 export type WorkItemStatus =
   | 'ACTIVE'
   | 'BLOCKED'
+  | 'PAUSED'
   | 'PENDING_APPROVAL'
   | 'COMPLETED'
   | 'CANCELLED';
@@ -1843,6 +1844,7 @@ export interface WorkItem {
 export type WorkflowRunStatus =
   | 'QUEUED'
   | 'RUNNING'
+  | 'PAUSED'
   | 'WAITING_APPROVAL'
   | 'WAITING_INPUT'
   | 'WAITING_CONFLICT'

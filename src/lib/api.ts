@@ -1041,7 +1041,7 @@ export const createCapabilityWorkItem = async (
 export const moveCapabilityWorkItem = async (
   capabilityId: string,
   workItemId: string,
-  payload: { targetPhase: WorkItemPhase; note?: string },
+  payload: { targetPhase: WorkItemPhase; note?: string; cancelRunIfPresent?: boolean },
 ): Promise<WorkItem> =>
   requestJson<WorkItem>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/move`,
@@ -1331,6 +1331,34 @@ export const cancelCapabilityWorkflowRun = async (
 ): Promise<WorkflowRunDetail> =>
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/cancel`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
+    },
+  );
+
+export const pauseCapabilityWorkflowRun = async (
+  capabilityId: string,
+  runId: string,
+  payload?: { note?: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/pause`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
+    },
+  );
+
+export const resumeCapabilityWorkflowRun = async (
+  capabilityId: string,
+  runId: string,
+  payload?: { note?: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/resume`,
     {
       method: 'POST',
       headers: jsonHeaders,

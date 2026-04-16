@@ -119,8 +119,10 @@ import {
   continueWorkflowStageControl,
   createWorkItemRecord,
   moveWorkItemToPhaseControl,
+  pauseWorkflowRun,
   provideWorkflowRunInput,
   requestChangesWorkflowRun,
+  resumeWorkflowRun,
   resolveWorkflowRunConflict,
   restartWorkflowRun,
   startWorkflowExecution,
@@ -3191,6 +3193,7 @@ app.post('/api/capabilities/:capabilityId/work-items', async (request, response)
 app.post('/api/capabilities/:capabilityId/work-items/:workItemId/move', async (request, response) => {
   const targetPhase = String(request.body?.targetPhase || '').trim() as WorkItemPhase;
   const note = String(request.body?.note || '').trim();
+  const cancelRunIfPresent = Boolean(request.body?.cancelRunIfPresent);
 
   if (!targetPhase) {
     response.status(400).json({ error: 'A targetPhase is required.' });
@@ -3210,6 +3213,7 @@ app.post('/api/capabilities/:capabilityId/work-items/:workItemId/move', async (r
         workItemId: request.params.workItemId,
         targetPhase,
         note: note || undefined,
+        cancelRunIfPresent,
         actor,
       }),
     );
@@ -4033,6 +4037,48 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/cancel', async (request, r
         note: String(request.body?.note || '').trim() || undefined,
       }),
     );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/runs/:runId/pause', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'workitem.control',
+    });
+    response.json(
+      await pauseWorkflowRun({
+        capabilityId: request.params.capabilityId,
+        runId: request.params.runId,
+        note: String(request.body?.note || '').trim() || undefined,
+        actor,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/runs/:runId/resume', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'workitem.control',
+    });
+    const detail = await resumeWorkflowRun({
+      capabilityId: request.params.capabilityId,
+      runId: request.params.runId,
+      note: String(request.body?.note || '').trim() || undefined,
+      actor,
+    });
+    wakeExecutionWorker();
+    response.json(detail);
   } catch (error) {
     sendRepositoryError(response, error);
   }

@@ -53,6 +53,7 @@ const createId = (prefix: string) =>
 export const ACTIVE_RUN_STATUSES: WorkflowRunStatus[] = [
   'QUEUED',
   'RUNNING',
+  'PAUSED',
   'WAITING_APPROVAL',
   'WAITING_INPUT',
   'WAITING_CONFLICT',
@@ -677,6 +678,58 @@ export const createWorkflowRun = async ({
   });
 
 export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDetail> =>
+  transaction(async client => {
+    await client.query(
+      `
+        UPDATE capability_workflow_runs
+        SET
+          status = $3,
+          workflow_snapshot = $4,
+          current_node_id = $5,
+          current_step_id = $6,
+          current_phase = $7,
+          assigned_agent_id = $8,
+          branch_state = $9,
+          pause_reason = $10,
+          current_wait_id = $11,
+          terminal_outcome = $12,
+          restart_from_phase = $13,
+          trace_id = $14,
+          lease_owner = $15,
+          lease_expires_at = $16,
+          started_at = $17,
+          completed_at = $18,
+          updated_at = NOW()
+        WHERE capability_id = $1
+          AND id = $2
+          AND status NOT IN ('CANCELLED', 'COMPLETED', 'FAILED', 'PAUSED')
+      `,
+      [
+        run.capabilityId,
+        run.id,
+        run.status,
+        JSON.stringify(run.workflowSnapshot),
+        run.currentNodeId || null,
+        run.currentStepId || null,
+        run.currentPhase || null,
+        run.assignedAgentId || null,
+        serializeJson(run.branchState, {}),
+        run.pauseReason || null,
+        run.currentWaitId || null,
+        run.terminalOutcome || null,
+        run.restartFromPhase || null,
+        run.traceId || null,
+        run.leaseOwner || null,
+        run.leaseExpiresAt || null,
+        run.startedAt || null,
+        run.completedAt || null,
+      ],
+    );
+
+    return getRunDetailTx(client, run.capabilityId, run.id);
+  });
+
+export const updateWorkflowRunControl = async (run: WorkflowRun): Promise<WorkflowRunDetail> =>
   transaction(async client => {
     await client.query(
       `

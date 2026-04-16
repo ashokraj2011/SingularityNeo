@@ -244,6 +244,7 @@ const getRuntimeOwnerLabel = () => (isDesktopRuntime() ? 'desktop app' : 'Expres
 const WORK_ITEM_BRANCH_STATUS_PRIORITY: Record<WorkItem['status'], number> = {
   ACTIVE: 0,
   BLOCKED: 0,
+  PAUSED: 1,
   PENDING_APPROVAL: 1,
   COMPLETED: 2,
   CANCELLED: 2,
