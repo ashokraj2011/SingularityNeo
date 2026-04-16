@@ -158,6 +158,13 @@ export interface WorkspaceConnectorSettings {
 }
 
 export type WorkspaceUserStatus = 'ACTIVE' | 'INVITED' | 'DISABLED';
+export type WorkspaceRole =
+  | 'WORKSPACE_ADMIN'
+  | 'PORTFOLIO_OWNER'
+  | 'TEAM_LEAD'
+  | 'OPERATOR'
+  | 'AUDITOR'
+  | 'VIEWER';
 export type WorkspaceTeamMembershipRole =
   | 'LEAD'
   | 'MEMBER'
@@ -173,6 +180,31 @@ export type NotificationTrigger =
   | 'REQUEST_CHANGES'
   | 'CONFLICT_NEEDS_RESOLUTION'
   | 'HANDOFF_ACCEPTANCE_REQUIRED';
+export type PermissionAction =
+  | 'workspace.manage'
+  | 'access.manage'
+  | 'capability.create'
+  | 'capability.read'
+  | 'capability.read.rollup'
+  | 'capability.edit'
+  | 'workflow.edit'
+  | 'agents.manage'
+  | 'contract.publish'
+  | 'workitem.read'
+  | 'workitem.create'
+  | 'workitem.control'
+  | 'workitem.restart'
+  | 'approval.decide'
+  | 'artifact.read'
+  | 'artifact.publish'
+  | 'telemetry.read'
+  | 'chat.read'
+  | 'chat.write'
+  | 'report.view.operations'
+  | 'report.view.portfolio'
+  | 'report.view.executive'
+  | 'report.view.audit';
+export type CapabilityVisibilityScope = 'NONE' | 'ROLLUP_ONLY' | 'LIVE_DETAIL';
 
 export interface WorkspaceUser {
   id: string;
@@ -181,6 +213,7 @@ export interface WorkspaceUser {
   title?: string;
   status: WorkspaceUserStatus;
   teamIds: string[];
+  workspaceRoles: WorkspaceRole[];
 }
 
 export interface WorkspaceTeam {
@@ -220,7 +253,7 @@ export interface UserPreference {
   userId: string;
   defaultCapabilityId?: string;
   lastSelectedTeamId?: string;
-  workbenchView?: 'MY_QUEUE' | 'TEAM_QUEUE' | 'ATTENTION' | 'WATCHING';
+  workbenchView?: 'ALL_WORK' | 'MY_QUEUE' | 'TEAM_QUEUE' | 'ATTENTION' | 'WATCHING';
 }
 
 export interface NotificationRule {
@@ -234,14 +267,83 @@ export interface NotificationRule {
   digest: boolean;
 }
 
+export interface CapabilityGrant {
+  id: string;
+  capabilityId: string;
+  userId?: string;
+  teamId?: string;
+  actions: PermissionAction[];
+  note?: string;
+  createdByUserId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface InheritedRollupAccess {
+  capabilityId: string;
+  sourceCapabilityId: string;
+  sourceCapabilityName?: string;
+  reason: string;
+}
+
+export interface ExplicitDescendantAccessGrant {
+  id: string;
+  parentCapabilityId: string;
+  descendantCapabilityId: string;
+  userId?: string;
+  teamId?: string;
+  actions: PermissionAction[];
+  note?: string;
+  createdByUserId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EffectivePermissionSet {
+  actorUserId?: string;
+  actorDisplayName: string;
+  capabilityId?: string;
+  workspaceRoles: WorkspaceRole[];
+  capabilityRoles: CapabilityAccessRole[];
+  allowedActions: PermissionAction[];
+  visibilityScope: CapabilityVisibilityScope;
+  inheritedRollupAccess: InheritedRollupAccess[];
+  explicitDescendantGrantIds: string[];
+  reasoning: string[];
+}
+
+export interface AccessAuditEvent {
+  id: string;
+  actorUserId?: string;
+  actorDisplayName: string;
+  action: string;
+  targetType:
+    | 'WORKSPACE_USER'
+    | 'WORKSPACE_TEAM'
+    | 'CAPABILITY_ACCESS'
+    | 'DESCENDANT_ACCESS'
+    | 'NOTIFICATION_RULE'
+    | 'CONTRACT_PUBLISH'
+    | 'WORK_ITEM_CONTROL'
+    | 'WORK_ITEM_WRITE_CLAIM';
+  targetId: string;
+  capabilityId?: string;
+  summary: string;
+  metadata?: Record<string, any>;
+  createdAt: string;
+}
+
 export interface WorkspaceOrganization {
   users: WorkspaceUser[];
   teams: WorkspaceTeam[];
   memberships: WorkspaceMembership[];
   capabilityMemberships: CapabilityMembership[];
+  capabilityGrants: CapabilityGrant[];
+  descendantAccessGrants: ExplicitDescendantAccessGrant[];
   externalIdentityLinks: ExternalIdentityLink[];
   userPreferences: UserPreference[];
   notificationRules: NotificationRule[];
+  accessAuditEvents: AccessAuditEvent[];
   currentUserId?: string;
 }
 
@@ -249,7 +351,22 @@ export interface ActorContext {
   userId?: string;
   displayName: string;
   teamIds: string[];
+  workspaceRoles?: WorkspaceRole[];
   actedOnBehalfOfStakeholderIds?: string[];
+}
+
+export interface WorkspaceAccessSnapshot {
+  organization: WorkspaceOrganization;
+  currentActorPermissions: EffectivePermissionSet;
+}
+
+export interface CapabilityAccessSnapshot {
+  capabilityId: string;
+  capabilityMemberships: CapabilityMembership[];
+  capabilityGrants: CapabilityGrant[];
+  descendantAccessGrants: ExplicitDescendantAccessGrant[];
+  inheritedRollupAccess: InheritedRollupAccess[];
+  currentActorPermissions: EffectivePermissionSet;
 }
 
 export interface WorkspaceSettings {
@@ -826,6 +943,7 @@ export interface Capability {
   isSystemCapability?: boolean;
   systemCapabilityRole?: CapabilitySystemRole;
   skillLibrary: Skill[];
+  effectivePermissions?: EffectivePermissionSet;
 }
 
 export interface AgentUsage {
@@ -1076,6 +1194,7 @@ export type ArtifactKind =
   | 'CODE_DIFF'
   | 'HANDOFF_PACKET'
   | 'APPROVAL_RECORD'
+  | 'UPLOAD'
   | 'INPUT_NOTE'
   | 'STAGE_CONTROL_NOTE'
   | 'CONFLICT_RESOLUTION'
@@ -1084,7 +1203,7 @@ export type ArtifactKind =
   | 'REVIEW_PACKET'
   | 'EXECUTION_SUMMARY';
 
-export type ArtifactContentFormat = 'TEXT' | 'MARKDOWN' | 'JSON';
+export type ArtifactContentFormat = 'TEXT' | 'MARKDOWN' | 'JSON' | 'BINARY';
 
 export type ArtifactTemplateSectionType =
   | 'FREE_TEXT'
@@ -2003,6 +2122,8 @@ export interface ArtifactContentResponse {
   contentFormat: ArtifactContentFormat;
   mimeType: string;
   fileName: string;
+  hasBinary?: boolean;
+  sizeBytes?: number;
   contentText?: string;
   contentJson?: Record<string, any> | any[];
 }
@@ -2654,4 +2775,159 @@ export interface CapabilityWorkspace {
   messages: CapabilityChatMessage[];
   activeChatAgentId?: string;
   createdAt: string;
+}
+
+export interface ReportFilter {
+  capabilityId?: string;
+  teamId?: string;
+  status?: string[];
+  phase?: WorkItemPhase[];
+  dateFrom?: string;
+  dateTo?: string;
+  includeArchived?: boolean;
+}
+
+export interface ReportWorkItemSummary {
+  capabilityId: string;
+  capabilityName: string;
+  workItemId: string;
+  title: string;
+  phase: WorkItemPhase;
+  status: WorkItemStatus;
+  priority: WorkItem['priority'];
+  phaseOwnerTeamId?: string;
+  claimOwnerUserId?: string;
+  activeWriterUserId?: string;
+  blockedAgeHours?: number;
+  lastUpdatedAt?: string;
+}
+
+export interface ApprovalInboxEntry {
+  capabilityId: string;
+  capabilityName: string;
+  workItemId?: string;
+  workItemTitle?: string;
+  runId: string;
+  waitId: string;
+  assignmentId: string;
+  phase?: WorkItemPhase;
+  stepName?: string;
+  targetType: ApprovalRuleTarget;
+  assignedUserId?: string;
+  assignedTeamId?: string;
+  dueAt?: string;
+  status: ApprovalAssignmentStatus;
+  ageHours: number;
+}
+
+export interface OperationsDashboardSnapshot {
+  generatedAt: string;
+  actorUserId?: string;
+  actorDisplayName: string;
+  myWork: ReportWorkItemSummary[];
+  teamWork: ReportWorkItemSummary[];
+  watching: ReportWorkItemSummary[];
+  restartNeeded: ReportWorkItemSummary[];
+  approvalInbox: ApprovalInboxEntry[];
+  blockedCount: number;
+  pendingApprovalCount: number;
+  activeWriterConflicts: number;
+}
+
+export interface TeamQueueSnapshot {
+  generatedAt: string;
+  teamId: string;
+  teamName: string;
+  queue: ReportWorkItemSummary[];
+  approvalInbox: ApprovalInboxEntry[];
+  blockedCount: number;
+  pendingApprovalCount: number;
+  handoffWaitingCount: number;
+  activeWriterConflicts: number;
+  slaRiskCount: number;
+}
+
+export interface CapabilityHealthSnapshot {
+  generatedAt: string;
+  capabilityId: string;
+  capabilityName: string;
+  visibilityScope: CapabilityVisibilityScope;
+  activeWorkCount: number;
+  blockedCount: number;
+  pendingApprovalCount: number;
+  completedWorkCount: number;
+  outputArtifactCount: number;
+  evidenceCompleteness: number;
+  totalRuns: number;
+  failedRuns: number;
+  waitingRuns: number;
+  activeRuns: number;
+  totalCostUsd: number;
+  totalTokens: number;
+  averageLatencyMs: number;
+  publishFreshness: 'FRESH' | 'STALE' | 'MISSING';
+  latestPublishedVersion?: number;
+  latestPublishedAt?: string;
+  dependencyCount: number;
+  criticalDependencyCount: number;
+  unresolvedVersionMismatchCount: number;
+}
+
+export interface CollectionRollupSnapshot {
+  generatedAt: string;
+  capabilityId: string;
+  capabilityName: string;
+  visibilityScope: CapabilityVisibilityScope;
+  directChildren: CapabilityRollupChildSummary[];
+  sharedCapabilities: CapabilityRollupChildSummary[];
+  rollupSummary: CapabilityRollupSummary;
+}
+
+export interface ExecutiveSummarySnapshot {
+  generatedAt: string;
+  visibleCapabilityCount: number;
+  activeWorkCount: number;
+  blockedCount: number;
+  pendingApprovalCount: number;
+  completedWorkCount: number;
+  totalRuns: number;
+  failedRuns: number;
+  waitingRuns: number;
+  totalCostUsd: number;
+}
+
+export interface AuditReportSnapshot {
+  generatedAt: string;
+  accessEvents: AccessAuditEvent[];
+  approvalDecisions: ApprovalDecision[];
+  controlEvents: Array<{
+    capabilityId: string;
+    capabilityName: string;
+    workItemId: string;
+    workItemTitle: string;
+    actor: string;
+    action: string;
+    timestamp: string;
+    detail: string;
+  }>;
+  contractPublications: CapabilityPublishedSnapshot[];
+}
+
+export interface ReportExportPayload {
+  reportType:
+    | 'operations'
+    | 'team'
+    | 'capability'
+    | 'collection'
+    | 'executive'
+    | 'audit';
+  generatedAt: string;
+  filters?: ReportFilter;
+  payload:
+    | OperationsDashboardSnapshot
+    | TeamQueueSnapshot
+    | CapabilityHealthSnapshot
+    | CollectionRollupSnapshot
+    | ExecutiveSummarySnapshot
+    | AuditReportSnapshot;
 }

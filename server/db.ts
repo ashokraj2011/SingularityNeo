@@ -72,7 +72,7 @@ const getConnectionConfig = (config: RuntimeDatabaseConfig = runtimeDatabaseConf
   password: config.password,
 });
 
-const schemaStatements = [
+export const schemaStatements = [
   `
     CREATE TABLE IF NOT EXISTS capabilities (
       id TEXT PRIMARY KEY,
@@ -191,6 +191,7 @@ const schemaStatements = [
       title TEXT,
       status TEXT NOT NULL DEFAULT 'ACTIVE',
       team_ids TEXT[] NOT NULL DEFAULT '{}',
+      workspace_roles TEXT[] NOT NULL DEFAULT '{}',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
@@ -228,6 +229,33 @@ const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS capability_grants (
+      id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      user_id TEXT REFERENCES workspace_users(id) ON DELETE CASCADE,
+      team_id TEXT REFERENCES workspace_teams(id) ON DELETE CASCADE,
+      actions TEXT[] NOT NULL DEFAULT '{}',
+      note TEXT,
+      created_by_user_id TEXT REFERENCES workspace_users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_descendant_access_grants (
+      id TEXT PRIMARY KEY,
+      parent_capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      descendant_capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      user_id TEXT REFERENCES workspace_users(id) ON DELETE CASCADE,
+      team_id TEXT REFERENCES workspace_teams(id) ON DELETE CASCADE,
+      actions TEXT[] NOT NULL DEFAULT '{}',
+      note TEXT,
+      created_by_user_id TEXT REFERENCES workspace_users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS workspace_external_identity_links (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES workspace_users(id) ON DELETE CASCADE,
@@ -238,6 +266,20 @@ const schemaStatements = [
       profile_url TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS access_audit_events (
+      id TEXT PRIMARY KEY,
+      actor_user_id TEXT REFERENCES workspace_users(id) ON DELETE SET NULL,
+      actor_display_name TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      capability_id TEXT REFERENCES capabilities(id) ON DELETE CASCADE,
+      summary TEXT NOT NULL,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `,
   `
@@ -466,6 +508,18 @@ const schemaStatements = [
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_artifact_files (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      artifact_id TEXT NOT NULL,
+      bytes BYTEA NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      sha256 TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, artifact_id)
     )
   `,
   `
@@ -1063,7 +1117,7 @@ const schemaStatements = [
   `,
 ];
 
-const migrationStatements = [
+export const migrationStatements = [
   `
     ALTER TABLE capabilities
     ADD COLUMN IF NOT EXISTS git_repositories TEXT[] NOT NULL DEFAULT '{}'
@@ -1171,6 +1225,10 @@ const migrationStatements = [
   `
     ALTER TABLE workspace_settings
     ADD COLUMN IF NOT EXISTS foundations_initialized_at TIMESTAMPTZ
+  `,
+  `
+    ALTER TABLE workspace_users
+    ADD COLUMN IF NOT EXISTS workspace_roles TEXT[] NOT NULL DEFAULT '{}'
   `,
   `
     ALTER TABLE capability_skills

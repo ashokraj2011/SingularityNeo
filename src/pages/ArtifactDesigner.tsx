@@ -1,4 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, {
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+} from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   FileText, 
@@ -34,6 +41,9 @@ import {
   CapabilityWorkspace,
 } from '../types';
 import ArtifactPreview from '../components/ArtifactPreview';
+
+const TEMPLATE_ROW_HEIGHT_PX = 76;
+const TEMPLATE_ROW_OVERSCAN = 8;
 
 type ArtifactDraft = {
   name: string;
@@ -299,8 +309,16 @@ const ArtifactDesigner = () => {
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const [activeTab, setActiveTab] = useState<'definition' | 'sections' | 'governance'>('definition');
   const [isCreatingNew, setIsCreatingNew] = useState(false);
+  const [isSelecting, startTransition] = useTransition();
+
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const scrollRafRef = useRef<number | null>(null);
+  const pendingScrollTopRef = useRef(0);
+  const [listViewportHeight, setListViewportHeight] = useState(520);
+  const [listScrollTop, setListScrollTop] = useState(0);
   const [artifactDraft, setArtifactDraft] = useState<ArtifactDraft>(() =>
     buildArtifactDraft(undefined, workspace.agents[0]?.id || ''),
   );
@@ -311,10 +329,15 @@ const ArtifactDesigner = () => {
   );
 
   const filteredArtifacts = useMemo(() => {
+    const normalizedQuery = deferredSearchQuery.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return allArtifacts;
+    }
+
     return allArtifacts.filter(artifact =>
-      artifact.name.toLowerCase().includes(searchQuery.toLowerCase()),
+      artifact.name.toLowerCase().includes(normalizedQuery),
     );
-  }, [allArtifacts, searchQuery]);
+  }, [allArtifacts, deferredSearchQuery]);
 
   const selectedArtifact = useMemo(() => {
     return filteredArtifacts.find(a => a.id === selectedArtifactId) || filteredArtifacts[0];
@@ -355,9 +378,73 @@ const ArtifactDesigner = () => {
   };
 
   const handleSelectArtifact = (artifactId: string) => {
-    setIsCreatingNew(false);
-    setSelectedArtifactId(artifactId);
+    startTransition(() => {
+      setIsCreatingNew(false);
+      setSelectedArtifactId(artifactId);
+    });
   };
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+
+    const update = () => setListViewportHeight(el.clientHeight || 520);
+    update();
+
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+
+    // When filtering changes, reset scroll to avoid empty windows when the previous
+    // scroll position is past the end of the new result set.
+    el.scrollTop = 0;
+    pendingScrollTopRef.current = 0;
+    setListScrollTop(0);
+  }, [activeCapability.id, deferredSearchQuery]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current != null) {
+        window.cancelAnimationFrame(scrollRafRef.current);
+      }
+    };
+  }, []);
+
+  const handleListScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    pendingScrollTopRef.current = event.currentTarget.scrollTop;
+    if (scrollRafRef.current != null) return;
+
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      setListScrollTop(pendingScrollTopRef.current);
+    });
+  };
+
+  const { startIndex, totalHeight, visibleArtifacts } = useMemo(() => {
+    const total = filteredArtifacts.length;
+    const safeViewport =
+      Number.isFinite(listViewportHeight) && listViewportHeight > 0 ? listViewportHeight : 520;
+
+    const computedStart = Math.max(
+      0,
+      Math.floor(listScrollTop / TEMPLATE_ROW_HEIGHT_PX) - TEMPLATE_ROW_OVERSCAN,
+    );
+    const computedEnd = Math.min(
+      total,
+      Math.ceil((listScrollTop + safeViewport) / TEMPLATE_ROW_HEIGHT_PX) + TEMPLATE_ROW_OVERSCAN,
+    );
+
+    return {
+      startIndex: computedStart,
+      totalHeight: total * TEMPLATE_ROW_HEIGHT_PX,
+      visibleArtifacts: filteredArtifacts.slice(computedStart, computedEnd),
+    };
+  }, [filteredArtifacts, listScrollTop, listViewportHeight]);
 
   const handleAddSection = () => {
     setArtifactDraft(current => ({
@@ -532,12 +619,16 @@ const ArtifactDesigner = () => {
   const artifactDocumentPreview = selectedArtifact?.contentJson
     ? {
         format: 'JSON',
-        content: JSON.stringify(selectedArtifact.contentJson, null, 2),
+        // Render JSON on-demand inside <ArtifactPreview /> to keep the workbench responsive
+        // when artifacts contain very large payloads.
+        jsonValue: selectedArtifact.contentJson,
+        content: '',
       }
     : selectedArtifact?.contentText?.trim()
     ? {
         format: selectedArtifact.contentFormat || 'TEXT',
         content: selectedArtifact.contentText,
+        jsonValue: undefined,
       }
     : {
         format: 'MARKDOWN',
@@ -545,6 +636,7 @@ const ArtifactDesigner = () => {
           artifactDraft,
           agentName: connectedAgentName,
         }),
+        jsonValue: undefined,
       };
 
   return (
@@ -591,9 +683,10 @@ const ArtifactDesigner = () => {
                 />
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-              {isCreatingNew && (
+            {isCreatingNew && (
+              <div className="px-4 pt-3">
                 <button
+                  type="button"
                   onClick={() => setIsCreatingNew(true)}
                   className="w-full rounded-xl border border-primary/20 bg-primary/5 p-3 text-left transition-all"
                 >
@@ -605,38 +698,75 @@ const ArtifactDesigner = () => {
                     Curating a durable artifact from workflow or agent output.
                   </p>
                 </button>
+              </div>
+            )}
+            <div
+              ref={listRef}
+              onScroll={handleListScroll}
+              className="flex-1 overflow-y-auto p-2 custom-scrollbar"
+            >
+              {filteredArtifacts.length === 0 ? (
+                <div className="p-8 text-center">
+                  <p className="text-[0.6875rem] font-bold uppercase tracking-widest text-slate-400">
+                    No templates match your search
+                  </p>
+                </div>
+              ) : (
+                <div className="relative" style={{ height: totalHeight }}>
+                  {visibleArtifacts.map((art, localIndex) => {
+                    const index = startIndex + localIndex;
+                    const isSelected = !isCreatingNew && selectedArtifactId === art.id;
+
+                    return (
+                      <div
+                        key={art.id}
+                        className="absolute left-0 right-0"
+                        style={{
+                          top: index * TEMPLATE_ROW_HEIGHT_PX,
+                          height: TEMPLATE_ROW_HEIGHT_PX,
+                        }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleSelectArtifact(art.id)}
+                          className={cn(
+                            "w-full h-full text-left p-3 rounded-xl transition-all group flex flex-col gap-1 border",
+                            isSelected
+                              ? "bg-primary/5 border-primary/20 shadow-sm"
+                              : "bg-transparent border-transparent hover:bg-surface-container-low",
+                          )}
+                          aria-busy={isSelecting && isSelected ? true : undefined}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <FileText size={14} className={isSelected ? "text-primary" : "text-slate-400"} />
+                              <span
+                                className={cn(
+                                  "text-xs font-bold transition-colors truncate",
+                                  isSelected ? "text-primary" : "text-on-surface",
+                                )}
+                              >
+                                {art.name}
+                              </span>
+                            </div>
+                            {art.isMasterArtifact && (
+                              <span className="text-[0.5rem] font-bold text-primary bg-primary/10 px-1.5 py-0.5 rounded uppercase tracking-widest">
+                                Master
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between pl-6">
+                            <span className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest truncate">
+                              {art.type}
+                            </span>
+                            <span className="text-[0.625rem] text-slate-300">{art.version}</span>
+                          </div>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
-              {filteredArtifacts.map((art) => (
-                <button 
-                  key={art.id} 
-                  onClick={() => handleSelectArtifact(art.id)}
-                  className={cn(
-                    "w-full text-left p-3 rounded-xl transition-all group flex flex-col gap-1 border",
-                    !isCreatingNew && selectedArtifactId === art.id
-                      ? "bg-primary/5 border-primary/20 shadow-sm" 
-                      : "bg-transparent border-transparent hover:bg-surface-container-low"
-                  )}
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <FileText size={14} className={!isCreatingNew && selectedArtifactId === art.id ? "text-primary" : "text-slate-400"} />
-                      <span className={cn(
-                        "text-xs font-bold transition-colors",
-                        !isCreatingNew && selectedArtifactId === art.id ? "text-primary" : "text-on-surface"
-                      )}>
-                        {art.name}
-                      </span>
-                    </div>
-                    {art.isMasterArtifact && (
-                      <span className="text-[0.5rem] font-bold text-primary bg-primary/10 px-1.5 py-0.5 rounded uppercase tracking-widest">Master</span>
-                    )}
-                  </div>
-                  <div className="flex items-center justify-between pl-6">
-                    <span className="text-[0.625rem] font-bold text-slate-400 uppercase tracking-widest">{art.type}</span>
-                    <span className="text-[0.625rem] text-slate-300">{art.version}</span>
-                  </div>
-                </button>
-              ))}
             </div>
           </div>
 
@@ -871,11 +1001,12 @@ const ArtifactDesigner = () => {
                       </div>
                     </div>
                     <div className="rounded-3xl border border-outline-variant/15 bg-surface-container-low px-5 py-5">
-                      <ArtifactPreview
-                        format={artifactDocumentPreview.format}
-                        content={artifactDocumentPreview.content}
-                        emptyLabel="This artifact does not have previewable content yet."
-                      />
+	                      <ArtifactPreview
+	                        format={artifactDocumentPreview.format}
+	                        content={artifactDocumentPreview.content}
+	                        jsonValue={artifactDocumentPreview.jsonValue}
+	                        emptyLabel="This artifact does not have previewable content yet."
+	                      />
                     </div>
                   </section>
                 </motion.div>

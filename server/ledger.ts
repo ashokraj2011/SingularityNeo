@@ -23,7 +23,7 @@ import {
   listWorkflowRunsByCapability,
   listWorkflowRunsForWorkItem,
 } from './execution/repository';
-import { getCapabilityArtifact, getCapabilityBundle } from './repository';
+import { getCapabilityArtifact, getCapabilityArtifactFileMeta, getCapabilityBundle } from './repository';
 
 const ACTIVE_RUN_STATUSES = new Set([
   'QUEUED',
@@ -121,22 +121,59 @@ const buildFallbackWorkItem = ({
   history: [],
 });
 
-const buildArtifactContent = (artifact: Artifact): ArtifactContentResponse => {
-  const contentFormat =
-    artifact.contentFormat ||
-    (artifact.contentJson ? 'JSON' : artifact.mimeType === 'text/plain' ? 'TEXT' : 'MARKDOWN');
+const buildArtifactContent = (
+  artifact: Artifact,
+  fileMeta?: { sizeBytes: number; sha256: string } | null,
+): ArtifactContentResponse => {
+  const hasBinary = Boolean(fileMeta);
+  const sizeBytes = fileMeta?.sizeBytes;
+
+  let contentFormat: ArtifactContentResponse['contentFormat'];
+  if (artifact.contentFormat) {
+    contentFormat = artifact.contentFormat;
+  } else if (artifact.contentJson) {
+    contentFormat = 'JSON';
+  } else if (artifact.contentText) {
+    contentFormat = artifact.mimeType === 'text/plain' ? 'TEXT' : 'MARKDOWN';
+  } else if (hasBinary) {
+    contentFormat = 'BINARY';
+  } else {
+    contentFormat = artifact.mimeType === 'text/plain' ? 'TEXT' : 'MARKDOWN';
+  }
+
   const mimeType =
     artifact.mimeType ||
     (contentFormat === 'JSON'
-      ? 'application/json'
+      ? 'application/json; charset=utf-8'
       : contentFormat === 'TEXT'
       ? 'text/plain; charset=utf-8'
-      : 'text/markdown; charset=utf-8');
+      : contentFormat === 'MARKDOWN'
+      ? 'text/markdown; charset=utf-8'
+      : 'application/octet-stream');
+
   const fileName =
     artifact.fileName ||
     `${toSafeFileSlug(artifact.name)}.${
-      contentFormat === 'JSON' ? 'json' : contentFormat === 'TEXT' ? 'txt' : 'md'
+      contentFormat === 'JSON'
+        ? 'json'
+        : contentFormat === 'TEXT'
+        ? 'txt'
+        : contentFormat === 'MARKDOWN'
+        ? 'md'
+        : 'bin'
     }`;
+
+  if (contentFormat === 'BINARY') {
+    return {
+      artifact,
+      contentFormat,
+      mimeType,
+      fileName,
+      hasBinary,
+      sizeBytes,
+    };
+  }
+
   const fallbackText = [
     `# ${artifact.name}`,
     artifact.summary ? `Summary: ${artifact.summary}` : null,
@@ -151,7 +188,10 @@ const buildArtifactContent = (artifact: Artifact): ArtifactContentResponse => {
     contentFormat,
     mimeType,
     fileName,
-    contentText: artifact.contentText || (contentFormat === 'JSON' ? undefined : fallbackText),
+    hasBinary,
+    sizeBytes,
+    contentText:
+      artifact.contentText || (contentFormat === 'JSON' ? undefined : fallbackText),
     contentJson: artifact.contentJson,
   };
 };
@@ -736,7 +776,8 @@ export const getLedgerArtifactContent = async (
     throw new Error(`Artifact ${artifactId} was not found.`);
   }
 
-  return buildArtifactContent(artifact);
+  const fileMeta = await getCapabilityArtifactFileMeta(capabilityId, artifactId);
+  return buildArtifactContent(artifact, fileMeta);
 };
 
 export const buildWorkItemEvidenceBundle = async (

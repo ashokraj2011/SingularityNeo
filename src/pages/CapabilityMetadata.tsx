@@ -18,7 +18,7 @@ import {
   Users,
   Workflow as WorkflowIcon,
 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   CommandTemplateEditor,
   DeploymentTargetEditor,
@@ -389,6 +389,7 @@ const normalizeStakeholders = (stakeholders: CapabilityStakeholder[]) => {
 
 export default function CapabilityMetadata() {
   const navigate = useNavigate();
+  const location = useLocation();
   const {
     activeCapability,
     bootStatus,
@@ -400,6 +401,20 @@ export default function CapabilityMetadata() {
     workspaceSettings,
   } = useCapability();
   const { success, error: showError } = useToast();
+
+  useEffect(() => {
+    const raw = location.hash?.slice(1) || '';
+    if (!raw) {
+      return;
+    }
+    const el = document.getElementById(raw);
+    if (!el) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }, [location.hash]);
   const [isSaving, setIsSaving] = useState(false);
   const [isUpdatingRuntime, setIsUpdatingRuntime] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -2312,7 +2327,7 @@ export default function CapabilityMetadata() {
               </label>
             </section>
 
-            <section className="grid gap-5 md:grid-cols-2">
+            <section id="execution-policy" className="grid gap-5 md:grid-cols-2">
               <div className="md:col-span-2 flex items-center gap-3">
                 <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
                   <FolderCode size={24} />

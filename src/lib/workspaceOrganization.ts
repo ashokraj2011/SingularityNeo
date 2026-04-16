@@ -1,11 +1,16 @@
 import type {
+  AccessAuditEvent,
   ActorContext,
   Capability,
+  CapabilityGrant,
   CapabilityMembership,
+  ExplicitDescendantAccessGrant,
   NotificationRule,
+  PermissionAction,
   UserPreference,
   WorkspaceMembership,
   WorkspaceOrganization,
+  WorkspaceRole,
   WorkspaceTeam,
   WorkspaceUser,
 } from '../types';
@@ -37,6 +42,7 @@ export const createDefaultWorkspaceUser = (): WorkspaceUser => ({
   title: 'Platform Operator',
   status: 'ACTIVE',
   teamIds: ['TEAM-PLATFORM-OPERATIONS'],
+  workspaceRoles: ['WORKSPACE_ADMIN'],
 });
 
 export const createDefaultWorkspaceOrganization = (): WorkspaceOrganization => ({
@@ -59,11 +65,71 @@ export const createDefaultWorkspaceOrganization = (): WorkspaceOrganization => (
     },
   ],
   capabilityMemberships: [],
+  capabilityGrants: [],
+  descendantAccessGrants: [],
   externalIdentityLinks: [],
   userPreferences: [],
   notificationRules: [],
+  accessAuditEvents: [],
   currentUserId: 'USR-WORKSPACE-OPERATOR',
 });
+
+const WORKSPACE_ROLES: WorkspaceRole[] = [
+  'WORKSPACE_ADMIN',
+  'PORTFOLIO_OWNER',
+  'TEAM_LEAD',
+  'OPERATOR',
+  'AUDITOR',
+  'VIEWER',
+];
+
+const PERMISSION_ACTIONS: PermissionAction[] = [
+  'workspace.manage',
+  'access.manage',
+  'capability.create',
+  'capability.read',
+  'capability.read.rollup',
+  'capability.edit',
+  'workflow.edit',
+  'agents.manage',
+  'contract.publish',
+  'workitem.read',
+  'workitem.create',
+  'workitem.control',
+  'workitem.restart',
+  'approval.decide',
+  'artifact.read',
+  'artifact.publish',
+  'telemetry.read',
+  'chat.read',
+  'chat.write',
+  'report.view.operations',
+  'report.view.portfolio',
+  'report.view.executive',
+  'report.view.audit',
+] as const;
+
+const normalizeWorkspaceRoles = (roles?: WorkspaceRole[] | string[]) =>
+  Array.from(
+    new Set(
+      (roles || [])
+        .map(role => trim(role))
+        .filter((role): role is WorkspaceRole =>
+          WORKSPACE_ROLES.includes(role as WorkspaceRole),
+        ),
+    ),
+  );
+
+const normalizePermissionActions = (actions?: PermissionAction[] | string[]) =>
+  Array.from(
+    new Set(
+      (actions || [])
+        .map(action => trim(action))
+        .filter((action): action is PermissionAction =>
+          PERMISSION_ACTIONS.includes(action as PermissionAction),
+        ),
+    ),
+  );
 
 export const normalizeWorkspaceUsers = (
   users: WorkspaceUser[] | undefined,
@@ -77,6 +143,7 @@ export const normalizeWorkspaceUsers = (
       status:
         user?.status === 'INVITED' || user?.status === 'DISABLED' ? user.status : 'ACTIVE',
       teamIds: Array.from(new Set((user?.teamIds || []).map(teamId => trim(teamId)).filter(Boolean))),
+      workspaceRoles: normalizeWorkspaceRoles(user?.workspaceRoles),
     } satisfies WorkspaceUser))
     .filter(user => Boolean(user.id));
 
@@ -173,6 +240,78 @@ const normalizeNotificationRules = (
     } satisfies NotificationRule))
     .filter(rule => Boolean(rule.id));
 
+const normalizeCapabilityGrants = (
+  grants: CapabilityGrant[] | undefined,
+): CapabilityGrant[] =>
+  (grants || [])
+    .map(grant => ({
+      id: trim(grant?.id) || toWorkspaceEntityId('GRANT', `${trim(grant?.capabilityId)}-${trim(grant?.userId) || trim(grant?.teamId) || 'SCOPE'}`),
+      capabilityId: trim(grant?.capabilityId),
+      userId: trim(grant?.userId) || undefined,
+      teamId: trim(grant?.teamId) || undefined,
+      actions: normalizePermissionActions(grant?.actions),
+      note: trim(grant?.note) || undefined,
+      createdByUserId: trim(grant?.createdByUserId) || undefined,
+      createdAt: trim(grant?.createdAt) || new Date(0).toISOString(),
+      updatedAt: trim(grant?.updatedAt) || trim(grant?.createdAt) || new Date(0).toISOString(),
+    } satisfies CapabilityGrant))
+    .filter(grant => grant.capabilityId && (grant.userId || grant.teamId) && grant.actions.length > 0);
+
+const normalizeDescendantAccessGrants = (
+  grants: ExplicitDescendantAccessGrant[] | undefined,
+): ExplicitDescendantAccessGrant[] =>
+  (grants || [])
+    .map(grant => ({
+      id:
+        trim(grant?.id) ||
+        toWorkspaceEntityId(
+          'DESC',
+          `${trim(grant?.parentCapabilityId)}-${trim(grant?.descendantCapabilityId)}-${trim(grant?.userId) || trim(grant?.teamId) || 'SCOPE'}`,
+        ),
+      parentCapabilityId: trim(grant?.parentCapabilityId),
+      descendantCapabilityId: trim(grant?.descendantCapabilityId),
+      userId: trim(grant?.userId) || undefined,
+      teamId: trim(grant?.teamId) || undefined,
+      actions: normalizePermissionActions(grant?.actions),
+      note: trim(grant?.note) || undefined,
+      createdByUserId: trim(grant?.createdByUserId) || undefined,
+      createdAt: trim(grant?.createdAt) || new Date(0).toISOString(),
+      updatedAt: trim(grant?.updatedAt) || trim(grant?.createdAt) || new Date(0).toISOString(),
+    } satisfies ExplicitDescendantAccessGrant))
+    .filter(
+      grant =>
+        grant.parentCapabilityId &&
+        grant.descendantCapabilityId &&
+        (grant.userId || grant.teamId) &&
+        grant.actions.length > 0,
+    );
+
+const normalizeAccessAuditEvents = (
+  events: AccessAuditEvent[] | undefined,
+): AccessAuditEvent[] =>
+  (events || [])
+    .map(event => ({
+      id:
+        trim(event?.id) ||
+        toWorkspaceEntityId(
+          'AUDIT',
+          `${trim(event?.targetType) || 'TARGET'}-${trim(event?.targetId) || 'EVENT'}-${trim(event?.createdAt) || 'NOW'}`,
+        ),
+      actorUserId: trim(event?.actorUserId) || undefined,
+      actorDisplayName: trim(event?.actorDisplayName) || 'Workspace Operator',
+      action: trim(event?.action) || 'access.updated',
+      targetType: event?.targetType || 'CAPABILITY_ACCESS',
+      targetId: trim(event?.targetId) || 'unknown',
+      capabilityId: trim(event?.capabilityId) || undefined,
+      summary: trim(event?.summary) || 'Access model updated.',
+      metadata:
+        event?.metadata && typeof event.metadata === 'object'
+          ? event.metadata
+          : undefined,
+      createdAt: trim(event?.createdAt) || new Date(0).toISOString(),
+    } satisfies AccessAuditEvent))
+    .filter(event => Boolean(event.id));
+
 const normalizeUserPreferences = (
   preferences: UserPreference[] | undefined,
 ): UserPreference[] =>
@@ -182,6 +321,7 @@ const normalizeUserPreferences = (
       defaultCapabilityId: trim(preference?.defaultCapabilityId) || undefined,
       lastSelectedTeamId: trim(preference?.lastSelectedTeamId) || undefined,
       workbenchView:
+        preference?.workbenchView === 'ALL_WORK' ||
         preference?.workbenchView === 'TEAM_QUEUE' ||
         preference?.workbenchView === 'ATTENTION' ||
         preference?.workbenchView === 'WATCHING'
@@ -199,6 +339,10 @@ export const normalizeWorkspaceOrganization = (
   const memberships = normalizeWorkspaceMemberships(organization?.memberships);
   const capabilityMemberships = normalizeCapabilityMemberships(
     organization?.capabilityMemberships,
+  );
+  const capabilityGrants = normalizeCapabilityGrants(organization?.capabilityGrants);
+  const descendantAccessGrants = normalizeDescendantAccessGrants(
+    organization?.descendantAccessGrants,
   );
   const externalIdentityLinks = (organization?.externalIdentityLinks || [])
     .map(link => ({
@@ -223,19 +367,47 @@ export const normalizeWorkspaceOrganization = (
     .filter(link => link.userId && link.externalId);
   const userPreferences = normalizeUserPreferences(organization?.userPreferences);
   const notificationRules = normalizeNotificationRules(organization?.notificationRules);
+  const accessAuditEvents = normalizeAccessAuditEvents(organization?.accessAuditEvents);
   const currentUserId = trim(organization?.currentUserId);
 
+  // Prevent self-lockout: ensure at least one workspace admin exists even when migrating
+  // from older snapshots that did not store workspaceRoles.
+  const hasWorkspaceAdmin = users.some(user =>
+    (user.workspaceRoles || []).includes('WORKSPACE_ADMIN'),
+  );
+  const ensureWorkspaceAdmin = (candidates: WorkspaceUser[]) => {
+    if (hasWorkspaceAdmin || candidates.length === 0) {
+      return candidates;
+    }
+
+    const operatorIndex = candidates.findIndex(user => user.id === fallback.users[0]?.id);
+    const targetIndex = operatorIndex >= 0 ? operatorIndex : 0;
+    const target = candidates[targetIndex];
+    const nextRoles = Array.from(
+      new Set([...(target.workspaceRoles || []), 'WORKSPACE_ADMIN']),
+    ) as WorkspaceRole[];
+
+    return candidates.map((user, index) =>
+      index === targetIndex ? { ...user, workspaceRoles: nextRoles } : user,
+    );
+  };
+
+  const normalizedUsers = ensureWorkspaceAdmin(users.length > 0 ? users : fallback.users);
+
   return {
-    users: users.length > 0 ? users : fallback.users,
+    users: normalizedUsers,
     teams: teams.length > 0 ? teams : fallback.teams,
     memberships: memberships.length > 0 ? memberships : fallback.memberships,
     capabilityMemberships,
+    capabilityGrants,
+    descendantAccessGrants,
     externalIdentityLinks,
     userPreferences,
     notificationRules,
+    accessAuditEvents,
     currentUserId:
       currentUserId ||
-      users[0]?.id ||
+      normalizedUsers[0]?.id ||
       fallback.currentUserId,
   };
 };
@@ -288,6 +460,7 @@ export const seedWorkspaceOrganizationFromCapabilities = (
         title: trim(stakeholder.role) || existingUser?.title,
         status: existingUser?.status || 'ACTIVE',
         teamIds: Array.from(new Set([...(existingUser?.teamIds || []), ...teamIds])),
+        workspaceRoles: existingUser?.workspaceRoles || [],
       });
 
       for (const teamId of teamIds) {
@@ -333,6 +506,9 @@ export const seedWorkspaceOrganizationFromCapabilities = (
     teams: [...teams.values()],
     memberships: [...memberships.values()],
     capabilityMemberships: [...capabilityMemberships.values()],
+    capabilityGrants: base.capabilityGrants,
+    descendantAccessGrants: base.descendantAccessGrants,
+    accessAuditEvents: base.accessAuditEvents,
   });
 
   return next.users.length > 0 ? next : base;
@@ -356,5 +532,6 @@ export const buildActorContextFromOrganization = (
     userId: currentUser?.id,
     displayName: currentUser?.name || 'Workspace Operator',
     teamIds: currentUser?.teamIds || [],
+    workspaceRoles: currentUser?.workspaceRoles || [],
   };
 };

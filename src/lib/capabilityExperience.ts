@@ -86,6 +86,8 @@ export interface CapabilityOutcomeContract {
 
 export type AdvancedToolId =
   | 'architecture'
+  | 'identity'
+  | 'access'
   | 'databases'
   | 'memory'
   | 'tool-access'
@@ -131,6 +133,20 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     description: 'Review the capability hierarchy, published contracts, dependency graph, and ALM rollups.',
   },
   {
+    id: 'identity',
+    label: 'Login',
+    shortName: 'Login',
+    path: '/login',
+    description: 'Switch the active workspace operator and review the roles bound to this session.',
+  },
+  {
+    id: 'access',
+    label: 'Users & Access',
+    shortName: 'Access',
+    path: '/access',
+    description: 'Manage workspace users, teams, capability grants, inherited rollups, and access audit history.',
+  },
+  {
     id: 'databases',
     label: 'Database Setup',
     shortName: 'DB',
@@ -146,10 +162,10 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
   },
   {
     id: 'tool-access',
-    label: 'Tool Access',
-    shortName: 'Tools',
+    label: 'Rule Engine',
+    shortName: 'Rules',
     path: '/tool-access',
-    description: 'Review which workflow steps and agents can use read, write, test, and deploy tools.',
+    description: 'Review workflow rules, step-level tool access, approvals, and execution boundaries for this capability.',
   },
   {
     id: 'run-console',

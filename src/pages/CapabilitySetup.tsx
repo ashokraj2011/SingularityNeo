@@ -12,6 +12,7 @@ import {
   Layers,
   Link2,
   Rocket,
+  Search,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -142,6 +143,7 @@ export default function CapabilitySetup() {
     capabilities,
     createCapability,
     updateCapabilityMetadata,
+    setActiveCapability,
     lastSyncError,
   } =
     useCapability();
@@ -169,6 +171,7 @@ export default function CapabilitySetup() {
 
   const activeStepIndex = steps.findIndex(step => step.id === activeStepId);
   const activeStep = steps[activeStepIndex];
+  const [existingCapabilityQuery, setExistingCapabilityQuery] = useState('');
   const ownerAgentId = useMemo(() => {
     const suffix = slugify(draft.name || 'CAPABILITY');
     return `AGENT-${suffix}-OWNER`;
@@ -211,6 +214,25 @@ export default function CapabilitySetup() {
       ),
     [capabilities, draft.parentCapabilityId, selectedChildCapabilityIds],
   );
+  const filteredExistingCapabilities = useMemo(() => {
+    const query = existingCapabilityQuery.trim().toLowerCase();
+    if (!query) {
+      return capabilities;
+    }
+    return capabilities.filter(capability =>
+      [
+        capability.name,
+        capability.id,
+        capability.domain,
+        capability.businessUnit,
+        capability.capabilityKind,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+        .includes(query),
+    );
+  }, [capabilities, existingCapabilityQuery]);
 
   const approvedWorkspacePaths = useMemo(
     () =>
@@ -1581,6 +1603,64 @@ export default function CapabilitySetup() {
         </motion.section>
 
         <aside className="space-y-4 xl:sticky xl:top-28 xl:self-start">
+          <div className="rounded-3xl border border-outline-variant/20 bg-white p-5 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="form-kicker">Existing capabilities</p>
+                <p className="mt-2 text-sm leading-relaxed text-secondary">
+                  Open an existing capability directly from onboarding instead of searching for it elsewhere.
+                </p>
+              </div>
+              <span className="rounded-full border border-outline-variant/30 bg-surface-container-low px-3 py-1 text-xs font-semibold text-secondary">
+                {capabilities.length}
+              </span>
+            </div>
+            <label className="relative mt-4 block">
+              <Search
+                size={15}
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-outline"
+              />
+              <input
+                value={existingCapabilityQuery}
+                onChange={event => setExistingCapabilityQuery(event.target.value)}
+                placeholder="Search existing capability"
+                className="field-input pl-10"
+              />
+            </label>
+            <div className="mt-4 max-h-80 space-y-2 overflow-y-auto pr-1">
+              {filteredExistingCapabilities.length > 0 ? (
+                filteredExistingCapabilities.slice(0, 12).map(capability => (
+                  <button
+                    key={capability.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveCapability(capability);
+                      navigate('/capabilities/metadata');
+                    }}
+                    className="w-full rounded-2xl border border-outline-variant/25 bg-surface-container-low px-4 py-3 text-left transition hover:border-primary/20 hover:bg-white"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-semibold text-on-surface">{capability.name}</p>
+                      <StatusBadge
+                        tone={capability.capabilityKind === 'COLLECTION' ? 'info' : 'brand'}
+                      >
+                        {capability.capabilityKind}
+                      </StatusBadge>
+                    </div>
+                    <p className="mt-1 text-xs text-secondary">
+                      {[capability.domain, capability.businessUnit].filter(Boolean).join(' • ') ||
+                        capability.id}
+                    </p>
+                  </button>
+                ))
+              ) : (
+                <p className="rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm text-secondary">
+                  No capability matches this search yet.
+                </p>
+              )}
+            </div>
+          </div>
+
           <div className="rounded-3xl border border-outline-variant/20 bg-white p-5 shadow-sm">
             <p className="form-kicker">Completion checklist</p>
             <div className="mt-4 space-y-3">

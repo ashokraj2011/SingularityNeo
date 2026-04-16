@@ -90,6 +90,7 @@ import {
   markOpenToolInvocationsAborted,
   releaseRunLease,
   resolveRunWait,
+  upsertWorkItemClaim,
   updateApprovalAssignmentsForWait,
   updateToolInvocation,
   updateRunWaitPayload,
@@ -3310,6 +3311,7 @@ export const createWorkItemRecord = async ({
     step: firstStep,
   });
   const actorName = getActorDisplayName(actor, 'System');
+  const shouldClaim = Boolean(actor?.userId);
 
   const nextWorkItem: WorkItem = {
     id: `WI-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
@@ -3319,6 +3321,8 @@ export const createWorkItemRecord = async ({
     phaseStakeholders: normalizedPhaseStakeholders,
     phase: firstStep.phase,
     phaseOwnerTeamId,
+    claimOwnerUserId: shouldClaim ? actor?.userId : undefined,
+    watchedByUserIds: shouldClaim && actor?.userId ? [actor.userId] : [],
     capabilityId,
     workflowId,
     currentStepId: firstStep.id,
@@ -3335,8 +3339,31 @@ export const createWorkItemRecord = async ({
         firstStep.phase,
         getStepStatus(firstStep),
       ),
+      ...(shouldClaim
+        ? [
+            createHistoryEntry(
+              actorName,
+              'Operator control claimed',
+              `${actorName} automatically took initial operator control so execution can begin immediately. Release control to hand off to the phase owner team when ready.`,
+              firstStep.phase,
+              getStepStatus(firstStep),
+            ),
+          ]
+        : []),
     ],
   };
+
+  if (shouldClaim && actor?.userId) {
+    await upsertWorkItemClaim({
+      capabilityId,
+      workItemId: nextWorkItem.id,
+      userId: actor.userId,
+      teamId: actor.teamIds?.[0],
+      status: 'ACTIVE',
+      claimedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+    });
+  }
 
   const attachmentArtifacts = normalizedAttachments.map(attachment =>
     buildWorkItemAttachmentArtifact({
@@ -3506,12 +3533,65 @@ export const startWorkflowExecution = async ({
     );
   }
 
-  const projection = await recordOperatorGuidance({
+  let projection = await recordOperatorGuidance({
     capabilityId,
     workItemId,
     guidance,
     guidedBy,
   });
+
+  // Starting execution is an operator action. If the work item is still unclaimed, implicitly
+  // claim operator control for the starting actor so the flow "just works" in multi-team work.
+  if (actor?.userId && !projection.workItem.claimOwnerUserId) {
+    const actorName = getActorDisplayName(actor, guidedBy || 'Capability Owner');
+    const claimedAt = new Date().toISOString();
+
+    await upsertWorkItemClaim({
+      capabilityId,
+      workItemId,
+      userId: actor.userId,
+      teamId: actor.teamIds?.[0],
+      status: 'ACTIVE',
+      claimedAt,
+      expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+    });
+
+    const nextWorkItem: WorkItem = {
+      ...projection.workItem,
+      claimOwnerUserId: actor.userId,
+      watchedByUserIds: Array.from(
+        new Set([...(projection.workItem.watchedByUserIds || []), actor.userId]),
+      ),
+      recordVersion: (projection.workItem.recordVersion || 1) + 1,
+      history: [
+        ...projection.workItem.history,
+        createHistoryEntry(
+          actorName,
+          'Operator control claimed',
+          `${actorName} claimed operator control while starting execution.`,
+          projection.workItem.phase,
+          projection.workItem.status,
+        ),
+      ],
+    };
+
+    await persistProjection({
+      capabilityId,
+      workspace: projection.workspace,
+      workItem: nextWorkItem,
+      workflow: projection.workflow,
+    });
+
+    projection = {
+      ...projection,
+      workItem: nextWorkItem,
+      workspace: {
+        ...projection.workspace,
+        workItems: replaceWorkItem(projection.workspace.workItems, nextWorkItem),
+      },
+    };
+  }
+
   if (!canActorOperateWorkItem({ actor, workItem: projection.workItem })) {
     throw new Error('Only the current phase owner can start or restart this phase.');
   }

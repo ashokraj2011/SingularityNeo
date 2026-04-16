@@ -200,8 +200,8 @@ export default function ToolAccess() {
       <PageHeader
         eyebrow="Advanced Tools"
         context={activeCapability.id}
-        title="Tool Access Policy"
-        description="Tool access is step-scoped, not blanket agent access. Agents only get read, write, test, or deploy tools when a workflow step explicitly grants them."
+        title="Rule Engine"
+        description="Review workflow rules, step-scoped tool access, approvals, and execution boundaries. Agents only get read, write, test, or deploy tools when a workflow step explicitly grants them."
         actions={
           <div className="flex flex-wrap gap-2">
             <button

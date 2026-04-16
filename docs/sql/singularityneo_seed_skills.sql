@@ -32,11 +32,13 @@ INSERT INTO tmp_singularity_skill_templates (
   version
 )
 VALUES
-  ('SKL-001', 'Log Analysis', 'Analyze system logs for patterns and anomalies.', 'Analysis', '1.2.0'),
-  ('SKL-002', 'Auto-Remediation', 'Automatically fix common infrastructure issues.', 'Automation', '0.9.5'),
-  ('SKL-003', 'Security Scanning', 'Scan artifacts for vulnerabilities.', 'Security', '2.1.0'),
-  ('SKL-004', 'Compliance Verification', 'Verify artifacts against regulatory frameworks.', 'Compliance', '1.5.0'),
-  ('SKL-005', 'Data Normalization', 'Transform raw data into canonical formats.', 'Data', '1.1.0');
+  ('SKL-GENERAL-REPO-INSTRUCTIONS', 'Repository-wide Copilot Instructions', 'Shared operating guidance that every standard agent should follow before specializing by role.', 'Analysis', '1.0.0'),
+  ('SKL-ROLE-BUSINESS-ANALYST', 'Business Analyst', 'Refine requirements, clarify scope, and produce stakeholder-ready delivery inputs.', 'Analysis', '1.0.0'),
+  ('SKL-ROLE-SOFTWARE-ARCHITECT', 'Software Architect', 'Design architecture, interfaces, tradeoffs, and non-functional solution direction.', 'Analysis', '1.0.0'),
+  ('SKL-ROLE-SOFTWARE-ENGINEER', 'Software Engineer', 'Implement, refactor, debug, and document maintainable code aligned to repository patterns.', 'Automation', '1.0.0'),
+  ('SKL-ROLE-QA-ENGINEER', 'QA Engineer', 'Define test strategy, quality risks, and validation coverage for safe delivery.', 'Analysis', '1.0.0'),
+  ('SKL-ROLE-RELEASE-ENGINEER', 'Release Engineer', 'Plan release safety, deployment sequencing, rollback, and production readiness.', 'Compliance', '1.0.0'),
+  ('SKL-ROLE-CONFLICT-RESOLVER', 'Conflict Resolver', 'Resolve cross-role disagreements using explicit precedence, tradeoffs, and safe reversible decisions.', 'Compliance', '1.0.0');
 
 INSERT INTO capability_skills (
   capability_id,

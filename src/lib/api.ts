@@ -1,6 +1,7 @@
 import {
   ActorContext,
   AgentLearningProfileDetail,
+  Artifact,
   ArtifactContentResponse,
   Capability,
   CapabilityAgent,
@@ -10,9 +11,12 @@ import {
   CapabilityRepository,
   CapabilityPublishedSnapshot,
   CapabilityDeploymentTarget,
+  CapabilityAccessSnapshot,
   CapabilityExecutionCommandTemplate,
   CapabilityFlightRecorderSnapshot,
+  CapabilityHealthSnapshot,
   CapabilityWorkspace,
+  CollectionRollupSnapshot,
   CommandTemplateValidationResult,
   CopilotSessionMonitorSnapshot,
   CompletedWorkOrderDetail,
@@ -21,6 +25,7 @@ import {
   CapabilityConnectorContext,
   DeploymentTargetValidationResult,
   ChatStreamEvent,
+  ExecutiveSummarySnapshot,
   EvalRun,
   EvalRunDetail,
   EvalSuite,
@@ -36,10 +41,12 @@ import {
   TelemetrySpan,
   UserPreference,
   ReviewPacketArtifactSummary,
+  ReportExportPayload,
   WorkspaceDatabaseBootstrapConfig,
   WorkspaceDatabaseBootstrapProfileSnapshot,
   WorkspaceDatabaseBootstrapResult,
   WorkspaceDatabaseBootstrapStatus,
+  WorkspaceAccessSnapshot,
   WorkspaceSettings,
   WorkspaceConnectorSettings,
   WorkspaceCatalogSnapshot,
@@ -60,6 +67,11 @@ import {
   WorkItemPhase,
   WorkflowRun,
   WorkflowRunDetail,
+  OperationsDashboardSnapshot,
+  TeamQueueSnapshot,
+  AuditReportSnapshot,
+  PermissionAction,
+  EffectivePermissionSet,
 } from '../types';
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from './desktop';
 
@@ -391,6 +403,18 @@ export const updateWorkspaceOrganizationRecord = async (
   updates: Partial<WorkspaceOrganization>,
 ): Promise<WorkspaceOrganization> =>
   requestJson<WorkspaceOrganization>('/api/workspace/organization', {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(updates),
+  });
+
+export const fetchWorkspaceAccessSnapshot = async (): Promise<WorkspaceAccessSnapshot> =>
+  requestJson<WorkspaceAccessSnapshot>('/api/workspace/access');
+
+export const updateWorkspaceAccessSnapshot = async (
+  updates: Partial<WorkspaceOrganization>,
+): Promise<WorkspaceAccessSnapshot> =>
+  requestJson<WorkspaceAccessSnapshot>('/api/workspace/access', {
     method: 'PATCH',
     headers: jsonHeaders,
     body: JSON.stringify(updates),
@@ -733,6 +757,46 @@ export const getArtifactDownloadUrl = (capabilityId: string, artifactId: string)
     `/api/capabilities/${encodeURIComponent(capabilityId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
   );
 
+export const getArtifactBlobUrl = (
+  capabilityId: string,
+  artifactId: string,
+  options?: { inline?: boolean },
+) =>
+  resolveApiUrl(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/artifacts/${encodeURIComponent(artifactId)}/blob${
+      options?.inline ? '?inline=1' : ''
+    }`,
+  );
+
+export const uploadCapabilityWorkItemFiles = async (
+  capabilityId: string,
+  workItemId: string,
+  files: File[],
+): Promise<Artifact[]> => {
+  const formData = new FormData();
+  files.forEach(file => {
+    formData.append('files', file);
+  });
+
+  const response = await fetch(
+    resolveApiUrl(
+      `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/uploads`,
+    ),
+    {
+      method: 'POST',
+      headers: withActorHeaders(),
+      body: formData,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(await getError(response));
+  }
+
+  const payload = (await response.json()) as { artifacts?: Artifact[] };
+  return Array.isArray(payload.artifacts) ? payload.artifacts : [];
+};
+
 export const getWorkItemEvidenceBundleDownloadUrl = (
   capabilityId: string,
   workItemId: string,
@@ -769,6 +833,46 @@ export const fetchCapabilityArchitecture = async (
   requestJson<CapabilityArchitectureSnapshot>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/architecture`,
   );
+
+export const fetchCapabilityAccessSnapshot = async (
+  capabilityId: string,
+): Promise<CapabilityAccessSnapshot> =>
+  requestJson<CapabilityAccessSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/access`,
+  );
+
+export const updateCapabilityAccessSnapshot = async (
+  capabilityId: string,
+  updates: Partial<CapabilityAccessSnapshot>,
+): Promise<CapabilityAccessSnapshot> =>
+  requestJson<CapabilityAccessSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/access`,
+    {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify(updates),
+    },
+  );
+
+export const evaluateCapabilityPermission = async (
+  capabilityId: string,
+  action: PermissionAction,
+): Promise<{
+  capabilityId: string;
+  action: PermissionAction;
+  allowed: boolean;
+  permissionSet: EffectivePermissionSet;
+}> =>
+  requestJson<{
+    capabilityId: string;
+    action: PermissionAction;
+    allowed: boolean;
+    permissionSet: EffectivePermissionSet;
+  }>('/api/permissions/evaluate', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ capabilityId, action }),
+  });
 
 export const publishCapabilityContract = async (
   capabilityId: string,
@@ -1244,6 +1348,58 @@ export const fetchRunConsoleSnapshot = async (
   requestJson<RunConsoleSnapshot>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/run-console`,
   );
+
+export const fetchOperationsDashboardSnapshot =
+  async (): Promise<OperationsDashboardSnapshot> =>
+    requestJson<OperationsDashboardSnapshot>('/api/reports/operations');
+
+export const fetchTeamQueueSnapshot = async (
+  teamId: string,
+): Promise<TeamQueueSnapshot> =>
+  requestJson<TeamQueueSnapshot>(
+    `/api/reports/team/${encodeURIComponent(teamId)}`,
+  );
+
+export const fetchCapabilityHealthSnapshot = async (
+  capabilityId: string,
+): Promise<CapabilityHealthSnapshot> =>
+  requestJson<CapabilityHealthSnapshot>(
+    `/api/reports/capability/${encodeURIComponent(capabilityId)}`,
+  );
+
+export const fetchCollectionRollupSnapshot = async (
+  capabilityId: string,
+): Promise<CollectionRollupSnapshot> =>
+  requestJson<CollectionRollupSnapshot>(
+    `/api/reports/collection/${encodeURIComponent(capabilityId)}`,
+  );
+
+export const fetchExecutiveSummarySnapshot =
+  async (): Promise<ExecutiveSummarySnapshot> =>
+    requestJson<ExecutiveSummarySnapshot>('/api/reports/executive');
+
+export const fetchAuditReportSnapshot = async (): Promise<AuditReportSnapshot> =>
+  requestJson<AuditReportSnapshot>('/api/reports/audit');
+
+export const fetchReportExportPayload = async (
+  reportType: ReportExportPayload['reportType'],
+  params?: {
+    capabilityId?: string;
+    teamId?: string;
+  },
+): Promise<ReportExportPayload> => {
+  const search = new URLSearchParams();
+  if (params?.capabilityId) {
+    search.set('capabilityId', params.capabilityId);
+  }
+  if (params?.teamId) {
+    search.set('teamId', params.teamId);
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : '';
+  return requestJson<ReportExportPayload>(
+    `/api/reports/export/${encodeURIComponent(reportType)}${suffix}`,
+  );
+};
 
 export const fetchCopilotSessionMonitor = async (
   capabilityId: string,

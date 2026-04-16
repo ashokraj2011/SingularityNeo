@@ -900,6 +900,7 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
   const preferredCapabilityIdRef = useRef(preferredCapabilityId);
   const capabilityWorkspacesRef = useRef(capabilityWorkspaces);
   const workspaceOrganizationRef = useRef(workspaceOrganization);
+  const lastAuthorizedUserSyncRef = useRef('');
 
   useEffect(() => {
     capabilitiesRef.current = capabilities;
@@ -1077,6 +1078,11 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
           nextState.workspaceOrganization.currentUserId || '',
         ) || nextState.workspaceOrganization.currentUserId || '',
       );
+      lastAuthorizedUserSyncRef.current =
+        readViewPreference(
+          DEFAULT_WORKSPACE_USER_KEY,
+          nextState.workspaceOrganization.currentUserId || '',
+        ) || nextState.workspaceOrganization.currentUserId || '';
       setActiveCapabilityState(nextState.activeCapability);
       setLastSyncError('');
       setBootStatus('ready');
@@ -1449,7 +1455,11 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
     writeViewPreference(DEFAULT_WORKSPACE_USER_KEY, nextUserId || null);
     setWorkspaceOrganization(current => ({
       ...current,
-      currentUserId: nextUserId || current.currentUserId,
+      currentUserId:
+        nextUserId ||
+        current.users.find(user => user.id === 'USR-WORKSPACE-OPERATOR')?.id ||
+        current.users[0]?.id ||
+        current.currentUserId,
     }));
   };
 
@@ -1481,6 +1491,43 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
 
     void refreshCapabilityBundle(activeCapability.id);
   }, [activeCapability.id]);
+
+  useEffect(() => {
+    const selectedUserId =
+      currentWorkspaceUserId || workspaceOrganization.currentUserId || '';
+    if (!selectedUserId || bootStatus !== 'ready') {
+      return;
+    }
+    if (lastAuthorizedUserSyncRef.current === selectedUserId) {
+      return;
+    }
+
+    lastAuthorizedUserSyncRef.current = selectedUserId;
+
+    void (async () => {
+      try {
+        const nextState = normalizeAppState(
+          await fetchAppState(),
+          preferredCapabilityIdRef.current || activeCapabilityRef.current.id,
+        );
+        setCapabilities(nextState.capabilities);
+        setCapabilityWorkspaces(nextState.capabilityWorkspaces);
+        setWorkspaceSettings(nextState.workspaceSettings);
+        setWorkspaceOrganization(nextState.workspaceOrganization);
+        setActiveCapabilityState(nextState.activeCapability);
+        setLastSyncError('');
+        setBootStatus('ready');
+      } catch (error) {
+        lastAuthorizedUserSyncRef.current = '';
+        setLastSyncError(
+          error instanceof Error
+            ? error.message
+            : 'Unable to refresh capability permissions for the selected operator.',
+        );
+        setBootStatus('degraded');
+      }
+    })();
+  }, [bootStatus, currentWorkspaceUserId, workspaceOrganization.currentUserId]);
 
   const currentActorContext = buildActorContextFromOrganization({
     ...workspaceOrganization,

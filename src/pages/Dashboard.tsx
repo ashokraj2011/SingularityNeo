@@ -11,6 +11,7 @@ import {
   FileText,
   FolderGit2,
   Gauge,
+  KeyRound,
   MessageSquareText,
   PlayCircle,
   ShieldCheck,
@@ -31,8 +32,15 @@ import {
   getReadinessTone,
   getTrustLevelTone,
 } from '../lib/capabilityExperience';
+import { hasPermission } from '../lib/accessControl';
 import { getStatusTone } from '../lib/enterprise';
-import { fetchRuntimeStatus, type RuntimeStatus } from '../lib/api';
+import {
+  fetchCapabilityHealthSnapshot,
+  fetchCollectionRollupSnapshot,
+  fetchOperationsDashboardSnapshot,
+  fetchRuntimeStatus,
+  type RuntimeStatus,
+} from '../lib/api';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
 import {
@@ -42,9 +50,16 @@ import {
   StatusBadge,
 } from '../components/EnterpriseUI';
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
+import type {
+  CapabilityHealthSnapshot,
+  CollectionRollupSnapshot,
+  OperationsDashboardSnapshot,
+} from '../types';
 
 const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   architecture: Building2,
+  identity: KeyRound,
+  access: ShieldCheck,
   databases: Database,
   memory: Database,
   'tool-access': ShieldCheck,
@@ -60,7 +75,18 @@ const Dashboard = () => {
   const navigate = useNavigate();
   const { activeCapability, getCapabilityWorkspace } = useCapability();
   const workspace = getCapabilityWorkspace(activeCapability.id);
+  const canCreateWorkItems = hasPermission(
+    activeCapability.effectivePermissions,
+    'workitem.create',
+  );
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [operationsSnapshot, setOperationsSnapshot] = useState<OperationsDashboardSnapshot | null>(
+    null,
+  );
+  const [healthSnapshot, setHealthSnapshot] = useState<CapabilityHealthSnapshot | null>(null);
+  const [collectionSnapshot, setCollectionSnapshot] =
+    useState<CollectionRollupSnapshot | null>(null);
+  const [reportError, setReportError] = useState('');
   const [explainWorkItemId, setExplainWorkItemId] = useState('');
 
   useEffect(() => {
@@ -90,6 +116,36 @@ const Dashboard = () => {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    void Promise.all([
+      fetchOperationsDashboardSnapshot().catch(() => null),
+      fetchCapabilityHealthSnapshot(activeCapability.id).catch(error => {
+        if (isMounted) {
+          setReportError(
+            error instanceof Error ? error.message : 'Unable to load capability reporting.',
+          );
+        }
+        return null;
+      }),
+      activeCapability.capabilityKind === 'COLLECTION'
+        ? fetchCollectionRollupSnapshot(activeCapability.id).catch(() => null)
+        : Promise.resolve(null),
+    ]).then(([operations, health, collection]) => {
+      if (!isMounted) {
+        return;
+      }
+      setOperationsSnapshot(operations);
+      setHealthSnapshot(health);
+      setCollectionSnapshot(collection);
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeCapability.id, activeCapability.capabilityKind]);
 
   const experience = useMemo(
     () =>
@@ -199,33 +255,35 @@ const Dashboard = () => {
         {[
           {
             label: 'Active work',
-            value: experience.activeWorkCount,
+            value: healthSnapshot?.activeWorkCount ?? experience.activeWorkCount,
             helper: 'Items currently moving',
             icon: BriefcaseBusiness,
             tone: 'brand' as const,
           },
           {
             label: 'Needs attention',
-            value: experience.blockerCount + experience.approvalCount,
-            helper: `${experience.blockerCount} blocked, ${experience.approvalCount} approvals`,
+            value:
+              (healthSnapshot?.blockedCount ?? experience.blockerCount) +
+              (healthSnapshot?.pendingApprovalCount ?? experience.approvalCount),
+            helper: `${healthSnapshot?.blockedCount ?? experience.blockerCount} blocked, ${healthSnapshot?.pendingApprovalCount ?? experience.approvalCount} approvals`,
             icon: AlertTriangle,
             tone:
-              experience.blockerCount > 0
+              (healthSnapshot?.blockedCount ?? experience.blockerCount) > 0
                 ? ('danger' as const)
-                : experience.approvalCount > 0
+                : (healthSnapshot?.pendingApprovalCount ?? experience.approvalCount) > 0
                 ? ('warning' as const)
                 : ('success' as const),
           },
           {
             label: 'Delivered work',
-            value: experience.completedWorkCount,
+            value: healthSnapshot?.completedWorkCount ?? experience.completedWorkCount,
             helper: 'Completed work items',
             icon: CheckCircle2,
             tone: 'success' as const,
           },
           {
             label: 'Evidence outputs',
-            value: experience.latestOutputCount,
+            value: healthSnapshot?.outputArtifactCount ?? experience.latestOutputCount,
             helper: 'Artifacts and handoffs',
             icon: FileText,
             tone: 'info' as const,
@@ -336,6 +394,65 @@ const Dashboard = () => {
         </SectionCard>
 
         <SectionCard
+          title="Operations Pulse"
+          description="Permission-aware operations reporting and capability health from server-built projections."
+          icon={Gauge}
+        >
+          {reportError ? (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              {reportError}
+            </div>
+          ) : null}
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+              <p className="form-kicker">My work</p>
+              <p className="mt-2 text-2xl font-bold text-on-surface">
+                {operationsSnapshot?.myWork.length ?? 0}
+              </p>
+              <p className="mt-2 text-xs text-secondary">
+                {operationsSnapshot?.pendingApprovalCount ?? 0} approvals pending
+              </p>
+            </div>
+            <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+              <p className="form-kicker">Capability health</p>
+              <p className="mt-2 text-2xl font-bold text-on-surface">
+                {healthSnapshot?.publishFreshness || 'Unknown'}
+              </p>
+              <p className="mt-2 text-xs text-secondary">
+                {healthSnapshot?.totalRuns ?? 0} runs · {healthSnapshot?.failedRuns ?? 0} failed
+              </p>
+            </div>
+            <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+              <p className="form-kicker">Evidence completeness</p>
+              <p className="mt-2 text-2xl font-bold text-on-surface">
+                {Math.round((healthSnapshot?.evidenceCompleteness ?? 0) * 100)}%
+              </p>
+              <p className="mt-2 text-xs text-secondary">
+                ${(healthSnapshot?.totalCostUsd ?? 0).toFixed(2)} cost ·{' '}
+                {Math.round(healthSnapshot?.averageLatencyMs ?? 0)} ms average latency
+              </p>
+            </div>
+            <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+              <p className="form-kicker">
+                {activeCapability.capabilityKind === 'COLLECTION'
+                  ? 'Collection rollup'
+                  : 'Team operations'}
+              </p>
+              <p className="mt-2 text-2xl font-bold text-on-surface">
+                {activeCapability.capabilityKind === 'COLLECTION'
+                  ? collectionSnapshot?.rollupSummary.directChildCount ?? 0
+                  : operationsSnapshot?.teamWork.length ?? 0}
+              </p>
+              <p className="mt-2 text-xs text-secondary">
+                {activeCapability.capabilityKind === 'COLLECTION'
+                  ? `${collectionSnapshot?.rollupSummary.unresolvedDependencyCount ?? 0} dependency risks · ${collectionSnapshot?.rollupSummary.missingPublishCount ?? 0} missing publishes`
+                  : `${operationsSnapshot?.blockedCount ?? 0} blocked · ${operationsSnapshot?.activeWriterConflicts ?? 0} writer conflicts`}
+              </p>
+            </div>
+          </div>
+        </SectionCard>
+
+        <SectionCard
           title="Trust ladder"
           description="Proof milestones that show whether this capability is real, grounded, operable, and proven."
           icon={ClipboardCheck}
@@ -378,7 +495,8 @@ const Dashboard = () => {
             <button
               type="button"
               onClick={() => navigate('/orchestrator?new=1')}
-              className="enterprise-button enterprise-button-secondary"
+              disabled={!canCreateWorkItems}
+              className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
             >
               New work
             </button>
@@ -430,7 +548,8 @@ const Dashboard = () => {
                 <button
                   type="button"
                   onClick={() => navigate('/orchestrator?new=1')}
-                  className="enterprise-button enterprise-button-primary"
+                  disabled={!canCreateWorkItems}
+                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Create work
                 </button>

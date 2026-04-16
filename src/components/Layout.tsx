@@ -11,7 +11,9 @@ import {
   ChevronDown,
   Database,
   FileText,
+  KeyRound,
   LayoutDashboard,
+  LogOut,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
@@ -49,6 +51,8 @@ const primaryNavItems = [
 
 const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
   architecture: Building2,
+  identity: KeyRound,
+  access: ShieldCheck,
   databases: Database,
   memory: BrainCircuit,
   'tool-access': ShieldCheck,
@@ -74,9 +78,11 @@ const routeTitles: Record<string, string> = {
   '/capabilities/new': 'On Board Capability',
   '/capabilities/metadata': 'Capability Metadata',
   '/architecture': 'Architecture',
+  '/access': 'Users & Access',
   '/capabilities/databases': 'Workspace Databases',
   '/workspace/databases': 'Workspace Databases',
-  '/tool-access': 'Tool Access',
+  '/tool-access': 'Rule Engine',
+  '/rule-engine': 'Rule Engine',
 };
 
 const SIDEBAR_STORAGE_KEY = 'singularity.sidebar.collapsed';
@@ -101,6 +107,7 @@ const Sidebar = ({
     setActiveCapability,
     setPreferredCapabilityId,
     capabilities,
+    setCurrentWorkspaceUserId,
     updateCapabilityMetadata,
   } = useCapability();
   const { success } = useToast();
@@ -171,6 +178,12 @@ const Sidebar = ({
       `${activeCapability.name} will open as the default workspace capability.`,
     );
     setIsCapabilityMenuOpen(false);
+  };
+
+  const handleLogout = () => {
+    setIsCapabilityMenuOpen(false);
+    setCurrentWorkspaceUserId('');
+    navigate('/login');
   };
 
   return (
@@ -456,6 +469,32 @@ const Sidebar = ({
           <PlusCircle size={16} />
           {!isCollapsed ? <span>On Board Capability</span> : null}
         </button>
+
+        {!isCollapsed ? (
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => navigate('/capabilities/metadata')}
+              className="enterprise-button enterprise-button-secondary px-2 py-2 text-[0.7rem]"
+            >
+              Existing
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/workspace/databases')}
+              className="enterprise-button enterprise-button-secondary px-2 py-2 text-[0.7rem]"
+            >
+              Databases
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/rule-engine')}
+              className="enterprise-button enterprise-button-secondary px-2 py-2 text-[0.7rem]"
+            >
+              Rules
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <nav className="mt-5 flex flex-col gap-1.5">
@@ -541,6 +580,25 @@ const Sidebar = ({
             ))}
           </nav>
         ) : null}
+
+        <div className={cn('mt-3', isCollapsed && 'flex justify-center')}>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className={cn(
+              'group flex items-center rounded-xl text-sm font-semibold text-secondary transition-all hover:bg-surface-container-low hover:text-on-surface',
+              isCollapsed ? 'justify-center gap-0 px-2 py-3' : 'gap-3 px-4 py-2.5',
+            )}
+            title="Logout"
+            aria-label="Logout"
+          >
+            <LogOut
+              size={17}
+              className="shrink-0 transition-transform group-hover:scale-105"
+            />
+            {!isCollapsed ? <span>Logout</span> : null}
+          </button>
+        </div>
       </div>
 
       </div>
@@ -700,10 +758,14 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
   const currentWorkspaceUser =
     workspaceOrganization.users.find(user => user.id === currentWorkspaceUserId) ||
     workspaceOrganization.users[0];
+  const currentWorkspaceRoles = currentWorkspaceUser?.workspaceRoles || [];
   const currentActorTeamLabel =
     workspaceOrganization.teams.find(team =>
       currentActorContext.teamIds.includes(team.id),
-    )?.name || currentWorkspaceUser?.title;
+    )?.name ||
+    (currentWorkspaceRoles.length > 0
+      ? currentWorkspaceRoles.join(', ')
+      : currentWorkspaceUser?.title);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -844,6 +906,10 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
   const isDatabaseSetupRoute =
     location.pathname === '/workspace/databases' ||
     location.pathname === '/capabilities/databases';
+  const isAdvancedToolRoute =
+    advancedNavItems.some(item => item.path === location.pathname) ||
+    location.pathname === '/rule-engine';
+  const isLoginRoute = location.pathname === '/login';
   const showBlockingSyncState =
     !isDatabaseSetupRoute &&
     (bootStatus === 'loading' || (bootStatus === 'degraded' && capabilities.length === 0));
@@ -851,6 +917,9 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     !showBlockingSyncState &&
     bootStatus === 'ready' &&
     capabilities.length === 0 &&
+    !isDatabaseSetupRoute &&
+    !isAdvancedToolRoute &&
+    !isLoginRoute &&
     location.pathname !== '/capabilities/new';
 
   useEffect(() => {
@@ -1150,12 +1219,54 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                   type="button"
                   onClick={() => {
                     setIsMobileNavOpen(false);
+                    navigate('/capabilities/metadata');
+                  }}
+                  className="enterprise-button enterprise-button-secondary w-full"
+                >
+                  Existing Capability
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileNavOpen(false);
+                    navigate('/workspace/databases');
+                  }}
+                  className="enterprise-button enterprise-button-secondary w-full"
+                >
+                  Database Setup
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileNavOpen(false);
+                    navigate('/rule-engine');
+                  }}
+                  className="enterprise-button enterprise-button-secondary w-full"
+                >
+                  Rule Engine
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileNavOpen(false);
                     setIsHelpMenuOpen(true);
                   }}
                   className="enterprise-button enterprise-button-secondary w-full"
                 >
                   <CircleHelp size={16} />
                   Help
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileNavOpen(false);
+                    setCurrentWorkspaceUserId('');
+                    navigate('/login');
+                  }}
+                  className="enterprise-button enterprise-button-secondary w-full"
+                >
+                  <LogOut size={16} />
+                  Logout
                 </button>
               </div>
             </div>

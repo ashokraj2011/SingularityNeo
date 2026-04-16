@@ -20,6 +20,7 @@ import {
   fetchCapabilityWorkflowRunEvents,
   fetchRunConsoleSnapshot,
 } from '../lib/api';
+import { hasPermission } from '../lib/accessControl';
 import { createApiEventSource } from '../lib/desktop';
 import { useCapability } from '../context/CapabilityContext';
 import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
@@ -92,6 +93,10 @@ const RunConsole = () => {
   const navigate = useNavigate();
   const { activeCapability, getCapabilityWorkspace, setActiveChatAgent } = useCapability();
   const workspace = getCapabilityWorkspace(activeCapability.id);
+  const canReadTelemetry = hasPermission(
+    activeCapability.effectivePermissions,
+    'telemetry.read',
+  );
   const [snapshot, setSnapshot] = useState<RunConsoleSnapshot | null>(null);
   const [sessionMonitor, setSessionMonitor] = useState<CopilotSessionMonitorSnapshot | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string>('');
@@ -124,10 +129,19 @@ const RunConsole = () => {
   };
 
   useEffect(() => {
+    if (!canReadTelemetry) {
+      setSnapshot(null);
+      setSessionMonitor(null);
+      setSelectedRunId('');
+      return;
+    }
     void loadSnapshot();
-  }, [activeCapability.id]);
+  }, [activeCapability.id, canReadTelemetry]);
 
   useEffect(() => {
+    if (!canReadTelemetry) {
+      return;
+    }
     if (!selectedRunId) {
       setSelectedRunDetail(null);
       setSelectedRunEvents([]);
@@ -201,7 +215,7 @@ const RunConsole = () => {
       isMounted = false;
       eventSource?.close();
     };
-  }, [activeCapability.id, selectedRunId]);
+  }, [activeCapability.id, canReadTelemetry, selectedRunId]);
 
   const recentRuns = snapshot?.recentRuns || [];
   const selectedRun =
@@ -256,6 +270,18 @@ const RunConsole = () => {
           </button>
         }
       />
+
+      {!canReadTelemetry ? (
+        <EmptyState
+          title="Run console access is restricted"
+          description="This operator can see the capability, but not live run telemetry, event streams, or stored Copilot sessions."
+          icon={ShieldCheck}
+          className="min-h-[18rem]"
+        />
+      ) : null}
+
+      {canReadTelemetry ? (
+        <>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <StatTile
@@ -612,6 +638,8 @@ const RunConsole = () => {
         isOpen={isExplainOpen}
         onClose={() => setIsExplainOpen(false)}
       />
+        </>
+      ) : null}
     </div>
   );
 };

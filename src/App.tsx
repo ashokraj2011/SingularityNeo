@@ -24,11 +24,13 @@ const ArtifactDesigner = lazy(() => import('./pages/ArtifactDesigner'));
 const CapabilitySetup = lazy(() => import('./pages/CapabilitySetup'));
 const CapabilityMetadata = lazy(() => import('./pages/CapabilityMetadata'));
 const Architecture = lazy(() => import('./pages/Architecture'));
+const UsersAccess = lazy(() => import('./pages/UsersAccess'));
 const CapabilityDatabases = lazy(() => import('./pages/CapabilityDatabases'));
 const ToolAccess = lazy(() => import('./pages/ToolAccess'));
 const RunConsole = lazy(() => import('./pages/RunConsole'));
 const MemoryExplorer = lazy(() => import('./pages/MemoryExplorer'));
 const EvalCenter = lazy(() => import('./pages/EvalCenter'));
+const Login = lazy(() => import('./pages/Login'));
 
 const RouteLoader = () => (
   <div className="section-card ambient-shadow min-h-[calc(100vh-12rem)] p-8">
@@ -85,9 +87,12 @@ export default function App() {
                   <Route path="/capabilities/new" element={<CapabilitySetup />} />
                   <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
                   <Route path="/architecture" element={<Architecture />} />
+                  <Route path="/access" element={<UsersAccess />} />
+                  <Route path="/login" element={<Login />} />
                   <Route path="/capabilities/databases" element={<CapabilityDatabases />} />
                   <Route path="/workspace/databases" element={<CapabilityDatabases />} />
                   <Route path="/tool-access" element={<ToolAccess />} />
+                  <Route path="/rule-engine" element={<ToolAccess />} />
                   <Route path="/run-console" element={<RunConsole />} />
                   <Route path="/memory" element={<MemoryExplorer />} />
                   <Route path="/evals" element={<EvalCenter />} />

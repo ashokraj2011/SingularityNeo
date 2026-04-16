@@ -1,6 +1,8 @@
 import dotenv from 'dotenv';
 import express from 'express';
+import multer from 'multer';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +11,7 @@ import type {
   ActorContext,
   Capability,
   CapabilityAgent,
+  CapabilityAccessSnapshot,
   CapabilityChatMessage,
   CapabilityContractDraft,
   CapabilityDependency,
@@ -16,6 +19,8 @@ import type {
   CapabilityDeploymentTarget,
   CapabilityExecutionCommandTemplate,
   CapabilityWorkspace,
+  PermissionAction,
+  ReportExportPayload,
   Skill,
   UserPreference,
   WorkItem,
@@ -64,9 +69,12 @@ import {
   addCapabilityAgentRecord,
   addCapabilitySkillRecord,
   appendCapabilityMessageRecord,
+  createCapabilityArtifactUploadRecord,
   createCapabilityRecord,
   fetchAppState,
   getCapabilityAlmExportRecord,
+  getCapabilityArtifact,
+  getCapabilityArtifactFileBytes,
   getCapabilityBundle,
   getCapabilityRepositoriesRecord,
   getWorkspaceCatalogSnapshot,
@@ -122,6 +130,25 @@ import {
   updateWorkspaceOrganization,
   upsertUserPreference,
 } from './workspaceOrganization';
+import {
+  assertCapabilityPermission,
+  assertWorkspacePermission,
+  getAuthorizedAppState,
+  getCapabilityAccessSnapshot,
+  getWorkspaceAccessSnapshot,
+  updateCapabilityAccessSnapshot,
+  updateWorkspaceAccessSnapshot,
+} from './access';
+import {
+  buildAuditReportSnapshot,
+  buildCapabilityHealthSnapshot,
+  buildCollectionRollupSnapshot,
+  buildExecutiveSummarySnapshot,
+  buildOperationsDashboardSnapshot,
+  buildReportExportPayload,
+  buildTeamQueueSnapshot,
+} from './reporting';
+import { hasPermission } from '../src/lib/accessControl';
 import {
   buildWorkItemEvidenceBundle,
   getCompletedWorkOrderEvidence,
@@ -214,6 +241,14 @@ dotenv.config();
 const app = express();
 const port = Number(process.env.PORT || '3001');
 const execFileAsync = promisify(execFile);
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    files: 5,
+  },
+});
 
 let workersStarted = false;
 let startupInitializationPromise: Promise<void> | null = null;
@@ -1366,19 +1401,31 @@ app.post('/api/bootstrap/database/profiles/:profileId/activate', async (request,
   }
 });
 
-app.get('/api/state', async (_request, response) => {
+app.get('/api/state', async (request, response) => {
   try {
     await awaitStartupInitialization();
-    response.json(await fetchAppState());
+    response.json(await getAuthorizedAppState(parseActorContext(request, 'Workspace Operator')));
   } catch (error) {
     sendRepositoryError(response, error);
   }
 });
 
-app.get('/api/workspace/organization', async (_request, response) => {
+app.get('/api/workspace/organization', async (request, response) => {
   try {
     await awaitStartupInitialization();
-    response.json(await getWorkspaceOrganization());
+    const actor = parseActorContext(request, 'Workspace Operator');
+    const accessSnapshot = await getWorkspaceAccessSnapshot(actor);
+    response.json(
+      hasPermission(accessSnapshot.currentActorPermissions, 'access.manage') ||
+        hasPermission(accessSnapshot.currentActorPermissions, 'workspace.manage')
+        ? accessSnapshot.organization
+        : {
+            ...accessSnapshot.organization,
+            capabilityGrants: [],
+            descendantAccessGrants: [],
+            accessAuditEvents: [],
+          },
+    );
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -1387,8 +1434,15 @@ app.get('/api/workspace/organization', async (_request, response) => {
 app.patch('/api/workspace/organization', async (request, response) => {
   try {
     await awaitStartupInitialization();
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'access.manage' });
     response.json(
-      await updateWorkspaceOrganization(request.body as Partial<WorkspaceOrganization>),
+      (
+        await updateWorkspaceAccessSnapshot({
+          updates: request.body as Partial<WorkspaceOrganization>,
+          actor,
+        })
+      ).organization,
     );
   } catch (error) {
     sendRepositoryError(response, error);
@@ -1398,6 +1452,10 @@ app.patch('/api/workspace/organization', async (request, response) => {
 app.put('/api/workspace/users/:userId/preferences', async (request, response) => {
   try {
     await awaitStartupInitialization();
+    const actor = parseActorContext(request, 'Workspace Operator');
+    if (actor.userId !== request.params.userId) {
+      await assertWorkspacePermission({ actor, action: 'access.manage' });
+    }
     response.json(
       await upsertUserPreference({
         userId: request.params.userId,
@@ -1414,9 +1472,40 @@ app.put('/api/workspace/users/:userId/preferences', async (request, response) =>
   }
 });
 
-app.get('/api/workspace/settings', async (_request, response) => {
+app.get('/api/workspace/access', async (request, response) => {
   try {
     await awaitStartupInitialization();
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'access.manage' });
+    response.json(await getWorkspaceAccessSnapshot(actor));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.patch('/api/workspace/access', async (request, response) => {
+  try {
+    await awaitStartupInitialization();
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'access.manage' });
+    response.json(
+      await updateWorkspaceAccessSnapshot({
+        updates: request.body as Partial<WorkspaceOrganization>,
+        actor,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/workspace/settings', async (request, response) => {
+  try {
+    await awaitStartupInitialization();
+    await assertWorkspacePermission({
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workspace.manage',
+    });
     response.json(await getWorkspaceSettings());
   } catch (error) {
     sendRepositoryError(response, error);
@@ -1425,6 +1514,10 @@ app.get('/api/workspace/settings', async (_request, response) => {
 
 app.patch('/api/workspace/settings', async (request, response) => {
   try {
+    await assertWorkspacePermission({
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workspace.manage',
+    });
     response.json(
       await updateWorkspaceSettings({
         databaseConfigs: normalizeCapabilityDatabaseConfigs(
@@ -1440,8 +1533,12 @@ app.patch('/api/workspace/settings', async (request, response) => {
   }
 });
 
-app.get('/api/workspace/connectors', async (_request, response) => {
+app.get('/api/workspace/connectors', async (request, response) => {
   try {
+    await assertWorkspacePermission({
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workspace.manage',
+    });
     response.json((await getWorkspaceSettings()).connectors);
   } catch (error) {
     sendRepositoryError(response, error);
@@ -1450,6 +1547,10 @@ app.get('/api/workspace/connectors', async (_request, response) => {
 
 app.patch('/api/workspace/connectors', async (request, response) => {
   try {
+    await assertWorkspacePermission({
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workspace.manage',
+    });
     response.json(
       (
         await updateWorkspaceSettings({
@@ -1462,18 +1563,26 @@ app.patch('/api/workspace/connectors', async (request, response) => {
   }
 });
 
-app.get('/api/workspace/catalog', async (_request, response) => {
+app.get('/api/workspace/catalog', async (request, response) => {
   try {
     await awaitStartupInitialization();
+    await assertWorkspacePermission({
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workspace.manage',
+    });
     response.json(await getWorkspaceCatalogSnapshot());
   } catch (error) {
     sendRepositoryError(response, error);
   }
 });
 
-app.post('/api/workspace/catalog/initialize', async (_request, response) => {
+app.post('/api/workspace/catalog/initialize', async (request, response) => {
   try {
     await awaitStartupInitialization();
+    await assertWorkspacePermission({
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workspace.manage',
+    });
     response.json(await initializeWorkspaceFoundations());
   } catch (error) {
     sendRepositoryError(response, error);
@@ -1482,7 +1591,17 @@ app.post('/api/workspace/catalog/initialize', async (_request, response) => {
 
 app.get('/api/capabilities/:capabilityId', async (request, response) => {
   try {
-    response.json(await getCapabilityBundle(request.params.capabilityId));
+    const actor = parseActorContext(request, 'Workspace Operator');
+    const state = await getAuthorizedAppState(actor);
+    const capability = state.capabilities.find(item => item.id === request.params.capabilityId);
+    const workspace = state.capabilityWorkspaces.find(
+      item => item.capabilityId === request.params.capabilityId,
+    );
+    if (!capability || !workspace) {
+      response.status(404).json({ error: 'Capability was not found or is not visible.' });
+      return;
+    }
+    response.json({ capability, workspace });
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -1490,6 +1609,11 @@ app.get('/api/capabilities/:capabilityId', async (request, response) => {
 
 app.get('/api/capabilities/:capabilityId/run-console', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'telemetry.read',
+    });
     const capabilityId = request.params.capabilityId;
     const [recentRuns, recentEvents, recentPolicyDecisions] = await Promise.all([
       listWorkflowRunsByCapability(capabilityId),
@@ -1512,6 +1636,11 @@ app.get('/api/capabilities/:capabilityId/run-console', async (request, response)
 
 app.get('/api/capabilities/:capabilityId/copilot-sessions', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'telemetry.read',
+    });
     response.json(
       await buildCopilotSessionMonitorSnapshot(request.params.capabilityId),
     );
@@ -1522,6 +1651,11 @@ app.get('/api/capabilities/:capabilityId/copilot-sessions', async (request, resp
 
 app.get('/api/capabilities/:capabilityId/telemetry/spans', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'telemetry.read',
+    });
     response.json(
       await listTelemetrySpans(
         request.params.capabilityId,
@@ -1535,6 +1669,11 @@ app.get('/api/capabilities/:capabilityId/telemetry/spans', async (request, respo
 
 app.get('/api/capabilities/:capabilityId/telemetry/metrics', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'telemetry.read',
+    });
     response.json(
       await listTelemetryMetrics(
         request.params.capabilityId,
@@ -1546,8 +1685,200 @@ app.get('/api/capabilities/:capabilityId/telemetry/metrics', async (request, res
   }
 });
 
+app.post('/api/permissions/evaluate', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    const capabilityId = String(request.body?.capabilityId || '').trim();
+    const action = String(request.body?.action || '').trim() as PermissionAction;
+    if (!capabilityId || !action) {
+      response.status(400).json({
+        error: 'capabilityId and action are required for permission evaluation.',
+      });
+      return;
+    }
+    const { permissionSet } = await assertCapabilityPermission({
+      capabilityId,
+      actor,
+      action:
+        action === 'capability.read.rollup' || action === 'capability.read'
+          ? action
+          : 'capability.read.rollup',
+    });
+    response.json({
+      capabilityId,
+      action,
+      allowed: hasPermission(permissionSet, action),
+      permissionSet,
+    });
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/reports/operations', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.operations' });
+    response.json(await buildOperationsDashboardSnapshot(actor));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/reports/team/:teamId', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    const permissions = await assertWorkspacePermission({
+      actor,
+      action: 'report.view.operations',
+    });
+    if (
+      !permissions.workspaceRoles.includes('WORKSPACE_ADMIN') &&
+      !permissions.workspaceRoles.includes('PORTFOLIO_OWNER') &&
+      !permissions.workspaceRoles.includes('AUDITOR') &&
+      !actor.teamIds.includes(request.params.teamId)
+    ) {
+      throw new Error('Forbidden: team reports are not allowed outside the current actor team scope.');
+    }
+    response.json(
+      await buildTeamQueueSnapshot({
+        actor,
+        teamId: request.params.teamId,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/reports/capability/:capabilityId', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'capability.read.rollup',
+    });
+    response.json(
+      await buildCapabilityHealthSnapshot({
+        actor,
+        capabilityId: request.params.capabilityId,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/reports/collection/:capabilityId', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'capability.read.rollup',
+    });
+    response.json(
+      await buildCollectionRollupSnapshot({
+        actor,
+        capabilityId: request.params.capabilityId,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/reports/executive', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.executive' });
+    response.json(await buildExecutiveSummarySnapshot(actor));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/reports/audit', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+    response.json(await buildAuditReportSnapshot(actor));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/reports/export/:reportType', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    const reportType = String(request.params.reportType || '').trim();
+    let payload:
+      | Awaited<ReturnType<typeof buildOperationsDashboardSnapshot>>
+      | Awaited<ReturnType<typeof buildTeamQueueSnapshot>>
+      | Awaited<ReturnType<typeof buildCapabilityHealthSnapshot>>
+      | Awaited<ReturnType<typeof buildCollectionRollupSnapshot>>
+      | Awaited<ReturnType<typeof buildExecutiveSummarySnapshot>>
+      | Awaited<ReturnType<typeof buildAuditReportSnapshot>>;
+
+    if (reportType === 'operations') {
+      await assertWorkspacePermission({ actor, action: 'report.view.operations' });
+      payload = await buildOperationsDashboardSnapshot(actor);
+    } else if (reportType === 'team') {
+      await assertWorkspacePermission({ actor, action: 'report.view.operations' });
+      payload = await buildTeamQueueSnapshot({
+        actor,
+        teamId: String(request.query.teamId || ''),
+      });
+    } else if (reportType === 'capability') {
+      const capabilityId = String(request.query.capabilityId || '');
+      await assertCapabilityPermission({
+        capabilityId,
+        actor,
+        action: 'capability.read.rollup',
+      });
+      payload = await buildCapabilityHealthSnapshot({ actor, capabilityId });
+    } else if (reportType === 'collection') {
+      const capabilityId = String(request.query.capabilityId || '');
+      await assertCapabilityPermission({
+        capabilityId,
+        actor,
+        action: 'capability.read.rollup',
+      });
+      payload = await buildCollectionRollupSnapshot({ actor, capabilityId });
+    } else if (reportType === 'executive') {
+      await assertWorkspacePermission({ actor, action: 'report.view.executive' });
+      payload = await buildExecutiveSummarySnapshot(actor);
+    } else if (reportType === 'audit') {
+      await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+      payload = await buildAuditReportSnapshot(actor);
+    } else {
+      response.status(400).json({ error: 'Unknown report type.' });
+      return;
+    }
+
+    response.json(
+      buildReportExportPayload({
+        reportType: reportType as ReportExportPayload['reportType'],
+        payload,
+        filters: {
+          capabilityId: String(request.query.capabilityId || '').trim() || undefined,
+          teamId: String(request.query.teamId || '').trim() || undefined,
+        },
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
 app.get('/api/capabilities/:capabilityId/memory/documents', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
     response.json(
       await listMemoryDocuments(
         request.params.capabilityId,
@@ -1561,6 +1892,11 @@ app.get('/api/capabilities/:capabilityId/memory/documents', async (request, resp
 
 app.get('/api/capabilities/:capabilityId/memory/search', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
     response.json(
       await searchCapabilityMemory({
         capabilityId: request.params.capabilityId,
@@ -1576,6 +1912,12 @@ app.get('/api/capabilities/:capabilityId/memory/search', async (request, respons
 
 app.post('/api/capabilities/:capabilityId/memory/refresh', async (request, response) => {
   try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'agents.manage',
+    });
     const documents = await refreshCapabilityMemory(request.params.capabilityId, {
       requeueAgents: true,
       requestReason: 'manual-memory-refresh',
@@ -1589,6 +1931,11 @@ app.post('/api/capabilities/:capabilityId/memory/refresh', async (request, respo
 
 app.get('/api/capabilities/:capabilityId/agents/:agentId/learning', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
     response.json(
       await getAgentLearningProfileDetail(
         request.params.capabilityId,
@@ -1602,6 +1949,12 @@ app.get('/api/capabilities/:capabilityId/agents/:agentId/learning', async (reque
 
 app.post('/api/capabilities/:capabilityId/agents/:agentId/learning/refresh', async (request, response) => {
   try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'agents.manage',
+    });
     await queueSingleAgentLearningRefresh(
       request.params.capabilityId,
       request.params.agentId,
@@ -1621,6 +1974,11 @@ app.post('/api/capabilities/:capabilityId/agents/:agentId/learning/refresh', asy
 
 app.get('/api/capabilities/:capabilityId/evals/suites', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
     response.json(await listEvalSuites(request.params.capabilityId));
   } catch (error) {
     sendRepositoryError(response, error);
@@ -1629,6 +1987,11 @@ app.get('/api/capabilities/:capabilityId/evals/suites', async (request, response
 
 app.get('/api/capabilities/:capabilityId/evals/runs', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
     response.json(await listEvalRuns(request.params.capabilityId));
   } catch (error) {
     sendRepositoryError(response, error);
@@ -1637,6 +2000,11 @@ app.get('/api/capabilities/:capabilityId/evals/runs', async (request, response) 
 
 app.get('/api/capabilities/:capabilityId/evals/runs/:runId', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
     response.json(
       await getEvalRunDetail(
         request.params.capabilityId,
@@ -1650,6 +2018,12 @@ app.get('/api/capabilities/:capabilityId/evals/runs/:runId', async (request, res
 
 app.post('/api/capabilities/:capabilityId/evals/suites/:suiteId/run', async (request, response) => {
   try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'workflow.edit',
+    });
     response.status(201).json(
       await runEvalSuite(
         request.params.capabilityId,
@@ -1663,6 +2037,11 @@ app.post('/api/capabilities/:capabilityId/evals/suites/:suiteId/run', async (req
 
 app.get('/api/capabilities/:capabilityId/ledger/artifacts', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'artifact.read',
+    });
     response.json(await listLedgerArtifacts(request.params.capabilityId));
   } catch (error) {
     sendRepositoryError(response, error);
@@ -1673,6 +2052,11 @@ app.get(
   '/api/capabilities/:capabilityId/ledger/completed-work-orders',
   async (request, response) => {
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'artifact.read',
+      });
       response.json(await listCompletedWorkOrders(request.params.capabilityId));
     } catch (error) {
       sendRepositoryError(response, error);
@@ -1682,6 +2066,11 @@ app.get(
 
 app.get('/api/capabilities/:capabilityId/flight-recorder', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'telemetry.read',
+    });
     response.json(await buildCapabilityFlightRecorderSnapshot(request.params.capabilityId));
   } catch (error) {
     sendRepositoryError(response, error);
@@ -1690,6 +2079,11 @@ app.get('/api/capabilities/:capabilityId/flight-recorder', async (request, respo
 
 app.get('/api/capabilities/:capabilityId/flight-recorder/download', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'telemetry.read',
+    });
     const format = request.query.format === 'markdown' ? 'markdown' : 'json';
     const snapshot = await buildCapabilityFlightRecorderSnapshot(request.params.capabilityId);
     response.setHeader(
@@ -1719,6 +2113,11 @@ app.get(
   '/api/capabilities/:capabilityId/work-items/:workItemId/flight-recorder',
   async (request, response) => {
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'telemetry.read',
+      });
       response.json(
         await buildWorkItemFlightRecorderDetail(
           request.params.capabilityId,
@@ -1735,6 +2134,11 @@ app.get(
   '/api/capabilities/:capabilityId/work-items/:workItemId/explain',
   async (request, response) => {
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'workitem.read',
+      });
       response.json(
         await buildWorkItemExplainDetail(
           request.params.capabilityId,
@@ -1751,6 +2155,11 @@ app.post(
   '/api/capabilities/:capabilityId/work-items/:workItemId/review-packet',
   async (request, response) => {
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'artifact.read',
+      });
       response.status(201).json(
         await generateReviewPacketForWorkItem(
           request.params.capabilityId,
@@ -1783,6 +2192,11 @@ app.post(
           ? body.resolvedBy.trim()
           : 'Capability Owner',
       );
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
       response.json(
         await continueWorkflowStageControl({
           capabilityId: request.params.capabilityId,
@@ -1817,6 +2231,11 @@ app.get(
   '/api/capabilities/:capabilityId/work-items/:workItemId/flight-recorder/download',
   async (request, response) => {
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'telemetry.read',
+      });
       const format = request.query.format === 'markdown' ? 'markdown' : 'json';
       const detail = await buildWorkItemFlightRecorderDetail(
         request.params.capabilityId,
@@ -1848,6 +2267,11 @@ app.get(
 
 app.get('/api/capabilities/:capabilityId/work-items/:workItemId/evidence', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'artifact.read',
+    });
     response.json(
       await getCompletedWorkOrderEvidence(
         request.params.capabilityId,
@@ -1946,8 +2370,60 @@ app.post(
   },
 );
 
+app.get(
+  '/api/capabilities/:capabilityId/artifacts/:artifactId/blob',
+  async (request, response) => {
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'artifact.read',
+      });
+
+      const artifact = await getCapabilityArtifact(
+        request.params.capabilityId,
+        request.params.artifactId,
+      );
+
+      if (!artifact) {
+        response.status(404).json({ error: 'Artifact was not found.' });
+        return;
+      }
+
+      const file = await getCapabilityArtifactFileBytes(
+        request.params.capabilityId,
+        request.params.artifactId,
+      );
+
+      if (!file) {
+        response.status(404).json({ error: 'Artifact blob was not found.' });
+        return;
+      }
+
+      const inline =
+        request.query.inline === '1' || String(request.query.inline || '') === 'true';
+      const fileName = artifact.fileName || `${request.params.artifactId}.bin`;
+
+      response.setHeader('Content-Type', artifact.mimeType || 'application/octet-stream');
+      response.setHeader('Content-Length', String(file.sizeBytes));
+      response.setHeader(
+        'Content-Disposition',
+        `${inline ? 'inline' : 'attachment'}; filename="${fileName}"`,
+      );
+      response.send(file.bytes);
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
 app.get('/api/capabilities/:capabilityId/artifacts/:artifactId/content', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'artifact.read',
+    });
     response.json(
       await getLedgerArtifactContent(
         request.params.capabilityId,
@@ -1961,15 +2437,36 @@ app.get('/api/capabilities/:capabilityId/artifacts/:artifactId/content', async (
 
 app.get('/api/capabilities/:capabilityId/artifacts/:artifactId/download', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'artifact.read',
+    });
     const content = await getLedgerArtifactContent(
       request.params.capabilityId,
       request.params.artifactId,
     );
+
+    if (content.contentFormat === 'BINARY' || content.hasBinary) {
+      const file = await getCapabilityArtifactFileBytes(
+        request.params.capabilityId,
+        request.params.artifactId,
+      );
+
+      if (file) {
+        response.setHeader('Content-Type', content.mimeType);
+        response.setHeader('Content-Length', String(file.sizeBytes));
+        response.setHeader(
+          'Content-Disposition',
+          `attachment; filename="${content.fileName}"`,
+        );
+        response.send(file.bytes);
+        return;
+      }
+    }
+
     response.setHeader('Content-Type', content.mimeType);
-    response.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${content.fileName}"`,
-    );
+    response.setHeader('Content-Disposition', `attachment; filename="${content.fileName}"`);
     response.send(
       content.contentFormat === 'JSON'
         ? JSON.stringify(content.contentJson || {}, null, 2)
@@ -1980,10 +2477,207 @@ app.get('/api/capabilities/:capabilityId/artifacts/:artifactId/download', async 
   }
 });
 
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/uploads',
+  upload.array('files', 5),
+  async (request, response) => {
+    try {
+      const actor = parseActorContext(request, 'Workspace Operator');
+
+      // Allow stakeholders who can control work or decide approvals to attach evidence.
+      const authActions: PermissionAction[] = [
+        'workitem.control',
+        'approval.decide',
+        'artifact.publish',
+      ];
+      let authorized = false;
+      let firstError: unknown = null;
+
+      for (const action of authActions) {
+        try {
+          await assertCapabilityPermission({
+            capabilityId: request.params.capabilityId,
+            actor,
+            action,
+          });
+          authorized = true;
+          break;
+        } catch (error) {
+          if (!firstError) firstError = error;
+        }
+      }
+
+      if (!authorized) {
+        throw firstError instanceof Error ? firstError : new Error('Forbidden.');
+      }
+
+      const bundle = await getCapabilityBundle(request.params.capabilityId);
+      assertCapabilitySupportsExecution(bundle.capability);
+
+      const workItem = bundle.workspace.workItems.find(
+        item => item.id === request.params.workItemId,
+      );
+      if (!workItem) {
+        response.status(404).json({ error: 'Work item was not found.' });
+        return;
+      }
+
+      const workflow = bundle.workspace.workflows.find(
+        item => item.id === workItem.workflowId,
+      );
+
+      const files = Array.isArray(request.files) ? request.files : [];
+      if (files.length === 0) {
+        response.status(400).json({ error: 'At least one file is required.' });
+        return;
+      }
+
+      const allowedExtensions = new Set([
+        '.png',
+        '.jpg',
+        '.jpeg',
+        '.webp',
+        '.gif',
+        '.pdf',
+        '.txt',
+        '.md',
+        '.json',
+        '.csv',
+        '.doc',
+        '.docx',
+      ]);
+      const allowedMimePrefixes = ['image/', 'text/'];
+      const allowedMimes = new Set([
+        'application/pdf',
+        'application/json',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'text/csv',
+      ]);
+
+      const toFileSlug = (value: string) =>
+        value
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 80) || 'artifact';
+
+      const createArtifactId = () =>
+        `ART-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+
+      const normalizeMime = (value: string) => String(value || '').trim().toLowerCase();
+      const inferContentFormat = (file: Express.Multer.File) => {
+        const mime = normalizeMime(file.mimetype);
+        const ext = path.extname(file.originalname || '').toLowerCase();
+
+        if (mime.includes('json') || ext === '.json') {
+          return 'JSON' as const;
+        }
+
+        if (mime.includes('markdown') || ext === '.md') {
+          return 'MARKDOWN' as const;
+        }
+
+        if (mime.startsWith('text/')) {
+          return 'TEXT' as const;
+        }
+
+        return 'BINARY' as const;
+      };
+
+      const createdArtifacts = [];
+
+      for (const file of files) {
+        const mime = normalizeMime(file.mimetype);
+        const ext = path.extname(file.originalname || '').toLowerCase();
+        const passesAllowlist =
+          Boolean(mime && (allowedMimePrefixes.some(prefix => mime.startsWith(prefix)) || allowedMimes.has(mime))) ||
+          allowedExtensions.has(ext);
+
+        if (!passesAllowlist) {
+          response.status(400).json({
+            error: `Unsupported upload type for "${file.originalname}".`,
+          });
+          return;
+        }
+
+        const contentFormat = inferContentFormat(file);
+        let contentText: string | undefined;
+        let contentJson: Record<string, any> | any[] | undefined;
+
+        if (contentFormat !== 'BINARY') {
+          const decoded = file.buffer.toString('utf-8');
+          if (contentFormat === 'JSON') {
+            try {
+              contentJson = JSON.parse(decoded);
+            } catch {
+              contentText = decoded;
+            }
+          } else {
+            contentText = decoded;
+          }
+        }
+
+        const sha256 = createHash('sha256').update(file.buffer).digest('hex');
+        const artifact = {
+          id: createArtifactId(),
+          name: `${workItem.title} · ${file.originalname}`,
+          capabilityId: bundle.capability.id,
+          type: mime.startsWith('image/') ? 'Reference Image' : 'Reference Document',
+          inputs: [],
+          version: `phase-${toFileSlug(workItem.phase || 'work')}`,
+          agent: actor.displayName || 'User Upload',
+          created: new Date().toISOString(),
+          direction: 'INPUT' as const,
+          connectedAgentId: workItem.assignedAgentId,
+          sourceWorkflowId: workflow?.id,
+          summary: `Uploaded ${file.originalname} for ${workItem.id}.`,
+          artifactKind: 'UPLOAD' as const,
+          phase: workItem.phase,
+          workItemId: workItem.id,
+          contentFormat,
+          mimeType: mime || 'application/octet-stream',
+          fileName: file.originalname,
+          contentText,
+          contentJson,
+          downloadable: true,
+        };
+
+        await createCapabilityArtifactUploadRecord({
+          capabilityId: request.params.capabilityId,
+          artifact,
+          file: {
+            bytes: file.buffer,
+            sizeBytes: file.size,
+            sha256,
+          },
+        });
+
+        createdArtifacts.push(artifact);
+      }
+
+      await refreshCapabilityMemory(request.params.capabilityId, {
+        requeueAgents: true,
+        requestReason: 'work-item-uploaded',
+      }).catch(() => undefined);
+      wakeAgentLearningWorker();
+
+      response.status(201).json({ artifacts: createdArtifacts });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
 app.get(
   '/api/capabilities/:capabilityId/work-items/:workItemId/evidence-bundle',
   async (request, response) => {
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'artifact.read',
+      });
       const bundle = await buildWorkItemEvidenceBundle(
         request.params.capabilityId,
         request.params.workItemId,
@@ -2012,6 +2706,10 @@ app.post('/api/capabilities', async (request, response) => {
   }
 
   try {
+    await assertWorkspacePermission({
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.create',
+    });
     await createCapabilityRecord(capability);
     await queueCapabilityAgentLearningRefresh(capability.id, 'capability-created');
     wakeAgentLearningWorker();
@@ -2023,6 +2721,11 @@ app.post('/api/capabilities', async (request, response) => {
 
 app.patch('/api/capabilities/:capabilityId', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.edit',
+    });
     await updateCapabilityRecord(
       request.params.capabilityId,
       request.body as Partial<Capability>,
@@ -2044,7 +2747,13 @@ app.patch('/api/capabilities/:capabilityId', async (request, response) => {
 
 app.get('/api/capabilities/:capabilityId/architecture', async (request, response) => {
   try {
-    const state = await fetchAppState();
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'capability.read.rollup',
+    });
+    const state = await getAuthorizedAppState(actor);
     const capability = state.capabilities.find(
       item => item.id === request.params.capabilityId,
     );
@@ -2086,6 +2795,11 @@ app.get('/api/capabilities/:capabilityId/architecture', async (request, response
 app.post('/api/capabilities/:capabilityId/publish-contract', async (request, response) => {
   try {
     const actor = parseActorContext(request, 'Capability Owner');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'contract.publish',
+    });
     const result = await publishCapabilityContractRecord({
       capabilityId: request.params.capabilityId,
       publishedBy: actor.displayName,
@@ -2102,7 +2816,42 @@ app.post('/api/capabilities/:capabilityId/publish-contract', async (request, res
 
 app.get('/api/capabilities/:capabilityId/alm-export', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read.rollup',
+    });
     response.json(await getCapabilityAlmExportRecord(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/access', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'capability.read',
+    });
+    response.json(await getCapabilityAccessSnapshot(request.params.capabilityId, actor));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.patch('/api/capabilities/:capabilityId/access', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'access.manage' });
+    response.json(
+      await updateCapabilityAccessSnapshot({
+        capabilityId: request.params.capabilityId,
+        updates: request.body as Partial<CapabilityAccessSnapshot>,
+        actor,
+      }),
+    );
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -2110,6 +2859,11 @@ app.get('/api/capabilities/:capabilityId/alm-export', async (request, response) 
 
 app.get('/api/capabilities/:capabilityId/repositories', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
     response.json(await getCapabilityRepositoriesRecord(request.params.capabilityId));
   } catch (error) {
     sendRepositoryError(response, error);
@@ -2118,6 +2872,11 @@ app.get('/api/capabilities/:capabilityId/repositories', async (request, response
 
 app.patch('/api/capabilities/:capabilityId/repositories', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.edit',
+    });
     const repositories = normalizeCapabilityRepositoriesPayload(
       request.params.capabilityId,
       request.body?.repositories,
@@ -2140,6 +2899,11 @@ app.post('/api/capabilities/:capabilityId/skills', async (request, response) => 
   }
 
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.edit',
+    });
     await addCapabilitySkillRecord(request.params.capabilityId, {
       ...skill,
       contentMarkdown:
@@ -2163,6 +2927,11 @@ app.post('/api/capabilities/:capabilityId/skills', async (request, response) => 
 
 app.delete('/api/capabilities/:capabilityId/skills/:skillId', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.edit',
+    });
     await removeCapabilitySkillRecord(
       request.params.capabilityId,
       request.params.skillId,
@@ -2191,6 +2960,11 @@ app.post('/api/capabilities/:capabilityId/agents', async (request, response) => 
   }
 
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'agents.manage',
+    });
     agent.model = await resolveWritableAgentModel(agent.model);
     await addCapabilityAgentRecord(request.params.capabilityId, agent);
     await queueSingleAgentLearningRefresh(
@@ -2217,6 +2991,11 @@ app.patch('/api/capabilities/:capabilityId/agents/bulk-model', async (request, r
   }
 
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'agents.manage',
+    });
     const resolvedModel = await resolveWritableAgentModel(requestedModel);
     response.json(
       await updateCapabilityAgentModelsRecord(
@@ -2231,6 +3010,11 @@ app.patch('/api/capabilities/:capabilityId/agents/bulk-model', async (request, r
 
 app.patch('/api/capabilities/:capabilityId/agents/:agentId', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'agents.manage',
+    });
     const updates = request.body as Partial<CapabilityAgent>;
     if (updates.model) {
       updates.model = await resolveWritableAgentModel(updates.model);
@@ -2263,6 +3047,11 @@ app.post('/api/capabilities/:capabilityId/messages', async (request, response) =
   }
 
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'chat.write',
+    });
     response.status(201).json(
       await appendCapabilityMessageRecord(request.params.capabilityId, message),
     );
@@ -2279,6 +3068,11 @@ app.patch('/api/capabilities/:capabilityId/chat-agent', async (request, response
   }
 
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'chat.read',
+    });
     response.json(
       await setActiveChatAgentRecord(request.params.capabilityId, agentId),
     );
@@ -2289,6 +3083,11 @@ app.patch('/api/capabilities/:capabilityId/chat-agent', async (request, response
 
 app.patch('/api/capabilities/:capabilityId/workspace', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.edit',
+    });
     const capability = (await getCapabilityBundle(request.params.capabilityId)).capability;
     if (
       normalizeCapabilityKind(capability.capabilityKind, capability.collectionKind) ===
@@ -2364,6 +3163,11 @@ app.post('/api/capabilities/:capabilityId/work-items', async (request, response)
       (await getCapabilityBundle(request.params.capabilityId)).capability,
     );
     const actor = parseActorContext(request, parseActor(request.body?.guidedBy, 'Capability Owner'));
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'workitem.create',
+    });
     response.status(201).json(
       await createWorkItemRecord({
         capabilityId: request.params.capabilityId,
@@ -2394,6 +3198,11 @@ app.post('/api/capabilities/:capabilityId/work-items/:workItemId/move', async (r
 
   try {
     const actor = parseActorContext(request, 'Capability Owner');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'workitem.control',
+    });
     response.json(
       await moveWorkItemToPhaseControl({
         capabilityId: request.params.capabilityId,
@@ -2412,6 +3221,11 @@ app.get(
   '/api/capabilities/:capabilityId/work-items/:workItemId/collaboration',
   async (request, response) => {
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'workitem.read',
+      });
       const [claims, presence] = await Promise.all([
         listActiveWorkItemClaims(request.params.capabilityId, request.params.workItemId),
         listWorkItemPresence(request.params.capabilityId, request.params.workItemId),
@@ -2427,6 +3241,11 @@ app.get(
   '/api/capabilities/:capabilityId/work-items/:workItemId/execution-context',
   async (request, response) => {
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'workitem.read',
+      });
       const [context, handoffs] = await Promise.all([
         getWorkItemExecutionContextRecord({
           capabilityId: request.params.capabilityId,
@@ -2449,6 +3268,11 @@ app.post(
   async (request, response) => {
     try {
       const actor = parseActorContext(request, 'Capability Owner');
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
       const context = await initializeWorkItemExecutionContextRecord({
         capabilityId: request.params.capabilityId,
         workItemId: request.params.workItemId,
@@ -2466,6 +3290,11 @@ app.post(
   async (request, response) => {
     try {
       const actor = parseActorContext(request, 'Capability Owner');
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
       const context = await initializeWorkItemExecutionContextRecord({
         capabilityId: request.params.capabilityId,
         workItemId: request.params.workItemId,
@@ -2570,6 +3399,11 @@ app.post(
     }
 
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
       await initializeWorkItemExecutionContextRecord({
         capabilityId: request.params.capabilityId,
         workItemId: request.params.workItemId,
@@ -2605,6 +3439,11 @@ app.delete(
     }
 
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
       await releaseWorkItemCodeClaimRecord({
         capabilityId: request.params.capabilityId,
         workItemId: request.params.workItemId,
@@ -2622,6 +3461,11 @@ app.get(
   '/api/capabilities/:capabilityId/work-items/:workItemId/handoff',
   async (request, response) => {
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'workitem.read',
+      });
       response.json(
         await listWorkItemHandoffPacketsRecord({
           capabilityId: request.params.capabilityId,
@@ -2645,6 +3489,11 @@ app.post(
     }
 
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
       const packet = await createWorkItemHandoffPacketRecord({
         capabilityId: request.params.capabilityId,
         packet: {
@@ -2692,6 +3541,11 @@ app.post(
   async (request, response) => {
     const actor = parseActorContext(request, 'Capability Owner');
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
       const packet = await acceptWorkItemHandoffPacketRecord({
         capabilityId: request.params.capabilityId,
         packetId: request.params.packetId,
@@ -2729,6 +3583,11 @@ app.post(
     }
 
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
       const session = await upsertWorkItemCheckoutSessionRecord({
         capabilityId: request.params.capabilityId,
         session: {
@@ -2760,6 +3619,11 @@ app.post(
     }
 
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
       const bundle = await getCapabilityBundle(request.params.capabilityId);
       const workItem = bundle.workspace.workItems.find(
         item => item.id === request.params.workItemId,
@@ -2816,6 +3680,11 @@ app.delete(
     }
 
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
       await releaseWorkItemClaim({
         capabilityId: request.params.capabilityId,
         workItemId: request.params.workItemId,
@@ -2851,6 +3720,11 @@ app.post(
     }
 
     try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.read',
+      });
       const presence = await upsertWorkItemPresence({
         capabilityId: request.params.capabilityId,
         workItemId: request.params.workItemId,
@@ -2875,6 +3749,11 @@ app.post('/api/capabilities/:capabilityId/work-items/:workItemId/runs', async (r
       request,
       parseActor(request.body?.guidedBy, 'Capability Owner'),
     );
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'workitem.control',
+    });
     await initializeWorkItemExecutionContextRecord({
       capabilityId: request.params.capabilityId,
       workItemId: request.params.workItemId,
@@ -2897,6 +3776,11 @@ app.post('/api/capabilities/:capabilityId/work-items/:workItemId/runs', async (r
 
 app.get('/api/capabilities/:capabilityId/work-items/:workItemId/runs', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workitem.read',
+    });
     response.json(
       await listWorkflowRunsForWorkItem(
         request.params.capabilityId,
@@ -2910,6 +3794,11 @@ app.get('/api/capabilities/:capabilityId/work-items/:workItemId/runs', async (re
 
 app.get('/api/capabilities/:capabilityId/runs/:runId', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workitem.read',
+    });
     response.json(
       await getWorkflowRunDetail(
         request.params.capabilityId,
@@ -2923,6 +3812,11 @@ app.get('/api/capabilities/:capabilityId/runs/:runId', async (request, response)
 
 app.get('/api/capabilities/:capabilityId/runs/:runId/events', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'telemetry.read',
+    });
     response.json(
       await listWorkflowRunEvents(
         request.params.capabilityId,
@@ -2935,6 +3829,17 @@ app.get('/api/capabilities/:capabilityId/runs/:runId/events', async (request, re
 });
 
 app.get('/api/capabilities/:capabilityId/runs/:runId/stream', async (request, response) => {
+  try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'telemetry.read',
+    });
+  } catch (error) {
+    sendRepositoryError(response, error);
+    return;
+  }
+
   response.setHeader('Content-Type', 'text/event-stream');
   response.setHeader('Cache-Control', 'no-cache, no-transform');
   response.setHeader('Connection', 'keep-alive');
@@ -2985,6 +3890,11 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/approve', async (request, 
       request,
       parseActor(request.body?.resolvedBy, 'Capability Owner'),
     );
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'approval.decide',
+    });
     const detail = await approveWorkflowRun({
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
@@ -3006,6 +3916,11 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/request-changes', async (r
       request,
       parseActor(request.body?.resolvedBy, 'Capability Owner'),
     );
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'approval.decide',
+    });
     const detail = await requestChangesWorkflowRun({
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
@@ -3028,6 +3943,11 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/provide-input', async (req
       request,
       parseActor(request.body?.resolvedBy, 'Capability Owner'),
     );
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'workitem.control',
+    });
     const detail = await provideWorkflowRunInput({
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
@@ -3049,6 +3969,11 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/resolve-conflict', async (
       request,
       parseActor(request.body?.resolvedBy, 'Capability Owner'),
     );
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'workitem.control',
+    });
     const detail = await resolveWorkflowRunConflict({
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
@@ -3067,6 +3992,11 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/resolve-conflict', async (
 
 app.post('/api/capabilities/:capabilityId/runs/:runId/cancel', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workitem.control',
+    });
     response.json(
       await cancelWorkflowRun({
         capabilityId: request.params.capabilityId,
@@ -3085,6 +4015,11 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/restart', async (request, 
       request,
       parseActor(request.body?.guidedBy, 'Capability Owner'),
     );
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'workitem.restart',
+    });
     const detail = await restartWorkflowRun({
       capabilityId: request.params.capabilityId,
       runId: request.params.runId,
@@ -3102,6 +4037,11 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/restart', async (request, 
 
 app.get('/api/capabilities/:capabilityId/code-workspaces', async (request, response) => {
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
     const bundle = await getCapabilityBundle(request.params.capabilityId);
     const workspaces = await Promise.all(
       getCapabilityWorkspaceRoots(bundle.capability).map(directoryPath =>
@@ -3127,6 +4067,11 @@ app.post('/api/capabilities/:capabilityId/code-workspaces/branch', async (reques
   }
 
   try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.edit',
+    });
     const bundle = await getCapabilityBundle(request.params.capabilityId);
     const allowedPaths = getCapabilityWorkspaceRoots(bundle.capability);
     const resolvedPath = normalizeDirectoryPath(requestedPath);

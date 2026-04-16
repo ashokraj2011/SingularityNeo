@@ -34,10 +34,15 @@ import StageControlModal from '../components/StageControlModal';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
+import {
+  canReadCapabilityLiveDetail,
+  hasPermission,
+} from '../lib/accessControl';
 import { compactMarkdownPreview } from '../lib/markdown';
 import { createApiEventSource } from '../lib/desktop';
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import {
+  appendCapabilityMessageRecord,
   approveCapabilityWorkflowRun,
   acceptCapabilityWorkItemHandoff,
   cancelCapabilityWorkflowRun,
@@ -55,6 +60,7 @@ import {
   listCapabilityWorkflowRuns,
   moveCapabilityWorkItem,
   provideCapabilityWorkflowRunInput,
+  validateOnboardingWorkspacePath,
   releaseCapabilityWorkItemControl,
   releaseCapabilityWorkItemWriteControl,
   requestCapabilityWorkflowRunChanges,
@@ -62,6 +68,7 @@ import {
   restartCapabilityWorkflowRun,
   startCapabilityWorkflowRun,
   streamCapabilityChat,
+  uploadCapabilityWorkItemFiles,
   type RuntimeStatus,
   updateCapabilityWorkItemPresence,
 } from '../lib/api';
@@ -110,6 +117,7 @@ import type {
   WorkItemPhaseStakeholderAssignment,
   WorkItemPresence,
   WorkItemTaskType,
+  WorkspacePathValidationResult,
   Workflow,
   WorkflowRun,
   WorkflowRunDetail,
@@ -248,7 +256,8 @@ type WorkNavigatorSection = {
   helper: string;
   items: WorkNavigatorItem[];
 };
-type WorkbenchQueueView = 'MY_QUEUE' | 'TEAM_QUEUE' | 'ATTENTION' | 'WATCHING';
+type WorkbenchQueueView = 'ALL_WORK' | 'MY_QUEUE' | 'TEAM_QUEUE' | 'ATTENTION' | 'WATCHING';
+type WorkbenchSelectionFocus = 'INPUT' | 'APPROVAL' | 'RESOLUTION';
 
 const STORAGE_KEYS = {
   view: 'singularity.orchestrator.view',
@@ -748,11 +757,21 @@ const Orchestrator = () => {
     currentActorContext,
     getCapabilityWorkspace,
     refreshCapabilityBundle,
+    updateCapabilityMetadata,
     setActiveChatAgent,
     workspaceOrganization,
   } = useCapability();
   const { error: showError, success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
+  const permissionSet = activeCapability.effectivePermissions;
+  const canReadLiveDetail = canReadCapabilityLiveDetail(permissionSet);
+  const canEditCapability = hasPermission(permissionSet, 'capability.edit');
+  const canCreateWorkItems = hasPermission(permissionSet, 'workitem.create');
+  const canControlWorkItems = hasPermission(permissionSet, 'workitem.control');
+  const canRestartWorkItems = hasPermission(permissionSet, 'workitem.restart');
+  const canDecideApprovals = hasPermission(permissionSet, 'approval.decide');
+  const canReadChat = hasPermission(permissionSet, 'chat.read');
+  const canWriteChat = hasPermission(permissionSet, 'chat.write');
   const lifecycleBoardPhases = useMemo(
     () => getCapabilityBoardPhaseIds(activeCapability),
     [activeCapability],
@@ -793,7 +812,7 @@ const Orchestrator = () => {
   });
   const [isCreateSheetOpen, setIsCreateSheetOpen] = useState(false);
   const [view, setView] = useState<OrchestratorView>(() =>
-    readSessionValue(STORAGE_KEYS.view, 'board'),
+    readSessionValue(STORAGE_KEYS.view, 'list'),
   );
   const [detailTab, setDetailTab] = useState<DetailTab>(() => {
     const stored = readSessionValue(STORAGE_KEYS.detailTab, 'operate') as string;
@@ -828,6 +847,9 @@ const Orchestrator = () => {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeError, setRuntimeError] = useState('');
   const [actionError, setActionError] = useState('');
+  const [approvedWorkspaceDraft, setApprovedWorkspaceDraft] = useState('');
+  const [approvedWorkspaceValidation, setApprovedWorkspaceValidation] =
+    useState<WorkspacePathValidationResult | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [selectedRunDetail, setSelectedRunDetail] = useState<WorkflowRunDetail | null>(null);
   const [selectedRunEvents, setSelectedRunEvents] = useState<RunEvent[]>([]);
@@ -863,6 +885,24 @@ const Orchestrator = () => {
   const stageChatThreadRef = useRef<HTMLDivElement | null>(null);
   const stageChatStickToBottomRef = useRef(true);
   const stageChatRequestRef = useRef(0);
+
+  const [dockInput, setDockInput] = useState('');
+  const [dockDraft, setDockDraft] = useState('');
+  const [dockError, setDockError] = useState('');
+  const [isDockSending, setIsDockSending] = useState(false);
+  const [dockUploads, setDockUploads] = useState<
+    Array<{
+      id: string;
+      file: File;
+      previewUrl?: string;
+      kind: 'image' | 'file';
+    }>
+  >([]);
+  const dockUploadsRef = useRef(dockUploads);
+  const dockThreadRef = useRef<HTMLDivElement | null>(null);
+  const dockStickToBottomRef = useRef(true);
+  const dockRequestRef = useRef(0);
+  const selectionFocusRef = useRef<WorkbenchSelectionFocus | null>(null);
   const resolutionNoteRef = useRef<HTMLTextAreaElement | null>(null);
   const [draftWorkItem, setDraftWorkItem] = useState({
     title: '',
@@ -874,6 +914,20 @@ const Orchestrator = () => {
     priority: 'Med' as WorkItem['priority'],
     tags: '',
   });
+
+  useEffect(() => {
+    dockUploadsRef.current = dockUploads;
+  }, [dockUploads]);
+
+  useEffect(() => {
+    return () => {
+      dockUploadsRef.current.forEach(item => {
+        if (item.previewUrl) {
+          URL.revokeObjectURL(item.previewUrl);
+        }
+      });
+    };
+  }, []);
 
   const workflowsById = useMemo(
     () => new Map(workspace.workflows.map(workflow => [workflow.id, workflow])),
@@ -949,8 +1003,18 @@ const Orchestrator = () => {
   );
 
   const selectWorkItem = useCallback(
-    (workItemId: string, options?: { focusBoard?: boolean; openControl?: boolean }) => {
+    (
+      workItemId: string,
+      options?: {
+        focusBoard?: boolean;
+        openControl?: boolean;
+        focus?: WorkbenchSelectionFocus;
+      },
+    ) => {
       stageChatRequestRef.current += 1;
+      if (options?.focus) {
+        selectionFocusRef.current = options.focus;
+      }
       setSelectedWorkItemId(workItemId);
       setActionError('');
       setResolutionNote('');
@@ -1005,6 +1069,16 @@ const Orchestrator = () => {
     void refreshCapabilityBundle(activeCapability.id);
     void loadRuntime();
   }, [activeCapability.id, loadRuntime, refreshCapabilityBundle]);
+
+  useEffect(() => {
+    const preferred =
+      activeCapability.executionConfig.defaultWorkspacePath ||
+      activeCapability.executionConfig.allowedWorkspacePaths[0] ||
+      activeCapability.localDirectories[0] ||
+      '';
+    setApprovedWorkspaceDraft(preferred);
+    setApprovedWorkspaceValidation(null);
+  }, [activeCapability.id]);
 
   useEffect(() => {
     if (
@@ -1312,7 +1386,9 @@ const Orchestrator = () => {
       const matchesPriority =
         priorityFilter === 'ALL' || item.priority === priorityFilter;
       const matchesQueueView =
-        queueView === 'MY_QUEUE'
+        queueView === 'ALL_WORK'
+          ? true
+          : queueView === 'MY_QUEUE'
           ? Boolean(actorUserId) &&
             (item.claimOwnerUserId === actorUserId ||
               (item.phaseOwnerTeamId
@@ -1521,6 +1597,65 @@ const Orchestrator = () => {
   const selectedRequestedInputFields = asCompiledInputFields(
     selectedOpenWait?.payload?.requestedInputFields,
   );
+  const approvedWorkspaceRoots = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [
+            activeCapability.executionConfig.defaultWorkspacePath,
+            ...(activeCapability.executionConfig.allowedWorkspacePaths || []),
+            ...(activeCapability.localDirectories || []),
+          ]
+            .map(value => String(value || '').trim())
+            .filter(Boolean),
+        ),
+      ),
+    [
+      activeCapability.executionConfig.defaultWorkspacePath,
+      activeCapability.executionConfig.allowedWorkspacePaths,
+      activeCapability.localDirectories,
+    ],
+  );
+  const hasApprovedWorkspaceConfigured = approvedWorkspaceRoots.length > 0;
+  const waitRequiresApprovedWorkspace = selectedRequestedInputFields.some(
+    field => field.id === 'approved-workspace',
+  );
+  const waitOnlyRequestsApprovedWorkspace = Boolean(
+    waitRequiresApprovedWorkspace &&
+      selectedRequestedInputFields.length > 0 &&
+      selectedRequestedInputFields.every(field => field.id === 'approved-workspace'),
+  );
+
+  useEffect(() => {
+    const focus = selectionFocusRef.current;
+    if (!focus || detailTab !== 'operate') {
+      return;
+    }
+
+    const targetId =
+      focus === 'INPUT' && waitRequiresApprovedWorkspace && !hasApprovedWorkspaceConfigured
+        ? 'orchestrator-structured-input'
+        : 'orchestrator-guidance';
+    const element = document.getElementById(targetId);
+    if (!element) {
+      return;
+    }
+
+    selectionFocusRef.current = null;
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    if (targetId === 'orchestrator-guidance' && (focus === 'RESOLUTION' || focus === 'INPUT')) {
+      window.requestAnimationFrame(() => {
+        resolutionNoteRef.current?.focus();
+      });
+    }
+  }, [
+    detailTab,
+    hasApprovedWorkspaceConfigured,
+    selectedOpenWait?.type,
+    selectedWorkItemId,
+    waitRequiresApprovedWorkspace,
+  ]);
   const selectedCodeDiffArtifactId =
     typeof selectedOpenWait?.payload?.codeDiffArtifactId === 'string'
       ? selectedOpenWait.payload.codeDiffArtifactId
@@ -1610,14 +1745,15 @@ const Orchestrator = () => {
   );
   const runtimeReady = Boolean(runtimeStatus?.configured) && !runtimeError;
   const selectedCanTakeControl = Boolean(
-    selectedWorkItem && selectedAgent && runtimeReady,
+    selectedWorkItem && selectedAgent && runtimeReady && canControlWorkItems,
   );
   const selectedCanGuideBlockedAgent = Boolean(
     selectedWorkItem &&
       selectedWorkItem.status === 'BLOCKED' &&
       !selectedOpenWait &&
       !currentRunIsActive &&
-      runtimeReady,
+      runtimeReady &&
+      canRestartWorkItems,
   );
   const guidanceSuggestions = buildGuidanceSuggestions({
     workItem: selectedWorkItem,
@@ -1629,7 +1765,8 @@ const Orchestrator = () => {
     Boolean(selectedWorkItem) &&
     !selectedWorkItem?.activeRunId &&
     selectedWorkItem?.phase !== 'DONE' &&
-    runtimeReady;
+    runtimeReady &&
+    canControlWorkItems;
   const currentActorOwnsSelectedWorkItem = Boolean(
     selectedWorkItem &&
       currentActorContext.userId &&
@@ -1641,18 +1778,20 @@ const Orchestrator = () => {
     currentActorContext.userId &&
       selectedEffectiveExecutionContext?.activeWriterUserId === currentActorContext.userId,
   );
-  const canInitializeExecutionContext = Boolean(selectedWorkItem);
+  const canInitializeExecutionContext = Boolean(selectedWorkItem) && canControlWorkItems;
   const canCreateSharedBranch = Boolean(
     selectedWorkItem &&
       selectedExecutionRepository?.localRootHint &&
-      selectedEffectiveExecutionContext?.branch,
+      selectedEffectiveExecutionContext?.branch &&
+      canControlWorkItems,
   );
 
   const canRestartFromPhase =
     Boolean(selectedWorkItem && currentRun && !selectedWorkItem.activeRunId) &&
     selectedWorkItem?.phase !== 'DONE' &&
-    runtimeReady;
-  const canResetAndRestart = Boolean(selectedWorkItem) && runtimeReady;
+    runtimeReady &&
+    canRestartWorkItems;
+  const canResetAndRestart = Boolean(selectedWorkItem) && runtimeReady && canRestartWorkItems;
   const codeDiffReviewRequiresResponse = Boolean(
     selectedOpenWait?.type === 'APPROVAL' && selectedCodeDiffArtifactId,
   );
@@ -1685,11 +1824,23 @@ const Orchestrator = () => {
   const requestChangesIsAvailable = codeDiffReviewRequiresResponse;
   const canResolveSelectedWait =
     Boolean(selectedOpenWait) &&
+    (selectedOpenWait?.type === 'APPROVAL' ? canDecideApprovals : canControlWorkItems) &&
     (!resolutionIsRequired || Boolean(resolutionNote.trim()));
+  const hasMissingWorkspaceInput = selectedRequestedInputFields.some(
+    field => field.source === 'WORKSPACE' && field.status === 'MISSING',
+  ) && !hasApprovedWorkspaceConfigured;
   const canRequestChanges =
-    requestChangesIsAvailable && Boolean(resolutionNote.trim());
+    requestChangesIsAvailable && Boolean(resolutionNote.trim()) && canDecideApprovals;
   const canGuideAndRestart =
-    selectedCanGuideBlockedAgent && Boolean(resolutionNote.trim());
+    selectedCanGuideBlockedAgent && Boolean(resolutionNote.trim()) && canRestartWorkItems;
+
+  const requirePermission = (allowed: boolean, summary: string) => {
+    if (allowed) {
+      return true;
+    }
+    showError('Access restricted', summary);
+    return false;
+  };
 
   const stepOrder = useMemo(
     () =>
@@ -2214,6 +2365,23 @@ const Orchestrator = () => {
     thread.scrollTop = thread.scrollHeight;
   }, [isStageChatSending, selectedStageChatMessages, stageChatDraft]);
 
+  useEffect(() => {
+    if (view !== 'list') {
+      return;
+    }
+
+    const thread = dockThreadRef.current;
+    if (!thread) {
+      return;
+    }
+
+    if (!dockStickToBottomRef.current && !isDockSending && !dockDraft) {
+      return;
+    }
+
+    thread.scrollTop = thread.scrollHeight;
+  }, [dockDraft, isDockSending, selectedWorkItemId, view, workspace.messages]);
+
   const draftWorkflow = workflowsById.get(draftWorkItem.workflowId) || null;
   const draftFirstStep = draftWorkflow
     ? resolveWorkItemEntryStep(draftWorkflow, draftWorkItem.taskType, activeCapability.lifecycle) ||
@@ -2405,6 +2573,72 @@ const Orchestrator = () => {
     }));
   }, []);
 
+  const addDockUploadFiles = useCallback((files: FileList | File[] | null) => {
+    if (!files) {
+      return;
+    }
+
+    const incoming = Array.from(files);
+    if (incoming.length === 0) {
+      return;
+    }
+
+    const MAX_FILES = 5;
+    const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+    setDockUploads(current => {
+      const availableSlots = Math.max(0, MAX_FILES - current.length);
+      if (availableSlots === 0) {
+        showError('Upload limit reached', `Only ${MAX_FILES} files can be attached at once.`);
+        return current;
+      }
+
+      const next = [...current];
+      incoming.slice(0, availableSlots).forEach(file => {
+        if (file.size > MAX_FILE_BYTES) {
+          showError('File too large', `${file.name} exceeds 10MB and was skipped.`);
+          return;
+        }
+
+        const id = `dock-upload-${Date.now().toString(36)}-${Math.random()
+          .toString(36)
+          .slice(2, 8)}`;
+        const isImage = file.type.startsWith('image/');
+        const previewUrl = isImage ? URL.createObjectURL(file) : undefined;
+
+        next.push({
+          id,
+          file,
+          previewUrl,
+          kind: isImage ? 'image' : 'file',
+        });
+      });
+
+      return next;
+    });
+  }, [showError]);
+
+  const removeDockUpload = useCallback((id: string) => {
+    setDockUploads(current => {
+      const target = current.find(item => item.id === id);
+      if (target?.previewUrl) {
+        URL.revokeObjectURL(target.previewUrl);
+      }
+      return current.filter(item => item.id !== id);
+    });
+  }, []);
+
+  const clearDockUploads = useCallback(() => {
+    setDockUploads(current => {
+      current.forEach(item => {
+        if (item.previewUrl) {
+          URL.revokeObjectURL(item.previewUrl);
+        }
+      });
+      return [];
+    });
+  }, []);
+
   useEffect(() => {
     setDraftWorkItem(current => ({
       ...current,
@@ -2435,8 +2669,93 @@ const Orchestrator = () => {
     }
   };
 
+  const handleApproveWorkspacePath = async (options?: { unblock?: boolean }) => {
+    const requestedPath = approvedWorkspaceDraft.trim();
+    if (!requestedPath) {
+      showError(
+        'Workspace path required',
+        'Paste a local directory path to approve it for this capability.',
+      );
+      return;
+    }
+
+    if (
+      !requirePermission(
+        canEditCapability,
+        'This operator cannot update capability execution policy. Switch Current Operator to a role with capability edit rights (for example Workspace Operator).',
+      )
+    ) {
+      return;
+    }
+
+    if (
+      options?.unblock &&
+      !requirePermission(
+        canControlWorkItems,
+        'This operator cannot unblock workflow waits for the selected run.',
+      )
+    ) {
+      return;
+    }
+
+    await withAction(
+      'approveWorkspacePath',
+      async () => {
+        const validation = await validateOnboardingWorkspacePath({ path: requestedPath });
+        setApprovedWorkspaceValidation(validation);
+
+        if (!validation.valid || !validation.normalizedPath) {
+          throw new Error(validation.message || 'Workspace path could not be validated.');
+        }
+
+        const normalizedPath = validation.normalizedPath;
+        const nextAllowedPaths = Array.from(
+          new Set([
+            ...(activeCapability.executionConfig.allowedWorkspacePaths || []),
+            normalizedPath,
+          ]),
+        );
+        const nextDefaultWorkspacePath =
+          activeCapability.executionConfig.defaultWorkspacePath?.trim() ||
+          normalizedPath;
+
+        await updateCapabilityMetadata(activeCapability.id, {
+          executionConfig: {
+            ...activeCapability.executionConfig,
+            defaultWorkspacePath: nextDefaultWorkspacePath,
+            allowedWorkspacePaths: nextAllowedPaths,
+          },
+        });
+
+        setApprovedWorkspaceDraft(normalizedPath);
+        setResolutionNote(current =>
+          current.trim() ? current : `Approved workspace path: ${normalizedPath}`,
+        );
+
+        if (options?.unblock && currentRun && selectedOpenWait?.type === 'INPUT' && selectedWorkItem) {
+          await provideCapabilityWorkflowRunInput(activeCapability.id, currentRun.id, {
+            resolution: `Approved workspace path: ${normalizedPath}`,
+            resolvedBy: currentActorContext.displayName,
+          });
+          setResolutionNote('');
+          await refreshSelection(selectedWorkItem.id);
+          return;
+        }
+
+        await refreshCapabilityBundle(activeCapability.id);
+      },
+      {
+        title: options?.unblock ? 'Workspace path approved and run resumed' : 'Workspace path approved',
+        description: `${requestedPath} is now available for tool execution inside ${activeCapability.name}.`,
+      },
+    );
+  };
+
   const handleClaimControl = async () => {
-    if (!selectedWorkItem) {
+    if (
+      !selectedWorkItem ||
+      !requirePermission(canControlWorkItems, 'This operator cannot claim work-item control.')
+    ) {
       return;
     }
 
@@ -2460,7 +2779,10 @@ const Orchestrator = () => {
   };
 
   const handleReleaseControl = async () => {
-    if (!selectedWorkItem) {
+    if (
+      !selectedWorkItem ||
+      !requirePermission(canControlWorkItems, 'This operator cannot release work-item control.')
+    ) {
       return;
     }
 
@@ -2479,7 +2801,13 @@ const Orchestrator = () => {
   };
 
   const handleInitializeExecutionContext = async () => {
-    if (!selectedWorkItem) {
+    if (
+      !selectedWorkItem ||
+      !requirePermission(
+        canControlWorkItems,
+        'This operator cannot initialize execution context for the selected work item.',
+      )
+    ) {
       return;
     }
 
@@ -2501,7 +2829,13 @@ const Orchestrator = () => {
   };
 
   const handleCreateSharedBranch = async () => {
-    if (!selectedWorkItem) {
+    if (
+      !selectedWorkItem ||
+      !requirePermission(
+        canControlWorkItems,
+        'This operator cannot create or reopen the shared work-item branch.',
+      )
+    ) {
       return;
     }
 
@@ -2542,7 +2876,10 @@ const Orchestrator = () => {
   };
 
   const handleClaimWriteControl = async () => {
-    if (!selectedWorkItem) {
+    if (
+      !selectedWorkItem ||
+      !requirePermission(canControlWorkItems, 'This operator cannot claim write control.')
+    ) {
       return;
     }
 
@@ -2564,7 +2901,10 @@ const Orchestrator = () => {
   };
 
   const handleReleaseWriteControl = async () => {
-    if (!selectedWorkItem) {
+    if (
+      !selectedWorkItem ||
+      !requirePermission(canControlWorkItems, 'This operator cannot release write control.')
+    ) {
       return;
     }
 
@@ -2594,7 +2934,11 @@ const Orchestrator = () => {
   };
 
   const handleCreateHandoff = async () => {
-    if (!selectedWorkItem || !resolutionNote.trim()) {
+    if (
+      !selectedWorkItem ||
+      !resolutionNote.trim() ||
+      !requirePermission(canControlWorkItems, 'This operator cannot capture a handoff packet.')
+    ) {
       return;
     }
 
@@ -2628,7 +2972,11 @@ const Orchestrator = () => {
   };
 
   const handleAcceptLatestHandoff = async () => {
-    if (!selectedWorkItem || !latestSelectedHandoff) {
+    if (
+      !selectedWorkItem ||
+      !latestSelectedHandoff ||
+      !requirePermission(canControlWorkItems, 'This operator cannot accept the latest handoff.')
+    ) {
       return;
     }
 
@@ -2657,7 +3005,11 @@ const Orchestrator = () => {
 
   const handleCreateWorkItem = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!draftWorkItem.title.trim() || !draftWorkItem.workflowId) {
+    if (
+      !draftWorkItem.title.trim() ||
+      !draftWorkItem.workflowId ||
+      !requirePermission(canCreateWorkItems, 'This operator cannot create work items.')
+    ) {
       return;
     }
 
@@ -2701,7 +3053,10 @@ const Orchestrator = () => {
   };
 
   const handleStartExecution = async () => {
-    if (!selectedWorkItem) {
+    if (
+      !selectedWorkItem ||
+      !requirePermission(canControlWorkItems, 'This operator cannot start workflow execution.')
+    ) {
       return;
     }
 
@@ -2719,7 +3074,11 @@ const Orchestrator = () => {
   };
 
   const handleRestartExecution = async () => {
-    if (!currentRun || !selectedWorkItem) {
+    if (
+      !currentRun ||
+      !selectedWorkItem ||
+      !requirePermission(canRestartWorkItems, 'This operator cannot restart workflow execution.')
+    ) {
       return;
     }
 
@@ -2739,7 +3098,13 @@ const Orchestrator = () => {
   };
 
   const handleResetAndRestart = async () => {
-    if (!selectedWorkItem) {
+    if (
+      !selectedWorkItem ||
+      !requirePermission(
+        canRestartWorkItems,
+        'This operator cannot reset and restart the selected work item.',
+      )
+    ) {
       return;
     }
 
@@ -2790,6 +3155,31 @@ const Orchestrator = () => {
       return;
     }
 
+    if (
+      selectedOpenWait.type === 'INPUT' &&
+      waitRequiresApprovedWorkspace &&
+      !hasApprovedWorkspaceConfigured
+    ) {
+      selectionFocusRef.current = 'INPUT';
+      setDetailTab('operate');
+      showError(
+        'Approved workspace required',
+        'This run cannot continue until at least one approved workspace path is configured for the active capability.',
+      );
+      return;
+    }
+
+    if (
+      !requirePermission(
+        selectedOpenWait.type === 'APPROVAL' ? canDecideApprovals : canControlWorkItems,
+        selectedOpenWait.type === 'APPROVAL'
+          ? 'This operator cannot decide approval waits for the selected run.'
+          : 'This operator cannot resolve workflow waits for the selected run.',
+      )
+    ) {
+      return;
+    }
+
     const resolution = resolutionNote.trim() || actionButtonLabel;
 
     await withAction(
@@ -2830,8 +3220,281 @@ const Orchestrator = () => {
     );
   };
 
+  const uploadDockFilesIfNeeded = async (): Promise<Artifact[]> => {
+    if (!selectedWorkItem || dockUploads.length === 0) {
+      return [];
+    }
+
+    const uploadedArtifacts = await uploadCapabilityWorkItemFiles(
+      activeCapability.id,
+      selectedWorkItem.id,
+      dockUploads.map(item => item.file),
+    );
+
+    clearDockUploads();
+
+    if (uploadedArtifacts.length > 0) {
+      success(
+        'Files uploaded',
+        `${uploadedArtifacts.length} file${uploadedArtifacts.length === 1 ? '' : 's'} attached to ${selectedWorkItem.id}.`,
+      );
+    }
+
+    await refreshCapabilityBundle(activeCapability.id);
+    return uploadedArtifacts;
+  };
+
+  const handleDockResolveWait = async () => {
+    if (!currentRun || !selectedOpenWait || !selectedWorkItem) {
+      return;
+    }
+
+    if (
+      selectedOpenWait.type === 'INPUT' &&
+      waitRequiresApprovedWorkspace &&
+      !hasApprovedWorkspaceConfigured
+    ) {
+      showError(
+        'Approved workspace required',
+        'Approve at least one workspace path before submitting input for this wait.',
+      );
+      return;
+    }
+
+    const resolution = dockInput.trim() || actionButtonLabel;
+    const resolutionRequired =
+      selectedOpenWait.type === 'INPUT' || selectedOpenWait.type === 'CONFLICT_RESOLUTION';
+
+    if (resolutionRequired && !dockInput.trim() && !waitOnlyRequestsApprovedWorkspace) {
+      setActionError('Add the missing details before unblocking this workflow stage.');
+      return;
+    }
+
+    await withAction(
+      'dockResolveWait',
+      async () => {
+        await uploadDockFilesIfNeeded();
+
+        if (selectedOpenWait.type === 'APPROVAL') {
+          await approveCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+            resolution,
+            resolvedBy: currentActorContext.displayName,
+          });
+          setIsDiffReviewOpen(false);
+          setIsApprovalReviewOpen(false);
+          setIsApprovalReviewHydrated(false);
+        } else if (selectedOpenWait.type === 'INPUT') {
+          await provideCapabilityWorkflowRunInput(activeCapability.id, currentRun.id, {
+            resolution,
+            resolvedBy: currentActorContext.displayName,
+          });
+        } else {
+          await resolveCapabilityWorkflowRunConflict(activeCapability.id, currentRun.id, {
+            resolution,
+            resolvedBy: currentActorContext.displayName,
+          });
+        }
+
+        setDockInput('');
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title:
+          selectedOpenWait.type === 'APPROVAL'
+            ? 'Approval submitted'
+            : selectedOpenWait.type === 'INPUT'
+              ? 'Input submitted'
+              : 'Conflict resolved',
+        description: `${selectedWorkItem.title} can continue through the workflow.`,
+      },
+    );
+  };
+
+  const handleDockAskAgent = async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    const requestedMessage = dockInput.trim();
+    if (!requestedMessage && dockUploads.length === 0) {
+      return;
+    }
+
+    if (
+      !requirePermission(
+        canWriteChat,
+        'This operator cannot send chat messages for the selected capability.',
+      )
+    ) {
+      return;
+    }
+
+    if (!runtimeReady) {
+      setDockError(
+        runtimeError ||
+          'Runtime is not configured yet. Fix the Copilot connection before sending chat.',
+      );
+      return;
+    }
+
+    const agentForChat =
+      selectedAgent ||
+      (workspace.activeChatAgentId
+        ? agentsById.get(workspace.activeChatAgentId) || null
+        : null) ||
+      workspace.agents.find(agent => agent.isOwner) ||
+      workspace.agents[0] ||
+      null;
+
+    if (!agentForChat) {
+      setDockError('No chat agent is available for this capability.');
+      return;
+    }
+
+    const userMessageId = `${Date.now()}-dock-user`;
+    const userTimestamp = formatTimestamp();
+
+    setDockError('');
+    setDockDraft('');
+    setIsDockSending(true);
+
+    const requestToken = ++dockRequestRef.current;
+
+    try {
+      const uploadedArtifacts =
+        dockUploads.length > 0 ? await uploadDockFilesIfNeeded() : [];
+
+      const attachmentLine =
+        uploadedArtifacts.length > 0
+          ? `\n\nAttachments:\n${uploadedArtifacts
+              .map(artifact => `- ${artifact.fileName || artifact.name} (${artifact.id})`)
+              .join('\n')}`
+          : '';
+      const messageContent =
+        requestedMessage ||
+        (uploadedArtifacts.length > 0
+          ? `Uploaded ${uploadedArtifacts.length} file${uploadedArtifacts.length === 1 ? '' : 's'} for ${selectedWorkItem.id}.${attachmentLine}`
+          : '');
+
+      const threadHistory = workspace.messages
+        .filter(message => message.workItemId === selectedWorkItem.id)
+        .slice(-10);
+      const historyForRequest = [
+        ...threadHistory,
+        {
+          id: userMessageId,
+          capabilityId: activeCapability.id,
+          role: 'user' as const,
+          content: messageContent,
+          timestamp: userTimestamp,
+          workItemId: selectedWorkItem.id,
+          runId: currentRun?.id,
+          workflowStepId: selectedCurrentStep?.id,
+        },
+      ];
+
+      await appendCapabilityMessageRecord(activeCapability.id, {
+        id: userMessageId,
+        role: 'user',
+        content: messageContent,
+        timestamp: userTimestamp,
+        sessionScope: 'WORK_ITEM',
+        sessionScopeId: selectedWorkItem.id,
+        workItemId: selectedWorkItem.id,
+        runId: currentRun?.id,
+        workflowStepId: selectedCurrentStep?.id,
+      });
+
+      const streamResult = await streamCapabilityChat(
+        {
+          capability: activeCapability,
+          agent: agentForChat,
+          history: historyForRequest,
+          message: messageContent,
+          sessionScope: 'WORK_ITEM',
+          sessionScopeId: selectedWorkItem.id,
+          contextMode: 'WORK_ITEM_STAGE',
+          workItemId: selectedWorkItem.id,
+          runId: currentRun?.id,
+          workflowStepId: selectedCurrentStep?.id,
+        },
+        {
+          onEvent: streamEvent => {
+            if (dockRequestRef.current !== requestToken) {
+              return;
+            }
+
+            if (streamEvent.type === 'delta' && streamEvent.content) {
+              setDockDraft(current => current + streamEvent.content);
+            }
+
+            if (streamEvent.type === 'error' && streamEvent.error) {
+              setDockError(streamEvent.error);
+            }
+          },
+        },
+      );
+
+      if (dockRequestRef.current !== requestToken) {
+        return;
+      }
+
+      const assistantContent =
+        streamResult.completeEvent?.content || streamResult.draftContent;
+
+      if (!assistantContent.trim()) {
+        throw new Error(streamResult.error || 'The agent did not return a response.');
+      }
+
+      await appendCapabilityMessageRecord(activeCapability.id, {
+        id: `${Date.now()}-dock-agent`,
+        role: 'agent',
+        content: assistantContent,
+        timestamp: formatTimestamp(
+          streamResult.completeEvent?.createdAt
+            ? new Date(streamResult.completeEvent.createdAt)
+            : new Date(),
+        ),
+        agentId: agentForChat.id,
+        agentName: agentForChat.name,
+        traceId: streamResult.completeEvent?.traceId,
+        model: streamResult.completeEvent?.model || agentForChat.model,
+        sessionId: streamResult.completeEvent?.sessionId,
+        sessionScope: streamResult.completeEvent?.sessionScope,
+        sessionScopeId: streamResult.completeEvent?.sessionScopeId,
+        workItemId: selectedWorkItem.id,
+        runId: currentRun?.id,
+        workflowStepId: selectedCurrentStep?.id,
+      });
+
+      setDockDraft('');
+      setDockInput('');
+      await refreshCapabilityBundle(activeCapability.id);
+    } catch (error) {
+      if (dockRequestRef.current !== requestToken) {
+        return;
+      }
+
+      setDockDraft('');
+      setDockError(
+        error instanceof Error
+          ? error.message
+          : 'The agent could not complete this request.',
+      );
+    } finally {
+      if (dockRequestRef.current === requestToken) {
+        setIsDockSending(false);
+      }
+    }
+  };
+
   const handleRequestChanges = async () => {
-    if (!currentRun || !selectedWorkItem || !selectedHasCodeDiffApproval) {
+    if (
+      !currentRun ||
+      !selectedWorkItem ||
+      !selectedHasCodeDiffApproval ||
+      !requirePermission(canDecideApprovals, 'This operator cannot request changes on approvals.')
+    ) {
       return;
     }
 
@@ -2862,7 +3525,14 @@ const Orchestrator = () => {
   };
 
   const handleGuideAndRestart = async () => {
-    if (!selectedWorkItem || !selectedCanGuideBlockedAgent) {
+    if (
+      !selectedWorkItem ||
+      !selectedCanGuideBlockedAgent ||
+      !requirePermission(
+        canRestartWorkItems,
+        'This operator cannot guide and restart blocked work items.',
+      )
+    ) {
       return;
     }
 
@@ -2901,7 +3571,11 @@ const Orchestrator = () => {
   };
 
   const handleCancelRun = async () => {
-    if (!currentRun || !selectedWorkItem) {
+    if (
+      !currentRun ||
+      !selectedWorkItem ||
+      !requirePermission(canControlWorkItems, 'This operator cannot cancel active runs.')
+    ) {
       return;
     }
 
@@ -2923,7 +3597,11 @@ const Orchestrator = () => {
 
   const handleMoveWorkItem = async (workItemId: string, targetPhase: WorkItemPhase) => {
     const item = workItems.find(current => current.id === workItemId);
-    if (!item || item.phase === targetPhase) {
+    if (
+      !item ||
+      item.phase === targetPhase ||
+      !requirePermission(canControlWorkItems, 'This operator cannot move work items across phases.')
+    ) {
       return;
     }
 
@@ -2969,7 +3647,10 @@ const Orchestrator = () => {
   );
 
   const handleOpenFullChat = async () => {
-    if (!selectedAgent) {
+    if (
+      !selectedAgent ||
+      !requirePermission(canReadChat, 'This operator cannot open the full chat workspace.')
+    ) {
       return;
     }
 
@@ -3031,7 +3712,8 @@ const Orchestrator = () => {
       !selectedWorkItem ||
       !stageChatScopeKey ||
       !runtimeReady ||
-      isStageChatSending
+      isStageChatSending ||
+      !requirePermission(canWriteChat, 'This operator cannot send chat guidance from the workbench.')
     ) {
       return;
     }
@@ -3177,6 +3859,943 @@ const Orchestrator = () => {
     }
   };
 
+  if (view === 'list') {
+    const attentionById = new Map(attentionItems.map(entry => [entry.item.id, entry]));
+    const remainingItems = filteredWorkItems
+      .filter(item => !attentionById.has(item.id))
+      .slice()
+      .sort((left, right) => {
+        const leftTime = new Date(
+          getWorkItemAttentionTimestamp(left) ||
+            left.history[left.history.length - 1]?.timestamp ||
+            0,
+        ).getTime();
+        const rightTime = new Date(
+          getWorkItemAttentionTimestamp(right) ||
+            right.history[right.history.length - 1]?.timestamp ||
+            0,
+        ).getTime();
+        return rightTime - leftTime;
+      });
+
+    const inboxEntries = [
+      ...attentionItems.map(entry => ({
+        item: entry.item,
+        meta: buildNavigatorItem(entry.item),
+        attention: entry,
+      })),
+      ...remainingItems.map(item => ({
+        item,
+        meta: buildNavigatorItem(item),
+        attention: null as (typeof attentionItems)[number] | null,
+      })),
+    ];
+
+    const dockMessages = selectedWorkItem
+      ? workspace.messages.filter(message => message.workItemId === selectedWorkItem.id)
+      : [];
+
+    const dockMissingFields = selectedRequestedInputFields.filter(
+      field => field.status !== 'READY',
+    );
+
+    const dockResolutionRequired =
+      selectedOpenWait?.type === 'INPUT' || selectedOpenWait?.type === 'CONFLICT_RESOLUTION';
+
+    const dockCanResolveWait = Boolean(
+      selectedOpenWait &&
+        (selectedOpenWait.type === 'APPROVAL' ? canDecideApprovals : canControlWorkItems) &&
+        (!dockResolutionRequired || Boolean(dockInput.trim()) || waitOnlyRequestsApprovedWorkspace) &&
+        !(
+          selectedOpenWait.type === 'INPUT' &&
+          waitRequiresApprovedWorkspace &&
+          !hasApprovedWorkspaceConfigured
+        ),
+    );
+
+    return (
+      <div className="orchestrator-page-shell space-y-4">
+        <section className="orchestrator-commandbar">
+          <div className="orchestrator-commandbar-main">
+            <div className="orchestrator-commandbar-heading">
+              <div className="orchestrator-commandbar-copy">
+                <p className="form-kicker">Work Inbox</p>
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <h1 className="text-[1.75rem] font-bold tracking-tight text-on-surface">
+                    {activeCapability.name} Inbox
+                  </h1>
+                  <StatusBadge tone={runtimeReady ? 'success' : 'danger'}>
+                    {runtimeReady ? 'Execution ready' : 'Needs setup'}
+                  </StatusBadge>
+                  <StatusBadge tone="neutral">Inbox view</StatusBadge>
+                </div>
+                <p className="mt-2 max-w-2xl text-sm leading-relaxed text-secondary">
+                  Pick a work item, answer pending requests, and keep delivery moving with the Copilot Dock.
+                </p>
+              </div>
+
+              <div className="orchestrator-commandbar-controls">
+                <div className="orchestrator-toolbar-row orchestrator-toolbar-row-secondary">
+                  <div className="orchestrator-view-toggle" aria-label="Choose orchestrator view">
+                    <button
+                      type="button"
+                      onClick={() => setView('list')}
+                      className="orchestrator-view-toggle-button orchestrator-view-toggle-button-active"
+                    >
+                      <List size={16} />
+                      Inbox
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setView('board')}
+                      className="orchestrator-view-toggle-button"
+                    >
+                      <LayoutGrid size={16} />
+                      Board
+                    </button>
+                  </div>
+
+                  <div className="orchestrator-commandbar-actions">
+                    <button
+                      type="button"
+                      onClick={() => void handleRefresh()}
+                      disabled={busyAction === 'refresh'}
+                      className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <RefreshCw
+                        size={16}
+                        className={busyAction === 'refresh' ? 'animate-spin' : ''}
+                      />
+                      Refresh
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsCreateSheetOpen(true)}
+                      disabled={!canCreateWorkItems}
+                      className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <Plus size={16} />
+                      New Work Item
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="orchestrator-commandbar-footnote">
+              <span className="orchestrator-commandbar-footnote-copy">
+                Showing {filteredWorkItems.length} of {workItems.length} work items
+              </span>
+              <span className="orchestrator-commandbar-footnote-copy">
+                {queueView === 'MY_QUEUE'
+                  ? `${currentActorContext.displayName}'s queue`
+                  : queueView === 'ALL_WORK'
+                  ? 'All work items'
+                  : queueView === 'TEAM_QUEUE'
+                  ? 'Current team queue'
+                  : queueView === 'ATTENTION'
+                  ? 'Attention queue'
+                  : 'Watching queue'}
+              </span>
+              <span className="orchestrator-commandbar-footnote-copy">
+                {runtimeError ? 'Agent connection needs attention' : 'Inbox mode is optimized for stakeholder unblocking'}
+              </span>
+            </div>
+          </div>
+        </section>
+
+        {!canReadLiveDetail ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            This operator currently has rollup-only visibility for this capability. Live work items,
+            execution traces, and control actions are intentionally hidden until direct capability access is granted.
+          </div>
+        ) : null}
+
+        <div className="grid gap-4 xl:grid-cols-[22rem_minmax(0,1fr)_minmax(0,26rem)]">
+          <aside className="workspace-surface overflow-hidden p-0">
+            <div className="border-b border-outline-variant/25 px-4 pb-4 pt-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="form-kicker">Inbox</p>
+                  <h2 className="mt-1 text-lg font-bold text-on-surface">Needs action</h2>
+                  <p className="mt-1 text-sm text-secondary">
+                    Search, filter, and pick a work item to unblock.
+                  </p>
+                </div>
+                <StatusBadge tone="info">{filteredWorkItems.length} items</StatusBadge>
+              </div>
+
+              <label className="mt-4 relative block">
+                <Search
+                  size={16}
+                  className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-outline"
+                />
+                <input
+                  value={searchQuery}
+                  onChange={event => setSearchQuery(event.target.value)}
+                  placeholder="Search by id, title, tag, or agent"
+                  className="enterprise-input w-full pl-11"
+                />
+              </label>
+
+              <div className="mt-4">
+                <div className="orchestrator-view-toggle" aria-label="Choose work queue">
+                  {[
+                    ['ALL_WORK', 'All'],
+                    ['MY_QUEUE', 'Mine'],
+                    ['TEAM_QUEUE', 'Team'],
+                    ['ATTENTION', 'Approvals'],
+                    ['WATCHING', 'Watching'],
+                  ].map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setQueueView(value as WorkbenchQueueView)}
+                      className={cn(
+                        'orchestrator-view-toggle-button',
+                        queueView === value && 'orchestrator-view-toggle-button-active',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-2">
+                <select
+                  value={workflowFilter}
+                  onChange={event => setWorkflowFilter(event.target.value)}
+                  className="field-select"
+                >
+                  <option value="ALL">All workflows</option>
+                  {workspace.workflows.map(workflow => (
+                    <option key={workflow.id} value={workflow.id}>
+                      {workflow.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={statusFilter}
+                  onChange={event => setStatusFilter(event.target.value as WorkItemStatusFilter)}
+                  className="field-select"
+                >
+                  <option value="ALL">All statuses</option>
+                  <option value="ACTIVE">Active</option>
+                  <option value="BLOCKED">Blocked</option>
+                  <option value="PENDING_APPROVAL">Pending approval</option>
+                  <option value="COMPLETED">Completed</option>
+                </select>
+                <select
+                  value={priorityFilter}
+                  onChange={event => setPriorityFilter(event.target.value as WorkItemPriorityFilter)}
+                  className="field-select"
+                >
+                  <option value="ALL">All priorities</option>
+                  <option value="High">High</option>
+                  <option value="Med">Med</option>
+                  <option value="Low">Low</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="max-h-[70vh] overflow-y-auto px-4 py-4">
+              {inboxEntries.length === 0 ? (
+                <EmptyState
+                  title="Nothing in the inbox"
+                  description="Adjust the queue view or filters to bring items back into view."
+                  icon={WorkflowIcon}
+                  className="min-h-[18rem]"
+                />
+              ) : (
+                <div className="space-y-3">
+                  {inboxEntries.map(entry => {
+                    const attention = entry.attention;
+                    const cta =
+                      attention?.callToAction ||
+                      (!entry.item.activeRunId &&
+                      entry.item.phase !== 'DONE' &&
+                      entry.item.status !== 'COMPLETED'
+                        ? 'Start'
+                        : 'View');
+
+                    return (
+                      <button
+                        key={entry.item.id}
+                        type="button"
+                        onClick={() => selectWorkItem(entry.item.id)}
+                        className={cn(
+                          'orchestrator-navigator-item',
+                          selectedWorkItemId === entry.item.id && 'orchestrator-navigator-item-active',
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="form-kicker">{entry.item.id}</p>
+                            <p className="mt-1 line-clamp-2 text-sm font-semibold text-on-surface">
+                              {entry.item.title}
+                            </p>
+                          </div>
+                          <StatusBadge tone={attention ? 'warning' : 'neutral'}>{cta}</StatusBadge>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <StatusBadge tone="neutral">{getPhaseMeta(entry.item.phase).label}</StatusBadge>
+                          <StatusBadge tone={getStatusTone(entry.item.status)}>
+                            {WORK_ITEM_STATUS_META[entry.item.status].label}
+                          </StatusBadge>
+                          {attention?.attentionLabel ? (
+                            <StatusBadge tone="warning">{attention.attentionLabel}</StatusBadge>
+                          ) : null}
+                        </div>
+                        <div className="mt-3 space-y-1 text-xs leading-relaxed text-secondary">
+                          <p>{entry.meta.currentStepName}</p>
+                          <p>{entry.meta.agentName}</p>
+                          <p>{entry.meta.ageLabel}</p>
+                        </div>
+                        {attention?.attentionReason ? (
+                          <p className="mt-3 line-clamp-2 text-xs leading-relaxed text-secondary">
+                            {attention.attentionReason}
+                          </p>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </aside>
+
+          <main className="workspace-surface overflow-hidden p-0">
+            {!selectedWorkItem ? (
+              <EmptyState
+                title="Select a work item"
+                description="Choose an item from the inbox to see what is needed next."
+                icon={WorkflowIcon}
+                className="h-full min-h-[36rem]"
+              />
+            ) : (
+              <div className="flex h-full flex-col">
+                <div className="border-b border-outline-variant/25 px-5 pb-4 pt-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <p className="form-kicker">{selectedWorkItem.id}</p>
+                    <div className="flex flex-wrap gap-2">
+                      <StatusBadge tone={getStatusTone(selectedWorkItem.phase)}>
+                        {getPhaseMeta(selectedWorkItem.phase).label}
+                      </StatusBadge>
+                      <StatusBadge tone={getStatusTone(selectedWorkItem.status)}>
+                        {WORK_ITEM_STATUS_META[selectedWorkItem.status].label}
+                      </StatusBadge>
+                      {currentRun && (
+                        <StatusBadge tone={getStatusTone(currentRun.status)}>
+                          {RUN_STATUS_META[currentRun.status].label}
+                        </StatusBadge>
+                      )}
+                    </div>
+                  </div>
+
+                  <h2 className="mt-4 text-xl font-bold tracking-tight text-on-surface">
+                    {selectedWorkItem.title}
+                  </h2>
+                  <p className="mt-2 text-sm leading-relaxed text-secondary">
+                    {selectedWorkItem.description || 'No description was captured for this work item.'}
+                  </p>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {canStartExecution ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleStartExecution()}
+                        disabled={busyAction !== null}
+                        className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busyAction === 'start' ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <Play size={16} />
+                        )}
+                        Start execution
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => setIsExplainOpen(true)}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      Explain
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenFullChat()}
+                      disabled={!selectedAgent || !canReadChat}
+                      className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <MessageSquareText size={16} />
+                      Open full chat
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto px-5 py-4">
+                  {actionError ? (
+                    <div className="workspace-inline-alert workspace-inline-alert-danger">
+                      <AlertCircle size={18} className="mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-semibold">Action failed</p>
+                        <p className="mt-1 text-sm leading-relaxed">{actionError}</p>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="workspace-meta-card">
+                      <p className="workspace-meta-label">What’s next</p>
+                      <p className="mt-2 text-sm font-semibold text-on-surface">
+                        {selectedAttentionLabel}
+                      </p>
+                      <p className="mt-2 text-sm leading-relaxed text-secondary">
+                        {selectedNextActionSummary}
+                      </p>
+                    </div>
+                    <div className="workspace-meta-card">
+                      <p className="workspace-meta-label">Current step</p>
+                      <p className="mt-2 text-sm font-semibold text-on-surface">
+                        {selectedCurrentStep?.name || 'Awaiting orchestration'}
+                      </p>
+                      <p className="mt-1 text-xs leading-relaxed text-secondary">
+                        Agent: {selectedAgent?.name || selectedAgent?.id || 'Unassigned'}
+                      </p>
+                      {selectedAttentionTimestamp ? (
+                        <p className="mt-2 text-xs text-secondary">
+                          Updated {formatTimestamp(selectedAttentionTimestamp)}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </main>
+
+          <aside className="workspace-surface overflow-hidden p-0">
+            <div className="border-b border-outline-variant/25 px-5 pb-4 pt-5">
+              <p className="form-kicker">Copilot Dock</p>
+              <h2 className="mt-1 text-lg font-bold text-on-surface">Unblock here</h2>
+              <p className="mt-1 text-sm leading-relaxed text-secondary">
+                Upload evidence, ask questions, and resolve pending requests without switching screens.
+              </p>
+            </div>
+
+            <div className="flex h-full flex-col px-5 py-4">
+              {!selectedWorkItem ? (
+                <div className="workspace-meta-card">
+                  Select a work item to see pending requests and start a focused copilot thread.
+                </div>
+              ) : selectedOpenWait ? (
+                <div className="workspace-meta-card border-amber-200/80 bg-amber-50/50">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="workspace-meta-label">Pending request</p>
+                      <p className="mt-2 text-sm font-semibold text-on-surface">
+                        {selectedAttentionLabel}
+                      </p>
+                    </div>
+                    <StatusBadge tone="warning">{formatEnumLabel(selectedOpenWait.type)}</StatusBadge>
+                  </div>
+                  <p className="mt-3 text-sm leading-relaxed text-secondary">
+                    {selectedOpenWait.message}
+                  </p>
+
+                  {dockMissingFields.length > 0 ? (
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {dockMissingFields.map(field => (
+                        <span
+                          key={field.id}
+                          className="rounded-full border border-outline-variant/30 bg-white/85 px-3 py-1 text-xs font-semibold text-on-surface"
+                        >
+                          {field.label}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {waitRequiresApprovedWorkspace ? (
+                    <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
+                      <p className="workspace-meta-label">Approved workspace path</p>
+                      {hasApprovedWorkspaceConfigured ? (
+                        <>
+                          <p className="mt-2 text-xs leading-relaxed text-secondary">
+                            Configured roots:
+                          </p>
+                          <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
+                            {approvedWorkspaceRoots.slice(0, 4).map(root => (
+                              <li key={root} className="font-mono text-[0.72rem]">
+                                {root}
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : (
+                        <>
+                          <p className="mt-2 text-xs leading-relaxed text-secondary">
+                            Add a local directory path that tools are allowed to read and write.
+                          </p>
+                          <input
+                            value={approvedWorkspaceDraft}
+                            onChange={event => setApprovedWorkspaceDraft(event.target.value)}
+                            placeholder="/Users/you/projects/my-repo"
+                            className="mt-3 field-input font-mono text-[0.8rem]"
+                          />
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {selectedExecutionRepository?.localRootHint ? (
+                              <button
+                                type="button"
+                                onClick={() => setApprovedWorkspaceDraft(selectedExecutionRepository.localRootHint || '')}
+                                className="enterprise-button enterprise-button-secondary"
+                              >
+                                Use repo root hint
+                              </button>
+                            ) : null}
+                            {activeCapability.localDirectories.slice(0, 2).map(root => (
+                              <button
+                                key={root}
+                                type="button"
+                                onClick={() => setApprovedWorkspaceDraft(root)}
+                                className="enterprise-button enterprise-button-secondary"
+                              >
+                                {root}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleApproveWorkspacePath({ unblock: true })}
+                              disabled={busyAction !== null}
+                              className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {busyAction === 'approveWorkspacePath' ? (
+                                <LoaderCircle size={16} className="animate-spin" />
+                              ) : (
+                                <ShieldCheck size={16} />
+                              )}
+                              Approve and continue
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleApproveWorkspacePath()}
+                              disabled={busyAction !== null}
+                              className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              Approve only
+                            </button>
+                          </div>
+                          {approvedWorkspaceValidation ? (
+                            <p
+                              className={cn(
+                                'mt-2 text-xs font-medium',
+                                approvedWorkspaceValidation.valid
+                                  ? 'text-emerald-700'
+                                  : 'text-amber-800',
+                              )}
+                            >
+                              {approvedWorkspaceValidation.message}
+                            </p>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="workspace-meta-card">
+                  No open approval, input, or conflict wait is attached to the selected work item right now.
+                </div>
+              )}
+
+              <div
+                ref={dockThreadRef}
+                className="orchestrator-stage-chat-thread mt-4 flex-1"
+                onScroll={event => {
+                  const target = event.currentTarget;
+                  const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+                  dockStickToBottomRef.current = distanceFromBottom < 48;
+                }}
+              >
+                {dockMessages.length === 0 && !dockDraft ? (
+                  <div className="orchestrator-stage-chat-empty">
+                    This work item does not have a copilot thread yet. Ask a question or upload evidence to start one.
+                  </div>
+                ) : (
+                  <>
+                    {dockMessages.map(message => (
+                      <div
+                        key={message.id}
+                        className={cn(
+                          'orchestrator-stage-chat-message',
+                          message.role === 'user'
+                            ? 'orchestrator-stage-chat-message-user'
+                            : 'orchestrator-stage-chat-message-agent',
+                        )}
+                      >
+                        <div className="orchestrator-stage-chat-message-meta">
+                          <span>
+                            {message.role === 'user'
+                              ? currentActorContext.displayName
+                              : message.agentName || message.agentId || 'Agent'}
+                          </span>
+                          <span>{message.timestamp}</span>
+                        </div>
+                        <p className="mt-3 whitespace-pre-wrap text-sm leading-6">
+                          {message.content}
+                        </p>
+                      </div>
+                    ))}
+                    {dockDraft ? (
+                      <div className="orchestrator-stage-chat-message orchestrator-stage-chat-message-agent">
+                        <div className="orchestrator-stage-chat-message-meta">
+                          <span>{selectedAgent?.name || 'Agent'}</span>
+                          <span>Streaming</span>
+                        </div>
+                        <p className="mt-3 whitespace-pre-wrap text-sm leading-6">{dockDraft}</p>
+                      </div>
+                    ) : null}
+                  </>
+                )}
+              </div>
+
+              {dockError ? (
+                <div className="workspace-inline-alert workspace-inline-alert-danger mt-3">
+                  <AlertCircle size={18} className="mt-0.5 shrink-0" />
+                  <div>
+                    <p className="text-sm font-semibold">Copilot dock error</p>
+                    <p className="mt-1 text-sm leading-relaxed">{dockError}</p>
+                  </div>
+                </div>
+              ) : null}
+
+              <div
+                className="mt-3 rounded-[1.35rem] border border-outline-variant/28 bg-white/90 px-4 py-4"
+                onDragOver={event => event.preventDefault()}
+                onDrop={event => {
+                  event.preventDefault();
+                  addDockUploadFiles(event.dataTransfer.files);
+                }}
+              >
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-secondary">
+                  {selectedOpenWait ? 'Resolve wait mode' : 'Ask copilot'}
+                </p>
+                <textarea
+                  value={dockInput}
+                  onChange={event => setDockInput(event.target.value)}
+                  placeholder={resolutionPlaceholder}
+                  className="mt-3 min-h-[5.5rem] w-full resize-none rounded-2xl border border-outline-variant/35 bg-surface-container-low/35 px-4 py-3 text-sm leading-6 text-on-surface shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] focus:border-primary/40 focus:outline-none"
+                />
+
+                {dockUploads.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {dockUploads.map(upload => (
+                      <div
+                        key={upload.id}
+                        className="flex items-center gap-2 rounded-2xl border border-outline-variant/30 bg-white px-3 py-2 text-xs font-semibold text-on-surface"
+                      >
+                        {upload.kind === 'image' && upload.previewUrl ? (
+                          <img
+                            src={upload.previewUrl}
+                            alt={upload.file.name}
+                            className="h-10 w-10 rounded-xl object-cover"
+                          />
+                        ) : (
+                          <FileText size={14} className="text-secondary" />
+                        )}
+                        <span className="max-w-[10rem] truncate">{upload.file.name}</span>
+                        <span className="text-secondary">{formatAttachmentSizeLabel(upload.file.size)}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeDockUpload(upload.id)}
+                          className="workspace-list-action"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                  <label className="enterprise-button enterprise-button-secondary cursor-pointer">
+                    <Plus size={14} />
+                    Upload files
+                    <input
+                      type="file"
+                      multiple
+                      className="hidden"
+                      onChange={event => {
+                        addDockUploadFiles(event.target.files);
+                        event.currentTarget.value = '';
+                      }}
+                    />
+                  </label>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {selectedOpenWait ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void handleDockAskAgent()}
+                          disabled={isDockSending || !canWriteChat}
+                          className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {isDockSending ? <RefreshCw size={16} className="animate-spin" /> : <Send size={16} />}
+                          Ask agent
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDockResolveWait()}
+                          disabled={busyAction !== null || !dockCanResolveWait}
+                          className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {busyAction === 'dockResolveWait' ? (
+                            <LoaderCircle size={16} className="animate-spin" />
+                          ) : (
+                            <ArrowRight size={16} />
+                          )}
+                          {actionButtonLabel}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void handleDockAskAgent()}
+                        disabled={isDockSending || !canWriteChat}
+                        className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {isDockSending ? <RefreshCw size={16} className="animate-spin" /> : <Send size={16} />}
+                        Send
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        {isCreateSheetOpen && (
+          <div className="fixed inset-0 z-[90]">
+            <button
+              type="button"
+              aria-label="Close create work item sheet"
+              onClick={() => setIsCreateSheetOpen(false)}
+              className="absolute inset-0 bg-slate-950/35"
+            />
+            <motion.aside
+              initial={{ opacity: 0, x: 48 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 48 }}
+              className="orchestrator-quick-sheet"
+            >
+              <div className="orchestrator-quick-sheet-header">
+                <div>
+                  <p className="form-kicker">Quick Create</p>
+                  <h2 className="mt-1 text-xl font-bold text-on-surface">Stage new work</h2>
+                  <p className="mt-2 text-sm leading-relaxed text-secondary">
+                    Keep creation lightweight, pick the workflow, and let the execution engine own progression.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsCreateSheetOpen(false)}
+                  className="workspace-list-action"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto px-6 py-5">
+                {workspace.workflows.length === 0 ? (
+                  <EmptyState
+                    title="No workflow is available"
+                    description="Create or restore a workflow before staging new work into orchestration."
+                    icon={WorkflowIcon}
+                    className="min-h-[20rem]"
+                  />
+                ) : (
+                  <form
+                    id="orchestrator-create-work-item"
+                    onSubmit={handleCreateWorkItem}
+                    className="grid gap-5"
+                  >
+                    <label className="space-y-2">
+                      <span className="field-label">Work item title</span>
+                      <input
+                        value={draftWorkItem.title}
+                        onChange={event =>
+                          setDraftWorkItem(prev => ({ ...prev, title: event.target.value }))
+                        }
+                        placeholder="Implement expression parser"
+                        className="field-input"
+                      />
+                    </label>
+
+                    <label className="space-y-2">
+                      <span className="field-label">Workflow</span>
+                      <select
+                        value={draftWorkItem.workflowId}
+                        onChange={event =>
+                          setDraftWorkItem(prev => ({
+                            ...prev,
+                            workflowId: event.target.value,
+                          }))
+                        }
+                        className="field-select"
+                      >
+                        {workspace.workflows.map(workflow => (
+                          <option key={workflow.id} value={workflow.id}>
+                            {workflow.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="space-y-2">
+                      <span className="field-label">Description</span>
+                      <textarea
+                        value={draftWorkItem.description}
+                        onChange={event =>
+                          setDraftWorkItem(prev => ({ ...prev, description: event.target.value }))
+                        }
+                        placeholder="Summarize what success looks like..."
+                        className="field-input min-h-[7rem]"
+                      />
+                    </label>
+
+                    <label className="space-y-2">
+                      <span className="field-label">Upload supporting docs (text only)</span>
+                      <div className="flex flex-wrap gap-2">
+                        <label className="enterprise-button enterprise-button-secondary cursor-pointer">
+                          <Plus size={14} />
+                          Upload files
+                          <input
+                            type="file"
+                            multiple
+                            className="hidden"
+                            onChange={event => {
+                              void handleDraftAttachmentUpload(event.target.files);
+                              event.currentTarget.value = '';
+                            }}
+                          />
+                        </label>
+                        {draftWorkItem.attachments.length > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => setDraftWorkItem(prev => ({ ...prev, attachments: [] }))}
+                            className="enterprise-button enterprise-button-secondary"
+                          >
+                            Clear
+                          </button>
+                        ) : null}
+                      </div>
+                      {draftWorkItem.attachments.length > 0 ? (
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                          {draftWorkItem.attachments.map((attachment, index) => (
+                            <div
+                              key={`${attachment.fileName}-${index}`}
+                              className="flex items-center justify-between gap-3 rounded-[1.25rem] border border-outline-variant/20 bg-surface-container-low/35 px-4 py-3"
+                            >
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-semibold text-on-surface">
+                                  {attachment.fileName}
+                                </p>
+                                <p className="mt-1 truncate text-xs leading-relaxed text-secondary">
+                                  {[attachment.mimeType || 'text/plain', formatAttachmentSizeLabel(attachment.sizeBytes)]
+                                    .filter(Boolean)
+                                    .join(' • ')}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => removeDraftAttachment(index)}
+                                className="workspace-list-action shrink-0"
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="mt-3 text-xs leading-relaxed text-secondary">
+                          No files uploaded yet.
+                        </p>
+                      )}
+                    </label>
+                  </form>
+                )}
+              </div>
+
+              {workspace.workflows.length > 0 && (
+                <div className="orchestrator-quick-sheet-footer">
+                  <div className="flex items-center justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setIsCreateSheetOpen(false)}
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      form="orchestrator-create-work-item"
+                      disabled={busyAction !== null || !canCreateWorkItems}
+                      className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {busyAction === 'create' ? (
+                        <LoaderCircle size={16} className="animate-spin" />
+                      ) : (
+                        <Plus size={16} />
+                      )}
+                      Create work item
+                    </button>
+                  </div>
+                </div>
+              )}
+            </motion.aside>
+          </div>
+        )}
+
+        {selectedWorkItem ? (
+          <ErrorBoundary
+            resetKey={`${selectedWorkItem.id}:${selectedAgent?.id || 'none'}:${selectedCurrentStep?.id || 'stage'}:${isStageControlOpen ? 'open' : 'closed'}`}
+            title="Stage control could not render"
+            description="The takeover window hit an unexpected UI problem. The workbench is still available."
+          >
+            <StageControlModal
+              isOpen={isStageControlOpen}
+              capability={activeCapability}
+              workItem={selectedWorkItem}
+              agent={selectedAgent}
+              currentRun={currentRun}
+              currentStep={selectedCurrentStep}
+              openWait={selectedOpenWait}
+              compiledStepContext={selectedCompiledStepContext}
+              failureReason={selectedFailureReason || undefined}
+              runtimeReady={runtimeReady}
+              runtimeError={runtimeError}
+              onClose={() => setIsStageControlOpen(false)}
+              onRefresh={handleStageControlRefresh}
+            />
+          </ErrorBoundary>
+        ) : null}
+
+        <ExplainWorkItemDrawer
+          capability={activeCapability}
+          workItem={selectedWorkItem}
+          isOpen={isExplainOpen}
+          onClose={() => setIsExplainOpen(false)}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="orchestrator-page-shell space-y-4">
       <section className="orchestrator-commandbar">
@@ -3235,10 +4854,7 @@ const Orchestrator = () => {
                 <button
                   type="button"
                   onClick={() => setView('board')}
-                  className={cn(
-                    'orchestrator-view-toggle-button',
-                    view === 'board' && 'orchestrator-view-toggle-button-active',
-                  )}
+                  className="orchestrator-view-toggle-button orchestrator-view-toggle-button-active"
                 >
                   <LayoutGrid size={16} />
                   Board
@@ -3246,13 +4862,10 @@ const Orchestrator = () => {
                 <button
                   type="button"
                   onClick={() => setView('list')}
-                  className={cn(
-                    'orchestrator-view-toggle-button',
-                    view === 'list' && 'orchestrator-view-toggle-button-active',
-                  )}
+                  className="orchestrator-view-toggle-button"
                 >
                   <List size={16} />
-                  List
+                  Inbox
                 </button>
               </div>
             </div>
@@ -3261,6 +4874,7 @@ const Orchestrator = () => {
               <div className="orchestrator-filter-strip">
                 <div className="orchestrator-view-toggle" aria-label="Choose work queue">
                   {[
+                    ['ALL_WORK', 'All work'],
                     ['MY_QUEUE', 'My queue'],
                     ['TEAM_QUEUE', 'Team queue'],
                     ['ATTENTION', 'Needs approval'],
@@ -3334,7 +4948,8 @@ const Orchestrator = () => {
                 <button
                   type="button"
                   onClick={() => setIsCreateSheetOpen(true)}
-                  className="enterprise-button enterprise-button-primary"
+                  disabled={!canCreateWorkItems}
+                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Plus size={16} />
                   New Work Item
@@ -3349,6 +4964,8 @@ const Orchestrator = () => {
               <span className="orchestrator-commandbar-footnote-copy">
                 {queueView === 'MY_QUEUE'
                   ? `${currentActorContext.displayName}'s queue`
+                  : queueView === 'ALL_WORK'
+                  ? 'All work items'
                   : queueView === 'TEAM_QUEUE'
                   ? 'Current team queue'
                   : queueView === 'ATTENTION'
@@ -3364,6 +4981,14 @@ const Orchestrator = () => {
           </div>
         </div>
       </section>
+
+      {!canReadLiveDetail ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          This operator currently has rollup-only visibility for this capability. Live work items,
+          execution traces, and control actions are intentionally hidden until direct capability
+          access is granted.
+        </div>
+      ) : null}
 
       <AdvancedDisclosure
         title="Advanced execution details"
@@ -3425,16 +5050,29 @@ const Orchestrator = () => {
           </div>
         ) : (
           <div className="orchestrator-attention-row">
-            {attentionItems.map(attention => (
-              <button
-                key={attention.item.id}
-                type="button"
-                onClick={() => selectWorkItem(attention.item.id, { openControl: true })}
-                className={cn(
-                  'orchestrator-attention-card min-w-[18rem] text-left',
-                  selectedWorkItemId === attention.item.id &&
-                    'orchestrator-attention-card-active',
-                )}
+	            {attentionItems.map(attention => (
+	              <button
+	                key={attention.item.id}
+	                type="button"
+	                onClick={() => {
+	                  const focus: WorkbenchSelectionFocus | undefined =
+	                    attention.item.pendingRequest?.type === 'INPUT'
+	                      ? 'INPUT'
+	                      : attention.item.pendingRequest?.type === 'APPROVAL'
+	                        ? 'APPROVAL'
+	                        : attention.item.blocker?.type
+	                              ? 'RESOLUTION'
+	                              : undefined;
+	                  selectWorkItem(attention.item.id, {
+	                    openControl: true,
+	                    focus,
+	                  });
+	                }}
+	                className={cn(
+	                  'orchestrator-attention-card min-w-[18rem] text-left',
+	                  selectedWorkItemId === attention.item.id &&
+	                    'orchestrator-attention-card-active',
+	                )}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -3919,7 +5557,7 @@ const Orchestrator = () => {
                       <button
                         type="button"
                         onClick={() => void handleOpenFullChat()}
-                        disabled={!selectedAgent}
+                        disabled={!selectedAgent || !canReadChat}
                         className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         <MessageSquareText size={16} />
@@ -3941,7 +5579,8 @@ const Orchestrator = () => {
                             ? handleReleaseControl()
                             : handleClaimControl())
                         }
-                        className="enterprise-button enterprise-button-secondary"
+                        disabled={!canControlWorkItems}
+                        className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         <User size={16} />
                         {currentActorOwnsSelectedWorkItem ? 'Release control' : 'Claim control'}
@@ -4146,12 +5785,15 @@ const Orchestrator = () => {
                       </div>
                     )}
 
-                    {(selectedCanGuideBlockedAgent || selectedOpenWait || requestChangesIsAvailable) && (
-                      <div className="workspace-meta-card border-outline-variant/30 bg-white/90">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <p className="workspace-meta-label">Agent guidance</p>
-                            <p className="mt-2 text-sm leading-relaxed text-secondary">
+	                    {(selectedCanGuideBlockedAgent || selectedOpenWait || requestChangesIsAvailable) && (
+	                      <div
+	                        id="orchestrator-guidance"
+	                        className="workspace-meta-card border-outline-variant/30 bg-white/90"
+	                      >
+	                        <div className="flex flex-wrap items-start justify-between gap-3">
+	                          <div>
+	                            <p className="workspace-meta-label">Agent guidance</p>
+	                            <p className="mt-2 text-sm leading-relaxed text-secondary">
                               {selectedOpenWait
                                 ? 'Use this note to guide the agent before the run continues. Approval, human input, and conflict decisions all carry this guidance forward.'
                                 : selectedCanGuideBlockedAgent
@@ -4231,6 +5873,7 @@ const Orchestrator = () => {
                                       : buildBlockedGuidanceSeed(selectedAttentionReason),
                                   )
                                 }
+                                disabled={!canRestartWorkItems}
                                 className="enterprise-button enterprise-button-secondary"
                               >
                                 <ArrowRight size={14} />
@@ -4409,7 +6052,7 @@ const Orchestrator = () => {
                                     ? handleReleaseWriteControl()
                                     : handleClaimWriteControl())
                                 }
-                                disabled={busyAction !== null}
+                                disabled={busyAction !== null || !canControlWorkItems}
                                 className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
                               >
                                 {busyAction === 'claimWriteControl' ||
@@ -4456,7 +6099,7 @@ const Orchestrator = () => {
                               <button
                                 type="button"
                                 onClick={() => void handleCreateHandoff()}
-                                disabled={!resolutionNote.trim() || busyAction !== null}
+                                disabled={!resolutionNote.trim() || busyAction !== null || !canControlWorkItems}
                                 className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
                               >
                                 {busyAction === 'createHandoff' ? (
@@ -4469,7 +6112,7 @@ const Orchestrator = () => {
                               <button
                                 type="button"
                                 onClick={() => void handleAcceptLatestHandoff()}
-                                disabled={!latestSelectedHandoff || busyAction !== null}
+                                disabled={!latestSelectedHandoff || busyAction !== null || !canControlWorkItems}
                                 className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
                               >
                                 {busyAction === 'acceptHandoff' ? (
@@ -4930,23 +6573,143 @@ const Orchestrator = () => {
                       </div>
                     )}
 
-                    {selectedOpenWait?.type === 'INPUT' && (
-                      <div className="workspace-meta-card border-amber-200/80 bg-amber-50/50">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <p className="workspace-meta-label">Structured input request</p>
-                            <p className="mt-2 text-sm font-semibold text-on-surface">
-                              Fill the exact gaps the engine detected for this step
-                            </p>
-                          </div>
-                          <StatusBadge tone="warning">
-                            {selectedRequestedInputFields.length || 1} inputs
-                          </StatusBadge>
-                        </div>
+	                    {selectedOpenWait?.type === 'INPUT' && (
+	                      <div
+	                        id="orchestrator-structured-input"
+	                        className="workspace-meta-card border-amber-200/80 bg-amber-50/50"
+	                      >
+	                        <div className="flex flex-wrap items-start justify-between gap-3">
+	                          <div>
+	                            <p className="workspace-meta-label">Structured input request</p>
+	                            <p className="mt-2 text-sm font-semibold text-on-surface">
+	                              Fill the exact gaps the engine detected for this step
+	                            </p>
+	                          </div>
+	                          <StatusBadge tone="warning">
+	                            {selectedRequestedInputFields.length || 1} inputs
+	                          </StatusBadge>
+	                        </div>
+	                        <div className="mt-4 flex flex-wrap gap-2">
+	                          <button
+	                            type="button"
+	                            onClick={focusGuidanceComposer}
+	                            className="enterprise-button enterprise-button-secondary"
+	                          >
+	                            Open input note
+	                          </button>
+	                          {hasMissingWorkspaceInput ? (
+	                            <button
+	                              type="button"
+	                              onClick={() =>
+	                                navigate('/capabilities/metadata#execution-policy')
+	                              }
+	                              className="enterprise-button enterprise-button-primary"
+	                            >
+	                              Configure workspace paths
+	                            </button>
+	                          ) : null}
+	                        </div>
 
-                        {renderStructuredInputs(
-                          selectedRequestedInputFields,
-                          'The step is waiting for operator input, but no structured field list was attached to this wait.',
+                          {waitRequiresApprovedWorkspace ? (
+                            <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
+                              <p className="workspace-meta-label">Approved workspace path</p>
+                              {hasApprovedWorkspaceConfigured ? (
+                                <>
+                                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+                                    Configured roots for this capability:
+                                  </p>
+                                  <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
+                                    {approvedWorkspaceRoots.slice(0, 4).map(root => (
+                                      <li key={root} className="font-mono text-[0.72rem]">
+                                        {root}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                  {approvedWorkspaceRoots.length > 4 ? (
+                                    <p className="mt-2 text-xs text-secondary">
+                                      +{approvedWorkspaceRoots.length - 4} more
+                                    </p>
+                                  ) : null}
+                                  {waitOnlyRequestsApprovedWorkspace ? (
+                                    <div className="mt-3 flex flex-wrap gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleResolveWait()}
+                                        disabled={!canControlWorkItems || busyAction !== null}
+                                        className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                                      >
+                                        {busyAction === 'resolve' ? (
+                                          <LoaderCircle size={16} className="animate-spin" />
+                                        ) : (
+                                          <ArrowRight size={16} />
+                                        )}
+                                        Continue run
+                                      </button>
+                                    </div>
+                                  ) : null}
+                                </>
+                              ) : (
+                                <>
+                                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+                                    Add a readable local directory so the engine can safely run workspace tools.
+                                  </p>
+                                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                                    <input
+                                      value={approvedWorkspaceDraft}
+                                      onChange={event => {
+                                        setApprovedWorkspaceDraft(event.target.value);
+                                        setApprovedWorkspaceValidation(null);
+                                      }}
+                                      placeholder="/path/to/your/repo"
+                                      className="field-input min-w-[16rem] flex-1 bg-white"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleApproveWorkspacePath({ unblock: true })}
+                                      disabled={busyAction !== null}
+                                      className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                      {busyAction === 'approveWorkspacePath' ? (
+                                        <LoaderCircle size={16} className="animate-spin" />
+                                      ) : (
+                                        <ShieldCheck size={16} />
+                                      )}
+                                      Approve and continue
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleApproveWorkspacePath()}
+                                      disabled={busyAction !== null}
+                                      className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                      Approve only
+                                    </button>
+                                  </div>
+                                  {approvedWorkspaceValidation ? (
+                                    <p
+                                      className={cn(
+                                        'mt-2 text-xs font-medium',
+                                        approvedWorkspaceValidation.valid
+                                          ? 'text-emerald-700'
+                                          : 'text-amber-800',
+                                      )}
+                                    >
+                                      {approvedWorkspaceValidation.message}
+                                    </p>
+                                  ) : null}
+                                  {!canEditCapability ? (
+                                    <p className="mt-2 text-xs font-medium text-amber-800">
+                                      Switch Current Operator (top right) to a workspace admin to approve paths.
+                                    </p>
+                                  ) : null}
+                                </>
+                              )}
+                            </div>
+                          ) : null}
+	
+	                        {renderStructuredInputs(
+	                          selectedRequestedInputFields,
+	                          'The step is waiting for operator input, but no structured field list was attached to this wait.',
                         )}
                       </div>
                     )}
@@ -5330,7 +7093,7 @@ const Orchestrator = () => {
                                 </p>
                                 <button
                                   type="submit"
-                                  disabled={!stageChatInput.trim() || isStageChatSending}
+                                  disabled={!stageChatInput.trim() || isStageChatSending || !canWriteChat}
                                   className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                                 >
                                   {isStageChatSending ? (
@@ -6689,7 +8452,7 @@ const Orchestrator = () => {
                   <button
                     type="submit"
                     form="orchestrator-create-work-item"
-                    disabled={busyAction !== null}
+                    disabled={busyAction !== null || !canCreateWorkItems}
                     className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {busyAction === 'create' ? (

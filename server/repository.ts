@@ -1796,6 +1796,145 @@ const replaceWorkflowsTx = async (
   }
 };
 
+const insertArtifactTx = async (
+  client: PoolClient,
+  capabilityId: string,
+  artifact: Artifact,
+) => {
+  await client.query(
+    `
+        INSERT INTO capability_artifacts (
+          capability_id,
+          id,
+          name,
+          type,
+          inputs,
+          version,
+          agent,
+          created,
+          template,
+          template_sections,
+          documentation_status,
+          is_learning_artifact,
+          is_master_artifact,
+          decisions,
+          changes,
+          learning_insights,
+          governance_rules,
+          description,
+          direction,
+          connected_agent_id,
+          source_workflow_id,
+          run_id,
+          run_step_id,
+          tool_invocation_id,
+          summary,
+          work_item_id,
+          artifact_kind,
+          phase,
+          source_run_id,
+          source_run_step_id,
+          source_wait_id,
+          handoff_from_agent_id,
+          handoff_to_agent_id,
+          content_format,
+          mime_type,
+          file_name,
+          content_text,
+          content_json,
+          downloadable,
+          trace_id,
+          latency_ms,
+          cost_usd,
+          policy_decision_id,
+          retrieval_references,
+          updated_at
+        )
+        VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,${withUpdatedTimestamp}
+        )
+      `,
+    [
+      capabilityId,
+      artifact.id,
+      artifact.name,
+      artifact.type,
+      artifact.inputs || [],
+      artifact.version,
+      artifact.agent,
+      artifact.created,
+      artifact.template || null,
+      JSON.stringify(artifact.templateSections || []),
+      artifact.documentationStatus || null,
+      artifact.isLearningArtifact ?? null,
+      artifact.isMasterArtifact ?? null,
+      artifact.decisions || [],
+      artifact.changes || [],
+      artifact.learningInsights || [],
+      artifact.governanceRules || [],
+      artifact.description || null,
+      artifact.direction || null,
+      artifact.connectedAgentId || null,
+      artifact.sourceWorkflowId || null,
+      artifact.runId || null,
+      artifact.runStepId || null,
+      artifact.toolInvocationId || null,
+      artifact.summary || null,
+      artifact.workItemId || null,
+      artifact.artifactKind || null,
+      artifact.phase || null,
+      artifact.sourceRunId || null,
+      artifact.sourceRunStepId || null,
+      artifact.sourceWaitId || null,
+      artifact.handoffFromAgentId || null,
+      artifact.handoffToAgentId || null,
+      artifact.contentFormat || null,
+      artifact.mimeType || null,
+      artifact.fileName || null,
+      artifact.contentText || null,
+      artifact.contentJson || null,
+      artifact.downloadable ?? false,
+      artifact.traceId || null,
+      artifact.latencyMs ?? null,
+      artifact.costUsd ?? null,
+      artifact.policyDecisionId || null,
+      JSON.stringify(artifact.retrievalReferences || []),
+    ],
+  );
+};
+
+const upsertArtifactFileTx = async (
+  client: PoolClient,
+  capabilityId: string,
+  artifactId: string,
+  payload: {
+    bytes: Buffer;
+    sizeBytes: number;
+    sha256: string;
+  },
+) => {
+  await client.query(
+    `
+      INSERT INTO capability_artifact_files (
+        capability_id,
+        artifact_id,
+        bytes,
+        size_bytes,
+        sha256,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,${withUpdatedTimestamp})
+      ON CONFLICT (capability_id, artifact_id)
+      DO UPDATE SET
+        bytes = EXCLUDED.bytes,
+        size_bytes = EXCLUDED.size_bytes,
+        sha256 = EXCLUDED.sha256,
+        updated_at = ${withUpdatedTimestamp}
+    `,
+    [capabilityId, artifactId, payload.bytes, payload.sizeBytes, payload.sha256],
+  );
+};
+
 const replaceArtifactsTx = async (
   client: PoolClient,
   capabilityId: string,
@@ -1905,6 +2044,16 @@ const replaceArtifactsTx = async (
       ],
     );
   }
+
+  // `replaceCapabilityWorkspaceContentRecord` rewrites the artifact table wholesale, so keep
+  // binary blobs in a separate table and clean up only the rows that no longer exist.
+  await client.query(
+    `
+      DELETE FROM capability_artifact_files
+      WHERE capability_id = $1 AND artifact_id <> ALL($2::text[])
+    `,
+    [capabilityId, artifacts.map(artifact => artifact.id)],
+  );
 };
 
 const replaceTasksTx = async (
@@ -2081,37 +2230,37 @@ const replaceWorkItemsTx = async (
   for (const item of workItems) {
     await client.query(
       `
-        INSERT INTO capability_work_items (
-          capability_id,
-          id,
-          title,
-          description,
-          task_type,
-          phase_stakeholders,
-          phase,
-          workflow_id,
-          current_step_id,
-          assigned_agent_id,
-          phase_owner_team_id,
-          claim_owner_user_id,
-          watched_by_user_ids,
-          pending_handoff,
-          status,
-          priority,
-          tags,
-          pending_request,
-          blocker,
-          active_run_id,
-          last_run_id,
-          record_version,
-          history,
-          updated_at
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,${withUpdatedTimestamp})
-      `,
-      [
-        capabilityId,
-        item.id,
+	        INSERT INTO capability_work_items (
+	          capability_id,
+	          id,
+	          title,
+	          description,
+	          task_type,
+	          phase_stakeholders,
+	          phase,
+	          workflow_id,
+	          current_step_id,
+	          assigned_agent_id,
+	          phase_owner_team_id,
+	          claim_owner_user_id,
+	          watched_by_user_ids,
+	          pending_handoff,
+	          status,
+	          priority,
+	          tags,
+	          pending_request,
+	          blocker,
+	          active_run_id,
+	          last_run_id,
+	          record_version,
+	          history,
+	          updated_at
+	        )
+	        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,${withUpdatedTimestamp})
+	      `,
+	      [
+	        capabilityId,
+	        item.id,
         item.title,
         item.description,
         item.taskType || null,
@@ -3558,6 +3707,76 @@ export const getCapabilityArtifact = async (
 
   return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
 };
+
+export const getCapabilityArtifactFileMeta = async (
+  capabilityId: string,
+  artifactId: string,
+): Promise<{ sizeBytes: number; sha256: string } | null> => {
+  const result = await query(
+    `
+      SELECT size_bytes, sha256
+      FROM capability_artifact_files
+      WHERE capability_id = $1 AND artifact_id = $2
+      LIMIT 1
+    `,
+    [capabilityId, artifactId],
+  );
+
+  const row = result.rows[0] as any;
+  if (!row) {
+    return null;
+  }
+
+  return {
+    sizeBytes: Number(row.size_bytes) || 0,
+    sha256: String(row.sha256 || ''),
+  };
+};
+
+export const getCapabilityArtifactFileBytes = async (
+  capabilityId: string,
+  artifactId: string,
+): Promise<{ bytes: Buffer; sizeBytes: number; sha256: string } | null> => {
+  const result = await query(
+    `
+      SELECT bytes, size_bytes, sha256
+      FROM capability_artifact_files
+      WHERE capability_id = $1 AND artifact_id = $2
+      LIMIT 1
+    `,
+    [capabilityId, artifactId],
+  );
+
+  const row = result.rows[0] as any;
+  if (!row) {
+    return null;
+  }
+
+  return {
+    bytes: row.bytes as Buffer,
+    sizeBytes: Number(row.size_bytes) || 0,
+    sha256: String(row.sha256 || ''),
+  };
+};
+
+export const createCapabilityArtifactUploadRecord = async ({
+  capabilityId,
+  artifact,
+  file,
+}: {
+  capabilityId: string;
+  artifact: Artifact;
+  file: { bytes: Buffer; sizeBytes: number; sha256: string };
+}): Promise<Artifact> =>
+  transaction(async client => {
+    await assertCapabilityEditableTx(client, capabilityId);
+    await insertArtifactTx(client, capabilityId, {
+      ...artifact,
+      capabilityId,
+    });
+    await upsertArtifactFileTx(client, capabilityId, artifact.id, file);
+    return artifact;
+  });
 
 const remapAgentReference = (
   agentId: string | undefined,

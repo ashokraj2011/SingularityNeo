@@ -1,6 +1,9 @@
 import type { PoolClient } from 'pg';
 import type {
+  AccessAuditEvent,
   Capability,
+  CapabilityGrant,
+  ExplicitDescendantAccessGrant,
   ExternalIdentityLink,
   NotificationRule,
   UserPreference,
@@ -25,6 +28,7 @@ const userFromRow = (row: Record<string, any>): WorkspaceUser => ({
   title: row.title || undefined,
   status: row.status,
   teamIds: asStringArray(row.team_ids),
+  workspaceRoles: asStringArray(row.workspace_roles) as WorkspaceUser['workspaceRoles'],
 });
 
 const teamFromRow = (row: Record<string, any>): WorkspaceTeam => ({
@@ -78,6 +82,47 @@ const notificationRuleFromRow = (row: Record<string, any>): NotificationRule => 
   digest: Boolean(row.digest),
 });
 
+const capabilityGrantFromRow = (row: Record<string, any>): CapabilityGrant => ({
+  id: row.id,
+  capabilityId: row.capability_id,
+  userId: row.user_id || undefined,
+  teamId: row.team_id || undefined,
+  actions: asStringArray(row.actions) as CapabilityGrant['actions'],
+  note: row.note || undefined,
+  createdByUserId: row.created_by_user_id || undefined,
+  createdAt: row.created_at?.toISOString?.() || row.created_at,
+  updatedAt: row.updated_at?.toISOString?.() || row.updated_at,
+});
+
+const descendantAccessGrantFromRow = (
+  row: Record<string, any>,
+): ExplicitDescendantAccessGrant => ({
+  id: row.id,
+  parentCapabilityId: row.parent_capability_id,
+  descendantCapabilityId: row.descendant_capability_id,
+  userId: row.user_id || undefined,
+  teamId: row.team_id || undefined,
+  actions: asStringArray(row.actions) as ExplicitDescendantAccessGrant['actions'],
+  note: row.note || undefined,
+  createdByUserId: row.created_by_user_id || undefined,
+  createdAt: row.created_at?.toISOString?.() || row.created_at,
+  updatedAt: row.updated_at?.toISOString?.() || row.updated_at,
+});
+
+const accessAuditEventFromRow = (row: Record<string, any>): AccessAuditEvent => ({
+  id: row.id,
+  actorUserId: row.actor_user_id || undefined,
+  actorDisplayName: row.actor_display_name,
+  action: row.action,
+  targetType: row.target_type,
+  targetId: row.target_id,
+  capabilityId: row.capability_id || undefined,
+  summary: row.summary,
+  metadata:
+    row.metadata && typeof row.metadata === 'object' ? row.metadata : undefined,
+  createdAt: row.created_at?.toISOString?.() || row.created_at,
+});
+
 export const getWorkspaceOrganizationTx = async (
   client: PoolClient,
 ): Promise<WorkspaceOrganization> => {
@@ -86,17 +131,25 @@ export const getWorkspaceOrganizationTx = async (
     teamsResult,
     membershipsResult,
     capabilityMembershipsResult,
+    capabilityGrantsResult,
+    descendantAccessGrantsResult,
     identityLinksResult,
     preferencesResult,
     notificationRulesResult,
+    accessAuditResult,
   ] = await Promise.all([
     client.query(`SELECT * FROM workspace_users ORDER BY created_at ASC, id ASC`),
     client.query(`SELECT * FROM workspace_teams ORDER BY created_at ASC, id ASC`),
     client.query(`SELECT * FROM workspace_memberships ORDER BY created_at ASC, id ASC`),
     client.query(`SELECT * FROM capability_memberships ORDER BY created_at ASC, id ASC`),
+    client.query(`SELECT * FROM capability_grants ORDER BY created_at ASC, id ASC`),
+    client.query(
+      `SELECT * FROM capability_descendant_access_grants ORDER BY created_at ASC, id ASC`,
+    ),
     client.query(`SELECT * FROM workspace_external_identity_links ORDER BY created_at ASC, id ASC`),
     client.query(`SELECT * FROM workspace_user_preferences ORDER BY user_id ASC`),
     client.query(`SELECT * FROM workspace_notification_rules ORDER BY created_at ASC, id ASC`),
+    client.query(`SELECT * FROM access_audit_events ORDER BY created_at DESC, id DESC LIMIT 250`),
   ]);
 
   return normalizeWorkspaceOrganization({
@@ -104,9 +157,14 @@ export const getWorkspaceOrganizationTx = async (
     teams: teamsResult.rows.map(teamFromRow),
     memberships: membershipsResult.rows.map(membershipFromRow),
     capabilityMemberships: capabilityMembershipsResult.rows.map(capabilityMembershipFromRow),
+    capabilityGrants: capabilityGrantsResult.rows.map(capabilityGrantFromRow),
+    descendantAccessGrants: descendantAccessGrantsResult.rows.map(
+      descendantAccessGrantFromRow,
+    ),
     externalIdentityLinks: identityLinksResult.rows.map(identityLinkFromRow),
     userPreferences: preferencesResult.rows.map(userPreferenceFromRow),
     notificationRules: notificationRulesResult.rows.map(notificationRuleFromRow),
+    accessAuditEvents: accessAuditResult.rows.map(accessAuditEventFromRow),
   });
 };
 
@@ -122,9 +180,10 @@ const replaceWorkspaceUsersTx = async (client: PoolClient, users: WorkspaceUser[
           title,
           status,
           team_ids,
+          workspace_roles,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,NOW())
+        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
       `,
       [
         user.id,
@@ -133,6 +192,7 @@ const replaceWorkspaceUsersTx = async (client: PoolClient, users: WorkspaceUser[
         user.title || null,
         user.status,
         user.teamIds,
+        user.workspaceRoles,
       ],
     );
   }
@@ -210,6 +270,74 @@ const replaceCapabilityMembershipsTx = async (
         membership.userId,
         membership.teamId || null,
         membership.role,
+      ],
+    );
+  }
+};
+
+const replaceCapabilityGrantsTx = async (
+  client: PoolClient,
+  grants: CapabilityGrant[],
+) => {
+  await client.query(`DELETE FROM capability_grants`);
+  for (const grant of grants) {
+    await client.query(
+      `
+        INSERT INTO capability_grants (
+          id,
+          capability_id,
+          user_id,
+          team_id,
+          actions,
+          note,
+          created_by_user_id,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+      `,
+      [
+        grant.id,
+        grant.capabilityId,
+        grant.userId || null,
+        grant.teamId || null,
+        grant.actions,
+        grant.note || null,
+        grant.createdByUserId || null,
+      ],
+    );
+  }
+};
+
+const replaceDescendantAccessGrantsTx = async (
+  client: PoolClient,
+  grants: ExplicitDescendantAccessGrant[],
+) => {
+  await client.query(`DELETE FROM capability_descendant_access_grants`);
+  for (const grant of grants) {
+    await client.query(
+      `
+        INSERT INTO capability_descendant_access_grants (
+          id,
+          parent_capability_id,
+          descendant_capability_id,
+          user_id,
+          team_id,
+          actions,
+          note,
+          created_by_user_id,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+      `,
+      [
+        grant.id,
+        grant.parentCapabilityId,
+        grant.descendantCapabilityId,
+        grant.userId || null,
+        grant.teamId || null,
+        grant.actions,
+        grant.note || null,
+        grant.createdByUserId || null,
       ],
     );
   }
@@ -320,10 +448,14 @@ export const updateWorkspaceOrganization = async (
       memberships: updates.memberships ?? current.memberships,
       capabilityMemberships:
         updates.capabilityMemberships ?? current.capabilityMemberships,
+      capabilityGrants: updates.capabilityGrants ?? current.capabilityGrants,
+      descendantAccessGrants:
+        updates.descendantAccessGrants ?? current.descendantAccessGrants,
       externalIdentityLinks:
         updates.externalIdentityLinks ?? current.externalIdentityLinks,
       userPreferences: updates.userPreferences ?? current.userPreferences,
       notificationRules: updates.notificationRules ?? current.notificationRules,
+      accessAuditEvents: current.accessAuditEvents,
       currentUserId: updates.currentUserId ?? current.currentUserId,
     });
 
@@ -331,6 +463,8 @@ export const updateWorkspaceOrganization = async (
     await replaceWorkspaceTeamsTx(client, next.teams);
     await replaceWorkspaceMembershipsTx(client, next.memberships);
     await replaceCapabilityMembershipsTx(client, next.capabilityMemberships);
+    await replaceCapabilityGrantsTx(client, next.capabilityGrants);
+    await replaceDescendantAccessGrantsTx(client, next.descendantAccessGrants);
     await replaceExternalIdentityLinksTx(client, next.externalIdentityLinks);
     await replaceUserPreferencesTx(client, next.userPreferences);
     await replaceNotificationRulesTx(client, next.notificationRules);
@@ -351,6 +485,8 @@ export const syncWorkspaceOrganizationFromCapabilities = async (
     await replaceWorkspaceTeamsTx(client, next.teams);
     await replaceWorkspaceMembershipsTx(client, next.memberships);
     await replaceCapabilityMembershipsTx(client, next.capabilityMemberships);
+    await replaceCapabilityGrantsTx(client, next.capabilityGrants);
+    await replaceDescendantAccessGrantsTx(client, next.descendantAccessGrants);
     await replaceExternalIdentityLinksTx(client, next.externalIdentityLinks);
     await replaceUserPreferencesTx(client, next.userPreferences);
     await replaceNotificationRulesTx(client, next.notificationRules);
@@ -384,4 +520,41 @@ export const upsertUserPreference = async ({
   );
 
   return userPreferenceFromRow(result.rows[0]);
+};
+
+export const appendAccessAuditEvent = async (
+  event: AccessAuditEvent,
+): Promise<AccessAuditEvent> => {
+  const result = await query(
+    `
+      INSERT INTO access_audit_events (
+        id,
+        actor_user_id,
+        actor_display_name,
+        action,
+        target_type,
+        target_id,
+        capability_id,
+        summary,
+        metadata,
+        created_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      RETURNING *
+    `,
+    [
+      event.id,
+      event.actorUserId || null,
+      event.actorDisplayName,
+      event.action,
+      event.targetType,
+      event.targetId,
+      event.capabilityId || null,
+      event.summary,
+      JSON.stringify(event.metadata || {}),
+      event.createdAt,
+    ],
+  );
+
+  return accessAuditEventFromRow(result.rows[0]);
 };

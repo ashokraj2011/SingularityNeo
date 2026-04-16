@@ -36,6 +36,12 @@ import { WORKSPACE_AGENT_TEMPLATES } from '../src/lib/workspaceFoundations';
 const DEFAULT_AGENT_PROVIDER = 'GitHub Copilot SDK' as const;
 const DEFAULT_AGENT_MODEL = COPILOT_MODEL_OPTIONS[0].id;
 const DEFAULT_AGENT_TOKEN_LIMIT = 12000;
+const COLLECTION_BUILT_IN_AGENT_KEYS: Set<string> = new Set([
+  'PLANNING',
+  'ARCHITECT',
+  'BUSINESS-ANALYST',
+  'VALIDATION',
+] as const);
 
 export const createDefaultAgentLearningProfile = (): AgentLearningProfile => ({
   status: 'NOT_STARTED',
@@ -92,6 +98,13 @@ const createBuiltInAgentId = (capabilityId: string, key: string) =>
 
 const resolveCapabilityText = (value: string, capability: Capability) =>
   value.replace(/\{capabilityName\}/g, capability.name);
+
+const getBuiltInTemplatesForCapability = (capability: Capability) =>
+  BUILT_IN_AGENT_TEMPLATES.filter(template =>
+    capability.capabilityKind === 'COLLECTION'
+      ? COLLECTION_BUILT_IN_AGENT_KEYS.has(template.key)
+      : true,
+  );
 
 const getMetadataNumber = (value: unknown) =>
   typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -282,7 +295,7 @@ export const buildOwnerAgent = (capability: Capability): CapabilityAgent => {
 };
 
 export const buildBuiltInAgents = (capability: Capability): CapabilityAgent[] =>
-  BUILT_IN_AGENT_TEMPLATES.map(template => {
+  getBuiltInTemplatesForCapability(capability).map(template => {
     const agentId = createBuiltInAgentId(capability.id, template.key);
 
     return {
@@ -329,6 +342,11 @@ const mergeWorkspaceAgents = (
 ) => {
   const builtInAgents = buildBuiltInAgents(capability);
   const builtInIds = new Set(builtInAgents.map(agent => agent.id));
+  const builtInTemplateKeys = new Set(
+    builtInAgents
+      .map(agent => agent.standardTemplateKey)
+      .filter(Boolean),
+  );
   const nextOwnerAgent: CapabilityAgent = {
     ...buildOwnerAgent(capability),
     ...ownerAgent,
@@ -354,7 +372,14 @@ const mergeWorkspaceAgents = (
             }
           : agent;
       }),
-      ...agents.filter(agent => !agent.isOwner && !builtInIds.has(agent.id)),
+      ...agents
+        .filter(agent => !agent.isOwner && !builtInIds.has(agent.id))
+        .filter(
+          agent =>
+            !agent.isBuiltIn ||
+            !agent.standardTemplateKey ||
+            builtInTemplateKeys.has(agent.standardTemplateKey),
+        ),
     ],
     tasks,
     logs,
