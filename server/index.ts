@@ -114,6 +114,7 @@ import {
 } from './execution/repository';
 import {
   approveWorkflowRun,
+  archiveWorkItemControl,
   cancelWorkflowRun,
   cancelWorkItemControl,
   continueWorkflowStageControl,
@@ -122,6 +123,7 @@ import {
   pauseWorkflowRun,
   provideWorkflowRunInput,
   requestChangesWorkflowRun,
+  restoreWorkItemControl,
   resumeWorkflowRun,
   resolveWorkflowRunConflict,
   restartWorkflowRun,
@@ -3238,6 +3240,62 @@ app.post(
 
       response.json(
         await cancelWorkItemControl({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          note: String(request.body?.note || '').trim() || undefined,
+          actor,
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/archive',
+  async (request, response) => {
+    try {
+      const bundle = await getCapabilityBundle(request.params.capabilityId);
+      assertCapabilitySupportsExecution(bundle.capability);
+
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
+
+      response.json(
+        await archiveWorkItemControl({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          note: String(request.body?.note || '').trim() || undefined,
+          actor,
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/restore',
+  async (request, response) => {
+    try {
+      const bundle = await getCapabilityBundle(request.params.capabilityId);
+      assertCapabilitySupportsExecution(bundle.capability);
+
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
+
+      response.json(
+        await restoreWorkItemControl({
           capabilityId: request.params.capabilityId,
           workItemId: request.params.workItemId,
           note: String(request.body?.note || '').trim() || undefined,

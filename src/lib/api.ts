@@ -1066,6 +1066,34 @@ export const cancelCapabilityWorkItem = async (
     },
   );
 
+export const archiveCapabilityWorkItem = async (
+  capabilityId: string,
+  workItemId: string,
+  payload?: { note?: string },
+): Promise<WorkItem> =>
+  requestJson<WorkItem>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/archive`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
+    },
+  );
+
+export const restoreCapabilityWorkItem = async (
+  capabilityId: string,
+  workItemId: string,
+  payload?: { note?: string },
+): Promise<WorkItem> =>
+  requestJson<WorkItem>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/restore`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
+    },
+  );
+
 export const fetchCapabilityWorkItemCollaboration = async (
   capabilityId: string,
   workItemId: string,

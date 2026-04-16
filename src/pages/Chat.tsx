@@ -248,6 +248,7 @@ const WORK_ITEM_BRANCH_STATUS_PRIORITY: Record<WorkItem['status'], number> = {
   PENDING_APPROVAL: 1,
   COMPLETED: 2,
   CANCELLED: 2,
+  ARCHIVED: 3,
 };
 
 const getExecutionContextPriority = (item: WorkItem) =>

@@ -1708,7 +1708,8 @@ export type WorkItemStatus =
   | 'PAUSED'
   | 'PENDING_APPROVAL'
   | 'COMPLETED'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  | 'ARCHIVED';
 
 export interface WorkItemPendingRequest {
   type: 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION';

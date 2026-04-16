@@ -20,6 +20,7 @@ import {
   Send,
   ShieldCheck,
   Square,
+  Trash2,
   User,
   Workflow as WorkflowIcon,
   X,
@@ -47,6 +48,7 @@ import {
   appendCapabilityMessageRecord,
   approveCapabilityWorkflowRun,
   acceptCapabilityWorkItemHandoff,
+  archiveCapabilityWorkItem,
   cancelCapabilityWorkItem,
   cancelCapabilityWorkflowRun,
   claimCapabilityWorkItemControl,
@@ -65,6 +67,7 @@ import {
   pauseCapabilityWorkflowRun,
   provideCapabilityWorkflowRunInput,
   resumeCapabilityWorkflowRun,
+  restoreCapabilityWorkItem,
   validateOnboardingWorkspacePath,
   releaseCapabilityWorkItemControl,
   releaseCapabilityWorkItemWriteControl,
@@ -166,6 +169,7 @@ const WORK_ITEM_STATUS_META: Record<
   PENDING_APPROVAL: { label: 'Pending Approval', accent: 'bg-amber-100 text-amber-700' },
   COMPLETED: { label: 'Completed', accent: 'bg-emerald-100 text-emerald-700' },
   CANCELLED: { label: 'Cancelled', accent: 'bg-slate-200 text-slate-700' },
+  ARCHIVED: { label: 'Archived', accent: 'bg-slate-100 text-slate-700' },
 };
 
 const ACTIVE_RUN_STATUSES: WorkflowRun['status'][] = [
@@ -271,7 +275,8 @@ type WorkbenchQueueView =
   | 'TEAM_QUEUE'
   | 'ATTENTION'
   | 'PAUSED'
-  | 'WATCHING';
+  | 'WATCHING'
+  | 'ARCHIVE';
 type WorkbenchSelectionFocus = 'INPUT' | 'APPROVAL' | 'RESOLUTION';
 
 const STORAGE_KEYS = {
@@ -894,6 +899,10 @@ const Orchestrator = () => {
   const [resolutionNote, setResolutionNote] = useState('');
   const [isCancelWorkItemOpen, setIsCancelWorkItemOpen] = useState(false);
   const [cancelWorkItemNote, setCancelWorkItemNote] = useState('');
+  const [isArchiveWorkItemOpen, setIsArchiveWorkItemOpen] = useState(false);
+  const [archiveWorkItemNote, setArchiveWorkItemNote] = useState('');
+  const [isRestoreWorkItemOpen, setIsRestoreWorkItemOpen] = useState(false);
+  const [restoreWorkItemNote, setRestoreWorkItemNote] = useState('');
   const [phaseMoveRequest, setPhaseMoveRequest] = useState<{
     workItemId: string;
     targetPhase: WorkItemPhase;
@@ -1450,6 +1459,8 @@ const Orchestrator = () => {
               Boolean(item.pendingRequest))
           : queueView === 'PAUSED'
           ? item.status === 'PAUSED'
+          : queueView === 'ARCHIVE'
+          ? item.status === 'ARCHIVED'
           : Boolean(actorUserId && item.watchedByUserIds?.includes(actorUserId));
 
       return (
@@ -1479,6 +1490,7 @@ const Orchestrator = () => {
         .filter(
           item =>
             item.status !== 'PAUSED' &&
+            item.status !== 'ARCHIVED' &&
             (item.blocker?.status === 'OPEN' ||
               Boolean(item.pendingRequest) ||
               item.status === 'BLOCKED' ||
@@ -1537,7 +1549,8 @@ const Orchestrator = () => {
           item =>
             item.phase === phase &&
             item.status !== 'COMPLETED' &&
-            item.status !== 'CANCELLED',
+            item.status !== 'CANCELLED' &&
+            item.status !== 'ARCHIVED',
         ),
       })),
     [activeBoardPhases, filteredWorkItems],
@@ -1548,9 +1561,10 @@ const Orchestrator = () => {
       filteredWorkItems
         .filter(
           item =>
-            item.phase === 'DONE' ||
-            item.status === 'COMPLETED' ||
-            item.status === 'CANCELLED',
+            item.status !== 'ARCHIVED' &&
+            (item.phase === 'DONE' ||
+              item.status === 'COMPLETED' ||
+              item.status === 'CANCELLED'),
         )
         .slice()
         .sort((left, right) => {
@@ -1613,6 +1627,7 @@ const Orchestrator = () => {
         title: 'Active work',
         helper: 'Current in-flight items across the capability.',
         items: filteredWorkItems
+          .filter(item => item.status !== 'ARCHIVED')
           .filter(item => item.status !== 'COMPLETED' && item.phase !== 'DONE')
           .filter(item => item.status !== 'CANCELLED')
           .filter(item => item.status !== 'PAUSED')
@@ -1633,6 +1648,15 @@ const Orchestrator = () => {
         title: 'Completed',
         helper: 'Recently finished work kept nearby for review and traceability.',
         items: completedItems.slice(0, 8).map(buildNavigatorItem),
+      },
+      {
+        id: 'archive',
+        title: 'Archive',
+        helper: 'Soft-deleted items kept out of the active queues. Restore them to restart from intake.',
+        items: filteredWorkItems
+          .filter(item => item.status === 'ARCHIVED')
+          .slice(0, 12)
+          .map(buildNavigatorItem),
       },
     ],
     [attentionItems, buildNavigatorItem, completedItems, filteredWorkItems],
@@ -1840,7 +1864,11 @@ const Orchestrator = () => {
   );
   const runtimeReady = Boolean(runtimeStatus?.configured) && !runtimeError;
   const selectedCanTakeControl = Boolean(
-    selectedWorkItem && selectedAgent && runtimeReady && canControlWorkItems,
+    selectedWorkItem &&
+      selectedWorkItem.status !== 'ARCHIVED' &&
+      selectedAgent &&
+      runtimeReady &&
+      canControlWorkItems,
   );
   const selectedCanGuideBlockedAgent = Boolean(
     selectedWorkItem &&
@@ -1858,6 +1886,9 @@ const Orchestrator = () => {
 
   const canStartExecution =
     Boolean(selectedWorkItem) &&
+    selectedWorkItem?.status !== 'ARCHIVED' &&
+    selectedWorkItem?.status !== 'COMPLETED' &&
+    selectedWorkItem?.status !== 'CANCELLED' &&
     !selectedWorkItem?.activeRunId &&
     selectedWorkItem?.phase !== 'DONE' &&
     runtimeReady &&
@@ -1873,7 +1904,8 @@ const Orchestrator = () => {
     currentActorContext.userId &&
       selectedEffectiveExecutionContext?.activeWriterUserId === currentActorContext.userId,
   );
-  const canInitializeExecutionContext = Boolean(selectedWorkItem) && canControlWorkItems;
+  const canInitializeExecutionContext =
+    Boolean(selectedWorkItem) && selectedWorkItem?.status !== 'ARCHIVED' && canControlWorkItems;
   const canCreateSharedBranch = Boolean(
     selectedWorkItem &&
       selectedExecutionRepository?.localRootHint &&
@@ -1883,10 +1915,19 @@ const Orchestrator = () => {
 
   const canRestartFromPhase =
     Boolean(selectedWorkItem && currentRun && !selectedWorkItem.activeRunId) &&
+    selectedWorkItem?.status !== 'ARCHIVED' &&
+    selectedWorkItem?.status !== 'COMPLETED' &&
+    selectedWorkItem?.status !== 'CANCELLED' &&
     selectedWorkItem?.phase !== 'DONE' &&
     runtimeReady &&
     canRestartWorkItems;
-  const canResetAndRestart = Boolean(selectedWorkItem) && runtimeReady && canRestartWorkItems;
+  const canResetAndRestart =
+    Boolean(selectedWorkItem) &&
+    selectedWorkItem?.status !== 'ARCHIVED' &&
+    selectedWorkItem?.status !== 'COMPLETED' &&
+    selectedWorkItem?.status !== 'CANCELLED' &&
+    runtimeReady &&
+    canRestartWorkItems;
   const codeDiffReviewRequiresResponse = Boolean(
     selectedOpenWait?.type === 'APPROVAL' && selectedCodeDiffArtifactId,
   );
@@ -3777,6 +3818,7 @@ const Orchestrator = () => {
       !selectedWorkItem ||
       selectedWorkItem.status === 'COMPLETED' ||
       selectedWorkItem.status === 'CANCELLED' ||
+      selectedWorkItem.status === 'ARCHIVED' ||
       !requirePermission(
         canControlWorkItems,
         'This operator cannot cancel work items in this capability.',
@@ -3800,6 +3842,72 @@ const Orchestrator = () => {
       {
         title: 'Work item cancelled',
         description: `${selectedWorkItem.title} was cancelled and removed from the active queue.`,
+      },
+    );
+  };
+
+  const handleArchiveWorkItem = async () => {
+    if (
+      !selectedWorkItem ||
+      selectedWorkItem.status === 'ARCHIVED' ||
+      !requirePermission(
+        canControlWorkItems,
+        'This operator cannot delete (archive) work items in this capability.',
+      )
+    ) {
+      return;
+    }
+
+    const note =
+      archiveWorkItemNote.trim() ||
+      resolutionNote.trim() ||
+      'Work item archived from the control plane.';
+
+    await withAction(
+      'archiveWorkItem',
+      async () => {
+        await archiveCapabilityWorkItem(activeCapability.id, selectedWorkItem.id, { note });
+        setArchiveWorkItemNote('');
+        setResolutionNote('');
+        setIsArchiveWorkItemOpen(false);
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Work item archived',
+        description: `${selectedWorkItem.title} moved to the Archive and its run history was cleaned up.`,
+      },
+    );
+  };
+
+  const handleRestoreWorkItem = async () => {
+    if (
+      !selectedWorkItem ||
+      selectedWorkItem.status !== 'ARCHIVED' ||
+      !requirePermission(
+        canControlWorkItems,
+        'This operator cannot restore archived work items in this capability.',
+      )
+    ) {
+      return;
+    }
+
+    const note =
+      restoreWorkItemNote.trim() ||
+      resolutionNote.trim() ||
+      'Work item restored from the archive.';
+
+    await withAction(
+      'restoreWorkItem',
+      async () => {
+        await restoreCapabilityWorkItem(activeCapability.id, selectedWorkItem.id, { note });
+        setRestoreWorkItemNote('');
+        setResolutionNote('');
+        setIsRestoreWorkItemOpen(false);
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Work item restored',
+        description: `${selectedWorkItem.title} was restored to its initial phase so execution can restart.`,
       },
     );
   };
@@ -4276,6 +4384,8 @@ const Orchestrator = () => {
                   ? 'Attention queue'
                   : queueView === 'PAUSED'
                   ? 'Paused queue'
+                  : queueView === 'ARCHIVE'
+                  ? 'Archive'
                   : 'Watching queue'}
               </span>
               <span className="orchestrator-commandbar-footnote-copy">
@@ -4484,6 +4594,7 @@ const Orchestrator = () => {
                     ['ATTENTION', 'Approvals'],
                     ['PAUSED', 'Paused'],
                     ['WATCHING', 'Watching'],
+                    ['ARCHIVE', 'Archive'],
                   ].map(([value, label]) => (
                     <button
                       key={value}
@@ -4525,6 +4636,7 @@ const Orchestrator = () => {
 	                  <option value="PENDING_APPROVAL">Pending approval</option>
 	                  <option value="COMPLETED">Completed</option>
 	                  <option value="CANCELLED">Cancelled</option>
+                    <option value="ARCHIVED">Archived</option>
 	                </select>
                 <select
                   value={priorityFilter}
@@ -4647,7 +4759,45 @@ const Orchestrator = () => {
                               Resume
                             </button>
                           ) : null}
-                          {entry.item.status !== 'COMPLETED' && entry.item.status !== 'CANCELLED' ? (
+                          {entry.item.status === 'ARCHIVED' ? (
+                            <button
+                              type="button"
+                              onClick={event => {
+                                event.stopPropagation();
+                                selectWorkItem(entry.item.id);
+                                setActionError('');
+                                setRestoreWorkItemNote('');
+                                setIsRestoreWorkItemOpen(true);
+                              }}
+                              disabled={!canControlWorkItems || busyAction !== null}
+                              className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <RefreshCw size={14} />
+                              Restore
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={event => {
+                                event.stopPropagation();
+                                selectWorkItem(entry.item.id);
+                                setActionError('');
+                                setArchiveWorkItemNote('');
+                                setIsArchiveWorkItemOpen(true);
+                              }}
+                              disabled={!canControlWorkItems || busyAction !== null}
+                              className={cn(
+                                'enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40',
+                                'border-red-200 text-red-700 hover:bg-red-50',
+                              )}
+                            >
+                              <Trash2 size={14} />
+                              Delete
+                            </button>
+                          )}
+                          {entry.item.status !== 'COMPLETED' &&
+                          entry.item.status !== 'CANCELLED' &&
+                          entry.item.status !== 'ARCHIVED' ? (
                             <button
                               type="button"
                               onClick={event => {
@@ -4795,23 +4945,57 @@ const Orchestrator = () => {
                         Resume
                       </button>
                     ) : null}
-	                    <button
-	                      type="button"
-	                      onClick={() => {
-	                        setActionError('');
-	                        setCancelWorkItemNote('');
-	                        setIsCancelWorkItemOpen(true);
-	                      }}
-	                      disabled={
-	                        busyAction !== null ||
-	                        selectedWorkItem.status === 'COMPLETED' ||
-	                        selectedWorkItem.status === 'CANCELLED'
-	                      }
-	                      className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
-	                    >
-                      <X size={16} />
-                      Cancel work item
-                    </button>
+                    {selectedWorkItem.status === 'ARCHIVED' ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActionError('');
+                          setRestoreWorkItemNote('');
+                          setIsRestoreWorkItemOpen(true);
+                        }}
+                        disabled={busyAction !== null}
+                        className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <RefreshCw size={16} />
+                        Restore
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActionError('');
+                            setArchiveWorkItemNote('');
+                            setIsArchiveWorkItemOpen(true);
+                          }}
+                          disabled={busyAction !== null}
+                          className={cn(
+                            'enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40',
+                            'border-red-200 text-red-700 hover:bg-red-50',
+                          )}
+                        >
+                          <Trash2 size={16} />
+                          Delete
+                        </button>
+	                      <button
+	                        type="button"
+	                        onClick={() => {
+	                          setActionError('');
+	                          setCancelWorkItemNote('');
+	                          setIsCancelWorkItemOpen(true);
+	                        }}
+	                        disabled={
+	                          busyAction !== null ||
+	                          selectedWorkItem.status === 'COMPLETED' ||
+	                          selectedWorkItem.status === 'CANCELLED'
+	                        }
+	                        className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+	                      >
+                          <X size={16} />
+                          Cancel work item
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -5551,6 +5735,7 @@ const Orchestrator = () => {
 	                    ['ATTENTION', 'Needs approval'],
 	                    ['PAUSED', 'Paused'],
 	                    ['WATCHING', 'Watching'],
+                      ['ARCHIVE', 'Archive'],
 	                  ].map(([value, label]) => (
                     <button
                       key={value}
@@ -5591,6 +5776,7 @@ const Orchestrator = () => {
 		                  <option value="PENDING_APPROVAL">Pending approval</option>
 		                  <option value="COMPLETED">Completed</option>
 		                  <option value="CANCELLED">Cancelled</option>
+                      <option value="ARCHIVED">Archived</option>
 		                </select>
                 <select
                   value={priorityFilter}
@@ -6362,23 +6548,57 @@ const Orchestrator = () => {
                           Cancel run
                         </button>
 
-	                        <button
-	                          type="button"
-	                          onClick={() => {
-	                            setActionError('');
-	                            setCancelWorkItemNote('');
-	                            setIsCancelWorkItemOpen(true);
-	                          }}
-	                          disabled={
-	                            busyAction !== null ||
-	                            selectedWorkItem.status === 'COMPLETED' ||
-	                            selectedWorkItem.status === 'CANCELLED'
-	                          }
-	                          className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
-	                        >
-                          <X size={16} />
-                          Cancel work item
-                        </button>
+                        {selectedWorkItem.status === 'ARCHIVED' ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActionError('');
+                              setRestoreWorkItemNote('');
+                              setIsRestoreWorkItemOpen(true);
+                            }}
+                            disabled={busyAction !== null}
+                            className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <RefreshCw size={16} />
+                            Restore
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActionError('');
+                                setArchiveWorkItemNote('');
+                                setIsArchiveWorkItemOpen(true);
+                              }}
+                              disabled={busyAction !== null}
+                              className={cn(
+                                'enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40',
+                                'border-red-200 text-red-700 hover:bg-red-50',
+                              )}
+                            >
+                              <Trash2 size={16} />
+                              Delete
+                            </button>
+	                          <button
+	                            type="button"
+	                            onClick={() => {
+	                              setActionError('');
+	                              setCancelWorkItemNote('');
+	                              setIsCancelWorkItemOpen(true);
+	                            }}
+	                            disabled={
+	                              busyAction !== null ||
+	                              selectedWorkItem.status === 'COMPLETED' ||
+	                              selectedWorkItem.status === 'CANCELLED'
+	                            }
+	                            className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+	                          >
+                              <X size={16} />
+                              Cancel work item
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -9276,6 +9496,204 @@ const Orchestrator = () => {
                     <ArrowRight size={16} />
                   )}
                   Move phase
+                </button>
+              </div>
+            </div>
+          </ModalShell>
+        </div>
+      )}
+
+      {isArchiveWorkItemOpen && selectedWorkItem && selectedWorkItem.status !== 'ARCHIVED' && (
+        <div className="fixed inset-0 z-[93] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-12 backdrop-blur-sm">
+          <button
+            type="button"
+            aria-label="Close archive work item dialog"
+            onClick={() => setIsArchiveWorkItemOpen(false)}
+            className="absolute inset-0"
+          />
+          <ModalShell
+            title={`Delete work item · ${selectedWorkItem.title}`}
+            eyebrow="Archive Work Item"
+            description="Deleting here is a soft delete: we archive the work item and purge its run history, artifacts, and copilot thread so the workspace stays fast. You can restore from Archive to restart from the initial phase."
+            className="relative z-[1] w-full max-w-2xl"
+            actions={
+              <button
+                type="button"
+                onClick={() => setIsArchiveWorkItemOpen(false)}
+                className="workspace-list-action"
+              >
+                <X size={14} />
+              </button>
+            }
+          >
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-relaxed text-red-900">
+                This will remove runs, logs, uploaded files, and chat history tied to this work item. Restore brings the work item back, but it starts fresh.
+              </div>
+
+              {!canControlWorkItems ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle size={18} className="mt-0.5 shrink-0" />
+                    <div>
+                      <p className="text-sm font-semibold">Read-only operator</p>
+                      <p className="mt-1 text-sm leading-relaxed">
+                        {currentActorContext.displayName} does not have{' '}
+                        <span className="font-mono">workitem.control</span>. Switch Current
+                        Operator in the top bar, or use Login to choose a role that can
+                        delete work items.
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsArchiveWorkItemOpen(false);
+                            navigate('/login');
+                          }}
+                          className="enterprise-button enterprise-button-secondary"
+                        >
+                          <ArrowRight size={16} />
+                          Switch operator
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              <label className="block space-y-2">
+                <span className="field-label">Delete note (optional)</span>
+                <textarea
+                  value={archiveWorkItemNote}
+                  onChange={event => setArchiveWorkItemNote(event.target.value)}
+                  placeholder="Why are we deleting (archiving) this work item?"
+                  className="field-textarea bg-white"
+                />
+              </label>
+
+              {actionError ? (
+                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+                  {actionError}
+                </div>
+              ) : null}
+
+              <div className="flex flex-wrap items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsArchiveWorkItemOpen(false)}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  Keep work item
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleArchiveWorkItem()}
+                  disabled={busyAction !== null || !canControlWorkItems}
+                  className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busyAction === 'archiveWorkItem' ? (
+                    <LoaderCircle size={16} className="animate-spin" />
+                  ) : (
+                    <Trash2 size={16} />
+                  )}
+                  Delete and archive
+                </button>
+              </div>
+            </div>
+          </ModalShell>
+        </div>
+      )}
+
+      {isRestoreWorkItemOpen && selectedWorkItem && selectedWorkItem.status === 'ARCHIVED' && (
+        <div className="fixed inset-0 z-[93] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-12 backdrop-blur-sm">
+          <button
+            type="button"
+            aria-label="Close restore work item dialog"
+            onClick={() => setIsRestoreWorkItemOpen(false)}
+            className="absolute inset-0"
+          />
+          <ModalShell
+            title={`Restore work item · ${selectedWorkItem.title}`}
+            eyebrow="Restore From Archive"
+            description="Restoring brings the work item back to its initial phase so you can restart execution."
+            className="relative z-[1] w-full max-w-2xl"
+            actions={
+              <button
+                type="button"
+                onClick={() => setIsRestoreWorkItemOpen(false)}
+                className="workspace-list-action"
+              >
+                <X size={14} />
+              </button>
+            }
+          >
+            <div className="space-y-4">
+              {!canControlWorkItems ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle size={18} className="mt-0.5 shrink-0" />
+                    <div>
+                      <p className="text-sm font-semibold">Read-only operator</p>
+                      <p className="mt-1 text-sm leading-relaxed">
+                        {currentActorContext.displayName} does not have{' '}
+                        <span className="font-mono">workitem.control</span>. Switch Current
+                        Operator in the top bar, or use Login to choose a role that can
+                        restore work items.
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsRestoreWorkItemOpen(false);
+                            navigate('/login');
+                          }}
+                          className="enterprise-button enterprise-button-secondary"
+                        >
+                          <ArrowRight size={16} />
+                          Switch operator
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              <label className="block space-y-2">
+                <span className="field-label">Restore note (optional)</span>
+                <textarea
+                  value={restoreWorkItemNote}
+                  onChange={event => setRestoreWorkItemNote(event.target.value)}
+                  placeholder="Any context for why we are restoring?"
+                  className="field-textarea bg-white"
+                />
+              </label>
+
+              {actionError ? (
+                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+                  {actionError}
+                </div>
+              ) : null}
+
+              <div className="flex flex-wrap items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsRestoreWorkItemOpen(false)}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  Keep archived
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleRestoreWorkItem()}
+                  disabled={busyAction !== null || !canControlWorkItems}
+                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busyAction === 'restoreWorkItem' ? (
+                    <LoaderCircle size={16} className="animate-spin" />
+                  ) : (
+                    <RefreshCw size={16} />
+                  )}
+                  Restore work item
                 </button>
               </div>
             </div>
