@@ -4341,16 +4341,16 @@ const Orchestrator = () => {
             </div>
           </div>
 
-          <div className="px-5 pb-5 pt-4">
-            <div className="relative">
-              <div className="absolute left-0 right-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-outline-variant/25" />
-              {selectedWorkItem ? (
-                <div
-                  className="absolute left-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-primary/25"
-                  style={{ width: `${phaseRailProgress}%` }}
-                />
-              ) : null}
-              <div className="relative flex items-center justify-between">
+	          <div className="px-5 pb-5 pt-4">
+	            <div className="relative">
+	              <div className="absolute left-0 right-0 top-1/2 h-3 -translate-y-1/2 rounded-full bg-outline-variant/30" />
+	              {selectedWorkItem ? (
+	                <div
+	                  className="absolute left-0 top-1/2 h-3 -translate-y-1/2 rounded-full bg-primary/30 animate-pulse"
+	                  style={{ width: `${phaseRailProgress}%` }}
+	                />
+	              ) : null}
+	              <div className="relative flex items-center justify-between">
                 {lifecycleBoardPhases.map((phase, index) => {
                   const isCurrent = Boolean(selectedWorkItem && phase === selectedWorkItem.phase);
                   const isReached = Boolean(selectedWorkItem && phaseRailIndex >= 0 && index <= phaseRailIndex);
@@ -4394,24 +4394,24 @@ const Orchestrator = () => {
                           workItemId: selectedWorkItem.id,
                           targetPhase: phase,
                         });
-                      }}
-                      className={cn(
-                        'relative z-10 flex h-8 w-8 items-center justify-center rounded-full transition',
-                        canMove ? 'hover:bg-primary/10' : 'cursor-not-allowed opacity-60',
-                      )}
-                      aria-label={`Move to ${label}`}
-                      title={canMove ? `Move to ${label}` : label}
-                    >
-                      {isCurrent ? (
-                        <span className="absolute h-7 w-7 rounded-full bg-primary/20 animate-ping" />
-                      ) : null}
-                      <span
-                        className={cn(
-                          'relative h-4 w-4 rounded-full border-2 shadow-[0_0_0_4px_rgba(255,255,255,0.7)]',
-                          isCurrent
-                            ? 'border-primary bg-primary'
-                            : isReached
-                            ? 'border-primary/70 bg-primary/60'
+	                      }}
+	                      className={cn(
+	                        'relative z-10 flex h-10 w-10 items-center justify-center rounded-full transition',
+	                        canMove ? 'hover:bg-primary/10' : 'cursor-not-allowed opacity-60',
+	                      )}
+	                      aria-label={`Move to ${label}`}
+	                      title={canMove ? `Move to ${label}` : label}
+	                    >
+	                      {isCurrent ? (
+	                        <span className="absolute h-9 w-9 rounded-full bg-primary/20 animate-ping" />
+	                      ) : null}
+	                      <span
+	                        className={cn(
+	                          'relative h-5 w-5 rounded-full border-2 shadow-[0_0_0_4px_rgba(255,255,255,0.7)]',
+	                          isCurrent
+	                            ? 'border-primary bg-primary'
+	                            : isReached
+	                            ? 'border-primary/70 bg-primary/60'
                             : 'border-outline-variant/40 bg-white',
                         )}
                       />
@@ -4448,8 +4448,8 @@ const Orchestrator = () => {
           </div>
         ) : null}
 
-        <div className="grid gap-4 xl:grid-cols-[21rem_minmax(0,33rem)_minmax(0,39rem)]">
-          <aside className="workspace-surface overflow-hidden p-0">
+	        <div className="grid gap-4 xl:grid-cols-[21rem_minmax(0,30rem)_minmax(0,44rem)]">
+	          <aside className="workspace-surface overflow-hidden p-0">
             <div className="border-b border-outline-variant/25 px-4 pb-4 pt-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -4795,21 +4795,20 @@ const Orchestrator = () => {
                         Resume
                       </button>
                     ) : null}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActionError('');
-                        setCancelWorkItemNote('');
-                        setIsCancelWorkItemOpen(true);
-                      }}
-                      disabled={
-                        !canControlWorkItems ||
-                        busyAction !== null ||
-                        selectedWorkItem.status === 'COMPLETED' ||
-                        selectedWorkItem.status === 'CANCELLED'
-                      }
-                      className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
-                    >
+	                    <button
+	                      type="button"
+	                      onClick={() => {
+	                        setActionError('');
+	                        setCancelWorkItemNote('');
+	                        setIsCancelWorkItemOpen(true);
+	                      }}
+	                      disabled={
+	                        busyAction !== null ||
+	                        selectedWorkItem.status === 'COMPLETED' ||
+	                        selectedWorkItem.status === 'CANCELLED'
+	                      }
+	                      className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+	                    >
                       <X size={16} />
                       Cancel work item
                     </button>
@@ -6363,21 +6362,20 @@ const Orchestrator = () => {
                           Cancel run
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setActionError('');
-                            setCancelWorkItemNote('');
-                            setIsCancelWorkItemOpen(true);
-                          }}
-                          disabled={
-                            !canControlWorkItems ||
-                            busyAction !== null ||
-                            selectedWorkItem.status === 'COMPLETED' ||
-                            selectedWorkItem.status === 'CANCELLED'
-                          }
-                          className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
-                        >
+	                        <button
+	                          type="button"
+	                          onClick={() => {
+	                            setActionError('');
+	                            setCancelWorkItemNote('');
+	                            setIsCancelWorkItemOpen(true);
+	                          }}
+	                          disabled={
+	                            busyAction !== null ||
+	                            selectedWorkItem.status === 'COMPLETED' ||
+	                            selectedWorkItem.status === 'CANCELLED'
+	                          }
+	                          className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+	                        >
                           <X size={16} />
                           Cancel work item
                         </button>
@@ -9308,15 +9306,45 @@ const Orchestrator = () => {
               </button>
             }
           >
-            <div className="space-y-4">
-              <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-relaxed text-red-900">
-                This cannot be undone. You can create a new work item later if needed.
-              </div>
+	            <div className="space-y-4">
+	              <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-relaxed text-red-900">
+	                This cannot be undone. You can create a new work item later if needed.
+	              </div>
 
-              <label className="block space-y-2">
-                <span className="field-label">Cancellation note (optional)</span>
-                <textarea
-                  value={cancelWorkItemNote}
+	              {!canControlWorkItems ? (
+	                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-900">
+	                  <div className="flex items-start gap-3">
+	                    <AlertCircle size={18} className="mt-0.5 shrink-0" />
+	                    <div>
+	                      <p className="text-sm font-semibold">Read-only operator</p>
+	                      <p className="mt-1 text-sm leading-relaxed">
+	                        {currentActorContext.displayName} does not have{' '}
+	                        <span className="font-mono">workitem.control</span>. Switch Current
+	                        Operator in the top bar, or use Login to choose a role that can
+	                        cancel work items.
+	                      </p>
+	                      <div className="mt-3 flex flex-wrap items-center gap-2">
+	                        <button
+	                          type="button"
+	                          onClick={() => {
+	                            setIsCancelWorkItemOpen(false);
+	                            navigate('/login');
+	                          }}
+	                          className="enterprise-button enterprise-button-secondary"
+	                        >
+	                          <ArrowRight size={16} />
+	                          Switch operator
+	                        </button>
+	                      </div>
+	                    </div>
+	                  </div>
+	                </div>
+	              ) : null}
+
+	              <label className="block space-y-2">
+	                <span className="field-label">Cancellation note (optional)</span>
+	                <textarea
+	                  value={cancelWorkItemNote}
                   onChange={event => setCancelWorkItemNote(event.target.value)}
                   placeholder="Why are we cancelling this work item?"
                   className="field-textarea bg-white"
