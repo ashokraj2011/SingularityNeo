@@ -87,6 +87,7 @@ import {
   getActiveRunForWorkItem,
   getLatestRunForWorkItem,
   getWorkflowRunDetail,
+  getWorkflowRunStatus,
   insertRunEvent,
   listActiveWorkItemClaims,
   markOpenToolInvocationsAborted,
@@ -4081,13 +4082,26 @@ export const cancelWorkflowRun = async ({
   await releaseRunLease({ capabilityId, runId });
 
   const projection = await resolveProjectionContext(capabilityId, detail.run.workItemId, detail.run.workflowSnapshot);
+  const nextWorkItemStatus: WorkItemStatus =
+    projection.workItem.status === 'COMPLETED' || projection.workItem.status === 'CANCELLED'
+      ? projection.workItem.status
+      : 'ACTIVE';
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
+    status: nextWorkItemStatus,
+    pendingRequest: undefined,
+    blocker: undefined,
     activeRunId: undefined,
     lastRunId: runId,
     history: [
       ...projection.workItem.history,
-      createHistoryEntry('User', 'Run cancelled', note || 'Run cancelled by user.', projection.workItem.phase, projection.workItem.status),
+      createHistoryEntry(
+        'User',
+        'Run cancelled',
+        note || 'Run cancelled by user.',
+        projection.workItem.phase,
+        nextWorkItemStatus,
+      ),
     ],
   };
 
@@ -4237,6 +4251,10 @@ const completeRunWithWait = async ({
   artifacts?: Artifact[];
   runStepOverride?: WorkflowRunStep;
 }) => {
+  if ((await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED') {
+    return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+  }
+
   const currentRunStep = runStepOverride || getCurrentRunStep(detail);
   const currentStep = getCurrentWorkflowStep(detail);
   const projection = await resolveProjectionContext(
@@ -4582,6 +4600,12 @@ export const reconcileWorkflowRunFailure = async ({
 const executeAutomatedStep = async (
   detail: WorkflowRunDetail,
 ): Promise<WorkflowRunDetail> => {
+  if (
+    (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+  ) {
+    return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+  }
+
   const projection = await resolveProjectionContext(
     detail.run.capabilityId,
     detail.run.workItemId,
@@ -4733,6 +4757,12 @@ const executeAutomatedStep = async (
   });
 
   if (compiledStepContext.missingInputs.length > 0) {
+    if (
+      (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+    ) {
+      return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+    }
+
     await finishTelemetrySpan({
       capabilityId: detail.run.capabilityId,
       spanId: stepSpan.id,
@@ -4762,6 +4792,12 @@ const executeAutomatedStep = async (
   }
 
   for (let iteration = 0; iteration < MAX_AGENT_TOOL_LOOPS; iteration += 1) {
+    if (
+      (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+    ) {
+      return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+    }
+
     const decisionEnvelope = await requestStepDecision({
       capability: projection.capability,
       workItem: projection.workItem,
@@ -4777,6 +4813,13 @@ const executeAutomatedStep = async (
       operatorGuidanceContext,
     });
     const decision = decisionEnvelope.decision;
+
+    if (
+      (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+    ) {
+      return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+    }
+
     await emitRunProgressEvent({
       capabilityId: detail.run.capabilityId,
       runId: detail.run.id,
@@ -4868,6 +4911,12 @@ const executeAutomatedStep = async (
     }
 
     if (decision.action === 'invoke_tool') {
+      if (
+        (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+      ) {
+        return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+      }
+
       const allowedToolIds = step.allowedToolIds || [];
       if (!allowedToolIds.includes(decision.toolCall.toolId)) {
         await finishTelemetrySpan({
@@ -4921,6 +4970,12 @@ const executeAutomatedStep = async (
       }
 
       if (policyDecision.decision === 'REQUIRE_APPROVAL') {
+        if (
+          (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+        ) {
+          return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+        }
+
         await finishTelemetrySpan({
           capabilityId: detail.run.capabilityId,
           spanId: stepSpan.id,
@@ -5182,6 +5237,12 @@ const executeAutomatedStep = async (
           : null;
 
       if (codeDiffArtifact) {
+        if (
+          (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+        ) {
+          return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+        }
+
         await finishTelemetrySpan({
           capabilityId: detail.run.capabilityId,
           spanId: stepSpan.id,
@@ -5295,6 +5356,13 @@ const executeAutomatedStep = async (
         decision.action === 'pause_for_conflict'
           ? 'CONFLICT_RESOLUTION'
           : decision.wait.type;
+
+      if (
+        (await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED'
+      ) {
+        return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+      }
+
       await finishTelemetrySpan({
         capabilityId: detail.run.capabilityId,
         spanId: stepSpan.id,
@@ -5355,6 +5423,10 @@ const executeAutomatedStep = async (
     }
   }
 
+  if ((await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id)) === 'CANCELLED') {
+    return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+  }
+
   await finishTelemetrySpan({
     capabilityId: detail.run.capabilityId,
     spanId: stepSpan.id,
@@ -5406,6 +5478,14 @@ export const processWorkflowRun = async (
     Math.max(getWorkflowNodes(currentDetail.run.workflowSnapshot).length, currentDetail.run.workflowSnapshot.steps.length) +
     2;
   for (let index = 0; index < maxTransitions; index += 1) {
+    const latestStatus = await getWorkflowRunStatus(
+      currentDetail.run.capabilityId,
+      currentDetail.run.id,
+    );
+    if (latestStatus === 'CANCELLED') {
+      return getWorkflowRunDetail(currentDetail.run.capabilityId, currentDetail.run.id);
+    }
+
     const currentStep = getCurrentWorkflowStep(currentDetail);
     if (currentStep.stepType === 'HUMAN_APPROVAL') {
       const projection = await resolveProjectionContext(

@@ -396,6 +396,26 @@ export const getWorkflowRunDetail = async (
 ): Promise<WorkflowRunDetail> =>
   transaction(client => getRunDetailTx(client, capabilityId, runId));
 
+export const getWorkflowRunStatus = async (
+  capabilityId: string,
+  runId: string,
+): Promise<WorkflowRunStatus> => {
+  const result = await query(
+    `
+      SELECT status
+      FROM capability_workflow_runs
+      WHERE capability_id = $1 AND id = $2
+    `,
+    [capabilityId, runId],
+  );
+
+  if (!result.rowCount) {
+    throw new Error(`Workflow run ${runId} was not found.`);
+  }
+
+  return (result.rows[0] as { status: WorkflowRunStatus }).status;
+};
+
 export const getWorkflowRun = async (
   capabilityId: string,
   runId: string,
@@ -679,7 +699,9 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
           started_at = $17,
           completed_at = $18,
           updated_at = NOW()
-        WHERE capability_id = $1 AND id = $2
+        WHERE capability_id = $1
+          AND id = $2
+          AND status NOT IN ('CANCELLED', 'COMPLETED', 'FAILED')
       `,
       [
         run.capabilityId,
@@ -1353,7 +1375,10 @@ export const renewRunLease = async ({
         lease_owner = $3,
         lease_expires_at = NOW() + ($4 * INTERVAL '1 millisecond'),
         updated_at = NOW()
-      WHERE capability_id = $1 AND id = $2
+      WHERE capability_id = $1
+        AND id = $2
+        AND status = 'RUNNING'
+        AND lease_owner = $3
     `,
     [capabilityId, runId, workerId, leaseMs],
   );
