@@ -4184,6 +4184,14 @@ const Orchestrator = () => {
         ),
     );
 
+    const phaseRailIndex = selectedWorkItem
+      ? lifecycleBoardPhases.indexOf(selectedWorkItem.phase)
+      : -1;
+    const phaseRailProgress =
+      lifecycleBoardPhases.length > 1 && phaseRailIndex >= 0
+        ? Math.min(100, Math.max(0, (phaseRailIndex / (lifecycleBoardPhases.length - 1)) * 100))
+        : 0;
+
     return (
       <div className="orchestrator-page-shell space-y-4">
         <section className="orchestrator-commandbar">
@@ -4277,6 +4285,160 @@ const Orchestrator = () => {
           </div>
         </section>
 
+        <section className="workspace-surface overflow-hidden p-0">
+          <div className="border-b border-outline-variant/25 bg-white/70 px-5 pb-4 pt-5">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0">
+                <p className="form-kicker">Workflow</p>
+                <h2 className="mt-1 text-lg font-bold text-on-surface">Lifecycle rail</h2>
+                <p className="mt-2 max-w-4xl text-sm leading-relaxed text-secondary">
+                  {selectedWorkItem ? (
+                    <>
+                      {selectedWorkflow?.name || 'Workflow'} ·{' '}
+                      <span className="font-semibold text-on-surface">{selectedWorkItem.id}</span>{' '}
+                      {selectedWorkItem.title}
+                    </>
+                  ) : (
+                    'Select a work item to preview its lifecycle and move phases safely.'
+                  )}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {selectedWorkItem ? (
+                  <>
+                    <StatusBadge tone={getStatusTone(selectedWorkItem.status)}>
+                      {WORK_ITEM_STATUS_META[selectedWorkItem.status].label}
+                    </StatusBadge>
+                    <div
+                      draggable={canControlWorkItems}
+                      onDragStart={event => {
+                        event.dataTransfer.setData(
+                          'application/x-singularity-work-item',
+                          selectedWorkItem.id,
+                        );
+                        event.dataTransfer.setData('text/plain', selectedWorkItem.id);
+                      }}
+                      className={cn(
+                        'inline-flex items-center gap-2 rounded-full border border-outline-variant/30 bg-white px-3 py-2 text-xs font-semibold text-on-surface shadow-sm',
+                        canControlWorkItems ? 'cursor-grab' : 'cursor-default opacity-60',
+                      )}
+                      title={
+                        canControlWorkItems
+                          ? 'Drag this chip onto a phase dot to move the work item.'
+                          : undefined
+                      }
+                    >
+                      <FileCode size={14} className="text-secondary" />
+                      Drag {selectedWorkItem.id}
+                    </div>
+                  </>
+                ) : (
+                  <StatusBadge tone="neutral">No selection</StatusBadge>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="px-5 pb-5 pt-4">
+            <div className="relative">
+              <div className="absolute left-0 right-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-outline-variant/25" />
+              {selectedWorkItem ? (
+                <div
+                  className="absolute left-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-primary/25"
+                  style={{ width: `${phaseRailProgress}%` }}
+                />
+              ) : null}
+              <div className="relative flex items-center justify-between">
+                {lifecycleBoardPhases.map((phase, index) => {
+                  const isCurrent = Boolean(selectedWorkItem && phase === selectedWorkItem.phase);
+                  const isReached = Boolean(selectedWorkItem && phaseRailIndex >= 0 && index <= phaseRailIndex);
+                  const label = getPhaseMeta(phase).label;
+                  const canMove = Boolean(selectedWorkItem && canControlWorkItems && busyAction === null && !isCurrent);
+
+                  return (
+                    <button
+                      key={phase}
+                      type="button"
+                      disabled={!canMove}
+                      onClick={() => {
+                        if (!selectedWorkItem) {
+                          return;
+                        }
+                        setActionError('');
+                        setPhaseMoveNote('');
+                        setPhaseMoveRequest({
+                          workItemId: selectedWorkItem.id,
+                          targetPhase: phase,
+                        });
+                      }}
+                      onDragOver={event => event.preventDefault()}
+                      onDrop={event => {
+                        event.preventDefault();
+                        if (!selectedWorkItem || !canControlWorkItems) {
+                          return;
+                        }
+
+                        const draggedId = event.dataTransfer.getData(
+                          'application/x-singularity-work-item',
+                        );
+                        if (!draggedId || draggedId !== selectedWorkItem.id) {
+                          return;
+                        }
+
+                        setActionError('');
+                        setPhaseMoveNote('');
+                        setPhaseMoveRequest({
+                          workItemId: selectedWorkItem.id,
+                          targetPhase: phase,
+                        });
+                      }}
+                      className={cn(
+                        'relative z-10 flex h-8 w-8 items-center justify-center rounded-full transition',
+                        canMove ? 'hover:bg-primary/10' : 'cursor-not-allowed opacity-60',
+                      )}
+                      aria-label={`Move to ${label}`}
+                      title={canMove ? `Move to ${label}` : label}
+                    >
+                      {isCurrent ? (
+                        <span className="absolute h-7 w-7 rounded-full bg-primary/20 animate-ping" />
+                      ) : null}
+                      <span
+                        className={cn(
+                          'relative h-4 w-4 rounded-full border-2 shadow-[0_0_0_4px_rgba(255,255,255,0.7)]',
+                          isCurrent
+                            ? 'border-primary bg-primary'
+                            : isReached
+                            ? 'border-primary/70 bg-primary/60'
+                            : 'border-outline-variant/40 bg-white',
+                        )}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-3 flex items-start justify-between gap-2 text-[0.7rem] font-semibold text-secondary">
+              {lifecycleBoardPhases.map(phase => (
+                <span key={phase} className="w-0 flex-1 text-center leading-tight">
+                  {getPhaseMeta(phase).label}
+                </span>
+              ))}
+            </div>
+
+            {!canControlWorkItems ? (
+              <p className="mt-3 text-xs leading-relaxed text-secondary">
+                You have read-only visibility here. Switch Current Operator to someone with `workitem.control` to pause, cancel, or move phases.
+              </p>
+            ) : (
+              <p className="mt-3 text-xs leading-relaxed text-secondary">
+                Tip: click a dot to move phases. You will confirm, and any in-flight run will be cancelled first.
+              </p>
+            )}
+          </div>
+        </section>
+
         {!canReadLiveDetail ? (
           <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
             This operator currently has rollup-only visibility for this capability. Live work items,
@@ -4284,7 +4446,7 @@ const Orchestrator = () => {
           </div>
         ) : null}
 
-        <div className="grid gap-4 xl:grid-cols-[22rem_minmax(0,1fr)_minmax(0,26rem)]">
+        <div className="grid gap-4 xl:grid-cols-[21rem_minmax(0,33rem)_minmax(0,39rem)]">
           <aside className="workspace-surface overflow-hidden p-0">
             <div className="border-b border-outline-variant/25 px-4 pb-4 pt-5">
               <div className="flex items-start justify-between gap-3">
@@ -4556,102 +4718,6 @@ const Orchestrator = () => {
                   <p className="mt-2 text-sm leading-relaxed text-secondary">
                     {selectedWorkItem.description || 'No description was captured for this work item.'}
                   </p>
-
-                  <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-surface-container-low/35 px-4 py-4">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <p className="workspace-meta-label">Phase rail</p>
-                        <p className="mt-2 text-xs leading-relaxed text-secondary">
-                          Click a phase to move this work item. Phase changes cancel any in-flight run first.
-                        </p>
-                      </div>
-                      <div
-                        draggable={canControlWorkItems}
-                        onDragStart={event => {
-                          event.dataTransfer.setData(
-                            'application/x-singularity-work-item',
-                            selectedWorkItem.id,
-                          );
-                          event.dataTransfer.setData('text/plain', selectedWorkItem.id);
-                        }}
-                        className={cn(
-                          'inline-flex items-center gap-2 rounded-full border border-outline-variant/30 bg-white px-3 py-1 text-xs font-semibold text-on-surface',
-                          canControlWorkItems ? 'cursor-grab' : 'cursor-default opacity-60',
-                        )}
-                        title={
-                          canControlWorkItems
-                            ? 'Drag this chip onto a phase dot to move the work item.'
-                            : undefined
-                        }
-                      >
-                        <FileCode size={14} className="text-secondary" />
-                        Drag {selectedWorkItem.id}
-                      </div>
-                    </div>
-
-                    <div className="relative mt-4 flex items-center justify-between gap-2">
-                      <div className="absolute left-2 right-2 top-1/2 h-px -translate-y-1/2 bg-outline-variant/30" />
-                      {lifecycleBoardPhases.map(phase => {
-                        const isCurrent = phase === selectedWorkItem.phase;
-                        const targetLabel = getPhaseMeta(phase).label;
-                        return (
-                          <button
-                            key={phase}
-                            type="button"
-                            disabled={!canControlWorkItems || busyAction !== null || isCurrent}
-                            onClick={() => {
-                              setActionError('');
-                              setPhaseMoveNote('');
-                              setPhaseMoveRequest({
-                                workItemId: selectedWorkItem.id,
-                                targetPhase: phase,
-                              });
-                            }}
-                            onDragOver={event => event.preventDefault()}
-                            onDrop={event => {
-                              event.preventDefault();
-                              const draggedId = event.dataTransfer.getData(
-                                'application/x-singularity-work-item',
-                              );
-                              if (!draggedId || draggedId !== selectedWorkItem.id) {
-                                return;
-                              }
-
-                              setActionError('');
-                              setPhaseMoveNote('');
-                              setPhaseMoveRequest({
-                                workItemId: selectedWorkItem.id,
-                                targetPhase: phase,
-                              });
-                            }}
-                            className={cn(
-                              'relative z-10 h-4 w-4 rounded-full border transition',
-                              isCurrent
-                                ? 'border-primary bg-primary'
-                                : 'border-outline-variant/40 bg-white hover:border-primary/60',
-                              (!canControlWorkItems || busyAction !== null) &&
-                                'cursor-not-allowed opacity-60',
-                            )}
-                            aria-label={`Move to ${targetLabel}`}
-                            title={`Move to ${targetLabel}`}
-                          >
-                            <span className="sr-only">{targetLabel}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <div className="mt-3 flex items-start justify-between gap-2 text-[0.7rem] font-semibold text-secondary">
-                      {lifecycleBoardPhases.map(phase => (
-                        <span
-                          key={phase}
-                          className="w-0 flex-1 text-center leading-tight"
-                        >
-                          {getPhaseMeta(phase).label}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
 
                   <div className="mt-4 flex flex-wrap gap-2">
                     {canStartExecution ? (
