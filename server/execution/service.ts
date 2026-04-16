@@ -80,6 +80,7 @@ import { evaluateToolPolicy } from '../policy';
 import {
   createApprovalAssignments,
   createApprovalDecision,
+  cancelOpenWaitsForRun,
   createRunEvent,
   createRunWait,
   createToolInvocation,
@@ -87,7 +88,9 @@ import {
   getLatestRunForWorkItem,
   getWorkflowRunDetail,
   insertRunEvent,
+  listActiveWorkItemClaims,
   markOpenToolInvocationsAborted,
+  releaseWorkItemClaim,
   releaseRunLease,
   resolveRunWait,
   upsertWorkItemClaim,
@@ -105,6 +108,7 @@ import {
 import { captureCodeDiffReviewArtifact } from './codeDiff';
 import {
   getCapabilityBundle,
+  releaseWorkItemCodeClaimRecord,
   replaceCapabilityWorkspaceContentRecord,
 } from '../repository';
 import {
@@ -4061,6 +4065,10 @@ export const cancelWorkflowRun = async ({
   note?: string;
 }) => {
   const detail = await getWorkflowRunDetail(capabilityId, runId);
+  await Promise.all([
+    cancelOpenWaitsForRun({ capabilityId, runId }),
+    markOpenToolInvocationsAborted({ capabilityId, runId }),
+  ]);
   await updateWorkflowRun({
     ...detail.run,
     status: 'CANCELLED',
@@ -4102,6 +4110,89 @@ export const cancelWorkflowRun = async ({
   });
 
   return getWorkflowRunDetail(capabilityId, runId);
+};
+
+export const cancelWorkItemControl = async ({
+  capabilityId,
+  workItemId,
+  note,
+  actor,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  note?: string;
+  actor?: ActorContext;
+}) => {
+  const actorName = getActorDisplayName(actor, 'User');
+  const cancellationNote = note?.trim() || 'Work item cancelled by user.';
+
+  const activeRun = await getActiveRunForWorkItem(capabilityId, workItemId);
+  if (activeRun) {
+    await cancelWorkflowRun({
+      capabilityId,
+      runId: activeRun.id,
+      note: cancellationNote,
+    });
+  }
+
+  const activeClaims = await listActiveWorkItemClaims(capabilityId, workItemId);
+  await Promise.all(
+    activeClaims.map(claim =>
+      releaseWorkItemClaim({
+        capabilityId,
+        workItemId: claim.workItemId,
+        userId: claim.userId,
+      }),
+    ),
+  );
+
+  await Promise.all([
+    releaseWorkItemCodeClaimRecord({ capabilityId, workItemId, claimType: 'WRITE' }),
+    releaseWorkItemCodeClaimRecord({ capabilityId, workItemId, claimType: 'REVIEW' }),
+  ]);
+
+  const projection = await resolveProjectionContext(capabilityId, workItemId);
+
+  const nextWorkItem: WorkItem = {
+    ...projection.workItem,
+    status: 'CANCELLED',
+    pendingRequest: undefined,
+    blocker: undefined,
+    pendingHandoff: undefined,
+    activeRunId: undefined,
+    claimOwnerUserId: undefined,
+    recordVersion: (projection.workItem.recordVersion || 1) + 1,
+    history: [
+      ...projection.workItem.history,
+      createHistoryEntry(
+        actorName,
+        'Work item cancelled',
+        cancellationNote,
+        projection.workItem.phase,
+        'CANCELLED',
+      ),
+    ],
+  };
+
+  await persistProjection({
+    capabilityId,
+    workspace: projection.workspace,
+    workItem: nextWorkItem,
+    workflow: projection.workflow,
+    logsToAppend: [
+      createExecutionLog({
+        capabilityId,
+        taskId: workItemId,
+        agentId: projection.workItem.assignedAgentId || projection.capability.specialAgentId || 'SYSTEM',
+        message: cancellationNote,
+        level: 'WARN',
+        runId: activeRun?.id,
+      }),
+    ],
+  });
+  await refreshCapabilityMemory(capabilityId).catch(() => undefined);
+
+  return nextWorkItem;
 };
 
 export const restartWorkflowRun = async ({

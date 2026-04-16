@@ -1702,7 +1702,12 @@ export interface LearningUpdate {
   relatedRunId?: string;
 }
 
-export type WorkItemStatus = 'ACTIVE' | 'BLOCKED' | 'PENDING_APPROVAL' | 'COMPLETED';
+export type WorkItemStatus =
+  | 'ACTIVE'
+  | 'BLOCKED'
+  | 'PENDING_APPROVAL'
+  | 'COMPLETED'
+  | 'CANCELLED';
 
 export interface WorkItemPendingRequest {
   type: 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION';

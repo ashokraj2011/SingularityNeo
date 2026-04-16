@@ -1052,6 +1052,20 @@ export const moveCapabilityWorkItem = async (
     },
   );
 
+export const cancelCapabilityWorkItem = async (
+  capabilityId: string,
+  workItemId: string,
+  payload?: { note?: string },
+): Promise<WorkItem> =>
+  requestJson<WorkItem>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/cancel`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
+    },
+  );
+
 export const fetchCapabilityWorkItemCollaboration = async (
   capabilityId: string,
   workItemId: string,

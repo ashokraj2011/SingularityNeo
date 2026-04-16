@@ -191,7 +191,7 @@ const getTaskStatus = (
   const currentIndex = workflow.steps.findIndex(candidate => candidate.id === workItem.currentStepId);
   const stepIndex = workflow.steps.findIndex(candidate => candidate.id === step.id);
 
-  if (workItem.status === 'COMPLETED') {
+  if (workItem.status === 'COMPLETED' || workItem.status === 'CANCELLED') {
     return 'COMPLETED';
   }
 

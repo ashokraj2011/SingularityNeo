@@ -115,6 +115,7 @@ import {
 import {
   approveWorkflowRun,
   cancelWorkflowRun,
+  cancelWorkItemControl,
   continueWorkflowStageControl,
   createWorkItemRecord,
   moveWorkItemToPhaseControl,
@@ -3216,6 +3217,34 @@ app.post('/api/capabilities/:capabilityId/work-items/:workItemId/move', async (r
     sendRepositoryError(response, error);
   }
 });
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/cancel',
+  async (request, response) => {
+    try {
+      const bundle = await getCapabilityBundle(request.params.capabilityId);
+      assertCapabilitySupportsExecution(bundle.capability);
+
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
+
+      response.json(
+        await cancelWorkItemControl({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          note: String(request.body?.note || '').trim() || undefined,
+          actor,
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
 
 app.get(
   '/api/capabilities/:capabilityId/work-items/:workItemId/collaboration',

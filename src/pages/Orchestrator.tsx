@@ -46,6 +46,7 @@ import {
   appendCapabilityMessageRecord,
   approveCapabilityWorkflowRun,
   acceptCapabilityWorkItemHandoff,
+  cancelCapabilityWorkItem,
   cancelCapabilityWorkflowRun,
   claimCapabilityWorkItemControl,
   claimCapabilityWorkItemWriteControl,
@@ -159,6 +160,7 @@ const WORK_ITEM_STATUS_META: Record<
   BLOCKED: { label: 'Blocked', accent: 'bg-red-100 text-red-700' },
   PENDING_APPROVAL: { label: 'Pending Approval', accent: 'bg-amber-100 text-amber-700' },
   COMPLETED: { label: 'Completed', accent: 'bg-emerald-100 text-emerald-700' },
+  CANCELLED: { label: 'Cancelled', accent: 'bg-slate-200 text-slate-700' },
 };
 
 const ACTIVE_RUN_STATUSES: WorkflowRun['status'][] = [
@@ -878,6 +880,8 @@ const Orchestrator = () => {
     null,
   );
   const [resolutionNote, setResolutionNote] = useState('');
+  const [isCancelWorkItemOpen, setIsCancelWorkItemOpen] = useState(false);
+  const [cancelWorkItemNote, setCancelWorkItemNote] = useState('');
   const [isDiffReviewOpen, setIsDiffReviewOpen] = useState(false);
   const [isApprovalReviewOpen, setIsApprovalReviewOpen] = useState(false);
   const [isApprovalReviewHydrated, setIsApprovalReviewHydrated] = useState(false);
@@ -1508,7 +1512,12 @@ const Orchestrator = () => {
     () =>
       activeBoardPhases.map(phase => ({
         phase,
-        items: filteredWorkItems.filter(item => item.phase === phase),
+        items: filteredWorkItems.filter(
+          item =>
+            item.phase === phase &&
+            item.status !== 'COMPLETED' &&
+            item.status !== 'CANCELLED',
+        ),
       })),
     [activeBoardPhases, filteredWorkItems],
   );
@@ -1516,7 +1525,12 @@ const Orchestrator = () => {
   const completedItems = useMemo(
     () =>
       filteredWorkItems
-        .filter(item => item.phase === 'DONE' || item.status === 'COMPLETED')
+        .filter(
+          item =>
+            item.phase === 'DONE' ||
+            item.status === 'COMPLETED' ||
+            item.status === 'CANCELLED',
+        )
         .slice()
         .sort((left, right) => {
           const leftTime = new Date(left.history[left.history.length - 1]?.timestamp || 0).getTime();
@@ -1579,6 +1593,7 @@ const Orchestrator = () => {
         helper: 'Current in-flight items across the capability.',
         items: filteredWorkItems
           .filter(item => item.status !== 'COMPLETED' && item.phase !== 'DONE')
+          .filter(item => item.status !== 'CANCELLED')
           .slice(0, 12)
           .map(buildNavigatorItem),
       },
@@ -3665,6 +3680,38 @@ const Orchestrator = () => {
     );
   };
 
+  const handleCancelWorkItem = async () => {
+    if (
+      !selectedWorkItem ||
+      selectedWorkItem.status === 'COMPLETED' ||
+      selectedWorkItem.status === 'CANCELLED' ||
+      !requirePermission(
+        canControlWorkItems,
+        'This operator cannot cancel work items in this capability.',
+      )
+    ) {
+      return;
+    }
+
+    const note =
+      cancelWorkItemNote.trim() || resolutionNote.trim() || 'Work item cancelled from the control plane.';
+
+    await withAction(
+      'cancelWorkItem',
+      async () => {
+        await cancelCapabilityWorkItem(activeCapability.id, selectedWorkItem.id, { note });
+        setCancelWorkItemNote('');
+        setResolutionNote('');
+        setIsCancelWorkItemOpen(false);
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Work item cancelled',
+        description: `${selectedWorkItem.title} was cancelled and removed from the active queue.`,
+      },
+    );
+  };
+
   const handleMoveWorkItem = async (workItemId: string, targetPhase: WorkItemPhase) => {
     const item = workItems.find(current => current.id === workItemId);
     if (
@@ -4160,11 +4207,12 @@ const Orchestrator = () => {
                   className="field-select"
                 >
                   <option value="ALL">All statuses</option>
-                  <option value="ACTIVE">Active</option>
-                  <option value="BLOCKED">Blocked</option>
-                  <option value="PENDING_APPROVAL">Pending approval</option>
-                  <option value="COMPLETED">Completed</option>
-                </select>
+	                  <option value="ACTIVE">Active</option>
+	                  <option value="BLOCKED">Blocked</option>
+	                  <option value="PENDING_APPROVAL">Pending approval</option>
+	                  <option value="COMPLETED">Completed</option>
+	                  <option value="CANCELLED">Cancelled</option>
+	                </select>
                 <select
                   value={priorityFilter}
                   onChange={event => setPriorityFilter(event.target.value as WorkItemPriorityFilter)}
@@ -5050,11 +5098,12 @@ const Orchestrator = () => {
                   className="field-select"
                 >
                   <option value="ALL">All statuses</option>
-                  <option value="ACTIVE">Active</option>
-                  <option value="BLOCKED">Blocked</option>
-                  <option value="PENDING_APPROVAL">Pending approval</option>
-                  <option value="COMPLETED">Completed</option>
-                </select>
+	                  <option value="ACTIVE">Active</option>
+	                  <option value="BLOCKED">Blocked</option>
+	                  <option value="PENDING_APPROVAL">Pending approval</option>
+	                  <option value="COMPLETED">Completed</option>
+	                  <option value="CANCELLED">Cancelled</option>
+	                </select>
                 <select
                   value={priorityFilter}
                   onChange={event =>
@@ -5821,6 +5870,25 @@ const Orchestrator = () => {
                             <Square size={16} />
                           )}
                           Cancel run
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActionError('');
+                            setCancelWorkItemNote('');
+                            setIsCancelWorkItemOpen(true);
+                          }}
+                          disabled={
+                            !canControlWorkItems ||
+                            busyAction !== null ||
+                            selectedWorkItem.status === 'COMPLETED' ||
+                            selectedWorkItem.status === 'CANCELLED'
+                          }
+                          className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <X size={16} />
+                          Cancel work item
                         </button>
                       </div>
                     </div>
@@ -8632,6 +8700,77 @@ const Orchestrator = () => {
               </div>
             )}
           </motion.aside>
+        </div>
+      )}
+
+      {isCancelWorkItemOpen && selectedWorkItem && (
+        <div className="fixed inset-0 z-[93] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-12 backdrop-blur-sm">
+          <button
+            type="button"
+            aria-label="Close cancel work item dialog"
+            onClick={() => setIsCancelWorkItemOpen(false)}
+            className="absolute inset-0"
+          />
+          <ModalShell
+            title={`Cancel work item · ${selectedWorkItem.title}`}
+            eyebrow="Cancel Work Item"
+            description="Cancelling marks the work item as cancelled, stops any active runs, and releases claims so the queue stays clean."
+            className="relative z-[1] w-full max-w-2xl"
+            actions={
+              <button
+                type="button"
+                onClick={() => setIsCancelWorkItemOpen(false)}
+                className="workspace-list-action"
+              >
+                <X size={14} />
+              </button>
+            }
+          >
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-relaxed text-red-900">
+                This cannot be undone. You can create a new work item later if needed.
+              </div>
+
+              <label className="block space-y-2">
+                <span className="field-label">Cancellation note (optional)</span>
+                <textarea
+                  value={cancelWorkItemNote}
+                  onChange={event => setCancelWorkItemNote(event.target.value)}
+                  placeholder="Why are we cancelling this work item?"
+                  className="field-textarea bg-white"
+                />
+              </label>
+
+              {actionError ? (
+                <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+                  {actionError}
+                </div>
+              ) : null}
+
+              <div className="flex flex-wrap items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsCancelWorkItemOpen(false)}
+                  className="enterprise-button enterprise-button-secondary"
+                >
+                  Keep work item
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleCancelWorkItem()}
+                  disabled={busyAction !== null || !canControlWorkItems}
+                  className="enterprise-button enterprise-button-danger disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busyAction === 'cancelWorkItem' ? (
+                    <LoaderCircle size={16} className="animate-spin" />
+                  ) : (
+                    <X size={16} />
+                  )}
+                  Cancel work item
+                </button>
+              </div>
+            </div>
+          </ModalShell>
         </div>
       )}
 
