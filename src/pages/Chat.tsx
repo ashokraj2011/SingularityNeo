@@ -237,9 +237,11 @@ const formatChatRuntimeError = (value: string) => {
   return value;
 };
 
-const getRuntimeDisplayLabel = () => (isDesktopRuntime() ? 'desktop runtime' : 'backend runtime');
+const getRuntimeDisplayLabel = () =>
+  isDesktopRuntime() ? 'desktop runtime' : 'control-plane runtime';
 
-const getRuntimeOwnerLabel = () => (isDesktopRuntime() ? 'desktop app' : 'Express runtime');
+const getRuntimeOwnerLabel = () =>
+  isDesktopRuntime() ? 'desktop runtime' : 'control-plane runtime';
 
 const WORK_ITEM_BRANCH_STATUS_PRIORITY: Record<WorkItem['status'], number> = {
   ACTIVE: 0,
@@ -310,6 +312,7 @@ const Chat = () => {
   const rateLimited = rateLimitRemainingMs > 0;
 
   const activeAgent =
+    workspace.agents.find(agent => agent.id === workspace.primaryCopilotAgentId) ||
     workspace.agents.find(agent => agent.id === workspace.activeChatAgentId) ||
     workspace.agents.find(agent => agent.isOwner) ||
     workspace.agents[0];

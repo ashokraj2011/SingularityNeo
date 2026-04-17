@@ -2840,10 +2840,10 @@ export default function CapabilityMetadata() {
           <div className="mt-8 flex items-center justify-between border-t border-outline-variant/10 pt-6">
             <button
               type="button"
-              onClick={() => navigate('/')}
+              onClick={() => navigate('/home')}
               className="rounded-2xl border border-outline-variant/15 px-4 py-2.5 text-sm font-bold text-secondary transition-all hover:bg-surface-container-low"
             >
-              Back to dashboard
+              Back to home
             </button>
             <div className="flex items-center gap-3">
               <StatusBadge

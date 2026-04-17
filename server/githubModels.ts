@@ -20,6 +20,7 @@ import {
   buildCapabilityBriefing,
   buildCapabilityBriefingPrompt,
 } from '../src/lib/capabilityBriefing';
+import { enrichCapabilityAgentProfile } from '../src/lib/agentProfiles';
 import {
   findAgentSessionRecord,
   upsertAgentSessionRecord,
@@ -899,6 +900,9 @@ export const buildCapabilitySystemPrompt = ({
   agent?: Partial<CapabilityAgent>;
 }) => {
   const briefing = buildCapabilityBriefing(capability);
+  const operatingAgent = agent
+    ? enrichCapabilityAgentProfile(agent as CapabilityAgent)
+    : undefined;
 
   return [
     `Capability boundary: ${capability?.name || capability?.id || 'Unknown capability'}`,
@@ -933,18 +937,70 @@ export const buildCapabilitySystemPrompt = ({
     capability?.documentationNotes
       ? `Capability documentation notes: ${capability.documentationNotes}`
       : null,
-    agent?.name ? `Active agent: ${agent.name}` : null,
-    agent?.role ? `Agent role: ${agent.role}` : null,
-    agent?.objective ? `Agent objective: ${agent.objective}` : null,
-    agent?.systemPrompt ? `Agent instructions: ${agent.systemPrompt}` : null,
-    toPromptSection('Documentation sources', agent?.documentationSources),
-    toPromptSection('Learning notes', agent?.learningNotes),
-    toPromptSection('Input artifacts', agent?.inputArtifacts),
-    toPromptSection('Output artifacts', agent?.outputArtifacts),
-    toAgentContractSection(agent),
-    toPromptSection('Attached skill ids', agent?.skillIds),
-    ...toSkillInstructionSections(capability, agent),
-    toPromptSection('Preferred tool profile', agent?.preferredToolIds),
+    operatingAgent?.name ? `Active agent: ${operatingAgent.name}` : null,
+    operatingAgent?.role ? `Agent role: ${operatingAgent.role}` : null,
+    operatingAgent?.objective ? `Agent objective: ${operatingAgent.objective}` : null,
+    operatingAgent?.userVisibility
+      ? `Agent visibility model: ${operatingAgent.userVisibility}`
+      : null,
+    operatingAgent?.rolePolicy
+      ? [
+          'Agent operating policy:',
+          `Summary: ${operatingAgent.rolePolicy.summary}`,
+          operatingAgent.rolePolicy.allowedToolIds?.length
+            ? `Allowed tool policy: ${operatingAgent.rolePolicy.allowedToolIds.join(', ')}`
+            : null,
+          operatingAgent.rolePolicy.escalationTriggers?.length
+            ? `Escalation triggers: ${operatingAgent.rolePolicy.escalationTriggers.join('; ')}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : null,
+    operatingAgent?.memoryScope
+      ? [
+          'Agent memory scope:',
+          `Summary: ${operatingAgent.memoryScope.summary}`,
+          operatingAgent.memoryScope.scopeLabels?.length
+            ? `Memory lenses: ${operatingAgent.memoryScope.scopeLabels.join(', ')}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : null,
+    operatingAgent?.qualityBar
+      ? [
+          `Agent quality bar: ${operatingAgent.qualityBar.label}`,
+          operatingAgent.qualityBar.summary,
+          operatingAgent.qualityBar.checklist?.length
+            ? `Checklist: ${operatingAgent.qualityBar.checklist.join('; ')}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : null,
+    operatingAgent?.evalProfile
+      ? [
+          `Agent eval profile: ${operatingAgent.evalProfile.label}`,
+          operatingAgent.evalProfile.summary,
+          operatingAgent.evalProfile.criteria?.length
+            ? `Evaluation criteria: ${operatingAgent.evalProfile.criteria.join('; ')}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : null,
+    operatingAgent?.systemPrompt
+      ? `Agent instructions: ${operatingAgent.systemPrompt}`
+      : null,
+    toPromptSection('Documentation sources', operatingAgent?.documentationSources),
+    toPromptSection('Learning notes', operatingAgent?.learningNotes),
+    toPromptSection('Input artifacts', operatingAgent?.inputArtifacts),
+    toPromptSection('Output artifacts', operatingAgent?.outputArtifacts),
+    toAgentContractSection(operatingAgent),
+    toPromptSection('Attached skill ids', operatingAgent?.skillIds),
+    ...toSkillInstructionSections(capability, operatingAgent),
+    toPromptSection('Preferred tool profile', operatingAgent?.preferredToolIds),
     'Keep the response inside this capability context. If capability context is missing for a claim, say so clearly instead of inventing it.',
     'Prefer practical, execution-ready answers that help the team move work forward.',
   ]

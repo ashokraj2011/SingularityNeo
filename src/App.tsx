@@ -73,7 +73,8 @@ export default function App() {
             <RouteErrorBoundary>
               <Suspense fallback={<RouteLoader />}>
                 <Routes>
-                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/" element={<Orchestrator />} />
+                  <Route path="/home" element={<Dashboard />} />
                   <Route path="/designer" element={<WorkflowDesignerNeo />} />
                   <Route path="/workflow-designer-neo" element={<WorkflowDesignerNeo />} />
                   <Route path="/tasks" element={<Tasks />} />
@@ -83,6 +84,7 @@ export default function App() {
                   <Route path="/studio" element={<Studio />} />
                   <Route path="/chat" element={<Chat />} />
                   <Route path="/orchestrator" element={<Orchestrator />} />
+                  <Route path="/work" element={<Orchestrator />} />
                   <Route path="/artifact-designer" element={<ArtifactDesigner />} />
                   <Route path="/capabilities/new" element={<CapabilitySetup />} />
                   <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
@@ -96,7 +98,7 @@ export default function App() {
                   <Route path="/run-console" element={<RunConsole />} />
                   <Route path="/memory" element={<MemoryExplorer />} />
                   <Route path="/evals" element={<EvalCenter />} />
-                  <Route path="*" element={<Dashboard />} />
+                  <Route path="*" element={<Orchestrator />} />
                 </Routes>
               </Suspense>
             </RouteErrorBoundary>

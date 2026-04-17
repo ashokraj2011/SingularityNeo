@@ -36,4 +36,4 @@ export const resolveRuntimeAccessMode = ({
 };
 
 export const getMissingRuntimeConfigurationMessage = () =>
-  'GitHub Copilot SDK is not configured. Set COPILOT_CLI_URL for a headless Copilot CLI server or add GITHUB_MODELS_TOKEN to .env.local, then restart the server.';
+  'Copilot runtime is not configured. Start the desktop runtime for the preferred local-owner model, or set COPILOT_CLI_URL / GITHUB_MODELS_TOKEN for a shared runtime, then restart the app.';

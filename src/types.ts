@@ -1057,6 +1057,31 @@ export type AgentKnowledgeFreshness =
   | 'ERROR';
 
 export type AgentKnowledgeConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
+export type AgentUserVisibility = 'PRIMARY_COPILOT' | 'SPECIALIST' | 'BACKGROUND';
+export type CapabilityRuntimeOwner = 'DESKTOP' | 'SERVER';
+
+export interface AgentRolePolicy {
+  summary: string;
+  allowedToolIds: ToolAdapterId[];
+  escalationTriggers: string[];
+}
+
+export interface AgentMemoryScope {
+  summary: string;
+  scopeLabels: string[];
+}
+
+export interface AgentQualityBar {
+  label: string;
+  summary: string;
+  checklist: string[];
+}
+
+export interface AgentEvalProfile {
+  label: string;
+  summary: string;
+  criteria: string[];
+}
 
 export interface LearningDelta {
   id: string;
@@ -1117,6 +1142,11 @@ export interface CapabilityAgent {
   previousOutputs: AgentOutputRecord[];
   learningProfile: AgentLearningProfile;
   sessionSummaries: AgentSessionSummary[];
+  rolePolicy?: AgentRolePolicy;
+  memoryScope?: AgentMemoryScope;
+  qualityBar?: AgentQualityBar;
+  evalProfile?: AgentEvalProfile;
+  userVisibility?: AgentUserVisibility;
 }
 
 export interface CapabilityChatMessage {
@@ -1680,6 +1710,25 @@ export interface CapabilityInteractionFeed {
     approvalCount: number;
     learningCount: number;
   };
+}
+
+export type GoldenPathStepStatus = 'COMPLETE' | 'CURRENT' | 'UP_NEXT' | 'BLOCKED';
+
+export interface GoldenPathStep {
+  id: string;
+  label: string;
+  description: string;
+  status: GoldenPathStepStatus;
+  path: string;
+}
+
+export interface GoldenPathProgress {
+  completedCount: number;
+  totalCount: number;
+  percentComplete: number;
+  currentStepId?: string;
+  summary: string;
+  steps: GoldenPathStep[];
 }
 
 export interface LearningUpdate {
@@ -2782,6 +2831,9 @@ export interface CapabilityWorkspace {
   workItems: WorkItem[];
   messages: CapabilityChatMessage[];
   activeChatAgentId?: string;
+  primaryCopilotAgentId?: string;
+  goldenPathProgress?: GoldenPathProgress;
+  interactionFeed?: CapabilityInteractionFeed;
   createdAt: string;
 }
 

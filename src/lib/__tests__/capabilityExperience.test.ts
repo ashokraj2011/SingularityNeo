@@ -192,7 +192,76 @@ describe('capability experience model', () => {
     });
 
     expect(experience.nextAction.title).toBe('Unblock Add refund API');
-    expect(experience.nextAction.path).toContain('/orchestrator?selected=WI-1');
+    expect(experience.nextAction.path).toContain('/?selected=WI-1');
+  });
+
+  it('treats missing contract and workspace basics as blocking delivery gates', () => {
+    const experience = buildCapabilityExperience({
+      capability: capability({
+        ownerTeam: '',
+        businessOutcome: '',
+        successMetrics: [],
+        definitionOfDone: '',
+        requiredEvidenceKinds: [],
+        gitRepositories: [],
+        localDirectories: [],
+        executionConfig: {
+          allowedWorkspacePaths: [],
+          commandTemplates: [],
+          deploymentTargets: [],
+        },
+      }),
+      workspace: workspace({
+        workflows: [],
+      }),
+      runtimeStatus: {
+        configured: false,
+        provider: 'GitHub Copilot SDK',
+        endpoint: '',
+        tokenSource: null,
+        defaultModel: '',
+        availableModels: [],
+      },
+    });
+
+    expect(experience.canStartDelivery).toBe(false);
+    expect(experience.blockingReadinessItems.map(item => item.id)).toContain('metadata');
+    expect(experience.goldenPathProgress.steps[0]?.status).toBe('CURRENT');
+  });
+
+  it('surfaces desktop-owned runtime health when the desktop runtime is connected', () => {
+    const experience = buildCapabilityExperience({
+      capability: capability({
+        localDirectories: ['/workspace/payments'],
+        executionConfig: {
+          defaultWorkspacePath: '/workspace/payments',
+          allowedWorkspacePaths: ['/workspace/payments'],
+          commandTemplates: [
+            {
+              id: 'test',
+              label: 'Run tests',
+              command: ['npm', 'test'],
+              workingDirectory: '/workspace/payments',
+              requiresApproval: false,
+            },
+          ],
+          deploymentTargets: [],
+        },
+      }),
+      workspace: workspace(),
+      runtimeStatus: {
+        configured: true,
+        provider: 'GitHub Copilot SDK (Desktop Worker)',
+        endpoint: 'ipc://desktop',
+        tokenSource: 'headless-cli',
+        defaultModel: 'gpt-4.1',
+        availableModels: [],
+        runtimeOwner: 'DESKTOP',
+        executionRuntimeOwner: 'DESKTOP',
+      },
+    });
+
+    expect(experience.runtimeHealth.label).toBe('Desktop connected');
   });
 
   it('uses business-facing learning labels', () => {

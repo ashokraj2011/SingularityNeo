@@ -57,6 +57,9 @@ import {
   normalizeCapabilitySharedReferences,
 } from '../lib/capabilityArchitecture';
 import { buildCapabilityBriefing } from '../lib/capabilityBriefing';
+import { buildCapabilityExperience } from '../lib/capabilityExperience';
+import { enrichCapabilityAgentProfile, selectPrimaryCopilotAgentId } from '../lib/agentProfiles';
+import { buildCapabilityInteractionFeed } from '../lib/interactionFeed';
 import { getDefaultCapabilityWorkflows } from '../lib/standardWorkflow';
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowGraph';
@@ -670,12 +673,14 @@ const buildCapabilityWorkspace = (
     : getDefaultCapabilityWorkflows(normalizedCapability).map(workflow =>
         buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)),
       );
-  return {
+  const agents = (includeSeedData
+    ? buildSeededAgents(normalizedCapability, ownerAgent)
+    : buildBaseAgents(normalizedCapability, ownerAgent)).map(enrichCapabilityAgentProfile);
+  const primaryCopilotAgentId = selectPrimaryCopilotAgentId(agents);
+  const baseWorkspace: CapabilityWorkspace = {
     capabilityId: normalizedCapability.id,
     briefing: buildCapabilityBriefing(normalizedCapability),
-    agents: includeSeedData
-      ? buildSeededAgents(normalizedCapability, ownerAgent)
-      : buildBaseAgents(normalizedCapability, ownerAgent),
+    agents,
     workflows: defaultWorkflows,
     artifacts: includeSeedData
       ? isCollectionCapability
@@ -705,8 +710,23 @@ const buildCapabilityWorkspace = (
         : WORK_ITEMS.filter(item => item.capabilityId === normalizedCapability.id)
       : [],
     messages: [buildWelcomeMessage(capability, ownerAgent)],
-    activeChatAgentId: ownerAgent.id,
+    activeChatAgentId: primaryCopilotAgentId || ownerAgent.id,
+    primaryCopilotAgentId,
     createdAt: new Date().toISOString(),
+  };
+  const experience = buildCapabilityExperience({
+    capability: normalizedCapability,
+    workspace: baseWorkspace,
+  });
+
+  return {
+    ...baseWorkspace,
+    goldenPathProgress: experience.goldenPathProgress,
+    interactionFeed: buildCapabilityInteractionFeed({
+      capability: normalizedCapability,
+      workspace: baseWorkspace,
+      agentId: primaryCopilotAgentId,
+    }),
   };
 };
 
@@ -761,19 +781,20 @@ const normalizeWorkspace = (
       : seededWorkspace.messages;
   const nextTasks = workspace?.tasks || seededWorkspace.tasks;
   const nextExecutionLogs = workspace?.executionLogs || seededWorkspace.executionLogs;
-
-  return {
+  const nextAgents = mergeWorkspaceAgents(
+    normalizedCapability,
+    nextOwnerAgent,
+    workspace?.agents || seededWorkspace.agents,
+    nextTasks,
+    nextExecutionLogs,
+  ).map(enrichCapabilityAgentProfile);
+  const primaryCopilotAgentId = selectPrimaryCopilotAgentId(nextAgents);
+  const normalizedWorkspace: CapabilityWorkspace = {
     ...seededWorkspace,
     ...workspace,
     capabilityId: normalizedCapability.id,
     briefing: buildCapabilityBriefing(normalizedCapability),
-    agents: mergeWorkspaceAgents(
-      normalizedCapability,
-      nextOwnerAgent,
-      workspace?.agents || seededWorkspace.agents,
-      nextTasks,
-      nextExecutionLogs,
-    ),
+    agents: nextAgents,
     workflows: (workspace?.workflows || seededWorkspace.workflows).map(workflow =>
       buildWorkflowFromGraph(normalizeWorkflowGraph(workflow)),
     ),
@@ -787,10 +808,25 @@ const normalizeWorkspace = (
     messages: nextMessages,
     activeChatAgentId:
       workspace?.activeChatAgentId &&
-      workspace.agents?.some(agent => agent.id === workspace.activeChatAgentId)
+      nextAgents.some(agent => agent.id === workspace.activeChatAgentId)
         ? workspace.activeChatAgentId
-        : nextOwnerAgent.id,
+        : primaryCopilotAgentId || nextOwnerAgent.id,
+    primaryCopilotAgentId,
     createdAt: workspace?.createdAt || seededWorkspace.createdAt,
+  };
+  const experience = buildCapabilityExperience({
+    capability: normalizedCapability,
+    workspace: normalizedWorkspace,
+  });
+
+  return {
+    ...normalizedWorkspace,
+    goldenPathProgress: experience.goldenPathProgress,
+    interactionFeed: buildCapabilityInteractionFeed({
+      capability: normalizedCapability,
+      workspace: normalizedWorkspace,
+      agentId: primaryCopilotAgentId,
+    }),
   };
 };
 

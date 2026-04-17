@@ -28,6 +28,8 @@ export const buildRuntimeStatus = async () => {
   return {
     configured,
     provider: 'GitHub Copilot SDK',
+    runtimeOwner: 'SERVER',
+    executionRuntimeOwner: 'SERVER',
     endpoint: headlessCli
       ? process.env.COPILOT_CLI_URL || githubModelsApiUrl
       : githubModelsApiUrl,

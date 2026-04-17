@@ -37,6 +37,7 @@ import StageControlModal from '../components/StageControlModal';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
+import { buildCapabilityExperience } from '../lib/capabilityExperience';
 import {
   canReadCapabilityLiveDetail,
   hasPermission,
@@ -1867,6 +1868,23 @@ const Orchestrator = () => {
     currentRun && ACTIVE_RUN_STATUSES.includes(currentRun.status),
   );
   const runtimeReady = Boolean(runtimeStatus?.configured) && !runtimeError;
+  const capabilityExperience = useMemo(
+    () =>
+      buildCapabilityExperience({
+        capability: activeCapability,
+        workspace,
+        runtimeStatus,
+      }),
+    [activeCapability, runtimeStatus, workspace],
+  );
+  const deliveryBlockingItem = capabilityExperience.blockingReadinessItems[0] || null;
+  const primaryCopilotAgent =
+    capabilityExperience.primaryCopilotAgent ||
+    (workspace.primaryCopilotAgentId
+      ? agentsById.get(workspace.primaryCopilotAgentId) || null
+      : null) ||
+    selectedAgent ||
+    null;
   const selectedCanTakeControl = Boolean(
     selectedWorkItem &&
       selectedWorkItem.status !== 'ARCHIVED' &&
@@ -1895,6 +1913,7 @@ const Orchestrator = () => {
     selectedWorkItem?.status !== 'CANCELLED' &&
     !selectedWorkItem?.activeRunId &&
     selectedWorkItem?.phase !== 'DONE' &&
+    capabilityExperience.canStartDelivery &&
     runtimeReady &&
     canControlWorkItems;
   const currentActorOwnsSelectedWorkItem = Boolean(
@@ -1923,6 +1942,7 @@ const Orchestrator = () => {
     selectedWorkItem?.status !== 'COMPLETED' &&
     selectedWorkItem?.status !== 'CANCELLED' &&
     selectedWorkItem?.phase !== 'DONE' &&
+    capabilityExperience.canStartDelivery &&
     runtimeReady &&
     canRestartWorkItems;
   const canResetAndRestart =
@@ -1930,6 +1950,7 @@ const Orchestrator = () => {
     selectedWorkItem?.status !== 'ARCHIVED' &&
     selectedWorkItem?.status !== 'COMPLETED' &&
     selectedWorkItem?.status !== 'CANCELLED' &&
+    capabilityExperience.canStartDelivery &&
     runtimeReady &&
     canRestartWorkItems;
   const codeDiffReviewRequiresResponse = Boolean(
@@ -3213,6 +3234,15 @@ const Orchestrator = () => {
       return;
     }
 
+    if (deliveryBlockingItem) {
+      setActionError(
+        deliveryBlockingItem.nextRequiredAction ||
+          deliveryBlockingItem.blockingReason ||
+          deliveryBlockingItem.description,
+      );
+      return;
+    }
+
     await withAction(
       'start',
       async () => {
@@ -3232,6 +3262,15 @@ const Orchestrator = () => {
       !selectedWorkItem ||
       !requirePermission(canRestartWorkItems, 'This operator cannot restart workflow execution.')
     ) {
+      return;
+    }
+
+    if (deliveryBlockingItem) {
+      setActionError(
+        deliveryBlockingItem.nextRequiredAction ||
+          deliveryBlockingItem.blockingReason ||
+          deliveryBlockingItem.description,
+      );
       return;
     }
 
@@ -3258,6 +3297,15 @@ const Orchestrator = () => {
         'This operator cannot reset and restart the selected work item.',
       )
     ) {
+      return;
+    }
+
+    if (deliveryBlockingItem) {
+      setActionError(
+        deliveryBlockingItem.nextRequiredAction ||
+          deliveryBlockingItem.blockingReason ||
+          deliveryBlockingItem.description,
+      );
       return;
     }
 
@@ -3504,6 +3552,9 @@ const Orchestrator = () => {
 
     const agentForChat =
       selectedAgent ||
+      (workspace.primaryCopilotAgentId
+        ? agentsById.get(workspace.primaryCopilotAgentId) || null
+        : null) ||
       (workspace.activeChatAgentId
         ? agentsById.get(workspace.activeChatAgentId) || null
         : null) ||
@@ -4321,8 +4372,20 @@ const Orchestrator = () => {
                   <h1 className="text-[1.75rem] font-bold tracking-tight text-on-surface">
                     {activeCapability.name} Inbox
                   </h1>
-                  <StatusBadge tone={runtimeReady ? 'success' : 'danger'}>
-                    {runtimeReady ? 'Execution ready' : 'Needs setup'}
+                  <StatusBadge
+                    tone={
+                      capabilityExperience.canStartDelivery
+                        ? runtimeReady
+                          ? 'success'
+                          : 'danger'
+                        : 'warning'
+                    }
+                  >
+                    {capabilityExperience.canStartDelivery
+                      ? runtimeReady
+                        ? 'Execution ready'
+                        : 'Needs setup'
+                      : 'Delivery gated'}
                   </StatusBadge>
                   <StatusBadge tone="neutral">Inbox view</StatusBadge>
                 </div>
@@ -5100,11 +5163,21 @@ const Orchestrator = () => {
 
 	          <aside className="workspace-surface flex min-h-0 flex-col overflow-hidden p-0">
 	            <div className="border-b border-outline-variant/25 px-5 pb-4 pt-5">
-	              <p className="form-kicker">Copilot Dock</p>
-	              <h2 className="mt-1 text-lg font-bold text-on-surface">Unblock here</h2>
+	              <p className="form-kicker">Capability Copilot</p>
+	              <h2 className="mt-1 text-lg font-bold text-on-surface">Operate from one dock</h2>
 	              <p className="mt-1 text-sm leading-relaxed text-secondary">
 	                Upload evidence, ask questions, and resolve pending requests without switching screens.
 	              </p>
+                {primaryCopilotAgent ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <StatusBadge tone="brand">{primaryCopilotAgent.name}</StatusBadge>
+                    <StatusBadge tone="neutral">
+                      {selectedAgent?.id === primaryCopilotAgent.id
+                        ? 'Primary copilot active'
+                        : `Routing with ${selectedAgent?.name || primaryCopilotAgent.role}`}
+                    </StatusBadge>
+                  </div>
+                ) : null}
 	            </div>
 	
 		            <div className="flex min-h-0 flex-1 flex-col px-5 py-4">
@@ -5720,8 +5793,20 @@ const Orchestrator = () => {
                 <h1 className="text-[1.75rem] font-bold tracking-tight text-on-surface">
                   {activeCapability.name} Work
                 </h1>
-                <StatusBadge tone={runtimeReady ? 'success' : 'danger'}>
-                  {runtimeReady ? 'Execution ready' : 'Needs setup'}
+                <StatusBadge
+                  tone={
+                    capabilityExperience.canStartDelivery
+                      ? runtimeReady
+                        ? 'success'
+                        : 'danger'
+                      : 'warning'
+                  }
+                >
+                  {capabilityExperience.canStartDelivery
+                    ? runtimeReady
+                      ? 'Execution ready'
+                      : 'Needs setup'
+                    : 'Delivery gated'}
                 </StatusBadge>
                 <StatusBadge tone="neutral">
                   {view === 'board' ? 'Board view' : 'List view'}
@@ -5898,6 +5983,157 @@ const Orchestrator = () => {
                   : 'Advanced execution details are collapsed below'}
               </span>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(22rem,0.8fr)]">
+        <div className="workspace-surface space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="form-kicker">Capability cockpit</p>
+              <h2 className="mt-1 text-lg font-bold text-on-surface">
+                One operating loop for work, waits, evidence, and learning
+              </h2>
+              <p className="mt-1 text-sm leading-relaxed text-secondary">
+                Work is the primary cockpit. Home summarizes, while Chat, Agents, and Evidence stay available as companion drills when you need to go deeper.
+              </p>
+            </div>
+            <StatusBadge tone={capabilityExperience.canStartDelivery ? 'success' : 'warning'}>
+              {capabilityExperience.canStartDelivery ? 'Delivery gate clear' : 'Delivery gated'}
+            </StatusBadge>
+          </div>
+
+          {deliveryBlockingItem ? (
+            <div className="workspace-inline-alert workspace-inline-alert-warning">
+              <AlertCircle size={18} className="mt-0.5 shrink-0" />
+              <div className="min-w-0">
+                <p className="text-sm font-semibold">{deliveryBlockingItem.label}</p>
+                <p className="mt-1 text-sm leading-relaxed">
+                  {deliveryBlockingItem.nextRequiredAction ||
+                    deliveryBlockingItem.blockingReason ||
+                    deliveryBlockingItem.description}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => navigate(deliveryBlockingItem.path)}
+                  className="enterprise-button enterprise-button-secondary mt-3"
+                >
+                  <ArrowRight size={16} />
+                  {deliveryBlockingItem.actionLabel}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="workspace-meta-card border-emerald-200 bg-emerald-50/50">
+              <p className="workspace-meta-label">Next move</p>
+              <p className="mt-2 text-sm font-semibold text-on-surface">
+                {capabilityExperience.nextAction.title}
+              </p>
+              <p className="mt-2 text-sm leading-relaxed text-secondary">
+                {capabilityExperience.nextAction.description}
+              </p>
+            </div>
+          )}
+
+          <div className="rounded-[1.5rem] border border-outline-variant/25 bg-surface-container-low/45 px-4 py-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="workspace-meta-label">Golden path</p>
+                <p className="mt-2 text-sm leading-relaxed text-secondary">
+                  {capabilityExperience.goldenPathProgress.summary}
+                </p>
+              </div>
+              <StatusBadge tone="brand">
+                {capabilityExperience.goldenPathProgress.percentComplete}% complete
+              </StatusBadge>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+              {capabilityExperience.goldenPathProgress.steps.map(step => (
+                <button
+                  key={step.id}
+                  type="button"
+                  onClick={() => navigate(step.path)}
+                  className={cn(
+                    'rounded-2xl border px-3 py-3 text-left transition',
+                    step.status === 'COMPLETE'
+                      ? 'border-emerald-200 bg-emerald-50/70'
+                      : step.status === 'CURRENT'
+                      ? 'border-primary/20 bg-primary/8'
+                      : 'border-outline-variant/30 bg-white/80 hover:border-primary/20',
+                  )}
+                >
+                  <p className="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-secondary">
+                    {step.status === 'COMPLETE'
+                      ? 'Complete'
+                      : step.status === 'CURRENT'
+                      ? 'Current'
+                      : 'Up next'}
+                  </p>
+                  <p className="mt-2 text-sm font-semibold text-on-surface">{step.label}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="workspace-surface space-y-4">
+          <div>
+            <p className="form-kicker">Capability copilot</p>
+            <h2 className="mt-1 text-lg font-bold text-on-surface">
+              {primaryCopilotAgent?.name || 'Capability Copilot'}
+            </h2>
+            <p className="mt-1 text-sm leading-relaxed text-secondary">
+              One user-facing copilot routes work to specialists and keeps the live operating story grounded in workflow state, evidence, and learning.
+            </p>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="workspace-meta-card">
+              <p className="workspace-meta-label">Primary role</p>
+              <p className="mt-2 text-sm font-semibold text-on-surface">
+                {primaryCopilotAgent?.role || 'Unavailable'}
+              </p>
+              <p className="mt-2 text-xs leading-relaxed text-secondary">
+                {primaryCopilotAgent?.rolePolicy?.summary ||
+                  'This copilot will interpret live work state and coordinate specialist responses.'}
+              </p>
+            </div>
+            <div className="workspace-meta-card">
+              <p className="workspace-meta-label">Current specialist</p>
+              <p className="mt-2 text-sm font-semibold text-on-surface">
+                {selectedAgent?.name || primaryCopilotAgent?.name || 'None selected'}
+              </p>
+              <p className="mt-2 text-xs leading-relaxed text-secondary">
+                {selectedAgent?.qualityBar?.label
+                  ? `${selectedAgent.qualityBar.label}: ${selectedAgent.qualityBar.summary}`
+                  : 'Select a work item to see which specialist is currently active.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => void handleOpenFullChat()}
+              disabled={!primaryCopilotAgent || !canReadChat}
+              className="rounded-2xl border border-outline-variant/40 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <p className="text-sm font-semibold text-on-surface">Open companion chat</p>
+              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                Deep-dive into the full capability conversation when the cockpit thread is not enough.
+              </p>
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/team')}
+              className="rounded-2xl border border-outline-variant/40 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white"
+            >
+              <p className="text-sm font-semibold text-on-surface">Inspect specialists</p>
+              <p className="mt-1 text-xs leading-relaxed text-secondary">
+                Review the specialist roster, learning state, and operating contracts behind the copilot.
+              </p>
+            </button>
           </div>
         </div>
       </section>
@@ -6720,6 +6956,40 @@ const Orchestrator = () => {
                         />
                       ) : null}
                     </div>
+
+                    {selectedAgent ? (
+                      <div className="grid gap-3 xl:grid-cols-3">
+                        <div className="workspace-meta-card">
+                          <p className="workspace-meta-label">Tool policy</p>
+                          <p className="mt-2 text-sm font-semibold text-on-surface">
+                            {selectedAgent.rolePolicy?.summary || 'Use approved tools only.'}
+                          </p>
+                          <p className="mt-2 text-xs leading-relaxed text-secondary">
+                            {(selectedAgent.rolePolicy?.allowedToolIds || selectedAgent.preferredToolIds || [])
+                              .slice(0, 4)
+                              .join(', ') || 'No preferred tools recorded'}
+                          </p>
+                        </div>
+                        <div className="workspace-meta-card">
+                          <p className="workspace-meta-label">Memory scope</p>
+                          <p className="mt-2 text-sm font-semibold text-on-surface">
+                            {selectedAgent.memoryScope?.summary || 'Capability context and current work state.'}
+                          </p>
+                          <p className="mt-2 text-xs leading-relaxed text-secondary">
+                            {selectedAgent.memoryScope?.scopeLabels.join(' • ') || 'Capability briefing • Work item context'}
+                          </p>
+                        </div>
+                        <div className="workspace-meta-card">
+                          <p className="workspace-meta-label">Quality bar</p>
+                          <p className="mt-2 text-sm font-semibold text-on-surface">
+                            {selectedAgent.qualityBar?.label || 'Execution quality'}
+                          </p>
+                          <p className="mt-2 text-xs leading-relaxed text-secondary">
+                            {selectedAgent.evalProfile?.summary || selectedAgent.qualityBar?.summary || 'The specialist should leave usable evidence and clear next steps.'}
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
 
                     <InteractionTimeline
                       feed={selectedInteractionFeed}

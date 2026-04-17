@@ -12,7 +12,6 @@ import {
   FolderGit2,
   Gauge,
   KeyRound,
-  MessageSquareText,
   PlayCircle,
   ShieldCheck,
   Sparkles,
@@ -22,14 +21,10 @@ import { useNavigate } from 'react-router-dom';
 import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
 import {
   buildCapabilityExperience,
-  ADVANCED_TOOL_DESCRIPTORS,
+  getVisibleAdvancedToolDescriptors,
   type AdvancedToolId,
   getAgentHealth,
   getBusinessWorkStatusLabel,
-  getProofStatusLabel,
-  getProofStatusTone,
-  getReadinessLabel,
-  getReadinessTone,
   getTrustLevelTone,
 } from '../lib/capabilityExperience';
 import { hasPermission } from '../lib/accessControl';
@@ -73,7 +68,12 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
 
 const Dashboard = () => {
   const navigate = useNavigate();
-  const { activeCapability, getCapabilityWorkspace } = useCapability();
+  const {
+    activeCapability,
+    currentWorkspaceUserId,
+    getCapabilityWorkspace,
+    workspaceOrganization,
+  } = useCapability();
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const canCreateWorkItems = hasPermission(
     activeCapability.effectivePermissions,
@@ -156,6 +156,19 @@ const Dashboard = () => {
       }),
     [activeCapability, runtimeStatus, workspace],
   );
+  const currentWorkspaceRoles =
+    workspaceOrganization.users.find(user => user.id === currentWorkspaceUserId)?.workspaceRoles ||
+    [];
+  const visibleAdvancedTools = useMemo(
+    () =>
+      getVisibleAdvancedToolDescriptors({
+        capability: activeCapability,
+        workspace,
+        workspaceRoles: currentWorkspaceRoles,
+        includeOnDemand: false,
+      }),
+    [activeCapability, currentWorkspaceRoles, workspace],
+  );
 
   const ownerHealth = getAgentHealth(experience.ownerAgent);
   const activeWork = workspace.workItems
@@ -183,27 +196,28 @@ const Dashboard = () => {
     ) || activeWork[0];
   const explainWorkItem =
     workspace.workItems.find(item => item.id === explainWorkItemId) || null;
+  const primaryBlockingItem = experience.blockingReadinessItems[0] || null;
 
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow="Capability Home"
+        eyebrow="Home"
         context={activeCapability.id}
         title={activeCapability.name}
         description={
           activeCapability.businessOutcome ||
           activeCapability.description ||
-          'A guided workspace for trust, active work, collaboration, and evidence.'
+          'Summary, trust, and health for the capability. Daily operating work now starts in Work.'
         }
         actions={
           <>
             <button
               type="button"
-              onClick={() => navigate('/chat')}
+              onClick={() => navigate('/')}
               className="enterprise-button enterprise-button-secondary"
             >
-              <MessageSquareText size={16} />
-              Chat with team
+              <Workflow size={16} />
+              Open Work
             </button>
             <button
               type="button"
@@ -318,13 +332,36 @@ const Dashboard = () => {
       </section>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(24rem,0.9fr)]">
-        <SectionCard
+      <SectionCard
           title="Today"
-          description="The clearest next move for this capability."
+          description="Home stays summary-first while Work becomes the operating cockpit."
           icon={ShieldCheck}
           tone="brand"
         >
           <div className="rounded-[1.6rem] border border-primary/15 bg-white px-5 py-5">
+            {primaryBlockingItem ? (
+              <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="form-kicker text-amber-800">Delivery gate</p>
+                    <p className="mt-1 text-sm font-semibold text-amber-950">
+                      {primaryBlockingItem.blockingReason || primaryBlockingItem.description}
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-amber-800">
+                      {primaryBlockingItem.nextRequiredAction ||
+                        'Resolve the missing setup before starting heavier workflow execution.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => navigate(primaryBlockingItem.path)}
+                    className="enterprise-button enterprise-button-secondary shrink-0"
+                  >
+                    Fix gate
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="min-w-0">
                 <StatusBadge tone={experience.nextAction.tone}>
@@ -362,12 +399,12 @@ const Dashboard = () => {
           <div className="grid gap-3 md:grid-cols-3">
             <button
               type="button"
-              onClick={() => navigate('/orchestrator')}
+              onClick={() => navigate('/')}
               className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-4 text-left transition hover:border-primary/20 hover:bg-white"
             >
               <p className="text-sm font-semibold text-on-surface">Open Work</p>
               <p className="mt-1 text-xs leading-relaxed text-secondary">
-                Approvals, blockers, active work, and restart controls.
+                Inbox, waits, copilot, uploads, evidence preview, and the live operating story.
               </p>
             </button>
             <button
@@ -453,12 +490,12 @@ const Dashboard = () => {
         </SectionCard>
 
         <SectionCard
-          title="Trust ladder"
-          description="Proof milestones that show whether this capability is real, grounded, operable, and proven."
+          title="Golden path"
+          description="The fastest trustworthy path from capability setup to the first real evidence packet."
           icon={ClipboardCheck}
         >
           <div className="space-y-3">
-            {experience.proofItems.map(item => (
+            {experience.goldenPathProgress.steps.map(item => (
               <button
                 key={item.id}
                 type="button"
@@ -468,15 +505,24 @@ const Dashboard = () => {
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="text-sm font-semibold text-on-surface">{item.label}</p>
-                    <StatusBadge tone={getProofStatusTone(item.status)}>
-                      {getProofStatusLabel(item.status)}
+                    <StatusBadge
+                      tone={
+                        item.status === 'COMPLETE'
+                          ? 'success'
+                          : item.status === 'CURRENT'
+                          ? 'brand'
+                          : 'neutral'
+                      }
+                    >
+                      {item.status === 'COMPLETE'
+                        ? 'Complete'
+                        : item.status === 'CURRENT'
+                        ? 'Current'
+                        : 'Up next'}
                     </StatusBadge>
                   </div>
                   <p className="mt-1 text-xs leading-relaxed text-secondary">
                     {item.description}
-                  </p>
-                  <p className="mt-2 text-xs font-medium leading-relaxed text-on-surface/80">
-                    {item.proofSignal}
                   </p>
                 </div>
                 <ArrowRight size={15} className="mt-1 shrink-0 text-outline" />
@@ -494,7 +540,7 @@ const Dashboard = () => {
           action={
             <button
               type="button"
-              onClick={() => navigate('/orchestrator?new=1')}
+              onClick={() => navigate('/?new=1')}
               disabled={!canCreateWorkItems}
               className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -513,7 +559,7 @@ const Dashboard = () => {
                     <button
                       type="button"
                       onClick={() =>
-                        navigate(`/orchestrator?selected=${encodeURIComponent(item.id)}`)
+                        navigate(`/?selected=${encodeURIComponent(item.id)}`)
                       }
                       className="min-w-0 text-left"
                     >
@@ -547,7 +593,7 @@ const Dashboard = () => {
               action={
                 <button
                   type="button"
-                  onClick={() => navigate('/orchestrator?new=1')}
+                  onClick={() => navigate('/?new=1')}
                   disabled={!canCreateWorkItems}
                   className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                 >
@@ -706,12 +752,12 @@ const Dashboard = () => {
 
       <AdvancedDisclosure
         title="Advanced tools"
-        description="Technical diagnostics and builder tools remain available, but they are no longer the main business journey."
+        description="Technical diagnostics and builder tools remain available, but they surface only when the current role or capability context really needs them."
         storageKey="singularity.home.advanced.open"
         badge={<StatusBadge tone="neutral">Technical tools</StatusBadge>}
       >
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          {ADVANCED_TOOL_DESCRIPTORS.map(tool => {
+          {visibleAdvancedTools.map(tool => {
             const Icon = advancedToolIcons[tool.id];
             return (
             <button

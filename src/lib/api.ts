@@ -79,6 +79,8 @@ export interface RuntimeStatus {
   configured: boolean;
   provider: string;
   endpoint: string;
+  runtimeOwner?: 'DESKTOP' | 'SERVER';
+  executionRuntimeOwner?: 'DESKTOP' | 'SERVER';
   tokenSource: string | null;
   defaultModel: string;
   modelCatalogSource?: 'runtime' | 'fallback';

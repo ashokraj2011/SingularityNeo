@@ -5503,12 +5503,12 @@ export default function WorkflowStudio({
                         <div className="workflow-neo-commandbar-title">
                           <button
                             type="button"
-                            onClick={() => navigate('/')}
+                            onClick={() => navigate('/home')}
                             className="workflow-lab-toolbar-button shrink-0"
-                            title="Back to workspace"
+                            title="Back to home"
                           >
                             <ArrowLeft size={16} />
-                            <span className="hidden xl:inline">Workspace</span>
+                            <span className="hidden xl:inline">Home</span>
                           </button>
                           <div className="min-w-0">
                             <p className="truncate text-sm font-semibold text-white">

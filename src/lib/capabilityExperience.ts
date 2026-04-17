@@ -3,11 +3,14 @@ import type {
   Capability,
   CapabilityAgent,
   CapabilityWorkspace,
+  GoldenPathProgress,
+  WorkspaceRole,
   WorkItem,
 } from '../types';
 import { CAPABILITIES } from '../constants';
 import type { RuntimeStatus } from './api';
 import type { EnterpriseTone } from './enterprise';
+import { selectPrimaryCopilotAgentId } from './agentProfiles';
 import {
   hasMeaningfulExecutionCommandTemplate,
   isWorkspacePathInsideApprovedRoot,
@@ -26,6 +29,9 @@ export interface CapabilityReadinessItem {
   status: CapabilityReadinessStatus;
   actionLabel: string;
   path: string;
+  isBlocking?: boolean;
+  blockingReason?: string;
+  nextRequiredAction?: string;
 }
 
 export interface CapabilityNextAction {
@@ -98,25 +104,41 @@ export type AdvancedToolId =
   | 'tasks'
   | 'studio';
 
+export type AdvancedToolAudience =
+  | 'ALL'
+  | 'OPERATORS'
+  | 'BUILDERS'
+  | 'ADMINS'
+  | 'ARCHITECTS';
+
+export type AdvancedToolExposureMode = 'ALWAYS' | 'WHEN_RELEVANT' | 'ON_DEMAND';
+
 export interface AdvancedToolDescriptor {
   id: AdvancedToolId;
   label: string;
   shortName: string;
   path: string;
   description: string;
+  audience: AdvancedToolAudience;
+  exposureMode: AdvancedToolExposureMode;
+  contextTriggers: string[];
 }
 
 export interface CapabilityExperienceModel {
   readinessItems: CapabilityReadinessItem[];
+  blockingReadinessItems: CapabilityReadinessItem[];
+  canStartDelivery: boolean;
   readinessScore: number;
   trustLevel: CapabilityTrustLevel;
   trustLabel: string;
   trustDescription: string;
   proofItems: CapabilityProofMilestone[];
+  goldenPathProgress: GoldenPathProgress;
   outcomeContract: CapabilityOutcomeContract;
   nextAction: CapabilityNextAction;
   runtimeHealth: UserFacingRuntimeHealth;
   ownerAgent: CapabilityAgent | null;
+  primaryCopilotAgent: CapabilityAgent | null;
   activeWorkCount: number;
   blockerCount: number;
   approvalCount: number;
@@ -131,6 +153,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Arch',
     path: '/architecture',
     description: 'Review the capability hierarchy, published contracts, dependency graph, and ALM rollups.',
+    audience: 'ARCHITECTS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['COLLECTION_CAPABILITY', 'HAS_ARCHITECTURE_CONTEXT'],
   },
   {
     id: 'identity',
@@ -138,6 +163,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Login',
     path: '/login',
     description: 'Switch the active workspace operator and review the roles bound to this session.',
+    audience: 'ALL',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
   },
   {
     id: 'access',
@@ -145,6 +173,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Access',
     path: '/access',
     description: 'Manage workspace users, teams, capability grants, inherited rollups, and access audit history.',
+    audience: 'ADMINS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_MULTIUSER_CONTEXT'],
   },
   {
     id: 'databases',
@@ -152,6 +183,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'DB',
     path: '/workspace/databases',
     description: 'Initialize the workspace database and inspect shared platform foundations.',
+    audience: 'ADMINS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['NEEDS_DATABASE_SETUP'],
   },
   {
     id: 'memory',
@@ -159,6 +193,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Memory',
     path: '/memory',
     description: 'Inspect learned sources, retrieval grounding, and memory provenance.',
+    audience: 'BUILDERS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_LEARNING_ACTIVITY'],
   },
   {
     id: 'tool-access',
@@ -166,6 +203,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Rules',
     path: '/tool-access',
     description: 'Review workflow rules, step-level tool access, approvals, and execution boundaries for this capability.',
+    audience: 'BUILDERS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_WORKFLOW'],
   },
   {
     id: 'run-console',
@@ -173,6 +213,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Runs',
     path: '/run-console',
     description: 'Open runtime telemetry, traces, policy decisions, and live run events.',
+    audience: 'OPERATORS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_WORK_ACTIVITY'],
   },
   {
     id: 'evals',
@@ -180,6 +223,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Evals',
     path: '/evals',
     description: 'Review structured quality checks for agents and workflows.',
+    audience: 'BUILDERS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_AGENT_ROSTER'],
   },
   {
     id: 'skills',
@@ -187,6 +233,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Skills',
     path: '/skills',
     description: 'Manage reusable capability skills and specialist behaviors.',
+    audience: 'BUILDERS',
+    exposureMode: 'ON_DEMAND',
+    contextTriggers: ['HAS_AGENT_ROSTER'],
   },
   {
     id: 'artifact-designer',
@@ -194,6 +243,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Artifacts',
     path: '/artifact-designer',
     description: 'Edit reusable artifact templates and handoff structures.',
+    audience: 'BUILDERS',
+    exposureMode: 'ON_DEMAND',
+    contextTriggers: ['HAS_WORKFLOW'],
   },
   {
     id: 'tasks',
@@ -201,6 +253,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Tasks',
     path: '/tasks',
     description: 'Inspect lower-level workflow-managed task records.',
+    audience: 'OPERATORS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_TASK_ACTIVITY'],
   },
   {
     id: 'studio',
@@ -208,6 +263,9 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Studio',
     path: '/studio',
     description: 'Open specialist authoring and skill composition tools.',
+    audience: 'BUILDERS',
+    exposureMode: 'ON_DEMAND',
+    contextTriggers: ['HAS_AGENT_ROSTER'],
   },
 ];
 
@@ -260,6 +318,107 @@ const hasDeploymentTargetSetup = (capability: Capability) => {
         isWorkspacePathInsideApprovedRoot(target.workspacePath, approvedPaths)),
   );
 };
+
+const hasMinimalCapabilityContract = (capability: Capability) =>
+  hasText(capability.description) &&
+  hasCapabilityOwner(capability) &&
+  hasText(capability.businessOutcome) &&
+  capability.successMetrics.some(metric => metric.trim()) &&
+  capability.requiredEvidenceKinds.some(kind => kind.trim()) &&
+  hasText(capability.definitionOfDone);
+
+const roleSet = (workspaceRoles: WorkspaceRole[]) => new Set(workspaceRoles || []);
+
+const matchesAdvancedToolAudience = (
+  tool: AdvancedToolDescriptor,
+  workspaceRoles: WorkspaceRole[],
+) => {
+  const roles = roleSet(workspaceRoles);
+
+  switch (tool.audience) {
+    case 'ADMINS':
+      return roles.has('WORKSPACE_ADMIN') || roles.has('PORTFOLIO_OWNER') || roles.has('TEAM_LEAD');
+    case 'ARCHITECTS':
+      return roles.has('WORKSPACE_ADMIN') || roles.has('PORTFOLIO_OWNER') || roles.has('TEAM_LEAD');
+    case 'OPERATORS':
+      return !roles.has('VIEWER');
+    case 'BUILDERS':
+      return !roles.has('VIEWER') && !roles.has('AUDITOR');
+    default:
+      return true;
+  }
+};
+
+const matchesAdvancedToolTrigger = (
+  trigger: string,
+  capability: Capability,
+  workspace: CapabilityWorkspace,
+) => {
+  switch (trigger) {
+    case 'COLLECTION_CAPABILITY':
+      return capability.capabilityKind === 'COLLECTION';
+    case 'HAS_ARCHITECTURE_CONTEXT':
+      return Boolean(
+        capability.parentCapabilityId ||
+          capability.sharedCapabilities?.length ||
+          capability.dependencies.length ||
+          capability.publishedSnapshots.length,
+      );
+    case 'HAS_MULTIUSER_CONTEXT':
+      return Boolean(
+        capability.phaseOwnershipRules?.length ||
+          workspace.workflows.some(workflow =>
+            workflow.steps.some(step => Boolean(step.ownershipRule)),
+          ),
+      );
+    case 'NEEDS_DATABASE_SETUP':
+      return workspace.workItems.length === 0 && workspace.workflows.length === 0;
+    case 'HAS_LEARNING_ACTIVITY':
+      return Boolean(
+        workspace.learningUpdates.length ||
+          workspace.agents.some(agent => (agent.learningProfile.sourceCount || 0) > 0),
+      );
+    case 'HAS_WORKFLOW':
+      return workspace.workflows.length > 0;
+    case 'HAS_WORK_ACTIVITY':
+      return workspace.workItems.length > 0 || workspace.executionLogs.length > 0;
+    case 'HAS_AGENT_ROSTER':
+      return workspace.agents.length > 0;
+    case 'HAS_TASK_ACTIVITY':
+      return workspace.tasks.length > 0;
+    default:
+      return false;
+  }
+};
+
+export const getVisibleAdvancedToolDescriptors = ({
+  capability,
+  workspace,
+  workspaceRoles = [],
+  includeOnDemand = false,
+}: {
+  capability: Capability;
+  workspace: CapabilityWorkspace;
+  workspaceRoles?: WorkspaceRole[];
+  includeOnDemand?: boolean;
+}) =>
+  ADVANCED_TOOL_DESCRIPTORS.filter(tool => {
+    if (!matchesAdvancedToolAudience(tool, workspaceRoles)) {
+      return false;
+    }
+
+    if (tool.exposureMode === 'ALWAYS') {
+      return true;
+    }
+
+    if (tool.exposureMode === 'ON_DEMAND') {
+      return includeOnDemand;
+    }
+
+    return tool.contextTriggers.some(trigger =>
+      matchesAdvancedToolTrigger(trigger, capability, workspace),
+    );
+  });
 
 const getLearningStatuses = (agents: CapabilityAgent[]) =>
   agents.map(agent => agent.learningProfile.status);
@@ -345,7 +504,7 @@ export const getRuntimeHealth = (
   if (!runtimeStatus) {
     return {
       label: 'Checking connection',
-      description: 'Loading Copilot runtime status.',
+      description: 'Loading Copilot runtime ownership and connection status.',
       tone: 'info',
       actionLabel: 'Open run console',
       path: '/run-console',
@@ -353,11 +512,15 @@ export const getRuntimeHealth = (
   }
 
   if (runtimeStatus.configured) {
+    const runtimeOwnerLabel =
+      runtimeStatus.runtimeOwner === 'DESKTOP'
+        ? 'Desktop runtime'
+        : 'Control-plane runtime';
     return {
-      label: 'Connected',
+      label: runtimeStatus.runtimeOwner === 'DESKTOP' ? 'Desktop connected' : 'Connected',
       description: runtimeStatus.githubIdentity?.login
-        ? `Copilot is connected as @${runtimeStatus.githubIdentity.login}.`
-        : 'Copilot runtime is available for agents and chat.',
+        ? `${runtimeOwnerLabel} is connected as @${runtimeStatus.githubIdentity.login}.`
+        : `${runtimeOwnerLabel} is available for agents and chat.`,
       tone: 'success',
       actionLabel: 'View runtime',
       path: '/run-console',
@@ -368,7 +531,7 @@ export const getRuntimeHealth = (
     label: runtimeStatus.lastRuntimeError ? 'Unavailable' : 'Needs Copilot setup',
     description:
       runtimeStatus.lastRuntimeError ||
-      'Connect the enterprise Copilot runtime before starting agent work.',
+      `Connect the ${runtimeStatus.runtimeOwner === 'DESKTOP' ? 'desktop' : 'runtime'} Copilot owner before starting agent work.`,
     tone: runtimeStatus.lastRuntimeError ? 'danger' : 'warning',
     actionLabel: 'Set up runtime',
     path: '/run-console',
@@ -501,7 +664,7 @@ const buildProofItems = (
           : 'Run one real work item through to evidence so this capability is proven.',
       actionLabel:
         workspace.workItems.length > 0 ? 'Review delivery evidence' : 'Run real work',
-      path: workspace.workItems.length > 0 ? '/ledger' : '/orchestrator?new=1',
+      path: workspace.workItems.length > 0 ? '/ledger' : '/?new=1',
     },
   ];
 
@@ -644,26 +807,27 @@ const buildReadinessItems = (
   return [
     {
       id: 'metadata',
-      label: 'Capability profile',
-      description: 'Purpose, business outcome, owner, and success metrics are clear.',
-      status:
-        hasText(capability.description) &&
-        (hasText(capability.domain) || hasText(capability.businessUnit)) &&
-        hasCapabilityOwner(capability) &&
-        hasText(capability.businessOutcome) &&
-        capability.successMetrics.some(metric => metric.trim())
-          ? 'READY'
-          : 'NEEDS_SETUP',
-      actionLabel: 'Complete profile',
+      label: 'Minimum capability contract',
+      description: 'Owner, outcome, success metric, evidence expectation, and definition of done are explicitly defined.',
+      status: hasMinimalCapabilityContract(capability) ? 'READY' : 'NEEDS_SETUP',
+      actionLabel: 'Complete contract',
       path: '/capabilities/metadata',
+      isBlocking: true,
+      blockingReason:
+        'Execution stays gated until the capability has an owner, business outcome, success metric, evidence requirement, and definition of done.',
+      nextRequiredAction: 'Finish the minimum capability contract before starting workflow execution.',
     },
     {
       id: 'connectors',
-      label: 'Enterprise connectors',
-      description: 'GitHub, Jira, Confluence, or documentation references are linked.',
+      label: 'Connected source',
+      description: 'At least one repo, ALM system, or source reference is linked to the capability.',
       status: hasConnectorSetup(capability) ? 'READY' : 'NEEDS_SETUP',
-      actionLabel: 'Add connectors',
+      actionLabel: 'Connect source',
       path: '/capabilities/metadata',
+      isBlocking: true,
+      blockingReason:
+        'Heavy workflow should not start before the capability is grounded in a real source system.',
+      nextRequiredAction: 'Add a repository, Jira board, Confluence page, or documentation source.',
     },
     {
       id: 'workspace',
@@ -672,6 +836,10 @@ const buildReadinessItems = (
       status: hasWorkspaceSource(capability) ? 'READY' : 'NEEDS_SETUP',
       actionLabel: 'Approve paths',
       path: '/capabilities/metadata',
+      isBlocking: true,
+      blockingReason:
+        'Copilot-backed work must stay inside an approved local workspace before execution can start.',
+      nextRequiredAction: 'Approve at least one workspace path for this capability.',
     },
     {
       id: 'commands',
@@ -707,6 +875,10 @@ const buildReadinessItems = (
       status: hasPublishedWorkflow ? 'READY' : hasWorkflow ? 'NEEDS_ATTENTION' : 'NEEDS_SETUP',
       actionLabel: hasWorkflow ? 'Publish workflow' : 'Create workflow',
       path: '/designer',
+      isBlocking: true,
+      blockingReason:
+        'Execution stays blocked until the capability has a validated or published workflow.',
+      nextRequiredAction: 'Publish or validate a workflow before starting the first run.',
     },
     {
       id: 'owner-agent',
@@ -737,8 +909,8 @@ const buildReadinessItems = (
     },
     {
       id: 'runtime',
-      label: 'Copilot connection',
-      description: 'The enterprise Copilot runtime is connected for chat and execution.',
+      label: 'Copilot runtime',
+      description: 'A runtime owner is connected for Copilot chat and workflow execution.',
       status: runtimeStatus?.configured
         ? 'READY'
         : runtimeStatus
@@ -746,6 +918,10 @@ const buildReadinessItems = (
         : 'IN_PROGRESS',
       actionLabel: 'Check runtime',
       path: '/run-console',
+      isBlocking: true,
+      blockingReason:
+        'Workflow execution cannot start until the Copilot runtime owner is connected.',
+      nextRequiredAction: 'Connect the runtime owner and confirm execution is available.',
     },
     {
       id: 'memory',
@@ -766,7 +942,7 @@ const buildReadinessItems = (
       description: 'At least one work item exists to move through the workflow.',
       status: workspace.workItems.length > 0 ? 'READY' : hasWorkflow ? 'NEEDS_SETUP' : 'NEEDS_ATTENTION',
       actionLabel: 'Create work',
-      path: '/orchestrator?new=1',
+      path: '/?new=1',
     },
   ];
 };
@@ -790,7 +966,7 @@ const buildNextAction = (
         attentionItem.blocker?.message ||
         'A work item needs a decision or input before it can continue.',
       actionLabel: 'Open work item',
-      path: `/orchestrator?selected=${encodeURIComponent(attentionItem.id)}`,
+      path: `/?selected=${encodeURIComponent(attentionItem.id)}`,
       tone: 'warning',
     };
   }
@@ -803,8 +979,25 @@ const buildNextAction = (
         attentionItem.pendingRequest?.message ||
         'A work item is waiting for business approval.',
       actionLabel: 'Review approval',
-      path: `/orchestrator?selected=${encodeURIComponent(attentionItem.id)}`,
+      path: `/?selected=${encodeURIComponent(attentionItem.id)}`,
       tone: 'warning',
+    };
+  }
+
+  const blockingItem =
+    readinessItems.find(item => item.isBlocking && item.status === 'NEEDS_ATTENTION') ||
+    readinessItems.find(item => item.isBlocking && item.status === 'NEEDS_SETUP') ||
+    readinessItems.find(item => item.isBlocking && item.status === 'IN_PROGRESS');
+
+  if (blockingItem) {
+    return {
+      id: `blocking-${blockingItem.id}`,
+      title: `Clear ${blockingItem.label.toLowerCase()}`,
+      description:
+        blockingItem.nextRequiredAction || blockingItem.blockingReason || blockingItem.description,
+      actionLabel: blockingItem.actionLabel,
+      path: blockingItem.path,
+      tone: blockingItem.status === 'NEEDS_ATTENTION' ? 'warning' : 'brand',
     };
   }
 
@@ -855,7 +1048,7 @@ const buildNextAction = (
       title: `Continue ${activeItem.title}`,
       description: 'Review the current step and keep delivery moving.',
       actionLabel: 'Open work',
-      path: `/orchestrator?selected=${encodeURIComponent(activeItem.id)}`,
+      path: `/?selected=${encodeURIComponent(activeItem.id)}`,
       tone: 'brand',
     };
   }
@@ -877,8 +1070,99 @@ const buildNextAction = (
     title: 'Start the next work item',
     description: 'This capability is ready. Create a work item to begin delivery.',
     actionLabel: 'Create work',
-    path: '/orchestrator?new=1',
+    path: '/?new=1',
     tone: 'brand',
+  };
+};
+
+const getBlockingReadinessItems = (readinessItems: CapabilityReadinessItem[]) =>
+  readinessItems.filter(
+    item => item.isBlocking && item.status !== 'READY',
+  );
+
+const buildGoldenPathProgress = ({
+  readinessItems,
+  proofItems,
+}: {
+  readinessItems: CapabilityReadinessItem[];
+  proofItems: CapabilityProofMilestone[];
+}): GoldenPathProgress => {
+  const readinessById = new Map(readinessItems.map(item => [item.id, item]));
+  const proofByLevel = new Map(proofItems.map(item => [item.level, item]));
+
+  const rawSteps = [
+    {
+      id: 'contract',
+      label: 'Define the capability contract',
+      description: readinessById.get('metadata')?.description || 'Define owner, outcome, and done criteria.',
+      path: '/capabilities/metadata',
+      complete: readinessById.get('metadata')?.status === 'READY',
+    },
+    {
+      id: 'source',
+      label: 'Connect a real source',
+      description: readinessById.get('connectors')?.description || 'Connect repo or ALM systems.',
+      path: '/capabilities/metadata',
+      complete: readinessById.get('connectors')?.status === 'READY',
+    },
+    {
+      id: 'workspace',
+      label: 'Approve a workspace',
+      description: readinessById.get('workspace')?.description || 'Approve an execution workspace.',
+      path: '/capabilities/metadata',
+      complete: readinessById.get('workspace')?.status === 'READY',
+    },
+    {
+      id: 'workflow',
+      label: 'Publish the workflow',
+      description: readinessById.get('workflow')?.description || 'Validate or publish a workflow.',
+      path: '/designer',
+      complete: readinessById.get('workflow')?.status === 'READY',
+    },
+    {
+      id: 'first-work',
+      label: 'Stage the first work item',
+      description: readinessById.get('first-work')?.description || 'Create the first work item.',
+      path: '/?new=1',
+      complete: readinessById.get('first-work')?.status === 'READY',
+    },
+    {
+      id: 'evidence',
+      label: 'Produce first evidence',
+      description:
+        proofByLevel.get('PROVEN')?.proofSignal ||
+        'Run one work item through to delivery evidence.',
+      path: '/ledger',
+      complete: proofByLevel.get('PROVEN')?.status === 'READY',
+    },
+  ];
+
+  let currentAssigned = false;
+  const steps = rawSteps.map(step => {
+    if (step.complete) {
+      return { ...step, status: 'COMPLETE' as const };
+    }
+
+    if (!currentAssigned) {
+      currentAssigned = true;
+      return { ...step, status: 'CURRENT' as const };
+    }
+
+    return { ...step, status: 'BLOCKED' as const };
+  });
+
+  const completedCount = steps.filter(step => step.status === 'COMPLETE').length;
+  const currentStep = steps.find(step => step.status === 'CURRENT');
+
+  return {
+    completedCount,
+    totalCount: steps.length,
+    percentComplete: Math.round((completedCount / steps.length) * 100),
+    currentStepId: currentStep?.id,
+    summary: currentStep
+      ? `${currentStep.label} is the next move in the golden path.`
+      : 'The golden path is complete and the capability has evidence of delivery.',
+    steps,
   };
 };
 
@@ -892,22 +1176,34 @@ export const buildCapabilityExperience = ({
   runtimeStatus?: RuntimeStatus | null;
 }): CapabilityExperienceModel => {
   const readinessItems = buildReadinessItems(capability, workspace, runtimeStatus);
+  const blockingReadinessItems = getBlockingReadinessItems(readinessItems);
   const readyCount = readinessItems.filter(item => item.status === 'READY').length;
   const ownerAgent = workspace.agents.find(agent => agent.isOwner) || workspace.agents[0] || null;
+  const primaryCopilotAgent =
+    workspace.agents.find(agent => agent.id === selectPrimaryCopilotAgentId(workspace.agents)) ||
+    ownerAgent;
   const proofItems = buildProofItems(capability, workspace, runtimeStatus);
   const trustLevel = getTrustLevel(proofItems);
+  const goldenPathProgress = buildGoldenPathProgress({
+    readinessItems,
+    proofItems,
+  });
 
   return {
     readinessItems,
+    blockingReadinessItems,
+    canStartDelivery: blockingReadinessItems.length === 0,
     readinessScore: Math.round((readyCount / readinessItems.length) * 100),
     trustLevel,
     trustLabel: getTrustLevelLabel(trustLevel),
     trustDescription: getTrustDescription(trustLevel, proofItems),
     proofItems,
+    goldenPathProgress,
     outcomeContract: buildOutcomeContract(capability),
     nextAction: buildNextAction(proofItems, readinessItems, workspace),
     runtimeHealth: getRuntimeHealth(runtimeStatus),
     ownerAgent,
+    primaryCopilotAgent,
     activeWorkCount: workspace.workItems.filter(item => item.status === 'ACTIVE').length,
     blockerCount: workspace.workItems.filter(item => item.status === 'BLOCKED').length,
     approvalCount: workspace.workItems.filter(item => item.status === 'PENDING_APPROVAL').length,

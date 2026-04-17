@@ -33,7 +33,7 @@ import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import {
-  ADVANCED_TOOL_DESCRIPTORS,
+  getVisibleAdvancedToolDescriptors,
   type AdvancedToolId,
 } from '../lib/capabilityExperience';
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
@@ -41,10 +41,13 @@ import { StatusBadge } from './EnterpriseUI';
 import { SingularityHelpMenu } from './SingularityHelpMenu';
 
 const primaryNavItems = [
-  { name: 'Home', shortName: 'Home', icon: LayoutDashboard, path: '/' },
-  { name: 'Work', shortName: 'Work', icon: Trello, path: '/orchestrator' },
-  { name: 'Agents', shortName: 'Agents', icon: Users, path: '/team' },
+  { name: 'Work', shortName: 'Work', icon: Trello, path: '/' },
+  { name: 'Home', shortName: 'Home', icon: LayoutDashboard, path: '/home' },
+] as const;
+
+const companionNavItems = [
   { name: 'Chat', shortName: 'Chat', icon: MessageSquare, path: '/chat' },
+  { name: 'Agents', shortName: 'Agents', icon: Users, path: '/team' },
   { name: 'Evidence', shortName: 'Evidence', icon: Wallet, path: '/ledger' },
   { name: 'Designer', shortName: 'Design', icon: Workflow, path: '/designer' },
 ] as const;
@@ -64,17 +67,9 @@ const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
   studio: Sparkles,
 };
 
-const advancedNavItems = ADVANCED_TOOL_DESCRIPTORS.map(tool => ({
-  name: tool.label,
-  shortName: tool.shortName,
-  path: tool.path,
-  description: tool.description,
-  icon: advancedToolIcons[tool.id],
-}));
-
-const workspaceNavItems = [...primaryNavItems, ...advancedNavItems] as const;
-
 const routeTitles: Record<string, string> = {
+  '/': 'Work',
+  '/home': 'Home',
   '/capabilities/new': 'On Board Capability',
   '/capabilities/metadata': 'Capability Metadata',
   '/architecture': 'Architecture',
@@ -91,11 +86,19 @@ const ADVANCED_NAV_STORAGE_KEY = 'singularity.navigation.advanced.open';
 const Sidebar = ({
   isCollapsed,
   isAdvancedNavOpen,
+  advancedNavItems,
   onToggleCollapsed,
   onToggleAdvancedNav,
 }: {
   isCollapsed: boolean;
   isAdvancedNavOpen: boolean;
+  advancedNavItems: Array<{
+    name: string;
+    shortName: string;
+    path: string;
+    description: string;
+    icon: typeof BrainCircuit;
+  }>;
   onToggleCollapsed: () => void;
   onToggleAdvancedNav: () => void;
 }) => {
@@ -209,7 +212,7 @@ const Sidebar = ({
                 Singulairy
               </h2>
               <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-secondary">
-                Delivery Console
+                Engineering Cockpit
               </p>
             </div>
           ) : null}
@@ -232,11 +235,10 @@ const Sidebar = ({
             Workspace
           </p>
           <p className="mt-2 text-sm font-semibold text-on-surface">
-            Capability-scoped product operations
+            Work-first engineering operations
           </p>
           <p className="mt-2 text-xs leading-relaxed text-secondary">
-            Teams, evidence, workflows, orchestration, and AI execution stay inside
-            the selected capability context.
+            Daily execution lives in Work. Home summarizes health, and specialist views stay one click away when you need them.
           </p>
         </div>
       ) : (
@@ -500,10 +502,40 @@ const Sidebar = ({
       <nav className="mt-5 flex flex-col gap-1.5">
         {!isCollapsed ? (
           <p className="px-4 pb-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-            Business workspace
+            Daily cockpit
           </p>
         ) : null}
         {primaryNavItems.map(item => (
+          <NavLink
+            key={item.path}
+            to={item.path}
+            title={item.name}
+            className={({ isActive }) =>
+              cn(
+                'group flex items-center rounded-xl text-sm font-semibold transition-all',
+                isCollapsed ? 'justify-center gap-0 px-2 py-3' : 'gap-3 px-4 py-3',
+                isActive
+                  ? 'border border-primary/15 bg-primary/10 text-primary shadow-[0_8px_20px_rgba(0,132,61,0.08)]'
+                  : 'text-secondary hover:bg-surface-container-low hover:text-on-surface',
+              )
+            }
+          >
+            <item.icon
+              size={18}
+              className="shrink-0 transition-transform group-hover:scale-105"
+            />
+            {!isCollapsed ? <span>{item.name}</span> : null}
+          </NavLink>
+        ))}
+      </nav>
+
+      <nav className="mt-4 flex flex-col gap-1.5">
+        {!isCollapsed ? (
+          <p className="px-4 pb-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+            Companion views
+          </p>
+        ) : null}
+        {companionNavItems.map(item => (
           <NavLink
             key={item.path}
             to={item.path}
@@ -542,7 +574,7 @@ const Sidebar = ({
           <Sparkles size={17} className="shrink-0 transition-transform group-hover:scale-105" />
           {!isCollapsed ? (
             <>
-              <span>Advanced tools</span>
+              <span>Specialist tools</span>
               <ChevronDown
                 size={15}
                 className={cn(
@@ -578,6 +610,11 @@ const Sidebar = ({
                 {!isCollapsed ? <span>{item.name}</span> : null}
               </NavLink>
             ))}
+            {!advancedNavItems.length && !isCollapsed ? (
+              <div className="rounded-xl border border-outline-variant/40 bg-surface-container-low px-4 py-3 text-xs leading-relaxed text-secondary">
+                Specialist tools will appear here when the current role or capability context needs them.
+              </div>
+            ) : null}
           </nav>
         ) : null}
 
@@ -608,6 +645,7 @@ const Sidebar = ({
 
 const TopBar = ({
   isSidebarCollapsed,
+  navItems,
   onOpenCommandPalette,
   onOpenHelp,
   onOpenMobileNav,
@@ -619,6 +657,7 @@ const TopBar = ({
   onChangeWorkspaceUser,
 }: {
   isSidebarCollapsed: boolean;
+  navItems: Array<{ name: string; path: string }>;
   onOpenCommandPalette: () => void;
   onOpenHelp: () => void;
   onOpenMobileNav: () => void;
@@ -632,8 +671,8 @@ const TopBar = ({
   const location = useLocation();
 
   const activeNavItem = useMemo(
-    () => workspaceNavItems.find(item => item.path === location.pathname) || null,
-    [location.pathname],
+    () => navItems.find(item => item.path === location.pathname) || null,
+    [location.pathname, navItems],
   );
   const pageTitle = activeNavItem?.name || routeTitles[location.pathname] || 'Console';
 
@@ -784,6 +823,46 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
   const activeWorkspace = activeCapability.id
     ? getCapabilityWorkspace(activeCapability.id)
     : null;
+  const visibleAdvancedNavItems = useMemo(
+    () =>
+      activeWorkspace
+        ? getVisibleAdvancedToolDescriptors({
+            capability: activeCapability,
+            workspace: activeWorkspace,
+            workspaceRoles: currentWorkspaceRoles,
+            includeOnDemand: false,
+          }).map(tool => ({
+            name: tool.label,
+            shortName: tool.shortName,
+            path: tool.path,
+            description: tool.description,
+            icon: advancedToolIcons[tool.id],
+          }))
+        : [],
+    [activeCapability, activeWorkspace, currentWorkspaceRoles],
+  );
+  const fullAdvancedCommandItems = useMemo(
+    () =>
+      activeWorkspace
+        ? getVisibleAdvancedToolDescriptors({
+            capability: activeCapability,
+            workspace: activeWorkspace,
+            workspaceRoles: currentWorkspaceRoles,
+            includeOnDemand: true,
+          }).map(tool => ({
+            name: tool.label,
+            shortName: tool.shortName,
+            path: tool.path,
+            description: tool.description,
+            icon: advancedToolIcons[tool.id],
+          }))
+        : [],
+    [activeCapability, activeWorkspace, currentWorkspaceRoles],
+  );
+  const workspaceNavItems = useMemo(
+    () => [...primaryNavItems, ...companionNavItems, ...visibleAdvancedNavItems],
+    [visibleAdvancedNavItems],
+  );
   const commandResults = useMemo(() => {
     const normalizedQuery = commandQuery.trim().toLowerCase();
     const matches = (value: string) =>
@@ -794,19 +873,30 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
       .map(item => ({
         key: `route:${item.path}`,
         label: item.name,
-        description: `Primary workspace • ${item.path}`,
-        section: 'Primary routes',
+        description: `Cockpit route • ${item.path}`,
+        section: 'Daily cockpit',
         type: 'route' as const,
         onSelect: () => navigate(item.path),
       }));
 
-    const advancedRouteResults = advancedNavItems
+    const companionRouteResults = companionNavItems
+      .filter(item => matches(item.name))
+      .map(item => ({
+        key: `companion-route:${item.path}`,
+        label: item.name,
+        description: `Companion view • ${item.path}`,
+        section: 'Companion views',
+        type: 'route' as const,
+        onSelect: () => navigate(item.path),
+      }));
+
+    const advancedRouteResults = fullAdvancedCommandItems
       .filter(item => matches(item.name))
       .map(item => ({
         key: `advanced-route:${item.path}`,
         label: item.name,
-        description: `Advanced tool • ${item.description}`,
-        section: 'Advanced tools',
+        description: `Specialist tool • ${item.description}`,
+        section: 'Specialist tools',
         type: 'route' as const,
         onSelect: () => navigate(item.path),
       }));
@@ -853,7 +943,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
           description: `${item.id} • ${item.status} • ${item.phase}`,
           section: 'Work items',
           type: 'work-item' as const,
-          onSelect: () => navigate(`/orchestrator?selected=${encodeURIComponent(item.id)}`),
+          onSelect: () => navigate(`/?selected=${encodeURIComponent(item.id)}`),
         })) || [];
 
     const helpResults = [
@@ -869,6 +959,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
 
     return [
       ...primaryRouteResults,
+      ...companionRouteResults,
       ...advancedRouteResults,
       ...helpResults,
       ...capabilityResults,
@@ -882,6 +973,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     activeWorkspace?.workItems,
     capabilities,
     commandQuery,
+    fullAdvancedCommandItems,
     navigate,
     setActiveCapability,
     setActiveChatAgent,
@@ -907,7 +999,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     location.pathname === '/workspace/databases' ||
     location.pathname === '/capabilities/databases';
   const isAdvancedToolRoute =
-    advancedNavItems.some(item => item.path === location.pathname) ||
+    fullAdvancedCommandItems.some(item => item.path === location.pathname) ||
     location.pathname === '/rule-engine';
   const isLoginRoute = location.pathname === '/login';
   const showBlockingSyncState =
@@ -954,6 +1046,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
         <Sidebar
           isCollapsed={isSidebarCollapsed}
           isAdvancedNavOpen={isAdvancedNavOpen}
+          advancedNavItems={visibleAdvancedNavItems}
           onToggleCollapsed={() => setIsSidebarCollapsed(current => !current)}
           onToggleAdvancedNav={() => setIsAdvancedNavOpen(current => !current)}
         />
@@ -962,6 +1055,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
         {!isImmersiveRoute ? (
           <TopBar
             isSidebarCollapsed={isSidebarCollapsed}
+            navItems={workspaceNavItems}
             onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
             onOpenHelp={() => setIsHelpMenuOpen(true)}
             onOpenMobileNav={() => setIsMobileNavOpen(true)}
@@ -1308,7 +1402,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                 aria-expanded={isAdvancedNavOpen}
               >
                 <Sparkles size={18} />
-                <span>Advanced tools</span>
+                <span>Specialist tools</span>
                 <ChevronDown
                   size={16}
                   className={cn(
@@ -1319,7 +1413,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
               </button>
               {isAdvancedNavOpen ? (
                 <nav className="mt-2 flex flex-col gap-1.5">
-                  {advancedNavItems.map(item => (
+                  {visibleAdvancedNavItems.map(item => (
                     <NavLink
                       key={item.path}
                       to={item.path}
@@ -1337,6 +1431,11 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                       <span>{item.name}</span>
                     </NavLink>
                   ))}
+                  {!visibleAdvancedNavItems.length ? (
+                    <div className="rounded-xl border border-outline-variant/40 bg-surface-container-low px-4 py-3 text-xs leading-relaxed text-secondary">
+                      Specialist tools appear when the current capability or role needs them.
+                    </div>
+                  ) : null}
                 </nav>
               ) : null}
             </div>

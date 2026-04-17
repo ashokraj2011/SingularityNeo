@@ -453,7 +453,9 @@ export default function Agents() {
   const mutationState = mutationStatusByCapability[activeCapability.id];
   const ownerAgent = workspace.agents.find(agent => agent.isOwner) || workspace.agents[0] || null;
   const activeChatAgent =
-    workspace.agents.find(agent => agent.id === workspace.activeChatAgentId) || ownerAgent;
+    workspace.agents.find(agent => agent.id === workspace.primaryCopilotAgentId) ||
+    workspace.agents.find(agent => agent.id === workspace.activeChatAgentId) ||
+    ownerAgent;
   const availableModelOptions = runtimeStatus?.availableModels?.length
     ? runtimeStatus.availableModels
     : fallbackModelOptions;
@@ -1072,6 +1074,121 @@ export default function Agents() {
                 ))}
               </div>
             </AdvancedDisclosure>
+
+            <section className="workspace-surface space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="workspace-section-title">Operating profile</p>
+                  <p className="workspace-section-copy">
+                    What this specialist is allowed to do, what context it carries, and how we judge a good result.
+                  </p>
+                </div>
+                <StatusBadge
+                  tone={selectedAgent.userVisibility === 'PRIMARY_COPILOT' ? 'brand' : 'neutral'}
+                >
+                  {selectedAgent.userVisibility === 'PRIMARY_COPILOT'
+                    ? 'Primary capability copilot'
+                    : 'Specialist collaborator'}
+                </StatusBadge>
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-2">
+                <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-low px-4 py-4">
+                  <p className="workspace-meta-label">Tool policy</p>
+                  <p className="mt-2 text-sm leading-7 text-secondary">
+                    {selectedAgent.rolePolicy?.summary ||
+                      'Operate only through the tools and workflow boundaries attached to this collaborator.'}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {(selectedAgent.rolePolicy?.allowedToolIds || selectedAgent.preferredToolIds || []).length >
+                    0 ? (
+                      (selectedAgent.rolePolicy?.allowedToolIds ||
+                        selectedAgent.preferredToolIds ||
+                        []
+                      ).map(toolId => (
+                        <StatusBadge key={toolId} tone="info">
+                          {formatToolLabel(toolId)}
+                        </StatusBadge>
+                      ))
+                    ) : (
+                      <span className="text-sm text-secondary">
+                        No preferred tool policy is attached yet.
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-low px-4 py-4">
+                  <p className="workspace-meta-label">Memory scope</p>
+                  <p className="mt-2 text-sm leading-7 text-secondary">
+                    {selectedAgent.memoryScope?.summary ||
+                      'Uses capability context, current work state, and recent artifacts.'}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {(selectedAgent.memoryScope?.scopeLabels || []).length > 0 ? (
+                      (selectedAgent.memoryScope?.scopeLabels || []).map(label => (
+                        <StatusBadge key={label} tone="neutral">
+                          {label}
+                        </StatusBadge>
+                      ))
+                    ) : (
+                      <span className="text-sm text-secondary">
+                        Memory scope has not been described yet.
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-low px-4 py-4">
+                  <p className="workspace-meta-label">
+                    {selectedAgent.qualityBar?.label || 'Quality bar'}
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-secondary">
+                    {selectedAgent.qualityBar?.summary ||
+                      'Outputs should be useful, bounded, and evidence-aware.'}
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    {(selectedAgent.qualityBar?.checklist || []).length > 0 ? (
+                      (selectedAgent.qualityBar?.checklist || []).map(item => (
+                        <div
+                          key={item}
+                          className="rounded-2xl border border-outline-variant/30 bg-white px-3 py-2 text-sm text-secondary"
+                        >
+                          {item}
+                        </div>
+                      ))
+                    ) : (
+                      <span className="text-sm text-secondary">
+                        No explicit quality checklist is attached yet.
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-low px-4 py-4">
+                  <p className="workspace-meta-label">
+                    {selectedAgent.evalProfile?.label || 'Eval profile'}
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-secondary">
+                    {selectedAgent.evalProfile?.summary ||
+                      'Used to judge whether the collaborator actually moved the work forward safely.'}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {(selectedAgent.evalProfile?.criteria || []).length > 0 ? (
+                      (selectedAgent.evalProfile?.criteria || []).map(item => (
+                        <StatusBadge key={item} tone="success">
+                          {item}
+                        </StatusBadge>
+                      ))
+                    ) : (
+                      <span className="text-sm text-secondary">
+                        No explicit evaluation criteria are attached yet.
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
 
             <section className="workspace-surface">
               <div className="flex flex-wrap items-center justify-between gap-3">

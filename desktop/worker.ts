@@ -627,6 +627,8 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
   return {
     configured,
     provider: 'GitHub Copilot SDK (Desktop Worker)',
+    runtimeOwner: 'DESKTOP',
+    executionRuntimeOwner: 'DESKTOP',
     endpoint: headlessCli ? process.env.COPILOT_CLI_URL || githubModelsApiUrl : githubModelsApiUrl,
     tokenSource,
     defaultModel: runtimeDefaultModel,
