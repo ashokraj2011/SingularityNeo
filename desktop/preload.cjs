@@ -10,9 +10,14 @@ contextBridge.exposeInMainWorld('singularityDesktop', {
   getShellContext: () => ipcRenderer.invoke('desktop:get-shell-context'),
   pingWorker: () => ipcRenderer.invoke('desktop:worker:ping'),
   getRuntimeStatus: () => ipcRenderer.invoke('desktop:runtime:status'),
+  setActorContext: actor => ipcRenderer.invoke('desktop:runtime:actor-context', { actor }),
   setRuntimeToken: token => ipcRenderer.invoke('desktop:runtime:set-token', { token }),
   clearRuntimeToken: () => ipcRenderer.invoke('desktop:runtime:clear-token'),
   sendRuntimeChat: payload => ipcRenderer.invoke('desktop:runtime:chat', payload),
+  claimCapabilityExecution: payload =>
+    ipcRenderer.invoke('desktop:runtime:execution:claim', payload),
+  releaseCapabilityExecution: payload =>
+    ipcRenderer.invoke('desktop:runtime:execution:release', payload),
   streamRuntimeChat: (payload, onEvent) => {
     const streamId =
       payload?.streamId ||

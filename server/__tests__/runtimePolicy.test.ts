@@ -47,6 +47,8 @@ describe('runtime policy', () => {
   });
 
   it('keeps the missing-runtime message stable for API and stream errors', () => {
-    expect(getMissingRuntimeConfigurationMessage()).toMatch(/Set COPILOT_CLI_URL/);
+    expect(getMissingRuntimeConfigurationMessage()).toMatch(
+      /Start the desktop runtime|COPILOT_CLI_URL/,
+    );
   });
 });

@@ -64,6 +64,11 @@ import {
 } from '../src/lib/capabilityArchitecture';
 import { query, transaction, getDatabaseRuntimeInfo } from './db';
 import { resolveRuntimeModel } from './githubModels';
+import {
+  normalizeEmbeddingProviderKey,
+  normalizeProviderKey,
+  resolveProviderDisplayName,
+} from './providerRegistry';
 import { syncWorkspaceOrganizationFromCapabilities } from './workspaceOrganization';
 import {
   applyWorkspaceRuntime,
@@ -102,6 +107,15 @@ import {
   listAgentLearningProfilesTx,
   listAgentSessionSummariesTx,
 } from './agentLearning/repository';
+import {
+  buildCapabilityExecutionSurface,
+  listDesktopExecutorRegistrations,
+} from './executionOwnership';
+import {
+  executionRuntimeRpc,
+  isRemoteExecutionClient,
+} from './execution/runtimeClient';
+import { buildCapabilityReadinessContract } from './readinessContract';
 
 type CapabilityBundle = {
   capability: Capability;
@@ -311,6 +325,8 @@ const workItemHandoffPacketFromRow = (
   recommendedNextStep: row.recommended_next_step || undefined,
   artifactIds: asStringArray(row.artifact_ids),
   traceIds: asStringArray(row.trace_ids),
+  delegationOriginTaskId: row.delegation_origin_task_id || undefined,
+  delegationOriginAgentId: row.delegation_origin_agent_id || undefined,
   createdAt:
     row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ''),
   acceptedAt:
@@ -868,9 +884,11 @@ const agentFromRow = (row: Record<string, any>): CapabilityAgent => ({
   learningNotes: asStringArray(row.learning_notes),
   skillIds: asStringArray(row.skill_ids),
   preferredToolIds: asStringArray(row.preferred_tool_ids) as CapabilityAgent['preferredToolIds'],
-  provider: process.env.COPILOT_CLI_URL?.trim()
-    ? 'GitHub Copilot SDK'
-    : row.provider,
+  provider: resolveProviderDisplayName(row.provider_key || row.provider),
+  providerKey: normalizeProviderKey(row.provider_key || row.provider),
+  embeddingProviderKey: normalizeEmbeddingProviderKey(
+    row.embedding_provider_key || row.provider_key || row.provider,
+  ),
   model: row.model,
   tokenLimit: Number(row.token_limit || 0),
   learningProfile: createDefaultAgentLearningProfile(),
@@ -995,6 +1013,12 @@ const taskFromRow = (row: Record<string, any>): AgentTask => ({
   runId: row.run_id || undefined,
   runStepId: row.run_step_id || undefined,
   toolInvocationId: row.tool_invocation_id || undefined,
+  taskSubtype: row.task_subtype || undefined,
+  parentTaskId: row.parent_task_id || undefined,
+  parentRunId: row.parent_run_id || undefined,
+  parentRunStepId: row.parent_run_step_id || undefined,
+  delegatedAgentId: row.delegated_agent_id || undefined,
+  handoffPacketId: row.handoff_packet_id || undefined,
   linkedArtifacts: asJsonArray<NonNullable<AgentTask['linkedArtifacts']>[number]>(row.linked_artifacts),
   producedOutputs: asJsonArray<NonNullable<AgentTask['producedOutputs']>[number]>(row.produced_outputs),
 });
@@ -1549,12 +1573,14 @@ const upsertAgentTx = async (
         skill_ids,
         preferred_tool_ids,
         provider,
+        provider_key,
+        embedding_provider_key,
         model,
         token_limit,
         updated_at
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,${withUpdatedTimestamp}
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,${withUpdatedTimestamp}
       )
       ON CONFLICT (capability_id, id) DO UPDATE SET
         name = EXCLUDED.name,
@@ -1574,6 +1600,8 @@ const upsertAgentTx = async (
         skill_ids = EXCLUDED.skill_ids,
         preferred_tool_ids = EXCLUDED.preferred_tool_ids,
         provider = EXCLUDED.provider,
+        provider_key = EXCLUDED.provider_key,
+        embedding_provider_key = EXCLUDED.embedding_provider_key,
         model = EXCLUDED.model,
         token_limit = EXCLUDED.token_limit,
         updated_at = ${withUpdatedTimestamp}
@@ -1597,7 +1625,11 @@ const upsertAgentTx = async (
       JSON.stringify(contract),
       agent.skillIds,
       agent.preferredToolIds || [],
-      agent.provider,
+      agent.provider || resolveProviderDisplayName(agent.providerKey),
+      normalizeProviderKey(agent.providerKey || agent.provider),
+      normalizeEmbeddingProviderKey(
+        agent.embeddingProviderKey || agent.providerKey || agent.provider,
+      ),
       normalizedModel,
       agent.tokenLimit,
     ],
@@ -2085,11 +2117,17 @@ const replaceTasksTx = async (
           run_id,
           run_step_id,
           tool_invocation_id,
+          task_subtype,
+          parent_task_id,
+          parent_run_id,
+          parent_run_step_id,
+          delegated_agent_id,
+          handoff_packet_id,
           linked_artifacts,
           produced_outputs,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,${withUpdatedTimestamp})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,${withUpdatedTimestamp})
       `,
       [
         capabilityId,
@@ -2110,6 +2148,12 @@ const replaceTasksTx = async (
         task.runId || null,
         task.runStepId || null,
         task.toolInvocationId || null,
+        task.taskSubtype || null,
+        task.parentTaskId || null,
+        task.parentRunId || null,
+        task.parentRunStepId || null,
+        task.delegatedAgentId || null,
+        task.handoffPacketId || null,
         JSON.stringify(task.linkedArtifacts || []),
         JSON.stringify(task.producedOutputs || []),
       ],
@@ -2839,8 +2883,23 @@ const getCapabilityWorkspaceTx = async (
     client,
     capability.id,
   );
+  const latestExecutionStateResult = await client.query(
+    `
+      SELECT queue_reason
+      FROM capability_workflow_runs
+      WHERE capability_id = $1
+        AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT')
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT 1
+    `,
+    [capability.id],
+  );
   const learningProfilesByAgent = await listAgentLearningProfilesTx(client, capability.id);
   const sessionSummariesByAgent = await listAgentSessionSummariesTx(client, capability.id);
+  const executionSurface = await buildCapabilityExecutionSurface({
+    capabilityId: capability.id,
+    queueReason: latestExecutionStateResult.rows[0]?.queue_reason || undefined,
+  });
 
   const agents = agentResult.rows.map(agentFromRow).map(agent => ({
     ...agent,
@@ -2860,8 +2919,7 @@ const getCapabilityWorkspaceTx = async (
   const effectiveWorkflows = hasSharedStandardWorkflow
     ? storedWorkflows
     : [...getDefaultCapabilityWorkflows(capability), ...storedWorkflows];
-
-  return materializeWorkspace(capability, {
+  const baseWorkspace = materializeWorkspace(capability, {
     capabilityId: capability.id,
     agents: applyWorkspaceRuntime(capability, agents, tasks, executionLogs),
     workflows: effectiveWorkflows,
@@ -2874,8 +2932,22 @@ const getCapabilityWorkspaceTx = async (
     ),
     messages: messageResult.rows.map(messageFromRow),
     activeChatAgentId: workspaceResult.rows[0]?.active_chat_agent_id || undefined,
+    executionOwnership: executionSurface.executionOwnership,
+    executionDispatchState: executionSurface.executionDispatchState,
+    executionQueueReason: executionSurface.executionQueueReason,
     createdAt: workspaceCreatedAt(workspaceResult.rows[0]),
   });
+  const readinessContract = buildCapabilityReadinessContract({
+    capability,
+    workspace: baseWorkspace,
+    executionOwnership: executionSurface.executionOwnership,
+    desktopExecutors: await listDesktopExecutorRegistrations(),
+  });
+
+  return {
+    ...baseWorkspace,
+    readinessContract,
+  };
 };
 
 const getCapabilityBundleTx = async (
@@ -3187,6 +3259,14 @@ export const releaseWorkItemCodeClaimRecord = async ({
   claimType: WorkItemCodeClaim['claimType'];
   userId?: string;
 }): Promise<void> =>
+  isRemoteExecutionClient()
+    ? executionRuntimeRpc<void>('releaseWorkItemCodeClaimRecord', {
+        capabilityId,
+        workItemId,
+        claimType,
+        userId,
+      })
+    :
   transaction(async client => {
     await assertCapabilityEditableTx(client, capabilityId);
     await client.query(
@@ -3276,11 +3356,13 @@ export const createWorkItemHandoffPacketRecord = async ({
           recommended_next_step,
           artifact_ids,
           trace_ids,
+          delegation_origin_task_id,
+          delegation_origin_agent_id,
           accepted_at,
           created_at,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,${withUpdatedTimestamp})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,${withUpdatedTimestamp})
         RETURNING *
       `,
       [
@@ -3297,6 +3379,8 @@ export const createWorkItemHandoffPacketRecord = async ({
         packet.recommendedNextStep || null,
         JSON.stringify(packet.artifactIds || []),
         JSON.stringify(packet.traceIds || []),
+        packet.delegationOriginTaskId || null,
+        packet.delegationOriginAgentId || null,
         packet.acceptedAt || null,
         packet.createdAt,
       ],
@@ -3636,7 +3720,45 @@ export const initializeWorkspaceFoundations = async (): Promise<WorkspaceCatalog
   });
 
 export const getCapabilityBundle = async (capabilityId: string): Promise<CapabilityBundle> =>
+  isRemoteExecutionClient()
+    ? executionRuntimeRpc<CapabilityBundle>('getCapabilityBundle', {
+        capabilityId,
+      })
+    :
   transaction(client => getCapabilityBundleTx(client, capabilityId));
+
+export const listCapabilityTasks = async (
+  capabilityId: string,
+): Promise<AgentTask[]> => {
+  const result = await query(
+    `
+      SELECT *
+      FROM capability_tasks
+      WHERE capability_id = $1
+      ORDER BY created_at DESC, id DESC
+    `,
+    [capabilityId],
+  );
+
+  return result.rows.map(taskFromRow);
+};
+
+export const getCapabilityTask = async (
+  capabilityId: string,
+  taskId: string,
+): Promise<AgentTask | null> => {
+  const result = await query(
+    `
+      SELECT *
+      FROM capability_tasks
+      WHERE capability_id = $1 AND id = $2
+      LIMIT 1
+    `,
+    [capabilityId, taskId],
+  );
+
+  return result.rowCount ? taskFromRow(result.rows[0]) : null;
+};
 
 export const publishCapabilityContractRecord = async ({
   capabilityId,
@@ -4212,6 +4334,12 @@ export const replaceCapabilityWorkspaceContentRecord = async (
     >
   >,
 ): Promise<CapabilityWorkspace> =>
+  isRemoteExecutionClient()
+    ? executionRuntimeRpc<CapabilityWorkspace>('replaceCapabilityWorkspaceContentRecord', {
+        capabilityId,
+        updates,
+      })
+    :
   transaction(async client => {
     const capability = await assertCapabilityEditableTx(client, capabilityId);
 

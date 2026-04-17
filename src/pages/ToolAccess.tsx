@@ -37,13 +37,24 @@ const TOOL_TONE: Record<ToolAdapterId, 'info' | 'warning' | 'danger'> = {
   workspace_search: 'info',
   git_status: 'info',
   workspace_write: 'danger',
+  workspace_replace_block: 'danger',
+  workspace_apply_patch: 'danger',
+  delegate_task: 'warning',
+  publish_bounty: 'warning',
+  resolve_bounty: 'warning',
+  wait_for_signal: 'warning',
   run_build: 'warning',
   run_test: 'warning',
   run_docs: 'warning',
   run_deploy: 'danger',
 };
 
-const HIGH_IMPACT_TOOLS = new Set<ToolAdapterId>(['workspace_write', 'run_deploy']);
+const HIGH_IMPACT_TOOLS = new Set<ToolAdapterId>([
+  'workspace_write',
+  'workspace_replace_block',
+  'workspace_apply_patch',
+  'run_deploy',
+]);
 
 const byLabel = <T extends { label: string }>(items: T[]) =>
   items.slice().sort((left, right) => left.label.localeCompare(right.label));

@@ -27,9 +27,12 @@ export interface SingularityDesktopBridge {
   getShellContext: () => Promise<DesktopShellContext>;
   pingWorker: () => Promise<DesktopWorkerPing>;
   getRuntimeStatus: () => Promise<unknown>;
+  setActorContext: (actor: unknown) => Promise<unknown>;
   setRuntimeToken: (token: string) => Promise<unknown>;
   clearRuntimeToken: () => Promise<unknown>;
   sendRuntimeChat: (payload: unknown) => Promise<unknown>;
+  claimCapabilityExecution: (payload: unknown) => Promise<unknown>;
+  releaseCapabilityExecution: (payload: unknown) => Promise<unknown>;
   streamRuntimeChat: (
     payload: unknown,
     onEvent: (event: unknown) => void,

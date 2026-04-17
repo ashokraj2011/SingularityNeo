@@ -10,6 +10,7 @@ import {
   GitHubProviderRateLimitError,
   isGitHubProviderRateLimitError,
 } from '../githubModels';
+import { isDesktopExecutionRuntime } from '../executionOwnership';
 
 const LEASE_MS = 30000;
 const HEARTBEAT_MS = 10000;
@@ -123,6 +124,10 @@ const runOnce = async () => {
 };
 
 export const wakeExecutionWorker = () => {
+  if (isDesktopExecutionRuntime()) {
+    return;
+  }
+
   if (wakeTimer) {
     clearTimeout(wakeTimer);
   }
@@ -134,6 +139,10 @@ export const wakeExecutionWorker = () => {
 };
 
 export const startExecutionWorker = () => {
+  if (isDesktopExecutionRuntime()) {
+    return;
+  }
+
   if (!pollTimer) {
     pollTimer = setInterval(() => {
       void runOnce();

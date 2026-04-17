@@ -40,6 +40,7 @@ export const InteractionTimeline = ({
   maxItems = 10,
   onOpenArtifact,
   onOpenRun,
+  onOpenTask,
 }: {
   feed: CapabilityInteractionFeed;
   title?: string;
@@ -47,6 +48,7 @@ export const InteractionTimeline = ({
   maxItems?: number;
   onOpenArtifact?: (artifactId: string) => void;
   onOpenRun?: (runId: string) => void;
+  onOpenTask?: (taskId: string) => void;
 }) => (
   <div className="workspace-meta-card">
     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -60,6 +62,8 @@ export const InteractionTimeline = ({
         <StatusBadge tone="info">{feed.summary.totalCount} records</StatusBadge>
         <StatusBadge tone="neutral">{feed.summary.toolCount} tools</StatusBadge>
         <StatusBadge tone="neutral">{feed.summary.chatCount} chat</StatusBadge>
+        <StatusBadge tone="neutral">{feed.summary.artifactCount} artifacts</StatusBadge>
+        <StatusBadge tone="neutral">{feed.summary.taskCount} tasks</StatusBadge>
         <StatusBadge tone="neutral">{feed.summary.learningCount} learning</StatusBadge>
       </div>
     </div>
@@ -100,6 +104,15 @@ export const InteractionTimeline = ({
                     className="enterprise-button enterprise-button-secondary"
                   >
                     Open artifact
+                  </button>
+                ) : null}
+                {record.id.startsWith('task-') && onOpenTask ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenTask(record.id.replace(/^task-/, ''))}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    Open task
                   </button>
                 ) : null}
                 {record.runId && onOpenRun ? (

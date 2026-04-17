@@ -3,6 +3,7 @@ import type {
   AgentLearningProfile,
   AgentSessionScope,
   AgentSessionSummary,
+  OperatingPolicySnapshot,
 } from '../../src/types';
 import { query, transaction } from '../db';
 
@@ -597,5 +598,77 @@ export const listAgentsNeedingLearning = async (): Promise<
   return result.rows.map(row => ({
     capabilityId: String((row as Record<string, any>).capability_id),
     agentId: String((row as Record<string, any>).agent_id),
+  }));
+};
+
+export const createOperatingPolicySnapshotTx = async (
+  client: PoolClient,
+  capabilityId: string,
+  summary: string,
+  triggeredByUserId?: string,
+  chatMessageId?: string,
+) => {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS operating_policy_snapshots (
+      id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL,
+      operating_policy_summary TEXT NOT NULL,
+      triggered_by_user_id TEXT,
+      chat_message_id TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  
+  const snapshotId = createId('OPSNAP');
+  await client.query(`
+    INSERT INTO operating_policy_snapshots (
+      id, capability_id, operating_policy_summary, triggered_by_user_id, chat_message_id, created_at
+    ) VALUES ($1, $2, $3, $4, $5, NOW())
+  `, [snapshotId, capabilityId, summary, triggeredByUserId || null, chatMessageId || null]);
+  return snapshotId;
+};
+
+export const createOperatingPolicySnapshot = async (
+  capabilityId: string,
+  summary: string,
+  triggeredByUserId?: string,
+  chatMessageId?: string,
+) => transaction(async (client) => {
+  return createOperatingPolicySnapshotTx(client, capabilityId, summary, triggeredByUserId, chatMessageId);
+});
+
+export const revertOperatingPolicyToSnapshot = async (
+  capabilityId: string,
+  snapshotId: string
+) => transaction(async (client) => {
+  const result = await client.query(`SELECT operating_policy_summary FROM operating_policy_snapshots WHERE capability_id = $1 AND id = $2`, [capabilityId, snapshotId]);
+  if (!result.rowCount) throw new Error("Snapshot not found");
+  const summary = result.rows[0].operating_policy_summary;
+  await client.query(`UPDATE capabilities SET operating_policy_summary = $1, updated_at = NOW() WHERE id = $2`, [summary, capabilityId]);
+  return summary;
+});
+
+export const getOperatingPolicySnapshots = async (capabilityId: string): Promise<OperatingPolicySnapshot[]> => {
+  await query(`
+    CREATE TABLE IF NOT EXISTS operating_policy_snapshots (
+      id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL,
+      operating_policy_summary TEXT NOT NULL,
+      triggered_by_user_id TEXT,
+      chat_message_id TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  const result = await query(
+    `SELECT * FROM operating_policy_snapshots WHERE capability_id = $1 ORDER BY created_at DESC`,
+    [capabilityId]
+  );
+  return result.rows.map(row => ({
+    id: row.id,
+    capabilityId: row.capability_id,
+    operatingPolicySummary: row.operating_policy_summary,
+    triggeredByUserId: row.triggered_by_user_id || undefined,
+    chatMessageId: row.chat_message_id || undefined,
+    createdAt: asIso(row.created_at)
   }));
 };

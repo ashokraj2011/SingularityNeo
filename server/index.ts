@@ -76,6 +76,7 @@ import {
   getCapabilityArtifact,
   getCapabilityArtifactFileBytes,
   getCapabilityBundle,
+  getCapabilityTask,
   getCapabilityRepositoriesRecord,
   getWorkspaceCatalogSnapshot,
   getWorkspaceSettings,
@@ -84,6 +85,7 @@ import {
   initializeWorkItemExecutionContextRecord,
   listWorkItemHandoffPacketsRecord,
   initializeSeedData,
+  listCapabilityTasks,
   publishCapabilityContractRecord,
   removeCapabilitySkillRecord,
   replaceCapabilityWorkspaceContentRecord,
@@ -173,6 +175,11 @@ import {
   buildWorkItemExplainDetail,
   generateReviewPacketForWorkItem,
 } from './workItemExplain';
+import { buildCapabilityInteractionFeedSnapshot } from './interactionFeed';
+import {
+  createEvidencePacketForWorkItem,
+  getEvidencePacket,
+} from './evidencePackets';
 import {
   GitHubProviderRateLimitError,
   defaultModel,
@@ -196,11 +203,16 @@ import {
   renderWorkItemFlightRecorderMarkdown,
 } from './flightRecorder';
 import {
+  applyAgentLearningCorrection,
   ensureAgentLearningBackfill,
   getAgentLearningProfileDetail,
   queueCapabilityAgentLearningRefresh,
   queueSingleAgentLearningRefresh,
 } from './agentLearning/service';
+import {
+  getOperatingPolicySnapshots,
+  revertOperatingPolicyToSnapshot,
+} from './agentLearning/repository';
 import {
   startAgentLearningWorker,
   wakeAgentLearningWorker,
@@ -221,6 +233,9 @@ import { getMissingRuntimeConfigurationMessage } from './runtimePolicy';
 import { sendApiError } from './api/errors';
 import { buildRuntimeStatus } from './runtimeStatus';
 import { registerRuntimeRoutes } from './routes/runtime';
+import { registerExecutionRuntimeRoutes } from './routes/executionRuntime';
+import { registerIncidentRoutes } from './routes/incidents';
+import { isDesktopExecutionRuntime } from './executionOwnership';
 import {
   buildFocusedWorkItemDeveloperPrompt,
   buildWorkItemStageControlBriefing,
@@ -239,6 +254,7 @@ import {
   detectCapabilityWorkspaceProfile,
   detectWorkspaceProfile,
 } from './workspaceProfile';
+import { startIncidentWorker, wakeIncidentWorker } from './incidents/worker';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -263,9 +279,13 @@ const ensureWorkersStarted = () => {
     return;
   }
 
-  startExecutionWorker();
+  if (!isDesktopExecutionRuntime()) {
+    startExecutionWorker();
+  }
   startAgentLearningWorker();
   wakeAgentLearningWorker();
+  startIncidentWorker();
+  wakeIncidentWorker();
   workersStarted = true;
 };
 
@@ -1127,7 +1147,14 @@ app.use((request, response, next) => {
   next();
 });
 
-app.use(express.json({ limit: '2mb' }));
+app.use(
+  express.json({
+    limit: '12mb',
+    verify: (request, _response, buffer) => {
+      (request as express.Request & { rawBody?: string }).rawBody = buffer.toString('utf8');
+    },
+  }),
+);
 
 app.post('/api/onboarding/validate-connectors', (request, response) => {
   const body = request.body as {
@@ -1612,6 +1639,72 @@ app.get('/api/capabilities/:capabilityId', async (request, response) => {
   }
 });
 
+app.get('/api/capabilities/:capabilityId/readiness-contract', async (request, response) => {
+  try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
+    const bundle = await getCapabilityBundle(request.params.capabilityId);
+    response.json(bundle.workspace.readinessContract);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/interaction-feed', async (request, response) => {
+  try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workitem.read',
+    });
+    response.json(
+      await buildCapabilityInteractionFeedSnapshot({
+        capabilityId: request.params.capabilityId,
+        workItemId: String(request.query.workItemId || '').trim() || undefined,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/tasks', async (request, response) => {
+  try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workitem.read',
+    });
+    response.json(await listCapabilityTasks(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/tasks/:taskId', async (request, response) => {
+  try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'workitem.read',
+    });
+    const task = await getCapabilityTask(
+      request.params.capabilityId,
+      request.params.taskId,
+    );
+    if (!task) {
+      response.status(404).json({ error: 'Task was not found.' });
+      return;
+    }
+    response.json(task);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
 app.get('/api/capabilities/:capabilityId/run-console', async (request, response) => {
   try {
     await assertCapabilityPermission({
@@ -1977,6 +2070,42 @@ app.post('/api/capabilities/:capabilityId/agents/:agentId/learning/refresh', asy
   }
 });
 
+app.post('/api/capabilities/:capabilityId/agents/:agentId/learning/corrections', async (request, response) => {
+  const correction = String(request.body?.correction || '').trim();
+  if (!correction) {
+    response.status(400).json({
+      error: 'A learning correction is required.',
+    });
+    return;
+  }
+
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'capability.edit',
+    });
+    await applyAgentLearningCorrection({
+      capabilityId: request.params.capabilityId,
+      agentId: request.params.agentId,
+      correction,
+      workItemId: String(request.body?.workItemId || '').trim() || undefined,
+      runId: String(request.body?.runId || '').trim() || undefined,
+      actor,
+    });
+    wakeAgentLearningWorker();
+    response.json(
+      await getAgentLearningProfileDetail(
+        request.params.capabilityId,
+        request.params.agentId,
+      ),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
 app.get('/api/capabilities/:capabilityId/evals/suites', async (request, response) => {
   try {
     await assertCapabilityPermission({
@@ -2176,6 +2305,48 @@ app.post(
     }
   },
 );
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/evidence-packets',
+  async (request, response) => {
+    try {
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'artifact.read',
+      });
+      response.status(201).json(
+        await createEvidencePacketForWorkItem({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          actor,
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.get('/api/evidence-packets/:bundleId', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    const packet = await getEvidencePacket(request.params.bundleId);
+    if (!packet) {
+      response.status(404).json({ error: 'Evidence packet was not found.' });
+      return;
+    }
+    await assertCapabilityPermission({
+      capabilityId: packet.capabilityId,
+      actor,
+      action: 'artifact.read',
+    });
+    response.json(packet);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
 
 app.post(
   '/api/capabilities/:capabilityId/work-items/:workItemId/stage-control/continue',
@@ -2893,6 +3064,29 @@ app.patch('/api/capabilities/:capabilityId/repositories', async (request, respon
     sendRepositoryError(response, error);
   }
 });
+
+  app.get('/api/capabilities/:capabilityId/policy-history', async (request, response) => {
+    try {
+      const capabilityId = request.params.capabilityId;
+      await assertCapabilityPermission(request, capabilityId, 'READ_CAPABILITY');
+      const snapshots = await getOperatingPolicySnapshots(capabilityId);
+      response.json(snapshots);
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.post('/api/capabilities/:capabilityId/revert-policy/:snapshotId', async (request, response) => {
+    try {
+      const capabilityId = request.params.capabilityId;
+      const snapshotId = request.params.snapshotId;
+      await assertCapabilityPermission(request, capabilityId, 'UPDATE_CAPABILITY_CONFIG');
+      const newSummary = await revertOperatingPolicyToSnapshot(capabilityId, snapshotId);
+      response.json({ success: true, operatingPolicySummary: newSummary });
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
 
 app.post('/api/capabilities/:capabilityId/skills', async (request, response) => {
   const skill = request.body as Skill | undefined;
@@ -4243,6 +4437,8 @@ app.post('/api/capabilities/:capabilityId/code-workspaces/branch', async (reques
 });
 
 registerRuntimeRoutes(app);
+registerExecutionRuntimeRoutes(app);
+registerIncidentRoutes(app, { parseActorContext });
 
 app.post('/api/runtime/chat', async (request, response) => {
   const body = request.body as ChatRequestBody;

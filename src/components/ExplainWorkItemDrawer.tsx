@@ -11,6 +11,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import MarkdownContent from './MarkdownContent';
 import {
+  createEvidencePacketForWorkItem,
   fetchWorkItemExplainDetail,
   generateWorkItemReviewPacket,
   publishCapabilityArtifactToConfluence,
@@ -107,6 +108,7 @@ export const ExplainWorkItemDrawer = ({
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [isGeneratingPacket, setIsGeneratingPacket] = useState(false);
+  const [isGeneratingEvidencePacket, setIsGeneratingEvidencePacket] = useState(false);
   const [reviewPacket, setReviewPacket] = useState<ReviewPacketArtifactSummary | undefined>();
   const [connectorContext, setConnectorContext] = useState<CapabilityConnectorContext | null>(
     null,
@@ -235,6 +237,24 @@ export const ExplainWorkItemDrawer = ({
       showError('Review packet failed', message);
     } finally {
       setIsGeneratingPacket(false);
+    }
+  };
+
+  const handleGenerateEvidencePacket = async () => {
+    setIsGeneratingEvidencePacket(true);
+    try {
+      const packet = await createEvidencePacketForWorkItem(capability.id, workItem.id);
+      success(
+        'Evidence packet created',
+        `${workItem.title} now has a durable internal evidence packet permalink.`,
+      );
+      navigate(`/e/${encodeURIComponent(packet.bundleId)}`);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to generate the evidence packet.';
+      showError('Evidence packet failed', message);
+    } finally {
+      setIsGeneratingEvidencePacket(false);
     }
   };
 
@@ -607,15 +627,26 @@ export const ExplainWorkItemDrawer = ({
                   description="Generate or preview the audit-ready packet for PR review, CAB review, or release review."
                   icon={FileText}
                   action={
-                    <button
-                      type="button"
-                      onClick={handleGeneratePacket}
-                      disabled={isGeneratingPacket}
-                      className="enterprise-button enterprise-button-secondary"
-                    >
-                      <FileText size={16} />
-                      {isGeneratingPacket ? 'Generating…' : 'Generate review packet'}
-                    </button>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={handleGenerateEvidencePacket}
+                        disabled={isGeneratingEvidencePacket}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        <ShieldCheck size={16} />
+                        {isGeneratingEvidencePacket ? 'Generating…' : 'Create evidence packet'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleGeneratePacket}
+                        disabled={isGeneratingPacket}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        <FileText size={16} />
+                        {isGeneratingPacket ? 'Generating…' : 'Generate review packet'}
+                      </button>
+                    </div>
                   }
                 >
                   {reviewPacket ? (

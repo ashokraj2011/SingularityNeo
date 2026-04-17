@@ -15,6 +15,7 @@ import type {
   CapabilityChatMessage,
   CapabilityMetadataEntry,
   CapabilityStakeholder,
+  ProviderKey,
 } from '../src/types';
 import {
   buildCapabilityBriefing,
@@ -32,6 +33,21 @@ import {
   isHttpFallbackAllowed,
 } from './runtimePolicy';
 import { getCapabilityWorkspaceRoots } from './workspacePaths';
+import {
+  isLocalOpenAIConfigured,
+  listLocalOpenAIModels,
+  requestLocalOpenAIEmbeddings,
+  requestLocalOpenAIModel,
+  requestLocalOpenAIModelStream,
+  type ProviderMessage,
+} from './localOpenAIProvider';
+import {
+  DEFAULT_PROVIDER_KEY,
+  LOCAL_OPENAI_PROVIDER_KEY,
+  normalizeProviderKey,
+  resolveAgentProviderKey,
+  resolveProviderDisplayName,
+} from './providerRegistry';
 
 export type ChatHistoryMessage = {
   role?: 'user' | 'agent';
@@ -65,8 +81,9 @@ type SessionExchangeResult = {
 
 type ManagedChatSessionRecord = {
   sessionId: string;
-  session: CopilotSession;
+  session?: CopilotSession | null;
   fingerprint: string;
+  providerKey: string;
   capabilityId?: string;
   capabilityName?: string;
   agentId?: string;
@@ -76,6 +93,7 @@ type ManagedChatSessionRecord = {
   model?: string;
   createdAt: string;
   lastUsedAt: string;
+  localMessages?: ProviderMessage[];
 };
 
 export class GitHubProviderRateLimitError extends Error {
@@ -812,8 +830,9 @@ export const listAvailableRuntimeModels = async ({
   }
 
   const token = getConfiguredToken();
+  const localModels = await listLocalOpenAIModels().catch(() => []);
   if (!token && !getConfiguredCopilotCliUrl()) {
-    const fallback = getStaticRuntimeModels();
+    const fallback = localModels.length > 0 ? localModels : getStaticRuntimeModels();
     runtimeModelCache = {
       fetchedAt: Date.now(),
       models: fallback,
@@ -835,15 +854,19 @@ export const listAvailableRuntimeModels = async ({
         (model, index, models) =>
           models.findIndex(candidate => candidate.id === model.id) === index,
       );
+    const merged = [...normalized, ...localModels].filter(
+      (model, index, models) =>
+        models.findIndex(candidate => candidate.apiModelId === model.apiModelId) === index,
+    );
 
-    if (normalized.length > 0) {
+    if (merged.length > 0) {
       runtimeModelCache = {
         fetchedAt: Date.now(),
-        models: normalized,
+        models: merged,
         fromRuntime: true,
       };
       return {
-        models: normalized,
+        models: merged,
         fromRuntime: true,
       };
     }
@@ -851,7 +874,7 @@ export const listAvailableRuntimeModels = async ({
     // Fall through to the static fallback when the SDK cannot enumerate models.
   }
 
-  const fallback = getStaticRuntimeModels();
+  const fallback = localModels.length > 0 ? localModels : getStaticRuntimeModels();
   runtimeModelCache = {
     fetchedAt: Date.now(),
     models: fallback,
@@ -1499,6 +1522,7 @@ const getManagedScopedSession = async ({
   resetSession?: boolean;
 }) => {
   const workingDirectory = selectWorkingDirectory(capability);
+  const providerKey = resolveAgentProviderKey(agent);
   const fingerprint = getChatSessionFingerprint({
     capability,
     agent,
@@ -1545,7 +1569,7 @@ const getManagedScopedSession = async ({
       ].join('--');
   const cacheKey = sessionId;
   const cached = !resetSession ? managedChatSessions.get(cacheKey) : null;
-  if (cached?.fingerprint === fingerprint) {
+  if (cached?.fingerprint === fingerprint && cached.providerKey === providerKey) {
     return {
       session: cached.session,
       isNewSession: false,
@@ -1553,6 +1577,43 @@ const getManagedScopedSession = async ({
       cacheKey,
       fingerprint,
       model: cached.model,
+      providerKey,
+      localMessages: cached.localMessages || [],
+    };
+  }
+
+  if (providerKey === LOCAL_OPENAI_PROVIDER_KEY) {
+    const initialMessages: ProviderMessage[] =
+      !resetSession && cached?.localMessages?.length
+        ? cached.localMessages
+        : [];
+
+    managedChatSessions.set(cacheKey, {
+      sessionId,
+      session: null,
+      fingerprint,
+      providerKey,
+      capabilityId: capability.id,
+      capabilityName: capability.name,
+      agentId: agent.id,
+      agentName: agent.name,
+      scope,
+      scopeId,
+      model: agent.model || undefined,
+      createdAt: new Date().toISOString(),
+      lastUsedAt: new Date().toISOString(),
+      localMessages: initialMessages,
+    });
+
+    return {
+      session: null,
+      isNewSession: resetSession || !cached,
+      sessionId,
+      cacheKey,
+      fingerprint,
+      model: agent.model,
+      providerKey,
+      localMessages: initialMessages,
     };
   }
 
@@ -1616,6 +1677,7 @@ const getManagedScopedSession = async ({
     sessionId,
     session,
     fingerprint,
+    providerKey,
     capabilityId: capability.id,
     capabilityName: capability.name,
     agentId: agent.id,
@@ -1634,6 +1696,8 @@ const getManagedScopedSession = async ({
     cacheKey,
     fingerprint,
     model: selectedModel,
+    providerKey,
+    localMessages: [],
   };
 };
 
@@ -1676,12 +1740,14 @@ export const invokeScopedCapabilitySession = async ({
   if (!(await shouldPreferHttpFallback())) {
     let managedSession:
       | {
-          session: CopilotSession;
+          session: CopilotSession | null;
           isNewSession: boolean;
           sessionId: string;
           cacheKey: string;
           fingerprint: string;
-          model: string;
+          model?: string;
+          providerKey: string;
+          localMessages: ProviderMessage[];
         }
       | null = null;
 
@@ -1696,18 +1762,69 @@ export const invokeScopedCapabilitySession = async ({
         resetSession,
       });
 
-      const result = await withSessionLock(managedSession.cacheKey, async () =>
-        runSessionExchange({
-          session: managedSession!.session,
-          prompt: prependRetrievedMemory(
-            managedSession!.isNewSession && initialPrompt ? initialPrompt : prompt,
-            memoryPrompt,
-          ),
-          model: managedSession!.model || agent.model,
-          timeoutMs,
-          onDelta,
-        }),
-      );
+      const result =
+        managedSession.providerKey === LOCAL_OPENAI_PROVIDER_KEY
+          ? await withSessionLock(managedSession.cacheKey, async () => {
+              const systemPrompt = buildScopedSystemPrompt({
+                capability,
+                agent,
+                developerPrompt,
+                learningContextBlock,
+                scope,
+                scopeId,
+              });
+              const localMessages: ProviderMessage[] = [
+                { role: 'system', content: systemPrompt },
+                ...managedSession!.localMessages,
+              ];
+              const nextPrompt = prependRetrievedMemory(
+                managedSession!.isNewSession && initialPrompt ? initialPrompt : prompt,
+                memoryPrompt,
+              );
+              localMessages.push({
+                role: 'user',
+                content: nextPrompt,
+              });
+              const completion = onDelta
+                ? await requestLocalOpenAIModelStream({
+                    model: managedSession!.model || agent.model,
+                    messages: localMessages,
+                    timeoutMs,
+                    onDelta,
+                  })
+                : await requestLocalOpenAIModel({
+                    model: managedSession!.model || agent.model,
+                    messages: localMessages,
+                    timeoutMs,
+                  });
+
+              updateManagedSessionRecord(managedSession!.sessionId, {
+                localMessages: [
+                  ...managedSession!.localMessages,
+                  { role: 'user', content: nextPrompt },
+                  { role: 'assistant', content: completion.content },
+                ],
+              });
+              return {
+                ...completion,
+                raw: {
+                  assistantMessage: null,
+                  usageEvent: null,
+                },
+              };
+            })
+          : await withSessionLock(managedSession.cacheKey, async () =>
+              runSessionExchange({
+                session: managedSession!.session!,
+                prompt: prependRetrievedMemory(
+                  managedSession!.isNewSession && initialPrompt ? initialPrompt : prompt,
+                  memoryPrompt,
+                ),
+                model: managedSession!.model || agent.model,
+                timeoutMs,
+                onDelta,
+              }),
+            );
 
       updateManagedSessionRecord(managedSession.sessionId, {
         lastUsedAt: new Date().toISOString(),
@@ -1765,29 +1882,37 @@ export const invokeScopedCapabilitySession = async ({
     }
   }
 
-  const fallbackResult = await requestGitHubModelsHttp({
-    model: await resolveRuntimeModel(agent.model),
-    messages: [
-      {
-        role: 'system',
-        content: buildScopedSystemPrompt({
-          capability,
-          agent,
-          developerPrompt,
-          learningContextBlock,
-          scope,
-          scopeId,
-        }),
-      },
-      {
-        role: 'user',
-        content: effectivePrompt,
-      },
-    ],
-    timeoutMs,
-    maxAttempts: scope === 'GENERAL_CHAT' ? 1 : 3,
-    maxRetryAfterMs: scope === 'GENERAL_CHAT' ? 5_000 : 120_000,
-  });
+  const fallbackMessages: ProviderMessage[] = [
+    {
+      role: 'system',
+      content: buildScopedSystemPrompt({
+        capability,
+        agent,
+        developerPrompt,
+        learningContextBlock,
+        scope,
+        scopeId,
+      }),
+    },
+    {
+      role: 'user',
+      content: effectivePrompt,
+    },
+  ];
+  const fallbackResult =
+    resolveAgentProviderKey(agent) === LOCAL_OPENAI_PROVIDER_KEY
+      ? await requestLocalOpenAIModel({
+          model: agent.model,
+          messages: fallbackMessages,
+          timeoutMs,
+        })
+      : await requestGitHubModelsHttp({
+          model: await resolveRuntimeModel(agent.model),
+          messages: fallbackMessages,
+          timeoutMs,
+          maxAttempts: scope === 'GENERAL_CHAT' ? 1 : 3,
+          maxRetryAfterMs: scope === 'GENERAL_CHAT' ? 5_000 : 120_000,
+        });
 
   if (onDelta && fallbackResult.content) {
     onDelta(fallbackResult.content);
@@ -1804,15 +1929,25 @@ export const invokeScopedCapabilitySession = async ({
 
 export const requestGitHubModel = async ({
   model,
+  providerKey,
   messages,
   timeoutMs = 45000,
 }: {
   model?: string;
+  providerKey?: ProviderKey | string;
   messages: GitHubModelsMessage[];
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
 }) => {
+  if (normalizeProviderKey(providerKey) === LOCAL_OPENAI_PROVIDER_KEY) {
+    return requestLocalOpenAIModel({
+      model,
+      messages,
+      timeoutMs,
+    });
+  }
+
   if (await shouldPreferHttpFallback()) {
     return requestGitHubModelsHttp({
       model,
@@ -1866,17 +2001,28 @@ export const requestGitHubModel = async ({
 
 export const requestGitHubModelStream = async ({
   model,
+  providerKey,
   messages,
   timeoutMs = 45000,
   onDelta,
 }: {
   model?: string;
+  providerKey?: ProviderKey | string;
   messages: GitHubModelsMessage[];
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
   onDelta: (delta: string) => void;
 }) => {
+  if (normalizeProviderKey(providerKey) === LOCAL_OPENAI_PROVIDER_KEY) {
+    return requestLocalOpenAIModelStream({
+      model,
+      messages,
+      timeoutMs,
+      onDelta,
+    });
+  }
+
   if (await shouldPreferHttpFallback()) {
     const fallbackResult = await requestGitHubModelsHttp({
       model,

@@ -19,6 +19,7 @@ import {
   CapabilityWorkspace,
   ExecutionLog,
   LearningUpdate,
+  ReadinessContract,
   WorkItem,
   Workflow,
 } from '../src/types';
@@ -478,6 +479,7 @@ export const materializeWorkspace = (
   capability: Capability,
   workspace: {
     capabilityId: string;
+    readinessContract?: ReadinessContract;
     agents: CapabilityAgent[];
     workflows: Workflow[];
     artifacts: CapabilityWorkspace['artifacts'];
@@ -487,6 +489,9 @@ export const materializeWorkspace = (
     workItems: WorkItem[];
     messages: CapabilityChatMessage[];
     activeChatAgentId?: string;
+    executionOwnership?: CapabilityWorkspace['executionOwnership'];
+    executionDispatchState?: CapabilityWorkspace['executionDispatchState'];
+    executionQueueReason?: CapabilityWorkspace['executionQueueReason'];
     createdAt: string;
   },
 ): CapabilityWorkspace => {
@@ -503,6 +508,7 @@ export const materializeWorkspace = (
   return {
     capabilityId: capability.id,
     briefing: buildCapabilityBriefing(capability),
+    readinessContract: workspace.readinessContract,
     agents,
     workflows: workspace.workflows,
     artifacts: workspace.artifacts,
@@ -521,6 +527,9 @@ export const materializeWorkspace = (
       agents.some(agent => agent.id === workspace.activeChatAgentId)
         ? workspace.activeChatAgentId
         : ownerAgent.id,
+    executionOwnership: workspace.executionOwnership ?? null,
+    executionDispatchState: workspace.executionDispatchState,
+    executionQueueReason: workspace.executionQueueReason,
     createdAt: workspace.createdAt,
   };
 };

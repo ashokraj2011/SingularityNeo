@@ -35,8 +35,39 @@ const workspace = (): CapabilityWorkspace => ({
   briefing: buildCapabilityBriefing(capability()),
   agents: [],
   workflows: [],
-  artifacts: [],
-  tasks: [],
+  artifacts: [
+    {
+      id: 'ART-1',
+      name: 'Build failure evidence',
+      capabilityId: 'CAP-FEED',
+      type: 'Review Packet',
+      version: 'v1',
+      agent: 'AGENT-1',
+      created: '2026-04-15T10:06:00.000Z',
+      workItemId: 'WI-1',
+      runId: 'RUN-1',
+      artifactKind: 'REVIEW_PACKET',
+      direction: 'OUTPUT',
+      summary: 'Captured the failing build evidence for operator review.',
+    },
+  ],
+  tasks: [
+    {
+      id: 'TASK-1',
+      title: 'Review failing build output',
+      agent: 'AGENT-1',
+      capabilityId: 'CAP-FEED',
+      workItemId: 'WI-1',
+      workflowStepId: 'STEP-1',
+      managedByWorkflow: true,
+      taskType: 'DELIVERY',
+      priority: 'High',
+      status: 'PROCESSING',
+      timestamp: '2026-04-15T10:01:00.000Z',
+      executionNotes: 'Task projection created from the implementation step.',
+      producedOutputs: [],
+    },
+  ],
   executionLogs: [
     {
       id: 'LOG-1',
@@ -155,7 +186,7 @@ const runDetail = (): WorkflowRunDetail => ({
 });
 
 describe('buildCapabilityInteractionFeed', () => {
-  it('merges chat, tool, run, wait, approval, and learning records into one feed', () => {
+  it('merges chat, tool, run, wait, approval, artifact, task, and learning records into one feed', () => {
     const feed = buildCapabilityInteractionFeed({
       capability: capability(),
       workspace: workspace(),
@@ -176,15 +207,26 @@ describe('buildCapabilityInteractionFeed', () => {
     });
 
     expect(feed.scope).toBe('WORK_ITEM');
-    expect(feed.summary.totalCount).toBe(7);
+    expect(feed.summary.totalCount).toBe(9);
     expect(feed.summary.chatCount).toBe(1);
     expect(feed.summary.toolCount).toBe(1);
     expect(feed.summary.waitCount).toBe(1);
     expect(feed.summary.approvalCount).toBe(1);
     expect(feed.summary.learningCount).toBe(1);
+    expect(feed.summary.artifactCount).toBe(1);
+    expect(feed.summary.taskCount).toBe(1);
     expect(feed.records[0].timestamp).toBe('2026-04-15T10:07:00.000Z');
     expect(feed.records.map(record => record.interactionType)).toEqual(
-      expect.arrayContaining(['CHAT', 'TOOL', 'RUN_EVENT', 'WAIT', 'APPROVAL', 'LEARNING']),
+      expect.arrayContaining([
+        'CHAT',
+        'TOOL',
+        'RUN_EVENT',
+        'WAIT',
+        'APPROVAL',
+        'LEARNING',
+        'ARTIFACT',
+        'TASK',
+      ]),
     );
   });
 });

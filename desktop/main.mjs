@@ -198,6 +198,9 @@ ipcMain.handle('desktop:worker:ping', async () =>
   }),
 );
 ipcMain.handle('desktop:runtime:status', async () => requestWorker('runtime:status'));
+ipcMain.handle('desktop:runtime:actor-context', async (_event, payload) =>
+  requestWorker('runtime:actor-context', payload || {}),
+);
 ipcMain.handle('desktop:runtime:set-token', async (_event, payload) =>
   requestWorker('runtime:set-token', payload || {}),
 );
@@ -206,6 +209,12 @@ ipcMain.handle('desktop:runtime:clear-token', async () =>
 );
 ipcMain.handle('desktop:runtime:chat', async (_event, payload) =>
   requestWorker('runtime:chat', payload || {}),
+);
+ipcMain.handle('desktop:runtime:execution:claim', async (_event, payload) =>
+  requestWorker('runtime:execution:claim', payload || {}),
+);
+ipcMain.handle('desktop:runtime:execution:release', async (_event, payload) =>
+  requestWorker('runtime:execution:release', payload || {}),
 );
 ipcMain.handle('desktop:runtime:chat-stream', async (_event, payload) => {
   const streamId = payload?.streamId || randomUUID();

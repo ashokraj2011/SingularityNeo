@@ -1,12 +1,21 @@
-# Singulairy
+# SingularityNeo 🚀
 
-Singulairy is a capability-centered delivery workspace for enterprise software teams. It combines workflow orchestration, agent collaboration, approvals, evidence, and auditability in one local-first operating console.
+SingularityNeo is an **Enterprise AI Operating System** that transforms how teams deliver software. It is a capability-centered delivery workspace that combines autonomous agent orchestration, workflow enforcement, verifiable evidence, and unprecedented governance control into one local-first operating console.
 
-Instead of treating delivery as separate tools for planning, coding, approvals, and reporting, Singulairy keeps them connected inside one selected capability.
+Instead of treating delivery as scattered tools for planning, coding, and reporting, SingularityNeo unifies them under a single **Capability**. It’s not just an orchestrator; it's a governed, auditable, and resilient foundation for human-AI collaboration.
 
-## What Singulairy Is
+## Why SingularityNeo is Awesome
 
-Singulairy is best understood as a delivery operating system for a business capability.
+SingularityNeo isn't just about running agents; it's about **Enterprise Safety and Observability**. We've built state-of-the-art governance right into the core loop:
+
+*   🛡️ **Dynamic Learning & Atomic Rollbacks**: Agents don't just act; they learn. When operators provide corrections, agents distill these into new guardrails. If a bad habit is learned, our **Agent State Versioning** lets you instantly roll back an agent's brain to a previous operational policy snapshot.
+*   👻 **Shadow Mode Execution**: Need to test a high-stakes deployment without risking production? Toggle a capability into **Shadow Mode**. The execution layer intercepts destructive commands across the entire platform, simulating successful runs to let you validate agent reasoning in a 100% risk-free environment.
+*   📋 **Evidence-Based Execution**: Every run leaves behind a durable cryptographic-style evidence trail. Artifacts, handoffs, approvals, and wait states are comprehensively logged in the Flight Recorder, so you never have to ask "why did the agent do that?"
+*   🤝 **Strict Human-in-the-Loop Governance**: Agents can plan, design, implement, and review, but the platform ensures humans retain ultimate control over approvals, policy boundaries, and conflict resolution.
+
+## What SingularityNeo Is
+
+SingularityNeo is best understood as a delivery operating system for a business capability.
 
 A capability owns:
 - its charter and business outcome
@@ -18,46 +27,31 @@ A capability owns:
 
 The product is strongest when a team wants to:
 - move work through an explicit SDLC or org-specific lifecycle
-- let agents help, but keep humans in control
+- deploy autonomous agents safely with full administrative rollbacks
 - explain why work is blocked, waiting, approved, or complete
-- keep durable evidence for reviews, release readiness, and audit
+- keep durable evidence for reviews, release readiness, and compliance audits
 
 ## Main Workspaces
 
 - `Home` shows capability health, trust, readiness, and what matters now.
 - `Work` is the delivery workbench for operating one work item well.
-- `Agents` shows standard agents, custom agents, skills, tools, and learning.
+- `Agents` shows standard agents, custom agents, skills, tools, and dynamic learning snapshots.
 - `Chat` gives capability-scoped and execution-aware collaboration.
 - `Evidence` provides artifacts, completed work, approvals, and flight recorder history.
 - `Designer` defines workflows, lifecycle lanes, and operating rules.
 
-Advanced tools include:
-- `Run Console`
-- `Memory Explorer`
-- `Eval Center`
-- `Skill Library`
-- `Artifact Designer`
-- `Tool Access`
-- `Tasks`
-- `Studio`
-- `Database Setup`
-
 ## Core Product Ideas
 
 ### 1. Capability-Centered
-
 The active capability is the center of gravity. Most of the application follows that selected capability, including its lifecycle, agents, evidence, database-backed state, and runtime context.
 
 ### 2. Human-Governed Agents
-
-Agents can plan, design, implement, validate, review, and explain. Workflow steps still control actual tool access, approvals, artifact contracts, and execution boundaries.
+Agents operate semi-autonomously through workflow steps that strictly define their boundaries, capability restrictions, and tool access, pausing seamlessly for human approval when policies dictate.
 
 ### 3. Work With Proof
-
 Every meaningful run can leave behind artifacts, handoffs, approvals, waits, policy decisions, and work-item explainability so the team can see what happened and why.
 
 ### 4. Adaptable Lifecycle
-
 The platform supports capability-specific lifecycles, including organization-specific flows like Brokerage SDLC. Lifecycle phases drive the Work lanes, Designer structure, and Evidence timeline.
 
 ## What A Normal Day Looks Like

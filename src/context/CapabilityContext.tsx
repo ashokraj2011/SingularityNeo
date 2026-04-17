@@ -721,6 +721,7 @@ const buildCapabilityWorkspace = (
 
   return {
     ...baseWorkspace,
+    readinessContract: experience.readinessContract,
     goldenPathProgress: experience.goldenPathProgress,
     interactionFeed: buildCapabilityInteractionFeed({
       capability: normalizedCapability,
@@ -812,6 +813,7 @@ const normalizeWorkspace = (
         ? workspace.activeChatAgentId
         : primaryCopilotAgentId || nextOwnerAgent.id,
     primaryCopilotAgentId,
+    readinessContract: workspace?.readinessContract,
     createdAt: workspace?.createdAt || seededWorkspace.createdAt,
   };
   const experience = buildCapabilityExperience({
@@ -821,6 +823,7 @@ const normalizeWorkspace = (
 
   return {
     ...normalizedWorkspace,
+    readinessContract: experience.readinessContract,
     goldenPathProgress: experience.goldenPathProgress,
     interactionFeed: buildCapabilityInteractionFeed({
       capability: normalizedCapability,

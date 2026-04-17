@@ -4,6 +4,7 @@ import type {
   CapabilityAgent,
   CapabilityWorkspace,
   GoldenPathProgress,
+  ReadinessContract,
   WorkspaceRole,
   WorkItem,
 } from '../types';
@@ -15,6 +16,7 @@ import {
   hasMeaningfulExecutionCommandTemplate,
   isWorkspacePathInsideApprovedRoot,
 } from './executionConfig';
+import { buildLocalReadinessContract } from './readinessContract';
 
 export type CapabilityReadinessStatus =
   | 'READY'
@@ -93,6 +95,9 @@ export interface CapabilityOutcomeContract {
 export type AdvancedToolId =
   | 'architecture'
   | 'identity'
+  | 'operations'
+  | 'incidents'
+  | 'mrm'
   | 'access'
   | 'databases'
   | 'memory'
@@ -125,6 +130,7 @@ export interface AdvancedToolDescriptor {
 }
 
 export interface CapabilityExperienceModel {
+  readinessContract: ReadinessContract;
   readinessItems: CapabilityReadinessItem[];
   blockingReadinessItems: CapabilityReadinessItem[];
   canStartDelivery: boolean;
@@ -147,6 +153,36 @@ export interface CapabilityExperienceModel {
 }
 
 export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
+  {
+    id: 'incidents',
+    label: 'Incidents',
+    shortName: 'Incidents',
+    path: '/incidents',
+    description: 'Link incidents to evidence packets, review candidate contributors, and prepare post-mortem attribution.',
+    audience: 'OPERATORS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_WORKFLOW'],
+  },
+  {
+    id: 'mrm',
+    label: 'MRM',
+    shortName: 'MRM',
+    path: '/mrm',
+    description: 'Review incident-attribution metrics, guardrail promotion requests, and model risk trends.',
+    audience: 'ADMINS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_WORKFLOW'],
+  },
+  {
+    id: 'operations',
+    label: 'Operations',
+    shortName: 'Ops',
+    path: '/operations',
+    description: 'Monitor desktop executor ownership, heartbeats, and queued execution routing.',
+    audience: 'OPERATORS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_WORKFLOW'],
+  },
   {
     id: 'architecture',
     label: 'Architecture',
@@ -527,6 +563,17 @@ export const getRuntimeHealth = (
     };
   }
 
+  if (runtimeStatus.executionRuntimeOwner === 'DESKTOP') {
+    return {
+      label: 'Desktop-owned execution',
+      description:
+        'Queued work can wait for a claimed desktop executor even when this browser session does not own the Copilot runtime.',
+      tone: 'info',
+      actionLabel: 'Open work cockpit',
+      path: '/orchestrator',
+    };
+  }
+
   return {
     label: runtimeStatus.lastRuntimeError ? 'Unavailable' : 'Needs Copilot setup',
     description:
@@ -537,6 +584,12 @@ export const getRuntimeHealth = (
     path: '/run-console',
   };
 };
+
+const hasExecutionPath = (runtimeStatus?: RuntimeStatus | null) =>
+  Boolean(
+    runtimeStatus &&
+      (runtimeStatus.configured || runtimeStatus.executionRuntimeOwner === 'DESKTOP'),
+  );
 
 const getCapabilityBoundarySignals = (capability: Capability) =>
   [
@@ -639,14 +692,14 @@ const buildProofItems = (
       description: 'Workflow, runtime, and meaningful execution commands are ready for real work.',
       ready:
         hasPublishedWorkflow &&
-        runtimeStatus?.configured === true &&
+        hasExecutionPath(runtimeStatus) &&
         hasCommandTemplates(capability),
       inProgress:
         hasPublishedWorkflow ||
-        runtimeStatus?.configured === true ||
+        hasExecutionPath(runtimeStatus) ||
         hasCommandTemplates(capability),
       proofSignal:
-        hasPublishedWorkflow && runtimeStatus?.configured === true && hasCommandTemplates(capability)
+        hasPublishedWorkflow && hasExecutionPath(runtimeStatus) && hasCommandTemplates(capability)
           ? 'Published workflow, connected runtime, and real execution commands are available.'
           : 'Publish a workflow, connect the runtime, and replace generic command placeholders.',
       actionLabel: hasPublishedWorkflow ? 'Finish execution setup' : 'Prepare execution',
@@ -911,17 +964,20 @@ const buildReadinessItems = (
       id: 'runtime',
       label: 'Copilot runtime',
       description: 'A runtime owner is connected for Copilot chat and workflow execution.',
-      status: runtimeStatus?.configured
+      status: hasExecutionPath(runtimeStatus)
         ? 'READY'
         : runtimeStatus
         ? 'NEEDS_SETUP'
         : 'IN_PROGRESS',
       actionLabel: 'Check runtime',
       path: '/run-console',
-      isBlocking: true,
+      isBlocking: runtimeStatus?.executionRuntimeOwner !== 'DESKTOP',
       blockingReason:
         'Workflow execution cannot start until the Copilot runtime owner is connected.',
-      nextRequiredAction: 'Connect the runtime owner and confirm execution is available.',
+      nextRequiredAction:
+        runtimeStatus?.executionRuntimeOwner === 'DESKTOP'
+          ? 'Claim a desktop executor so queued runs can start automatically.'
+          : 'Connect the runtime owner and confirm execution is available.',
     },
     {
       id: 'memory',
@@ -1175,6 +1231,13 @@ export const buildCapabilityExperience = ({
   workspace: CapabilityWorkspace;
   runtimeStatus?: RuntimeStatus | null;
 }): CapabilityExperienceModel => {
+  const readinessContract =
+    workspace.readinessContract ||
+    buildLocalReadinessContract({
+      capability,
+      workspace,
+      runtimeStatus,
+    });
   const readinessItems = buildReadinessItems(capability, workspace, runtimeStatus);
   const blockingReadinessItems = getBlockingReadinessItems(readinessItems);
   const readyCount = readinessItems.filter(item => item.status === 'READY').length;
@@ -1190,9 +1253,10 @@ export const buildCapabilityExperience = ({
   });
 
   return {
+    readinessContract,
     readinessItems,
     blockingReadinessItems,
-    canStartDelivery: blockingReadinessItems.length === 0,
+    canStartDelivery: readinessContract.allReady,
     readinessScore: Math.round((readyCount / readinessItems.length) * 100),
     trustLevel,
     trustLabel: getTrustLevelLabel(trustLevel),
@@ -1254,6 +1318,8 @@ export const getBusinessEvidenceLabel = (value?: string) => {
       return 'Conflict resolution';
     case 'CONTRARIAN_REVIEW':
       return 'Contrarian review';
+    case 'LEARNING_NOTE':
+      return 'Learning note';
     case 'EXECUTION_PLAN':
       return 'Execution plan';
     case 'HANDOFF':

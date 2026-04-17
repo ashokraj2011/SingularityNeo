@@ -54,6 +54,7 @@ import type {
 const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   architecture: Building2,
   identity: KeyRound,
+  operations: Gauge,
   access: ShieldCheck,
   databases: Database,
   memory: Database,
@@ -64,6 +65,8 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   'artifact-designer': FileText,
   tasks: PlayCircle,
   studio: Bot,
+  incidents: AlertTriangle,
+  mrm: ShieldCheck,
 };
 
 const Dashboard = () => {
@@ -188,6 +191,22 @@ const Dashboard = () => {
   const publishedWorkflow = workspace.workflows.find(
     workflow => !workflow.archivedAt && workflow.publishState === 'PUBLISHED',
   );
+  const executionOwnerLabel = workspace.executionOwnership
+    ? `${workspace.executionOwnership.actorDisplayName}${
+        runtimeStatus?.executorId &&
+        workspace.executionOwnership.executorId === runtimeStatus.executorId
+          ? ' (this desktop)'
+          : ''
+      }`
+    : 'No desktop owner';
+  const executionDispatchLabel =
+    workspace.executionDispatchState === 'ASSIGNED'
+      ? 'Desktop assigned'
+      : workspace.executionDispatchState === 'WAITING_FOR_EXECUTOR'
+      ? 'Waiting for desktop'
+      : workspace.executionDispatchState === 'STALE_EXECUTOR'
+      ? 'Desktop disconnected'
+      : 'Unassigned';
   const primaryWorkflow =
     publishedWorkflow || workspace.workflows.find(workflow => !workflow.archivedAt);
   const topAttentionWorkItem =
@@ -196,7 +215,8 @@ const Dashboard = () => {
     ) || activeWork[0];
   const explainWorkItem =
     workspace.workItems.find(item => item.id === explainWorkItemId) || null;
-  const primaryBlockingItem = experience.blockingReadinessItems[0] || null;
+  const primaryReadinessGate =
+    experience.readinessContract.gates.find(gate => !gate.satisfied) || null;
 
   return (
     <div className="space-y-6">
@@ -339,22 +359,22 @@ const Dashboard = () => {
           tone="brand"
         >
           <div className="rounded-[1.6rem] border border-primary/15 bg-white px-5 py-5">
-            {primaryBlockingItem ? (
+            {primaryReadinessGate ? (
               <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="form-kicker text-amber-800">Delivery gate</p>
                     <p className="mt-1 text-sm font-semibold text-amber-950">
-                      {primaryBlockingItem.blockingReason || primaryBlockingItem.description}
+                      {primaryReadinessGate.blockingReason || primaryReadinessGate.summary}
                     </p>
                     <p className="mt-1 text-xs leading-relaxed text-amber-800">
-                      {primaryBlockingItem.nextRequiredAction ||
+                      {primaryReadinessGate.nextRequiredAction ||
                         'Resolve the missing setup before starting heavier workflow execution.'}
                     </p>
                   </div>
                   <button
                     type="button"
-                    onClick={() => navigate(primaryBlockingItem.path)}
+                    onClick={() => navigate(primaryReadinessGate.path)}
                     className="enterprise-button enterprise-button-secondary shrink-0"
                   >
                     Fix gate
@@ -485,6 +505,32 @@ const Dashboard = () => {
                   ? `${collectionSnapshot?.rollupSummary.unresolvedDependencyCount ?? 0} dependency risks · ${collectionSnapshot?.rollupSummary.missingPublishCount ?? 0} missing publishes`
                   : `${operationsSnapshot?.blockedCount ?? 0} blocked · ${operationsSnapshot?.activeWriterConflicts ?? 0} writer conflicts`}
               </p>
+            </div>
+            <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4 md:col-span-2">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="form-kicker">Desktop execution</p>
+                  <p className="mt-2 text-lg font-bold text-on-surface">{executionOwnerLabel}</p>
+                  <p className="mt-2 text-xs text-secondary">
+                    {workspace.executionQueueReason === 'EXECUTOR_DISCONNECTED'
+                      ? 'The previous desktop owner disconnected. Queued runs will resume after a desktop claims this capability again.'
+                      : workspace.executionQueueReason === 'EXECUTOR_RELEASED'
+                      ? 'Execution was released and queued runs are waiting for a desktop owner.'
+                      : 'Automated workflow execution is desktop-owned; browser sessions can queue work, but a claimed desktop starts and resumes it.'}
+                  </p>
+                </div>
+                <StatusBadge
+                  tone={
+                    workspace.executionDispatchState === 'ASSIGNED'
+                      ? 'success'
+                      : workspace.executionDispatchState === 'STALE_EXECUTOR'
+                      ? 'warning'
+                      : 'neutral'
+                  }
+                >
+                  {executionDispatchLabel}
+                </StatusBadge>
+              </div>
             </div>
           </div>
         </SectionCard>

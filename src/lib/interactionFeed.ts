@@ -1,5 +1,7 @@
 import type {
   ApprovalDecision,
+  AgentTask,
+  Artifact,
   Capability,
   CapabilityChatMessage,
   CapabilityInteractionFeed,
@@ -178,6 +180,71 @@ const mapToolInvocation = ({
   },
 });
 
+const mapArtifact = (artifact: Artifact): CapabilityInteractionRecord => ({
+  id: `artifact-${artifact.id}`,
+  capabilityId: artifact.capabilityId,
+  interactionType: 'ARTIFACT',
+  timestamp: artifact.created,
+  title: `${artifact.name} published`,
+  summary: truncate(
+    artifact.summary ||
+      artifact.description ||
+      `${artifact.type}${artifact.version ? ` · ${artifact.version}` : ''}`,
+    240,
+  ),
+  level: artifact.direction === 'OUTPUT' ? 'SUCCESS' : 'INFO',
+  actorLabel: artifact.agent || 'Artifact pipeline',
+  agentId: artifact.connectedAgentId || undefined,
+  workItemId: artifact.workItemId,
+  runId: artifact.runId,
+  runStepId: artifact.runStepId,
+  traceId: artifact.traceId,
+  linkedArtifactId: artifact.id,
+  artifactIds: [artifact.id],
+  metadata: {
+    artifactKind: artifact.artifactKind,
+    direction: artifact.direction,
+    contentFormat: artifact.contentFormat,
+  },
+});
+
+const mapTask = (task: AgentTask): CapabilityInteractionRecord => ({
+  id: `task-${task.id}`,
+  capabilityId: task.capabilityId,
+  interactionType: 'TASK',
+  timestamp: task.timestamp,
+  title: task.title,
+  summary: truncate(
+    task.executionNotes ||
+      task.prompt ||
+      `${task.status} ${task.taskType ? task.taskType.toLowerCase() : 'workflow'} task`,
+    240,
+  ),
+  level:
+    task.status === 'ALERT'
+      ? 'ERROR'
+      : task.status === 'COMPLETED'
+      ? 'SUCCESS'
+      : task.status === 'PROCESSING'
+      ? 'INFO'
+      : 'NEUTRAL',
+  actorLabel: task.managedByWorkflow ? 'Workflow task projection' : 'Task projection',
+  agentId: task.agent,
+  workItemId: task.workItemId,
+  runId: task.runId,
+  runStepId: task.runStepId,
+  workflowStepId: task.workflowStepId,
+  linkedArtifactId: task.producedOutputs?.[0]?.artifactId,
+  metadata: {
+    status: task.status,
+    priority: task.priority,
+    managedByWorkflow: task.managedByWorkflow,
+    taskType: task.taskType,
+    linkedArtifacts: task.linkedArtifacts?.length || 0,
+    producedOutputs: task.producedOutputs?.length || 0,
+  },
+});
+
 export const buildCapabilityInteractionFeed = ({
   capability,
   workspace,
@@ -240,6 +307,26 @@ export const buildCapabilityInteractionFeed = ({
     return true;
   });
 
+  const relevantArtifacts = workspace.artifacts.filter(artifact => {
+    if (workItemId) {
+      return artifact.workItemId === workItemId;
+    }
+    if (agentId && artifact.connectedAgentId) {
+      return artifact.connectedAgentId === agentId;
+    }
+    return true;
+  });
+
+  const relevantTasks = workspace.tasks.filter(task => {
+    if (workItemId) {
+      return task.workItemId === workItemId;
+    }
+    if (agentId) {
+      return task.agent === agentId;
+    }
+    return true;
+  });
+
   const waitRecords = (runDetail?.waits || []).flatMap(wait => {
     const records: CapabilityInteractionRecord[] = [
       {
@@ -288,6 +375,8 @@ export const buildCapabilityInteractionFeed = ({
       }),
     ),
     ...waitRecords,
+    ...relevantArtifacts.map(mapArtifact),
+    ...relevantTasks.map(mapTask),
     ...relevantLearning.map(update => ({
       id: `learning-${update.id}`,
       capabilityId: update.capabilityId,
@@ -324,6 +413,8 @@ export const buildCapabilityInteractionFeed = ({
       waitCount: records.filter(record => record.interactionType === 'WAIT').length,
       approvalCount: records.filter(record => record.interactionType === 'APPROVAL').length,
       learningCount: records.filter(record => record.interactionType === 'LEARNING').length,
+      artifactCount: records.filter(record => record.interactionType === 'ARTIFACT').length,
+      taskCount: records.filter(record => record.interactionType === 'TASK').length,
     },
   };
 };

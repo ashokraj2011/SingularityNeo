@@ -1087,13 +1087,15 @@ export const STANDARD_AGENT_PREFERRED_TOOL_IDS: Record<
   OWNER: ['workspace_read', 'workspace_search'],
   PLANNING: ['workspace_read', 'workspace_search'],
   'BUSINESS-ANALYST': ['workspace_read', 'workspace_search'],
-  ARCHITECT: ['workspace_read', 'workspace_search', 'git_status'],
+  ARCHITECT: ['workspace_read', 'workspace_search', 'git_status', 'delegate_task'],
   'SOFTWARE-DEVELOPER': [
     'workspace_list',
     'workspace_read',
     'workspace_search',
     'git_status',
     'workspace_write',
+    'workspace_replace_block',
+    'workspace_apply_patch',
     'run_build',
     'run_test',
   ],
@@ -1107,7 +1109,7 @@ export const STANDARD_AGENT_PREFERRED_TOOL_IDS: Record<
     'run_deploy',
   ],
   VALIDATION: ['workspace_read', 'workspace_search', 'run_test'],
-  'EXECUTION-OPS': ['workspace_read', 'workspace_search', 'git_status'],
+  'EXECUTION-OPS': ['workspace_read', 'workspace_search', 'git_status', 'delegate_task'],
   'CONTRARIAN-REVIEWER': ['workspace_read', 'workspace_search'],
 };
 

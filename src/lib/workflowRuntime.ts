@@ -30,6 +30,8 @@ type CompileStepContextArgs = {
 
 const WRITE_CAPABLE_TOOLS = new Set<ToolAdapterId>([
   'workspace_write',
+  'workspace_replace_block',
+  'workspace_apply_patch',
   'run_build',
   'run_test',
   'run_docs',
@@ -82,7 +84,12 @@ export const deriveExecutionBoundary = (
     ...(allowedToolIds.includes('run_deploy')
       ? ['Deployment commands remain approval-gated.']
       : []),
-    ...(allowedToolIds.includes('workspace_write')
+    ...(allowedToolIds.some(
+      toolId =>
+        toolId === 'workspace_write' ||
+        toolId === 'workspace_replace_block' ||
+        toolId === 'workspace_apply_patch',
+    )
       ? ['Workspace writes should produce reviewable code diff evidence.']
       : []),
     ...(capability.executionConfig.allowedWorkspacePaths.length === 0 &&

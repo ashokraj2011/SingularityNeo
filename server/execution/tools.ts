@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -16,6 +16,17 @@ import {
   getCapabilityWorkspaceRoots,
   normalizeDirectoryPath,
 } from '../workspacePaths';
+import {
+  listIndexedWorkspaceFiles,
+  searchIndexedWorkspaceFiles,
+} from '../workspaceIndex';
+import {
+  getPublishedBounty,
+  getPublishedBountySignal,
+  publishBounty,
+  publishBountySignal,
+  waitForBountySignal,
+} from '../eventBus';
 
 const execFileAsync = promisify(execFile);
 
@@ -50,6 +61,51 @@ type ToolAdapter = {
 const previewText = (value: string, limit = 1600) =>
   value.replace(/\0/g, '').slice(0, limit);
 
+const clampLimit = (value: unknown, fallback: number, max: number) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(1, Math.min(Math.floor(parsed), max));
+};
+
+const paginateValues = ({
+  values,
+  cursor,
+  limit,
+}: {
+  values: string[];
+  cursor?: string;
+  limit: number;
+}) => {
+  const offset = (() => {
+    if (!cursor) {
+      return 0;
+    }
+
+    try {
+      const payload = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
+        offset?: number;
+      };
+      return Math.max(0, Number(payload.offset || 0));
+    } catch {
+      return 0;
+    }
+  })();
+  const page = values.slice(offset, offset + limit);
+  const nextCursor =
+    offset + limit < values.length
+      ? Buffer.from(JSON.stringify({ offset: offset + limit }), 'utf8').toString('base64url')
+      : undefined;
+
+  return {
+    page,
+    nextCursor,
+    total: values.length,
+    truncated: Boolean(nextCursor),
+  };
+};
+
 const getRequiredStringArg = (
   args: Record<string, any>,
   key: string,
@@ -74,6 +130,51 @@ const getRequiredStringArg = (
   return value;
 };
 
+const getRequiredRawStringArg = (
+  args: Record<string, any>,
+  key: string,
+  toolId: ToolAdapterId,
+) => {
+  if (Array.isArray(args[key])) {
+    throw new Error(`${toolId} requires a single ${key} value.`);
+  }
+
+  const value = args[key];
+  if (value === undefined || value === null || String(value).length === 0) {
+    throw new Error(`${toolId} requires ${key}.`);
+  }
+  return String(value);
+};
+
+const normalizeBountyRole = (value?: string | null) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ');
+
+const agentMatchesBountyRole = (agent: CapabilityAgent, targetRole?: string) => {
+  const expected = normalizeBountyRole(targetRole);
+  if (!expected) {
+    return true;
+  }
+
+  const candidates = [
+    agent.role,
+    agent.name,
+    agent.standardTemplateKey,
+    agent.roleStarterKey,
+  ]
+    .map(value => normalizeBountyRole(value))
+    .filter(Boolean);
+
+  return candidates.some(
+    candidate =>
+      candidate === expected ||
+      candidate.includes(expected) ||
+      expected.includes(candidate),
+  );
+};
+
 const describeDeploymentTargets = (
   targets: Capability['executionConfig']['deploymentTargets'],
 ) => targets.map(target => `${target.id} -> ${target.commandTemplateId}`).join(', ');
@@ -91,109 +192,64 @@ const SKIP_DIRECTORIES = new Set([
 const isCommandMissing = (result: { stderr?: string; stdout?: string }) =>
   /spawn\s+\S+\s+ENOENT/i.test(`${result.stderr || ''}\n${result.stdout || ''}`);
 
-const listWorkspaceFilesFallback = async (
-  workspacePath: string,
-  limit = 200,
-) => {
-  const files: string[] = [];
-
-  const visit = async (currentPath: string, depth: number): Promise<void> => {
-    if (files.length >= limit || depth > 5) {
-      return;
-    }
-
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = await fs.readdir(currentPath, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const entry of entries) {
-      if (files.length >= limit) {
-        return;
-      }
-
-      const absolutePath = path.join(currentPath, entry.name);
-      const relativePath = path.relative(workspacePath, absolutePath);
-
-      if (entry.isDirectory()) {
-        if (!SKIP_DIRECTORIES.has(entry.name)) {
-          await visit(absolutePath, depth + 1);
-        }
-        continue;
-      }
-
-      if (entry.isFile()) {
-        files.push(relativePath);
-      }
-    }
-  };
-
-  await visit(workspacePath, 0);
-  return files;
-};
-
-const searchWorkspaceFilesFallback = async ({
-  workspacePath,
-  scopePath,
-  pattern,
-  limit = 100,
+const runProcessWithInput = async ({
+  command,
+  args,
+  cwd,
+  stdin,
 }: {
-  workspacePath: string;
-  scopePath: string;
-  pattern: string;
-  limit?: number;
-}) => {
-  const stat = await fs.stat(scopePath).catch(() => null);
-  const searchRoot = stat?.isDirectory() ? scopePath : path.dirname(scopePath);
-  const scopedFiles = stat?.isFile()
-    ? [path.relative(workspacePath, scopePath)]
-    : await listWorkspaceFilesFallback(searchRoot, 500);
-  const matcher = (() => {
-    try {
-      return new RegExp(pattern, 'i');
-    } catch {
-      const loweredPattern = pattern.toLowerCase();
-      return {
-        test: (value: string) => value.toLowerCase().includes(loweredPattern),
-      };
-    }
-  })();
-  const matches: string[] = [];
-
-  for (const relativeFile of scopedFiles) {
-    if (matches.length >= limit) {
-      break;
-    }
-
-    const absoluteFile = stat?.isFile()
-      ? scopePath
-      : path.join(searchRoot, relativeFile);
-    const displayPath = path.relative(workspacePath, absoluteFile);
-    let content = '';
-
-    try {
-      const fileStat = await fs.stat(absoluteFile);
-      if (fileStat.size > 200_000) {
-        continue;
-      }
-      content = await fs.readFile(absoluteFile, 'utf8');
-    } catch {
-      continue;
-    }
-
-    content.split('\n').some((line, index) => {
-      if (!matcher.test(line)) {
-        return false;
-      }
-
-      matches.push(`${displayPath}:${index + 1}:${line}`);
-      return matches.length >= limit;
+  command: string;
+  args: string[];
+  cwd: string;
+  stdin: string;
+}) =>
+  new Promise<{ exitCode: number; stdout: string; stderr: string }>(resolve => {
+    const child = spawn(command, args, {
+      cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
-  }
+    let stdout = '';
+    let stderr = '';
 
-  return matches;
+    child.stdout.on('data', chunk => {
+      stdout += String(chunk || '');
+    });
+    child.stderr.on('data', chunk => {
+      stderr += String(chunk || '');
+    });
+    child.on('error', error => {
+      resolve({
+        exitCode: 1,
+        stdout,
+        stderr: error.message,
+      });
+    });
+    child.on('close', exitCode => {
+      resolve({
+        exitCode: exitCode ?? 1,
+        stdout,
+        stderr,
+      });
+    });
+
+    child.stdin.write(stdin);
+    child.stdin.end();
+  });
+
+const extractPatchTouchedFiles = (patchText: string) => {
+  const touched = new Set<string>();
+  patchText.split('\n').forEach(line => {
+    const match = line.match(/^\+\+\+\s+(?:b\/)?(.+)$/);
+    if (!match) {
+      return;
+    }
+    const candidate = match[1]?.trim();
+    if (!candidate || candidate === '/dev/null') {
+      return;
+    }
+    touched.add(candidate);
+  });
+  return [...touched];
 };
 
 const resolveWorkspacePath = (
@@ -441,7 +497,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_list: {
     id: 'workspace_list',
     description: 'List files inside an approved workspace path.',
-    usageExample: '{"path":"src"}',
+    usageExample: '{"path":"src","limit":200,"cursor":"..."}',
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
       const workspacePath = resolveWorkspacePath(
@@ -449,12 +505,32 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         workItem,
         args.workspacePath || args.path,
       );
-      const result = await runProcess('rg', ['--files', workspacePath], workspacePath);
-      const files = result.exitCode === 0
-        ? result.stdout.split('\n').filter(Boolean).slice(0, 200)
+      const scopePath = args.path
+        ? resolvePathWithinWorkspace(workspacePath, String(args.path))
+        : workspacePath;
+      const limit = clampLimit(args.limit, 200, 1000);
+      const cursor = typeof args.cursor === 'string' ? args.cursor.trim() : undefined;
+      const result = await runProcess('rg', ['--files', scopePath], workspacePath);
+      const paged = result.exitCode === 0
+        ? paginateValues({
+            values: result.stdout.split('\n').filter(Boolean),
+            cursor,
+            limit,
+          })
         : isCommandMissing(result)
-          ? await listWorkspaceFilesFallback(workspacePath)
-          : [];
+          ? {
+              page: [],
+              nextCursor: undefined,
+              total: 0,
+              truncated: false,
+              ...(await listIndexedWorkspaceFiles({
+                workspacePath,
+                scopePath,
+                cursor,
+                limit,
+              })),
+            }
+          : { page: [], nextCursor: undefined, total: 0, truncated: false };
 
       if (result.exitCode !== 0 && !isCommandMissing(result)) {
         throw new Error(
@@ -463,11 +539,15 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       }
 
       return {
-        summary: `Listed ${files.length} files from ${workspacePath}.`,
+        summary: `Listed ${paged.page.length} files from ${workspacePath}.`,
         workingDirectory: workspacePath,
-        stdoutPreview: previewText(files.join('\n')),
+        stdoutPreview: previewText(paged.page.join('\n')),
         details: {
-          files,
+          files: paged.page,
+          scopePath,
+          total: paged.total,
+          nextCursor: paged.nextCursor,
+          truncated: paged.truncated,
           fallback: result.exitCode !== 0 ? 'node-filesystem' : undefined,
         },
       };
@@ -501,7 +581,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_search: {
     id: 'workspace_search',
     description: 'Search within an approved workspace for a string or regex pattern.',
-    usageExample: '{"pattern":"Operator","path":"src"}',
+    usageExample: '{"pattern":"Operator","path":"src","limit":100,"cursor":"..."}',
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
       const pattern = getRequiredStringArg(args, 'pattern', 'workspace_search');
@@ -510,25 +590,52 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       const scopePath = args.path
         ? resolvePathWithinWorkspace(workspacePath, String(args.path))
         : workspacePath;
+      const limit = clampLimit(args.limit, 100, 500);
+      const cursor = typeof args.cursor === 'string' ? args.cursor.trim() : undefined;
       const result = await runProcess('rg', ['-n', pattern, scopePath], workspacePath);
-      const matches = isCommandMissing(result)
-        ? await searchWorkspaceFilesFallback({ workspacePath, scopePath, pattern })
-        : [];
-      const output = isCommandMissing(result)
-        ? matches.join('\n')
-        : result.stdout || result.stderr;
+      const paged = isCommandMissing(result)
+        ? await searchIndexedWorkspaceFiles({
+            workspacePath,
+            scopePath,
+            pattern,
+            cursor,
+            limit,
+          })
+        : {
+            matches: paginateValues({
+              values: (result.stdout || result.stderr).split('\n').filter(Boolean),
+              cursor,
+              limit,
+            }).page,
+            totalScanned: (result.stdout || result.stderr).split('\n').filter(Boolean).length,
+            nextCursor: paginateValues({
+              values: (result.stdout || result.stderr).split('\n').filter(Boolean),
+              cursor,
+              limit,
+            }).nextCursor,
+            truncated: paginateValues({
+              values: (result.stdout || result.stderr).split('\n').filter(Boolean),
+              cursor,
+              limit,
+            }).truncated,
+          };
+      const output = paged.matches.join('\n');
 
       return {
         summary:
-          result.exitCode === 0 || matches.length > 0
+          result.exitCode === 0 || paged.matches.length > 0
             ? `Search completed for pattern ${pattern}.`
             : `Search found no matches for pattern ${pattern}.`,
         workingDirectory: workspacePath,
-        exitCode: isCommandMissing(result) ? (matches.length > 0 ? 0 : 1) : result.exitCode,
+        exitCode: isCommandMissing(result) ? (paged.matches.length > 0 ? 0 : 1) : result.exitCode,
         stdoutPreview: previewText(output),
         details: {
           pattern,
           scopePath,
+          matches: paged.matches,
+          nextCursor: paged.nextCursor,
+          totalScanned: paged.totalScanned,
+          truncated: paged.truncated,
           fallback: isCommandMissing(result) ? 'node-filesystem' : undefined,
         },
       };
@@ -578,9 +685,114 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         workingDirectory: workspacePath,
         details: {
           path: targetPath,
+          touchedPaths: [targetPath],
           bytesWritten: Buffer.byteLength(content, 'utf8'),
         },
       };
+    },
+  },
+  workspace_replace_block: {
+    id: 'workspace_replace_block',
+    description:
+      'Replace a specific block of text inside an approved workspace file with anchor safety checks.',
+    usageExample:
+      '{"path":"src/App.tsx","find":"const oldValue = 1;","replace":"const oldValue = 2;","expectedMatches":1}',
+    retryable: false,
+    execute: async ({ capability, workItem }, args) => {
+      const workspacePath = resolveWorkspacePath(capability, workItem, args.workspacePath);
+      const targetPath = resolvePathWithinWorkspace(
+        workspacePath,
+        getRequiredStringArg(args, 'path', 'workspace_replace_block'),
+      );
+      const find = getRequiredRawStringArg(args, 'find', 'workspace_replace_block');
+      const replace = String(args.replace ?? '');
+      const expectedMatches = clampLimit(args.expectedMatches, 1, 1000);
+      const replaceAll = Boolean(args.replaceAll);
+      const current = await fs.readFile(targetPath, 'utf8');
+      const matchCount = current.split(find).length - 1;
+
+      if (matchCount === 0) {
+        throw new Error(`Could not find the requested block in ${targetPath}.`);
+      }
+      if (matchCount !== expectedMatches) {
+        throw new Error(
+          `Expected ${expectedMatches} block match(es) in ${targetPath}, but found ${matchCount}.`,
+        );
+      }
+
+      const nextContent = replaceAll
+        ? current.split(find).join(replace)
+        : current.replace(find, replace);
+      await fs.writeFile(targetPath, nextContent, 'utf8');
+
+      return {
+        summary: `Replaced ${matchCount} block match(es) in ${path.relative(workspacePath, targetPath)}.`,
+        workingDirectory: workspacePath,
+        details: {
+          path: targetPath,
+          touchedPaths: [targetPath],
+          matchCount,
+          bytesWritten: Buffer.byteLength(nextContent, 'utf8'),
+        },
+      };
+    },
+  },
+  workspace_apply_patch: {
+    id: 'workspace_apply_patch',
+    description: 'Apply a unified diff patch inside an approved workspace root.',
+    usageExample:
+      '{"patchText":"diff --git a/src/App.tsx b/src/App.tsx\\n--- a/src/App.tsx\\n+++ b/src/App.tsx\\n@@ ..."}',
+    retryable: false,
+    execute: async ({ capability, workItem }, args) => {
+      const workspacePath = resolveWorkspacePath(capability, workItem, args.workspacePath);
+      const patchText = getRequiredRawStringArg(
+        args,
+        'patchText',
+        'workspace_apply_patch',
+      );
+      const touchedRelativePaths = extractPatchTouchedFiles(patchText);
+      if (touchedRelativePaths.length === 0) {
+        throw new Error('workspace_apply_patch requires at least one touched file in the patch.');
+      }
+      const touchedPaths = touchedRelativePaths.map(relativePath =>
+        resolvePathWithinWorkspace(workspacePath, relativePath),
+      );
+
+      const result = await runProcessWithInput({
+        command: 'git',
+        args: ['apply', '--recount', '--reject', '--whitespace=nowarn', '--verbose', '-'],
+        cwd: workspacePath,
+        stdin: patchText,
+      });
+
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `Unable to apply patch in ${workspacePath}: ${previewText(result.stderr || result.stdout)}`,
+        );
+      }
+
+      return {
+        summary: `Applied patch touching ${touchedRelativePaths.length} file(s).`,
+        workingDirectory: workspacePath,
+        stdoutPreview: previewText(result.stdout || result.stderr),
+        details: {
+          touchedPaths,
+          touchedRelativePaths,
+        },
+      };
+    },
+  },
+  delegate_task: {
+    id: 'delegate_task',
+    description:
+      'Delegate a bounded specialist subtask to another agent inside the current capability execution.',
+    usageExample:
+      '{"delegatedAgentId":"AGENT-...","title":"Inspect failing tests","prompt":"Review the latest test failures and summarize the root cause."}',
+    retryable: false,
+    execute: async () => {
+      throw new Error(
+        'delegate_task is orchestrated by the execution service and cannot be executed outside an active workflow run.',
+      );
     },
   },
   run_build: {
@@ -659,6 +871,122 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       );
     },
   },
+  publish_bounty: {
+    id: 'publish_bounty',
+    description:
+      'Experimental: broadcast an in-process bounty request to other agents in the current desktop runtime.',
+    usageExample: '{"bountyId":"req-123","targetRole":"Backend","instructions":"..."}',
+    retryable: false,
+    execute: async ({ capability, agent }, args) => {
+      const bountyId = getRequiredStringArg(args, 'bountyId', 'publish_bounty');
+      const instructions = getRequiredStringArg(args, 'instructions', 'publish_bounty');
+      const targetRole = args.targetRole ? String(args.targetRole) : undefined;
+
+      if (getPublishedBounty(bountyId) || getPublishedBountySignal(bountyId)) {
+        throw new Error(
+          `Bounty ${bountyId} already exists in this runtime. Use a new bountyId instead of retrying the same publish request.`,
+        );
+      }
+      
+      publishBounty({
+        id: bountyId,
+        capabilityId: capability.id,
+        sourceAgentId: agent.id,
+        targetRole,
+        instructions,
+        status: 'OPEN',
+        createdAt: new Date().toISOString(),
+        timeoutMs: Number(args.timeoutMs) || undefined
+      });
+      
+      return {
+        summary: `Published experimental bounty ${bountyId}. Only the publishing agent may wait on it, and only an eligible peer may resolve it in this runtime.`,
+        details: { bountyId, targetRole, experimental: true }
+      };
+    }
+  },
+  resolve_bounty: {
+    id: 'resolve_bounty',
+    description:
+      'Experimental: resolve an active in-process bounty published by another agent in the same runtime.',
+    usageExample: '{"bountyId":"req-123","status":"RESOLVED","resultSummary":"Created route"}',
+    retryable: false,
+    execute: async ({ capability, agent }, args) => {
+      const bountyId = getRequiredStringArg(args, 'bountyId', 'resolve_bounty');
+      const status = args.status === 'FAILED' ? 'FAILED' : 'RESOLVED';
+      const resultSummary = args.resultSummary ? String(args.resultSummary) : undefined;
+      const bounty = getPublishedBounty(bountyId);
+
+      if (!bounty) {
+        throw new Error(`Bounty ${bountyId} is not active in this runtime.`);
+      }
+      if (bounty.capabilityId !== capability.id) {
+        throw new Error(`Bounty ${bountyId} belongs to another capability runtime.`);
+      }
+      if (bounty.sourceAgentId === agent.id) {
+        throw new Error(`Agent ${agent.id} cannot resolve its own bounty ${bountyId}.`);
+      }
+      if (!agentMatchesBountyRole(agent, bounty.targetRole)) {
+        throw new Error(
+          `Bounty ${bountyId} targets role ${bounty.targetRole}, which does not match ${agent.role}.`,
+        );
+      }
+      
+      publishBountySignal({
+        bountyId,
+        status,
+        resultSummary,
+        resolvedByAgentId: agent.id,
+        resolvedAt: new Date().toISOString()
+      });
+      
+      return {
+        summary: `Resolved experimental bounty ${bountyId} with status ${status}.`,
+        details: { bountyId, status, experimental: true }
+      };
+    }
+  },
+  wait_for_signal: {
+    id: 'wait_for_signal',
+    description:
+      'Experimental: wait for an in-process bounty published by this same agent to be resolved.',
+    usageExample: '{"bountyId":"req-123"}',
+    retryable: false,
+    execute: async ({ capability, agent }, args) => {
+      const bountyId = getRequiredStringArg(args, 'bountyId', 'wait_for_signal');
+      const timeoutMs = Number(args.timeoutMs) || 60000; // default 1 minute
+      const bounty = getPublishedBounty(bountyId);
+      const priorSignal = getPublishedBountySignal(bountyId);
+
+      if (bounty) {
+        if (bounty.capabilityId !== capability.id) {
+          throw new Error(`Bounty ${bountyId} belongs to another capability runtime.`);
+        }
+        if (bounty.sourceAgentId !== agent.id) {
+          throw new Error(
+            `Only the publishing agent ${bounty.sourceAgentId} may wait on bounty ${bountyId}.`,
+          );
+        }
+      } else if (!priorSignal) {
+        throw new Error(`Bounty ${bountyId} is not active in this runtime.`);
+      }
+      
+      try {
+        const result = await waitForBountySignal(bountyId, timeoutMs);
+        return {
+          summary: `Experimental bounty ${bountyId} was signaled with status: ${result.status}`,
+          details: {
+            resolvedByAgentId: result.resolvedByAgentId,
+            resultSummary: result.resultSummary,
+            payload: result.detailPayload,
+            experimental: true,
+          }
+        };
+      } catch (err: any) {
+        throw new Error(err.message || 'Error occurred while waiting for signal');
+      }
+    }
+  }
 };
 
 export const getToolAdapter = (toolId: ToolAdapterId) => {
@@ -674,6 +1002,16 @@ export const listToolDescriptions = (toolIds: ToolAdapterId[]) =>
     const adapter = getToolAdapter(toolId);
     return `- ${adapter.id}: ${adapter.description}${adapter.usageExample ? ` Example args: ${adapter.usageExample}` : ''}`;
   });
+
+const SHADOW_MOCKED_TOOLS = new Set([
+  'workspace_write',
+  'workspace_replace_block',
+  'workspace_apply_patch',
+  'run_build',
+  'run_test',
+  'run_docs',
+  'run_deploy'
+]);
 
 export const executeTool = async ({
   capability,
@@ -691,6 +1029,23 @@ export const executeTool = async ({
   requireApprovedDeployment?: boolean;
 }) => {
   const adapter = getToolAdapter(toolId);
+
+  if (
+    capability.executionConfig?.executionMode === 'SHADOW' &&
+    SHADOW_MOCKED_TOOLS.has(toolId)
+  ) {
+    return {
+      summary: `[SHADOW MODE INTERCEPT]: Simulated successful execution of ${toolId}.`,
+      workingDirectory: capability.executionConfig.defaultWorkspacePath || '/shadow',
+      exitCode: 0,
+      stdoutPreview: 'Shadow mode simulation successful. No actual changes were made.',
+      stderrPreview: '',
+      sandboxProfile: 'shadow',
+      details: { shadowIntercept: true, simulated: true, originalArgs: args },
+      retryable: false,
+    };
+  }
+
   const result = await adapter.execute(
     { capability, agent, workItem, requireApprovedDeployment },
     args,

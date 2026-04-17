@@ -39,6 +39,15 @@ const ROLE_USER_TEMPLATES: Array<Pick<
     workspaceRoles: ['TEAM_LEAD'],
   },
   {
+    id: 'USR-INCIDENT-COMMANDER',
+    name: 'Incident Commander',
+    email: 'incident.commander@local.workspace',
+    title: 'Incident Commander',
+    status: 'ACTIVE',
+    teamIds: [PLATFORM_TEAM_ID],
+    workspaceRoles: ['INCIDENT_COMMANDER'],
+  },
+  {
     id: 'USR-OPERATOR',
     name: 'Operator',
     email: 'operator+runtime@local.workspace',

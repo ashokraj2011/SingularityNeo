@@ -74,7 +74,10 @@ import {
   normalizeWorkItemPhaseStakeholders,
 } from '../../src/lib/workItemStakeholders';
 import { invokeScopedCapabilitySession } from '../githubModels';
-import { queueSingleAgentLearningRefresh } from '../agentLearning/service';
+import {
+  queueExperienceDistillationRefresh,
+  queueSingleAgentLearningRefresh,
+} from '../agentLearning/service';
 import { wakeAgentLearningWorker } from '../agentLearning/worker';
 import { buildMemoryContext, refreshCapabilityMemory } from '../memory';
 import { evaluateToolPolicy } from '../policy';
@@ -108,9 +111,11 @@ import {
   classifyToolExecutionError,
   executeTool,
   listToolDescriptions,
+  type ToolExecutionResult,
 } from './tools';
 import { captureCodeDiffReviewArtifact } from './codeDiff';
 import {
+  createWorkItemHandoffPacketRecord,
   getCapabilityBundle,
   releaseWorkItemCodeClaimRecord,
   replaceCapabilityWorkspaceContentRecord,
@@ -126,6 +131,8 @@ import {
   buildWorkspaceProfilePromptLines,
   detectWorkspaceProfile,
 } from '../workspaceProfile';
+import { resolveQueuedRunDispatch } from '../executionOwnership';
+import { isRemoteExecutionClient } from './runtimeClient';
 
 const MAX_AGENT_TOOL_LOOPS = 8;
 
@@ -252,6 +259,15 @@ const TOOL_ID_ALIASES: Record<string, ToolAdapterId> = {
   file_write: 'workspace_write',
   write_file: 'workspace_write',
   edit_file: 'workspace_write',
+  workspace_replace_block: 'workspace_replace_block',
+  replace_block: 'workspace_replace_block',
+  replace_in_file: 'workspace_replace_block',
+  workspace_apply_patch: 'workspace_apply_patch',
+  apply_patch: 'workspace_apply_patch',
+  patch_file: 'workspace_apply_patch',
+  delegate_task: 'delegate_task',
+  delegate: 'delegate_task',
+  handoff_task: 'delegate_task',
   git_status: 'git_status',
   repo_status: 'git_status',
   run_build: 'run_build',
@@ -866,6 +882,15 @@ const buildBlocker = (
 const replaceWorkItem = (items: WorkItem[], next: WorkItem) =>
   items.map(item => (item.id === next.id ? next : item));
 
+const replaceTask = (items: AgentTask[], next: AgentTask) => {
+  const existingIndex = items.findIndex(task => task.id === next.id);
+  if (existingIndex === -1) {
+    return [next, ...items];
+  }
+
+  return items.map((task, index) => (index === existingIndex ? next : task));
+};
+
 const replaceArtifact = (items: Artifact[], next: Artifact) => {
   const existingIndex = items.findIndex(
     artifact =>
@@ -891,6 +916,305 @@ const replaceArtifact = (items: Artifact[], next: Artifact) => {
 
 const replaceArtifacts = (items: Artifact[], nextArtifacts: Artifact[]) =>
   nextArtifacts.reduce((current, artifact) => replaceArtifact(current, artifact), items);
+
+const executeDelegatedTask = async ({
+  projection,
+  detail,
+  step,
+  parentAgent,
+  delegatedAgentId,
+  title,
+  prompt,
+  toolInvocationId,
+  traceId,
+  promoteToHandoff,
+  openQuestions,
+  blockingDependencies,
+  recommendedNextStep,
+}: {
+  projection: ProjectionContext;
+  detail: WorkflowRunDetail;
+  step: WorkflowStep;
+  parentAgent: CapabilityAgent;
+  delegatedAgentId: string;
+  title: string;
+  prompt: string;
+  toolInvocationId: string;
+  traceId?: string;
+  promoteToHandoff?: boolean;
+  openQuestions?: string[];
+  blockingDependencies?: string[];
+  recommendedNextStep?: string;
+}): Promise<ToolExecutionResult & { retryable: boolean }> => {
+  if (!delegatedAgentId.trim()) {
+    throw new Error('delegate_task requires delegatedAgentId.');
+  }
+  if (!prompt.trim()) {
+    throw new Error('delegate_task requires a non-empty prompt.');
+  }
+  const delegatedAgent =
+    projection.workspace.agents.find(candidate => candidate.id === delegatedAgentId) || null;
+  if (!delegatedAgent) {
+    throw new Error(`Delegated agent ${delegatedAgentId} was not found in this capability.`);
+  }
+
+  const childTaskId = `TASK-DELEGATE-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+  const childTask: AgentTask = {
+    id: childTaskId,
+    title: title.trim() || `${projection.workItem.title} · Delegated Specialist Review`,
+    agent: delegatedAgent.name,
+    capabilityId: projection.capability.id,
+    taskSubtype: 'DELEGATED_RUN',
+    workItemId: projection.workItem.id,
+    workflowId: detail.run.workflowId,
+    workflowStepId: step.id,
+    managedByWorkflow: false,
+    taskType: 'DELIVERY',
+    phase: step.phase,
+    priority: projection.workItem.priority,
+    status: 'PROCESSING',
+    timestamp: formatTaskTimestamp(),
+    prompt,
+    executionNotes: `Delegated by ${parentAgent.name} during ${step.name}.`,
+    runId: detail.run.id,
+    runStepId: detail.steps.find(item => item.status === 'RUNNING')?.id,
+    parentRunId: detail.run.id,
+    parentRunStepId: detail.steps.find(item => item.status === 'RUNNING')?.id,
+    delegatedAgentId: delegatedAgent.id,
+    toolInvocationId,
+    linkedArtifacts: [],
+    producedOutputs: [],
+  };
+
+  const queuedLog = createExecutionLog({
+    capabilityId: projection.capability.id,
+    taskId: childTask.id,
+    agentId: delegatedAgent.id,
+    message: `Delegated specialist task started: ${childTask.title}`,
+    runId: detail.run.id,
+    runStepId: childTask.runStepId,
+    toolInvocationId,
+    traceId,
+    metadata: {
+      parentAgentId: parentAgent.id,
+      parentAgentName: parentAgent.name,
+      delegatedAgentId: delegatedAgent.id,
+      delegatedAgentName: delegatedAgent.name,
+    },
+  });
+
+  projection.workspace.tasks = replaceTask(projection.workspace.tasks, childTask);
+  projection.workspace.executionLogs = [...projection.workspace.executionLogs, queuedLog];
+  await replaceCapabilityWorkspaceContentRecord(projection.capability.id, {
+    tasks: projection.workspace.tasks,
+    executionLogs: projection.workspace.executionLogs,
+  });
+
+  try {
+    const memoryContext = await buildMemoryContext({
+      capabilityId: projection.capability.id,
+      agentId: delegatedAgent.id,
+      queryText: [
+        childTask.title,
+        prompt,
+        projection.workItem.title,
+        projection.workItem.description,
+        step.name,
+        step.action,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      limit: 5,
+    });
+
+    const initialPrompt = [
+      `You are handling a delegated specialist subtask inside capability ${projection.capability.name}.`,
+      `Parent agent: ${parentAgent.name} (${parentAgent.role}).`,
+      `Delegated specialist: ${delegatedAgent.name} (${delegatedAgent.role}).`,
+      `Work item: ${projection.workItem.title} (${projection.workItem.id}).`,
+      `Workflow step: ${step.name} (${step.phase}).`,
+      `Task title: ${childTask.title}`,
+      '',
+      'Return concise markdown with these sections:',
+      '1. Summary',
+      '2. Findings',
+      '3. Recommended next step',
+      '4. Open questions',
+      '',
+      `Delegated prompt:\n${prompt}`,
+    ].join('\n');
+
+    const response = await invokeScopedCapabilitySession({
+      capability: projection.capability,
+      agent: delegatedAgent,
+      scope: 'TASK',
+      scopeId: childTask.id,
+      prompt,
+      initialPrompt,
+      memoryPrompt: memoryContext.prompt,
+      timeoutMs: 90_000,
+      resetSession: true,
+    });
+
+    const artifact: Artifact = {
+      id: createArtifactId(),
+      name: `${delegatedAgent.name} Delegation Result`,
+      capabilityId: projection.capability.id,
+      type: 'Delegation Result',
+      version: `run-${detail.run.attemptNumber}`,
+      agent: delegatedAgent.id,
+      connectedAgentId: parentAgent.id,
+      created: new Date().toISOString(),
+      direction: 'OUTPUT',
+      sourceWorkflowId: detail.run.workflowId,
+      runId: detail.run.id,
+      runStepId: childTask.runStepId,
+      summary: compactMarkdownSummary(response.content),
+      artifactKind: 'DELEGATION_RESULT',
+      phase: step.phase,
+      workItemId: projection.workItem.id,
+      sourceRunId: detail.run.id,
+      sourceRunStepId: childTask.runStepId,
+      handoffFromAgentId: parentAgent.id,
+      handoffToAgentId: delegatedAgent.id,
+      contentFormat: 'MARKDOWN',
+      mimeType: 'text/markdown',
+      fileName: `${toFileSlug(projection.workItem.id)}-${toFileSlug(step.name)}-${toFileSlug(delegatedAgent.name)}-delegation.md`,
+      contentText: `# ${delegatedAgent.name} Delegation Result\n\n${buildMarkdownArtifact([
+        ['Work Item', `${projection.workItem.title} (${projection.workItem.id})`],
+        ['Phase', getLifecyclePhaseLabel(projection.capability.lifecycle, step.phase)],
+        ['Parent Agent', `${parentAgent.name} (${parentAgent.role})`],
+        ['Delegated Agent', `${delegatedAgent.name} (${delegatedAgent.role})`],
+        ['Delegated Task', childTask.title],
+        ['Prompt', prompt],
+        ['Result Summary', compactMarkdownSummary(response.content)],
+      ])}\n\n## Full Result\n\n${response.content}`,
+      retrievalReferences: memoryContext.results.map(item => item.reference),
+    };
+
+    let handoffPacketId: string | undefined;
+    if (promoteToHandoff) {
+      const handoffPacket = await createWorkItemHandoffPacketRecord({
+        capabilityId: projection.capability.id,
+        packet: {
+          id: `HANDOFF-${Math.random().toString(36).slice(2, 10).toUpperCase()}`,
+          workItemId: projection.workItem.id,
+          summary: compactMarkdownSummary(response.content) || childTask.title,
+          openQuestions: openQuestions || [],
+          blockingDependencies: blockingDependencies || [],
+          recommendedNextStep:
+            recommendedNextStep || 'Review the delegated result artifact and continue the parent run.',
+          artifactIds: [artifact.id],
+          traceIds: traceId ? [traceId] : [],
+          delegationOriginTaskId: childTask.id,
+          delegationOriginAgentId: delegatedAgent.id,
+          createdAt: new Date().toISOString(),
+        },
+      });
+      handoffPacketId = handoffPacket.id;
+    }
+
+    const completedTask: AgentTask = {
+      ...childTask,
+      status: 'COMPLETED',
+      timestamp: formatTaskTimestamp(),
+      executionNotes: compactMarkdownSummary(response.content),
+      linkedArtifacts: [
+        {
+          name: artifact.name,
+          size: artifact.version,
+          type: 'file',
+        },
+      ],
+      producedOutputs: [
+        {
+          name: artifact.name,
+          status: 'completed',
+          artifactId: artifact.id,
+          runId: detail.run.id,
+          runStepId: childTask.runStepId,
+        },
+      ],
+      handoffPacketId,
+    };
+
+    const completionLog = createExecutionLog({
+      capabilityId: projection.capability.id,
+      taskId: childTask.id,
+      agentId: delegatedAgent.id,
+      message: `Delegated specialist task completed: ${artifact.summary}`,
+      runId: detail.run.id,
+      runStepId: childTask.runStepId,
+      toolInvocationId,
+      traceId,
+      metadata: {
+        artifactId: artifact.id,
+        handoffPacketId,
+        model: response.model,
+      },
+      costUsd: response.usage.estimatedCostUsd,
+      latencyMs: undefined,
+    });
+
+    projection.workspace.tasks = replaceTask(projection.workspace.tasks, completedTask);
+    projection.workspace.artifacts = replaceArtifact(projection.workspace.artifacts, artifact);
+    projection.workspace.executionLogs = [...projection.workspace.executionLogs, completionLog];
+
+    await replaceCapabilityWorkspaceContentRecord(projection.capability.id, {
+      tasks: projection.workspace.tasks,
+      artifacts: projection.workspace.artifacts,
+      executionLogs: projection.workspace.executionLogs,
+    });
+    await refreshCapabilityMemory(projection.capability.id).catch(() => undefined);
+    await queueTargetedLearningRefresh({
+      workspace: projection.workspace,
+      capabilityId: projection.capability.id,
+      focusedAgentId: delegatedAgent.id,
+      triggerType: 'MANUAL_REFRESH',
+    });
+
+    return {
+      summary: `Delegated ${childTask.title} to ${delegatedAgent.name}.`,
+      retryable: false,
+      details: {
+        childTaskId: childTask.id,
+        delegatedAgentId: delegatedAgent.id,
+        delegatedAgentName: delegatedAgent.name,
+        artifactId: artifact.id,
+        handoffPacketId,
+        model: response.model,
+        usage: response.usage,
+      },
+    };
+  } catch (error) {
+    const failedTask: AgentTask = {
+      ...childTask,
+      status: 'ALERT',
+      timestamp: formatTaskTimestamp(),
+      executionNotes:
+        error instanceof Error ? error.message : 'Delegated specialist task failed unexpectedly.',
+    };
+    const failureLog = createExecutionLog({
+      capabilityId: projection.capability.id,
+      taskId: childTask.id,
+      agentId: delegatedAgent.id,
+      level: 'ERROR',
+      message:
+        error instanceof Error ? error.message : 'Delegated specialist task failed unexpectedly.',
+      runId: detail.run.id,
+      runStepId: childTask.runStepId,
+      toolInvocationId,
+      traceId,
+    });
+    projection.workspace.tasks = replaceTask(projection.workspace.tasks, failedTask);
+    projection.workspace.executionLogs = [...projection.workspace.executionLogs, failureLog];
+    await replaceCapabilityWorkspaceContentRecord(projection.capability.id, {
+      tasks: projection.workspace.tasks,
+      executionLogs: projection.workspace.executionLogs,
+    });
+    throw error;
+  }
+};
 
 const updateTasksForCurrentStep = ({
   tasks,
@@ -1066,7 +1390,9 @@ const queueTargetedLearningRefresh = async ({
       ),
     ),
   ).catch(() => undefined);
-  wakeAgentLearningWorker();
+  if (!isRemoteExecutionClient()) {
+    wakeAgentLearningWorker();
+  }
 };
 
 const extractBalancedJsonCandidates = (value: string) => {
@@ -2344,6 +2670,16 @@ const syncCompletedProjection = async ({
       }),
     ],
   });
+  await queueExperienceDistillationRefresh({
+    capabilityId: detail.run.capabilityId,
+    agentId: completedStep.agentId,
+    outcome: 'COMPLETED',
+    workItemId: projection.workItem.id,
+    runId: detail.run.id,
+  }).catch(() => undefined);
+  if (!isRemoteExecutionClient()) {
+    wakeAgentLearningWorker();
+  }
 };
 
 const syncFailedProjection = async ({
@@ -2424,6 +2760,16 @@ const syncFailedProjection = async ({
       }),
     ],
   });
+  await queueExperienceDistillationRefresh({
+    capabilityId: detail.run.capabilityId,
+    agentId: currentStep.agentId,
+    outcome: 'FAILED',
+    workItemId: projection.workItem.id,
+    runId: detail.run.id,
+  }).catch(() => undefined);
+  if (!isRemoteExecutionClient()) {
+    wakeAgentLearningWorker();
+  }
 };
 
 const buildArtifactFromStepCompletion = ({
@@ -3622,6 +3968,15 @@ export const startWorkflowExecution = async ({
       `Phase ${restartFromPhase} is not part of ${projection.capability.name}'s lifecycle.`,
     );
   }
+  const readinessContract = projection.workspace.readinessContract;
+  if (readinessContract && !readinessContract.allReady) {
+    const firstBlockedGate = readinessContract.gates.find(gate => !gate.satisfied);
+    throw new Error(
+      firstBlockedGate?.blockingReason ||
+        readinessContract.summary ||
+        'This capability is not ready to start delivery yet.',
+    );
+  }
   const detail = await (await import('./repository')).createWorkflowRun({
     capabilityId,
     workItem: projection.workItem,
@@ -3775,6 +4130,7 @@ const resolveRunWaitAndQueue = async ({
     nextWorkflowStep = transition.nextStep;
     nextRun = transition.nextRun;
   } else {
+    const queuedDispatch = await resolveQueuedRunDispatch({ capabilityId });
     nextRunStep = await updateWorkflowRunStep({
       ...currentRunStep,
       status: 'PENDING',
@@ -3789,6 +4145,8 @@ const resolveRunWaitAndQueue = async ({
       await updateWorkflowRun({
         ...detail.run,
         status: 'QUEUED',
+        queueReason: queuedDispatch.queueReason,
+        assignedExecutorId: queuedDispatch.assignedExecutorId,
         pauseReason: undefined,
         currentWaitId: undefined,
         leaseOwner: undefined,
@@ -4309,9 +4667,12 @@ export const resumeWorkflowRun = async ({
     return getWorkflowRunDetail(capabilityId, runId);
   }
 
+  const queuedDispatch = await resolveQueuedRunDispatch({ capabilityId });
   await updateWorkflowRunControl({
     ...detail.run,
     status: 'QUEUED',
+    queueReason: queuedDispatch.queueReason,
+    assignedExecutorId: queuedDispatch.assignedExecutorId,
     pauseReason: undefined,
     currentWaitId: undefined,
     leaseOwner: undefined,
@@ -5912,14 +6273,53 @@ const executeAutomatedStep = async (
 
       try {
         attemptedTools.push(decision.toolCall.toolId);
-        const result = await executeTool({
-          capability: projection.capability,
-          agent,
-          workItem: projection.workItem,
-          toolId: decision.toolCall.toolId,
-          args: decision.toolCall.args || {},
-          requireApprovedDeployment: hasApprovedDeployment,
-        });
+        const result =
+          decision.toolCall.toolId === 'delegate_task'
+            ? await executeDelegatedTask({
+                projection,
+                detail: runningDetail,
+                step,
+                parentAgent: agent,
+                delegatedAgentId:
+                  typeof decision.toolCall.args?.delegatedAgentId === 'string'
+                    ? decision.toolCall.args.delegatedAgentId
+                    : '',
+                title:
+                  typeof decision.toolCall.args?.title === 'string'
+                    ? decision.toolCall.args.title
+                    : `${step.name} specialist delegation`,
+                prompt:
+                  typeof decision.toolCall.args?.prompt === 'string'
+                    ? decision.toolCall.args.prompt
+                    : '',
+                toolInvocationId,
+                traceId,
+                promoteToHandoff: Boolean(decision.toolCall.args?.promoteToHandoff),
+                openQuestions: Array.isArray(decision.toolCall.args?.openQuestions)
+                  ? decision.toolCall.args.openQuestions.filter(
+                      (value): value is string =>
+                        typeof value === 'string' && value.trim().length > 0,
+                    )
+                  : undefined,
+                blockingDependencies: Array.isArray(decision.toolCall.args?.blockingDependencies)
+                  ? decision.toolCall.args.blockingDependencies.filter(
+                      (value): value is string =>
+                        typeof value === 'string' && value.trim().length > 0,
+                    )
+                  : undefined,
+                recommendedNextStep:
+                  typeof decision.toolCall.args?.recommendedNextStep === 'string'
+                    ? decision.toolCall.args.recommendedNextStep
+                    : undefined,
+              })
+            : await executeTool({
+                capability: projection.capability,
+                agent,
+                workItem: projection.workItem,
+                toolId: decision.toolCall.toolId,
+                args: decision.toolCall.args || {},
+                requireApprovedDeployment: hasApprovedDeployment,
+              });
         const toolLatency = Date.now() - toolStartedAt;
         const completedTool = await updateToolInvocation({
           ...toolInvocation,
@@ -5994,13 +6394,16 @@ const executeAutomatedStep = async (
             lastToolSummary: result.summary,
           },
         });
-        if (
-          decision.toolCall.toolId === 'workspace_write' &&
-          typeof result.details?.path === 'string' &&
-          result.details.path.trim()
-        ) {
-          stepTouchedPaths.add(result.details.path.trim());
-        }
+        const touchedPaths = Array.isArray(result.details?.touchedPaths)
+          ? result.details.touchedPaths.filter(
+              (value): value is string => typeof value === 'string' && value.trim().length > 0,
+            )
+          : typeof result.details?.path === 'string' && result.details.path.trim()
+          ? [result.details.path.trim()]
+          : [];
+        touchedPaths.forEach(touchedPath => {
+          stepTouchedPaths.add(touchedPath);
+        });
         if (typeof decision.toolCall.args?.path === 'string' && decision.toolCall.args.path.trim()) {
           inspectedPaths.add(decision.toolCall.args.path.trim());
         }

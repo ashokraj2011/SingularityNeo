@@ -233,6 +233,31 @@ CREATE TABLE IF NOT EXISTS capability_workspaces (
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+CREATE TABLE IF NOT EXISTS desktop_executor_registrations (
+      id TEXT PRIMARY KEY,
+      actor_user_id TEXT REFERENCES workspace_users(id) ON DELETE SET NULL,
+      actor_display_name TEXT NOT NULL,
+      actor_team_ids TEXT[] NOT NULL DEFAULT '{}',
+      owned_capability_ids TEXT[] NOT NULL DEFAULT '{}',
+      approved_workspace_roots JSONB NOT NULL DEFAULT '{}'::jsonb,
+      runtime_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+      heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+CREATE TABLE IF NOT EXISTS capability_execution_ownership (
+      capability_id TEXT PRIMARY KEY REFERENCES capabilities(id) ON DELETE CASCADE,
+      executor_id TEXT NOT NULL REFERENCES desktop_executor_registrations(id) ON DELETE CASCADE,
+      actor_user_id TEXT REFERENCES workspace_users(id) ON DELETE SET NULL,
+      actor_display_name TEXT NOT NULL,
+      actor_team_ids TEXT[] NOT NULL DEFAULT '{}',
+      approved_workspace_roots TEXT[] NOT NULL DEFAULT '{}',
+      claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
 CREATE TABLE IF NOT EXISTS capability_skills (
       capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
       id TEXT NOT NULL,
@@ -268,6 +293,8 @@ CREATE TABLE IF NOT EXISTS capability_agents (
       skill_ids TEXT[] NOT NULL DEFAULT '{}',
       preferred_tool_ids TEXT[] NOT NULL DEFAULT '{}',
       provider TEXT NOT NULL,
+      provider_key TEXT,
+      embedding_provider_key TEXT,
       model TEXT NOT NULL,
       token_limit INTEGER NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -433,6 +460,140 @@ CREATE TABLE IF NOT EXISTS capability_artifact_files (
       PRIMARY KEY (capability_id, artifact_id)
     );
 
+CREATE TABLE IF NOT EXISTS capability_evidence_packets (
+      bundle_id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      work_item_id TEXT NOT NULL,
+      run_id TEXT,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      digest_sha256 TEXT NOT NULL UNIQUE,
+      payload JSONB NOT NULL,
+      generated_by_actor_user_id TEXT,
+      generated_by_actor_display_name TEXT NOT NULL,
+      touched_paths TEXT[] NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+CREATE TABLE IF NOT EXISTS capability_incidents (
+      id TEXT PRIMARY KEY,
+      external_id TEXT,
+      source TEXT NOT NULL,
+      capability_id TEXT REFERENCES capabilities(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      status TEXT NOT NULL,
+      detected_at TIMESTAMPTZ NOT NULL,
+      resolved_at TIMESTAMPTZ,
+      affected_services TEXT[] NOT NULL DEFAULT '{}',
+      affected_paths TEXT[] NOT NULL DEFAULT '{}',
+      summary TEXT,
+      postmortem_url TEXT,
+      raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_by_actor_user_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (source, external_id)
+    );
+
+CREATE TABLE IF NOT EXISTS capability_incident_packet_links (
+      incident_id TEXT NOT NULL REFERENCES capability_incidents(id) ON DELETE CASCADE,
+      packet_bundle_id TEXT NOT NULL REFERENCES capability_evidence_packets(bundle_id) ON DELETE CASCADE,
+      correlation TEXT NOT NULL,
+      correlation_score NUMERIC(5,3),
+      correlation_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+      linked_by_actor_user_id TEXT,
+      linked_by_actor_display_name TEXT,
+      linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (incident_id, packet_bundle_id)
+    );
+
+CREATE TABLE IF NOT EXISTS incident_source_configs (
+      source TEXT PRIMARY KEY,
+      enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      auth_type TEXT NOT NULL DEFAULT 'HMAC_SHA256',
+      secret_reference TEXT,
+      basic_username TEXT,
+      signature_header TEXT,
+      rate_limit_per_minute INTEGER NOT NULL DEFAULT 60,
+      settings JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+CREATE TABLE IF NOT EXISTS incident_service_capability_map (
+      service_name TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      default_affected_paths TEXT[] NOT NULL DEFAULT '{}',
+      owner_email TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+CREATE TABLE IF NOT EXISTS incident_export_target_configs (
+      target TEXT PRIMARY KEY,
+      enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      auth_type TEXT NOT NULL DEFAULT 'API_KEY',
+      base_url TEXT,
+      secret_reference TEXT,
+      basic_username TEXT,
+      settings JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+CREATE TABLE IF NOT EXISTS capability_incident_jobs (
+      id TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      incident_id TEXT REFERENCES capability_incidents(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'QUEUED',
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      lease_owner TEXT,
+      lease_expires_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+CREATE TABLE IF NOT EXISTS incident_export_deliveries (
+      id TEXT PRIMARY KEY,
+      target TEXT NOT NULL,
+      export_kind TEXT NOT NULL,
+      incident_id TEXT REFERENCES capability_incidents(id) ON DELETE SET NULL,
+      capability_id TEXT REFERENCES capabilities(id) ON DELETE CASCADE,
+      window_days INTEGER,
+      status TEXT NOT NULL DEFAULT 'QUEUED',
+      request_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      response_status INTEGER,
+      response_preview TEXT,
+      external_reference TEXT,
+      triggered_by_actor_user_id TEXT,
+      triggered_by_actor_display_name TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      exported_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+CREATE TABLE IF NOT EXISTS capability_incident_guardrail_promotions (
+      id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      incident_id TEXT NOT NULL REFERENCES capability_incidents(id) ON DELETE CASCADE,
+      packet_bundle_id TEXT NOT NULL REFERENCES capability_evidence_packets(bundle_id) ON DELETE CASCADE,
+      concern_text TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      approval_policy_id TEXT,
+      approval_wait_id TEXT,
+      approval_run_id TEXT,
+      requested_by_actor_user_id TEXT,
+      requested_by_actor_display_name TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
 CREATE TABLE IF NOT EXISTS capability_tasks (
       capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
       id TEXT NOT NULL,
@@ -452,6 +613,12 @@ CREATE TABLE IF NOT EXISTS capability_tasks (
       run_id TEXT,
       run_step_id TEXT,
       tool_invocation_id TEXT,
+      task_subtype TEXT,
+      parent_task_id TEXT,
+      parent_run_id TEXT,
+      parent_run_step_id TEXT,
+      delegated_agent_id TEXT,
+      handoff_packet_id TEXT,
       linked_artifacts JSONB NOT NULL DEFAULT '[]'::jsonb,
       produced_outputs JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -591,6 +758,8 @@ CREATE TABLE IF NOT EXISTS capability_work_item_handoff_packets (
       recommended_next_step TEXT,
       artifact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
       trace_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      delegation_origin_task_id TEXT,
+      delegation_origin_agent_id TEXT,
       accepted_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -603,6 +772,8 @@ CREATE TABLE IF NOT EXISTS capability_workflow_runs (
       work_item_id TEXT NOT NULL,
       workflow_id TEXT NOT NULL,
       status TEXT NOT NULL,
+      queue_reason TEXT,
+      assigned_executor_id TEXT,
       attempt_number INTEGER NOT NULL,
       workflow_snapshot JSONB NOT NULL,
       current_node_id TEXT,
@@ -1109,6 +1280,12 @@ ALTER TABLE capability_agents
 ALTER TABLE capability_agents
     ADD COLUMN IF NOT EXISTS preferred_tool_ids TEXT[] NOT NULL DEFAULT '{}';
 
+ALTER TABLE capability_agents
+    ADD COLUMN IF NOT EXISTS provider_key TEXT;
+
+ALTER TABLE capability_agents
+    ADD COLUMN IF NOT EXISTS embedding_provider_key TEXT;
+
 ALTER TABLE capability_learning_updates
     ADD COLUMN IF NOT EXISTS trigger_type TEXT;
 
@@ -1117,6 +1294,9 @@ ALTER TABLE capability_learning_updates
 
 ALTER TABLE capability_learning_updates
     ADD COLUMN IF NOT EXISTS related_run_id TEXT;
+
+ALTER TABLE capability_evidence_packets
+    ADD COLUMN IF NOT EXISTS touched_paths TEXT[] NOT NULL DEFAULT '{}';
 
 ALTER TABLE capability_tasks
     ADD COLUMN IF NOT EXISTS work_item_id TEXT;
@@ -1145,8 +1325,32 @@ ALTER TABLE capability_tasks
 ALTER TABLE capability_tasks
     ADD COLUMN IF NOT EXISTS tool_invocation_id TEXT;
 
+ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS task_subtype TEXT;
+
+ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS parent_task_id TEXT;
+
+ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
+
+ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS parent_run_step_id TEXT;
+
+ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS delegated_agent_id TEXT;
+
+ALTER TABLE capability_tasks
+    ADD COLUMN IF NOT EXISTS handoff_packet_id TEXT;
+
 ALTER TABLE capability_work_items
     ADD COLUMN IF NOT EXISTS task_type TEXT;
+
+ALTER TABLE capability_work_item_handoff_packets
+    ADD COLUMN IF NOT EXISTS delegation_origin_task_id TEXT;
+
+ALTER TABLE capability_work_item_handoff_packets
+    ADD COLUMN IF NOT EXISTS delegation_origin_agent_id TEXT;
 
 ALTER TABLE capability_work_items
     ADD COLUMN IF NOT EXISTS phase_stakeholders JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -1322,6 +1526,12 @@ ALTER TABLE capability_workflow_runs
 ALTER TABLE capability_workflow_runs
     ADD COLUMN IF NOT EXISTS branch_state JSONB NOT NULL DEFAULT '{}'::jsonb;
 
+ALTER TABLE capability_workflow_runs
+    ADD COLUMN IF NOT EXISTS queue_reason TEXT;
+
+ALTER TABLE capability_workflow_runs
+    ADD COLUMN IF NOT EXISTS assigned_executor_id TEXT;
+
 ALTER TABLE capability_workflow_run_steps
     ADD COLUMN IF NOT EXISTS span_id TEXT;
 
@@ -1385,6 +1595,15 @@ CREATE INDEX IF NOT EXISTS capability_workflow_runs_status_idx
 
 CREATE INDEX IF NOT EXISTS capability_workflow_runs_work_item_idx
     ON capability_workflow_runs (capability_id, work_item_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS capability_workflow_runs_executor_idx
+    ON capability_workflow_runs (assigned_executor_id, status, updated_at);
+
+CREATE INDEX IF NOT EXISTS capability_execution_ownership_executor_idx
+    ON capability_execution_ownership (executor_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS desktop_executor_registrations_heartbeat_idx
+    ON desktop_executor_registrations (heartbeat_at DESC);
 
 CREATE INDEX IF NOT EXISTS capability_repositories_primary_idx
     ON capability_repositories (capability_id, is_primary, created_at);
@@ -1454,6 +1673,42 @@ CREATE INDEX IF NOT EXISTS capability_agent_learning_jobs_agent_idx
 
 CREATE INDEX IF NOT EXISTS capability_agent_sessions_agent_idx
     ON capability_agent_sessions (capability_id, agent_id, last_used_at DESC);
+
+CREATE INDEX IF NOT EXISTS capability_evidence_packets_created_idx
+    ON capability_evidence_packets (capability_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS capability_evidence_packets_touched_paths_idx
+    ON capability_evidence_packets USING GIN (touched_paths);
+
+CREATE INDEX IF NOT EXISTS capability_incidents_capability_time_idx
+    ON capability_incidents (capability_id, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS capability_incidents_source_external_idx
+    ON capability_incidents (source, external_id);
+
+CREATE INDEX IF NOT EXISTS capability_incident_links_packet_idx
+    ON capability_incident_packet_links (packet_bundle_id);
+
+CREATE INDEX IF NOT EXISTS capability_incident_links_correlation_idx
+    ON capability_incident_packet_links (correlation);
+
+CREATE INDEX IF NOT EXISTS capability_incident_jobs_status_idx
+    ON capability_incident_jobs (status, available_at ASC);
+
+CREATE INDEX IF NOT EXISTS capability_incident_jobs_incident_idx
+    ON capability_incident_jobs (incident_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS incident_export_deliveries_target_idx
+    ON incident_export_deliveries (target, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS incident_export_deliveries_incident_idx
+    ON incident_export_deliveries (incident_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS incident_export_deliveries_capability_idx
+    ON incident_export_deliveries (capability_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS capability_incident_guardrail_promotions_capability_idx
+    ON capability_incident_guardrail_promotions (capability_id, created_at DESC);
 
 -- Optional pgvector acceleration. Safe to leave in place on instances without pgvector.
 DO $$

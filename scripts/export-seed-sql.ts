@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BUILT_IN_AGENT_TEMPLATES, SKILL_LIBRARY } from '../src/constants';
+import { WORKSPACE_AGENT_TEMPLATES } from '../src/lib/workspaceFoundations';
 import {
   createBrokerageCapabilityWorkflow,
   createStandardCapabilityWorkflow,
@@ -41,6 +42,8 @@ const sqlNullableString = (value?: string | null) =>
   value ? sqlString(value) : 'NULL';
 
 const sqlBoolean = (value: boolean) => (value ? 'TRUE' : 'FALSE');
+
+const sqlJson = (value: unknown) => `${sqlString(JSON.stringify(value))}::jsonb`;
 
 const slugify = (value: string) =>
   value
@@ -201,6 +204,265 @@ const artifactSeeds = (() => {
     left.name.localeCompare(right.name),
   );
 })();
+
+const ownerAgentTemplate = WORKSPACE_AGENT_TEMPLATES.find(template => template.key === 'OWNER');
+if (!ownerAgentTemplate) {
+  throw new Error('The owner agent template is required to export seed SQL.');
+}
+
+const collectionBuiltInAgentKeys = new Set([
+  'PLANNING',
+  'ARCHITECT',
+  'BUSINESS-ANALYST',
+  'VALIDATION',
+]);
+
+const createAgentsSql = () => `-- Singularity Neo capability-scoped agent seed
+-- Seeds the built-in owner/specialist agents for capabilities that already exist.
+-- This script does NOT create capabilities.
+
+BEGIN;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'capabilities'
+  ) THEN
+    RAISE EXCEPTION 'Table "capabilities" does not exist. Load the schema first.';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'capability_agents'
+  ) THEN
+    RAISE EXCEPTION 'Table "capability_agents" does not exist. Load the schema first.';
+  END IF;
+END $$;
+
+CREATE TEMP TABLE tmp_singularity_seed_capabilities ON COMMIT DROP AS
+SELECT
+  cap.id AS capability_id,
+  cap.name AS capability_name,
+  COALESCE(NULLIF(cap.domain, ''), cap.name) AS capability_scope_name,
+  COALESCE(NULLIF(cap.capability_kind, ''), 'DELIVERY') AS capability_kind,
+  COALESCE(
+    NULLIF(cap.special_agent_id, ''),
+    'AGENT-' ||
+      LEFT(
+        TRIM(
+          BOTH '-'
+          FROM REGEXP_REPLACE(
+            UPPER(COALESCE(NULLIF(cap.name, ''), cap.id, 'CAPABILITY')),
+            '[^A-Z0-9]+',
+            '-',
+            'g'
+          )
+        ),
+        24
+      ) ||
+      '-OWNER'
+  ) AS owner_agent_id,
+  ARRAY_REMOVE(
+    ARRAY[
+      NULLIF(cap.confluence_link, ''),
+      NULLIF(cap.jira_board_link, ''),
+      NULLIF(cap.documentation_notes, '')
+    ],
+    NULL
+  )::TEXT[] AS documentation_sources
+FROM capabilities cap;
+
+CREATE TEMP TABLE tmp_singularity_built_in_templates (
+  template_key TEXT NOT NULL,
+  role_starter_key TEXT NOT NULL,
+  agent_name TEXT NOT NULL,
+  agent_role TEXT NOT NULL,
+  objective_template TEXT NOT NULL,
+  system_prompt_template TEXT NOT NULL,
+  contract_json JSONB NOT NULL,
+  input_artifacts TEXT[] NOT NULL,
+  output_artifacts TEXT[] NOT NULL,
+  default_skill_ids TEXT[] NOT NULL,
+  preferred_tool_ids TEXT[] NOT NULL,
+  enabled_for_collection BOOLEAN NOT NULL
+) ON COMMIT DROP;
+
+INSERT INTO tmp_singularity_built_in_templates (
+  template_key,
+  role_starter_key,
+  agent_name,
+  agent_role,
+  objective_template,
+  system_prompt_template,
+  contract_json,
+  input_artifacts,
+  output_artifacts,
+  default_skill_ids,
+  preferred_tool_ids,
+  enabled_for_collection
+)
+VALUES
+${BUILT_IN_AGENT_TEMPLATES.map(template => {
+  const workspaceTemplate = WORKSPACE_AGENT_TEMPLATES.find(
+    item => item.key === template.key,
+  );
+  return `  (
+    ${sqlString(template.key)},
+    ${sqlString(template.roleStarterKey)},
+    ${sqlString(template.name)},
+    ${sqlString(template.role)},
+    ${sqlString(template.objective)},
+    ${sqlString(template.systemPrompt)},
+    ${sqlJson(template.contract)},
+    ${sqlTextArray([...template.inputArtifacts])},
+    ${sqlTextArray([...template.outputArtifacts])},
+    ${sqlTextArray(workspaceTemplate?.defaultSkillIds || [])},
+    ${sqlTextArray(workspaceTemplate?.preferredToolIds || [])},
+    ${sqlBoolean(collectionBuiltInAgentKeys.has(template.key))}
+  )`;
+}).join(',\n')};
+
+UPDATE capabilities cap
+SET
+  special_agent_id = seed.owner_agent_id,
+  updated_at = NOW()
+FROM tmp_singularity_seed_capabilities seed
+WHERE cap.id = seed.capability_id
+  AND COALESCE(NULLIF(cap.special_agent_id, ''), '') <> seed.owner_agent_id;
+
+INSERT INTO capability_agents (
+  capability_id,
+  id,
+  name,
+  role,
+  objective,
+  system_prompt,
+  initialization_status,
+  documentation_sources,
+  input_artifacts,
+  output_artifacts,
+  is_owner,
+  is_built_in,
+  standard_template_key,
+  role_starter_key,
+  learning_notes,
+  contract,
+  skill_ids,
+  preferred_tool_ids,
+  provider,
+  model,
+  token_limit,
+  updated_at
+)
+SELECT
+  seed.capability_id,
+  seed.owner_agent_id,
+  ${sqlString(ownerAgentTemplate.name)},
+  ${sqlString(ownerAgentTemplate.role)},
+  REPLACE(${sqlString(ownerAgentTemplate.objective)}, '{capabilityName}', seed.capability_name),
+  REPLACE(${sqlString(ownerAgentTemplate.systemPrompt)}, '{capabilityName}', seed.capability_name),
+  'READY',
+  seed.documentation_sources,
+  ${sqlTextArray(ownerAgentTemplate.inputArtifacts)},
+  ${sqlTextArray(ownerAgentTemplate.outputArtifacts)},
+  TRUE,
+  FALSE,
+  NULL,
+  ${sqlString(ownerAgentTemplate.roleStarterKey)},
+  ARRAY[
+    FORMAT('%s team context is isolated to this capability.', seed.capability_name),
+    FORMAT(
+      'All downstream chats, agents, and workflows should remain aligned to %s.',
+      seed.capability_scope_name
+    )
+  ]::TEXT[],
+  ${sqlJson(ownerAgentTemplate.contract)},
+  ${sqlTextArray(ownerAgentTemplate.defaultSkillIds)},
+  ${sqlTextArray(ownerAgentTemplate.preferredToolIds)},
+  'GitHub Copilot SDK',
+  'gpt-4.1-mini',
+  12000,
+  NOW()
+FROM tmp_singularity_seed_capabilities seed
+
+UNION ALL
+
+SELECT
+  seed.capability_id,
+  'AGENT-' ||
+    LEFT(
+      TRIM(
+        BOTH '-'
+        FROM REGEXP_REPLACE(UPPER(seed.capability_id), '[^A-Z0-9]+', '-', 'g')
+      ),
+      24
+    ) ||
+    '-' ||
+    template.template_key AS agent_id,
+  template.agent_name,
+  template.agent_role,
+  REPLACE(template.objective_template, '{capabilityName}', seed.capability_name) AS objective,
+  REPLACE(
+    template.system_prompt_template,
+    '{capabilityName}',
+    seed.capability_name
+  ) AS system_prompt,
+  'READY',
+  seed.documentation_sources,
+  template.input_artifacts,
+  template.output_artifacts,
+  FALSE,
+  TRUE,
+  template.template_key,
+  template.role_starter_key,
+  ARRAY[
+    FORMAT('%s is a built-in agent for %s.', template.agent_name, seed.capability_name),
+    FORMAT(
+      'Keep all outputs aligned to %s capability context.',
+      seed.capability_scope_name
+    )
+  ]::TEXT[] AS learning_notes,
+  template.contract_json,
+  template.default_skill_ids,
+  template.preferred_tool_ids,
+  'GitHub Copilot SDK',
+  'gpt-4.1-mini',
+  12000,
+  NOW()
+FROM tmp_singularity_seed_capabilities seed
+CROSS JOIN tmp_singularity_built_in_templates template
+WHERE seed.capability_kind <> 'COLLECTION'
+   OR template.enabled_for_collection = TRUE
+
+ON CONFLICT (capability_id, id) DO UPDATE SET
+  name = EXCLUDED.name,
+  role = EXCLUDED.role,
+  objective = EXCLUDED.objective,
+  system_prompt = EXCLUDED.system_prompt,
+  initialization_status = EXCLUDED.initialization_status,
+  documentation_sources = EXCLUDED.documentation_sources,
+  input_artifacts = EXCLUDED.input_artifacts,
+  output_artifacts = EXCLUDED.output_artifacts,
+  is_owner = EXCLUDED.is_owner,
+  is_built_in = EXCLUDED.is_built_in,
+  standard_template_key = EXCLUDED.standard_template_key,
+  role_starter_key = EXCLUDED.role_starter_key,
+  learning_notes = EXCLUDED.learning_notes,
+  contract = EXCLUDED.contract,
+  skill_ids = EXCLUDED.skill_ids,
+  preferred_tool_ids = EXCLUDED.preferred_tool_ids,
+  provider = EXCLUDED.provider,
+  model = EXCLUDED.model,
+  token_limit = EXCLUDED.token_limit,
+  updated_at = NOW();
+
+COMMIT;
+`;
 
 const createSkillsSql = () => `-- Singularity Neo capability-scoped starter skills seed
 -- Seeds the shared starter skill library into existing capabilities.
@@ -597,6 +859,7 @@ const writeSqlFile = (fileName: string, content: string) => {
   writeFileSync(path.join(sqlOutputDir, fileName), content);
 };
 
+writeSqlFile('singularityneo_seed_agents.sql', createAgentsSql());
 writeSqlFile('singularityneo_seed_skills.sql', createSkillsSql());
 writeSqlFile('singularityneo_seed_artifacts.sql', createArtifactsSql());
 writeSqlFile('singularityneo_seed_workflows.sql', createWorkflowSql());

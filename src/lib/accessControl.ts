@@ -25,6 +25,7 @@ export const ALL_PERMISSION_ACTIONS: PermissionAction[] = [
   'capability.read',
   'capability.read.rollup',
   'capability.edit',
+  'capability.execution.claim',
   'workflow.edit',
   'agents.manage',
   'contract.publish',
@@ -47,6 +48,7 @@ export const ALL_PERMISSION_ACTIONS: PermissionAction[] = [
 const LIVE_DETAIL_ACTIONS: PermissionAction[] = [
   'capability.read',
   'capability.edit',
+  'capability.execution.claim',
   'workflow.edit',
   'agents.manage',
   'contract.publish',
@@ -74,6 +76,7 @@ const WORKSPACE_ROLE_ACTIONS: Record<WorkspaceRole, PermissionAction[]> = {
   ],
   TEAM_LEAD: [
     'capability.read',
+    'capability.execution.claim',
     'workitem.read',
     'approval.decide',
     'artifact.read',
@@ -81,8 +84,16 @@ const WORKSPACE_ROLE_ACTIONS: Record<WorkspaceRole, PermissionAction[]> = {
     'chat.read',
     'report.view.operations',
   ],
+  INCIDENT_COMMANDER: [
+    'capability.read',
+    'capability.edit',
+    'artifact.read',
+    'report.view.operations',
+    'report.view.audit',
+  ],
   OPERATOR: [
     'capability.read',
+    'capability.execution.claim',
     'workitem.read',
     'workitem.create',
     'workitem.control',
@@ -109,6 +120,7 @@ const CAPABILITY_ROLE_ACTIONS: Record<CapabilityAccessRole, PermissionAction[]> 
     'capability.read',
     'capability.read.rollup',
     'capability.edit',
+    'capability.execution.claim',
     'workflow.edit',
     'agents.manage',
     'contract.publish',
@@ -128,6 +140,7 @@ const CAPABILITY_ROLE_ACTIONS: Record<CapabilityAccessRole, PermissionAction[]> 
   OPERATOR: [
     'capability.read',
     'capability.read.rollup',
+    'capability.execution.claim',
     'workitem.read',
     'workitem.create',
     'workitem.control',

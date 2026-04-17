@@ -14,6 +14,10 @@ import type {
   WorkItemPhase,
   WorkflowRunDetail,
 } from '../src/types';
+import {
+  applyAgentLearningCorrection,
+  getAgentLearningProfileDetail,
+} from './agentLearning/service';
 import { getWorkflowRunDetail } from './execution/repository';
 import {
   approveWorkflowRun,
@@ -44,7 +48,9 @@ type ChatWorkspaceActionType =
   | 'UNBLOCK'
   | 'START'
   | 'RESTART'
-  | 'CANCEL';
+  | 'CANCEL'
+  | 'CORRECT_LEARNING'
+  | 'SHOW_LEARNING';
 
 type ParsedChatWorkspaceAction = {
   type: ChatWorkspaceActionType;
@@ -52,6 +58,7 @@ type ParsedChatWorkspaceAction = {
   runId?: string;
   targetPhase?: WorkItemPhase;
   note?: string;
+  targetAgentName?: string;
 };
 
 export type ChatWorkspaceActionResult = {
@@ -803,6 +810,23 @@ const parseWorkspaceAction = (
     return { type: 'CANCEL', workItemId, runId, note };
   }
 
+  const teachMatch = message.match(/\bteach\s+(?:the\s+)?(.+?)\s*:\s*(.+)/i);
+  if (teachMatch) {
+    return {
+      type: 'CORRECT_LEARNING',
+      targetAgentName: teachMatch[1].trim(),
+      note: teachMatch[2].trim(),
+    };
+  }
+
+  if (/\b(show learning|learning profile|what has .+ learned|show what .+ knows)\b/.test(normalized)) {
+    const learnAgentMatch = message.match(/\b(?:show learning|learning profile|what has|show what)\s+(?:for\s+)?(?:the\s+)?(.+?)(?:\s+learned|\s+knows|$)/i);
+    return {
+      type: 'SHOW_LEARNING',
+      targetAgentName: learnAgentMatch?.[1]?.trim(),
+    };
+  }
+
   if (
     (/\bstart\b|\brun\b/.test(normalized)) &&
     !/\bstatus\b/.test(normalized) &&
@@ -996,6 +1020,91 @@ export const maybeHandleCapabilityChatAction = async ({
     }
 
     return { handled: false };
+  }
+
+  if (action.type === 'CORRECT_LEARNING' || action.type === 'SHOW_LEARNING') {
+    const targetName = action.targetAgentName?.toLowerCase() || '';
+    const matchedAgent = bundle.workspace.agents.find(
+      a =>
+        a.name.toLowerCase() === targetName ||
+        a.name.toLowerCase().includes(targetName) ||
+        a.role?.toLowerCase().includes(targetName) ||
+        a.id.toLowerCase() === targetName,
+    );
+
+    if (!matchedAgent) {
+      const agentList = bundle.workspace.agents
+        .map(a => `- ${a.name} (${a.role || a.id})`)
+        .join('\n');
+      return {
+        handled: true,
+        content: `I could not find an agent matching "${action.targetAgentName}". Available agents:\n${agentList}`,
+      };
+    }
+
+    if (action.type === 'SHOW_LEARNING') {
+      const profile = await getAgentLearningProfileDetail(
+        bundle.capability.id,
+        matchedAgent.id,
+      );
+      const highlights = profile.profile.highlights?.length
+        ? profile.profile.highlights.map(h => `- ${h}`).join('\n')
+        : 'No highlights yet.';
+      const guardrails = matchedAgent.contract?.guardrails?.length
+        ? matchedAgent.contract.guardrails.map(g => `- ${g}`).join('\n')
+        : 'No guardrails yet.';
+      const notes = matchedAgent.learningNotes?.length
+        ? matchedAgent.learningNotes.slice(-5).map(n => `- ${n}`).join('\n')
+        : 'No learning notes yet.';
+      return {
+        handled: true,
+        content: [
+          `Learning profile for ${matchedAgent.name} (${profile.profile.status})`,
+          '',
+          profile.profile.summary || 'No summary available.',
+          '',
+          '**Highlights:**',
+          highlights,
+          '',
+          '**Active guardrails:**',
+          guardrails,
+          '',
+          '**Recent learning notes:**',
+          notes,
+          '',
+          `Sources: ${profile.profile.sourceCount || 0} documents · Last refreshed: ${profile.profile.refreshedAt || 'never'}`,
+        ].join('\n'),
+      };
+    }
+
+    if (!action.note?.trim()) {
+      return {
+        handled: true,
+        content: `Add the lesson after a colon, for example: teach ${matchedAgent.name}: always use parameterized queries for the trades database`,
+      };
+    }
+
+    await applyAgentLearningCorrection({
+      capabilityId: bundle.capability.id,
+      agentId: matchedAgent.id,
+      correction: action.note,
+      actor: {
+        displayName: `${agent.name || agent.role || 'Operator'} via chat`,
+        teamIds: [],
+      },
+    });
+
+    return {
+      handled: true,
+      changedState: true,
+      content: [
+        `✅ Teaching applied to ${matchedAgent.name}.`,
+        '',
+        `**Correction:** ${action.note}`,
+        '',
+        `This has been added to ${matchedAgent.name}'s learning notes as an authoritative operator correction. A learning refresh has been queued — the agent will re-distill its experience incorporating this correction.`,
+      ].join('\n'),
+    };
   }
 
   if (action.type === 'STATUS' && !action.workItemId && !action.runId) {

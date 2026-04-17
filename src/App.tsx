@@ -20,6 +20,9 @@ const SkillLibrary = lazy(() => import('./pages/SkillLibrary'));
 const Studio = lazy(() => import('./pages/Studio'));
 const Chat = lazy(() => import('./pages/Chat'));
 const Orchestrator = lazy(() => import('./pages/Orchestrator'));
+const Operations = lazy(() => import('./pages/Operations'));
+const Incidents = lazy(() => import('./pages/Incidents'));
+const ModelRiskMonitoring = lazy(() => import('./pages/ModelRiskMonitoring'));
 const ArtifactDesigner = lazy(() => import('./pages/ArtifactDesigner'));
 const CapabilitySetup = lazy(() => import('./pages/CapabilitySetup'));
 const CapabilityMetadata = lazy(() => import('./pages/CapabilityMetadata'));
@@ -31,6 +34,7 @@ const RunConsole = lazy(() => import('./pages/RunConsole'));
 const MemoryExplorer = lazy(() => import('./pages/MemoryExplorer'));
 const EvalCenter = lazy(() => import('./pages/EvalCenter'));
 const Login = lazy(() => import('./pages/Login'));
+const EvidencePacketPage = lazy(() => import('./pages/EvidencePacket'));
 
 const RouteLoader = () => (
   <div className="section-card ambient-shadow min-h-[calc(100vh-12rem)] p-8">
@@ -85,6 +89,9 @@ export default function App() {
                   <Route path="/chat" element={<Chat />} />
                   <Route path="/orchestrator" element={<Orchestrator />} />
                   <Route path="/work" element={<Orchestrator />} />
+                  <Route path="/operations" element={<Operations />} />
+                  <Route path="/incidents" element={<Incidents />} />
+                  <Route path="/mrm" element={<ModelRiskMonitoring />} />
                   <Route path="/artifact-designer" element={<ArtifactDesigner />} />
                   <Route path="/capabilities/new" element={<CapabilitySetup />} />
                   <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
@@ -98,6 +105,7 @@ export default function App() {
                   <Route path="/run-console" element={<RunConsole />} />
                   <Route path="/memory" element={<MemoryExplorer />} />
                   <Route path="/evals" element={<EvalCenter />} />
+                  <Route path="/e/:bundleId" element={<EvidencePacketPage />} />
                   <Route path="*" element={<Orchestrator />} />
                 </Routes>
               </Suspense>

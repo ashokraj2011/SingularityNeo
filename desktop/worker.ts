@@ -1,5 +1,6 @@
 import readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import {
@@ -14,9 +15,11 @@ import type {
   CapabilityWorkspace,
   ChatStreamEvent,
   ExecutionLog,
+  ExecutorHeartbeatStatus,
   MemoryReference,
   MemorySearchResult,
   Workflow,
+  WorkflowRun,
   WorkflowRunDetail,
   WorkItem,
   WorkItemExplainDetail,
@@ -46,6 +49,10 @@ import {
   extractChatWorkspaceReferenceId,
   resolveMentionedWorkItem,
 } from '../server/chatWorkspace';
+import { getCapabilityWorkspaceRoots } from '../server/workspacePaths';
+import { processWorkflowRun, reconcileWorkflowRunFailure } from '../server/execution/service';
+import { getWorkflowRunDetail } from '../server/execution/repository';
+import { runWithExecutionClientContext } from '../server/execution/runtimeClient';
 
 const projectRoot = process.env.SINGULARITY_PROJECT_ROOT || process.cwd();
 dotenv.config({ path: path.join(projectRoot, '.env.local') });
@@ -80,6 +87,18 @@ const writeMessage = (message: Record<string, unknown>) => {
 const controlPlaneUrl = String(
   process.env.SINGULARITY_CONTROL_PLANE_URL || 'http://127.0.0.1:3001',
 ).replace(/\/+$/, '');
+
+const EXECUTOR_LEASE_MS = 30_000;
+const EXECUTOR_POLL_MS = 2_500;
+const executorId = `desktop-executor-${process.pid}-${randomUUID().slice(0, 8)}`;
+
+let activeActorContext: ActorContext | null = null;
+let executorHeartbeatAt: string | undefined;
+let executorHeartbeatStatus: ExecutorHeartbeatStatus = 'OFFLINE';
+let executorOwnedCapabilityIds: string[] = [];
+let executorApprovedWorkspaceRoots: Record<string, string[]> = {};
+let executorLoopTimer: NodeJS.Timeout | null = null;
+let executorTickInFlight = false;
 
 const respond = ({
   requestId,
@@ -161,6 +180,179 @@ const controlPlaneRequest = async <T>(
   }
 
   return response.json() as Promise<T>;
+};
+
+const getLocalApprovedWorkspaceRoots = (capability: Capability): string[] =>
+  getCapabilityWorkspaceRoots(capability).filter(root => {
+    try {
+      return fs.existsSync(root);
+    } catch {
+      return false;
+    }
+  });
+
+const buildRuntimeSummary = async () => {
+  const token = getConfiguredToken();
+  const tokenSource = getConfiguredTokenSource();
+  const headlessCli = tokenSource === 'headless-cli';
+  return {
+    provider: 'GitHub Copilot SDK (Desktop Worker)',
+    endpoint: headlessCli ? process.env.COPILOT_CLI_URL || githubModelsApiUrl : githubModelsApiUrl,
+    defaultModel: token ? await getRuntimeDefaultModel() : normalizeModel(defaultModel),
+    runtimeAccessMode: resolveRuntimeAccessMode({
+      tokenSource,
+      token,
+      modelCatalogFromRuntime: false,
+    }),
+  };
+};
+
+const syncExecutorRegistration = async () => {
+  if (!activeActorContext?.userId) {
+    executorHeartbeatStatus = 'OFFLINE';
+    executorHeartbeatAt = undefined;
+    executorOwnedCapabilityIds = [];
+    return null;
+  }
+
+  const registration = await controlPlaneRequest<{
+    id: string;
+    heartbeatAt: string;
+    heartbeatStatus: ExecutorHeartbeatStatus;
+    ownedCapabilityIds: string[];
+    approvedWorkspaceRoots: Record<string, string[]>;
+  }>(`/api/runtime/executors/${encodeURIComponent(executorId)}/heartbeat`, {
+    method: 'POST',
+    actorContext: activeActorContext,
+    body: {
+      approvedWorkspaceRoots: executorApprovedWorkspaceRoots,
+      runtimeSummary: await buildRuntimeSummary(),
+    },
+  }).catch(async () =>
+    controlPlaneRequest<{
+      id: string;
+      heartbeatAt: string;
+      heartbeatStatus: ExecutorHeartbeatStatus;
+      ownedCapabilityIds: string[];
+      approvedWorkspaceRoots: Record<string, string[]>;
+    }>('/api/runtime/executors/register', {
+      method: 'POST',
+      actorContext: activeActorContext,
+      body: {
+        executorId,
+        approvedWorkspaceRoots: executorApprovedWorkspaceRoots,
+        runtimeSummary: await buildRuntimeSummary(),
+      },
+    }),
+  );
+
+  executorHeartbeatAt = registration.heartbeatAt;
+  executorHeartbeatStatus = registration.heartbeatStatus;
+  executorOwnedCapabilityIds = registration.ownedCapabilityIds || [];
+  executorApprovedWorkspaceRoots = registration.approvedWorkspaceRoots || {};
+  return registration;
+};
+
+const heartbeatActiveRun = async (run: WorkflowRun) => {
+  await controlPlaneRequest<{ ok: boolean }>(
+    `/api/runtime/executors/${encodeURIComponent(executorId)}/runs/${encodeURIComponent(run.id)}/heartbeat`,
+    {
+      method: 'POST',
+      actorContext: activeActorContext,
+      body: {
+        capabilityId: run.capabilityId,
+        leaseMs: EXECUTOR_LEASE_MS,
+        approvedWorkspaceRoots: executorApprovedWorkspaceRoots,
+        runtimeSummary: await buildRuntimeSummary(),
+      },
+    },
+  );
+};
+
+const executeClaimedRun = async (run: WorkflowRun) => {
+  await runWithExecutionClientContext(
+    {
+      controlPlaneUrl,
+      executorId,
+      actor: activeActorContext,
+    },
+    async () => {
+      const heartbeat = setInterval(() => {
+        void heartbeatActiveRun(run).catch(() => undefined);
+      }, Math.max(8_000, Math.floor(EXECUTOR_LEASE_MS / 3)));
+
+      try {
+        const detail = await getWorkflowRunDetail(run.capabilityId, run.id);
+        await processWorkflowRun(detail);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Desktop execution failed unexpectedly.';
+        await reconcileWorkflowRunFailure({
+          capabilityId: run.capabilityId,
+          runId: run.id,
+          message,
+        }).catch(() => undefined);
+        throw error;
+      } finally {
+        clearInterval(heartbeat);
+      }
+    },
+  );
+};
+
+const tickDesktopExecutor = async () => {
+  if (executorTickInFlight || !activeActorContext?.userId) {
+    return;
+  }
+
+  executorTickInFlight = true;
+  try {
+    await syncExecutorRegistration();
+
+    const runtimeStatus = await buildDesktopRuntimeStatus();
+    if (!runtimeStatus.configured) {
+      return;
+    }
+
+    if (executorOwnedCapabilityIds.length === 0) {
+      return;
+    }
+
+    const claimResult = await controlPlaneRequest<{
+      run: WorkflowRun | null;
+      ownedCapabilityIds: string[];
+    }>(`/api/runtime/executors/${encodeURIComponent(executorId)}/runs/claim-next`, {
+      method: 'POST',
+      actorContext: activeActorContext,
+      body: {
+        leaseMs: EXECUTOR_LEASE_MS,
+        approvedWorkspaceRoots: executorApprovedWorkspaceRoots,
+        runtimeSummary: await buildRuntimeSummary(),
+      },
+    });
+
+    executorOwnedCapabilityIds = claimResult.ownedCapabilityIds || executorOwnedCapabilityIds;
+    if (!claimResult.run) {
+      return;
+    }
+
+    await executeClaimedRun(claimResult.run);
+  } finally {
+    executorTickInFlight = false;
+  }
+};
+
+const ensureDesktopExecutorLoop = () => {
+  if (executorLoopTimer) {
+    return;
+  }
+
+  executorLoopTimer = setInterval(() => {
+    void tickDesktopExecutor().catch(() => undefined);
+  }, EXECUTOR_POLL_MS);
+  void tickDesktopExecutor().catch(() => undefined);
 };
 
 const withoutPersistentIdentity = <T extends Partial<Capability> | Partial<CapabilityAgent>>(
@@ -629,6 +821,12 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
     provider: 'GitHub Copilot SDK (Desktop Worker)',
     runtimeOwner: 'DESKTOP',
     executionRuntimeOwner: 'DESKTOP',
+    executorId,
+    executorHeartbeatAt,
+    executorHeartbeatStatus,
+    actorUserId: activeActorContext?.userId,
+    actorDisplayName: activeActorContext?.displayName,
+    ownedCapabilityIds: executorOwnedCapabilityIds,
     endpoint: headlessCli ? process.env.COPILOT_CLI_URL || githubModelsApiUrl : githubModelsApiUrl,
     tokenSource,
     defaultModel: runtimeDefaultModel,
@@ -702,6 +900,25 @@ reader.on('line', async line => {
       return;
     }
 
+    if (message.type === 'runtime:actor-context') {
+      activeActorContext =
+        (message.payload?.actor as ActorContext | null | undefined) || null;
+
+      if (activeActorContext?.userId) {
+        await syncExecutorRegistration().catch(() => undefined);
+        ensureDesktopExecutorLoop();
+      } else {
+        executorHeartbeatStatus = 'OFFLINE';
+        executorOwnedCapabilityIds = [];
+      }
+
+      respond({
+        requestId,
+        payload: await buildDesktopRuntimeStatus(),
+      });
+      return;
+    }
+
     if (message.type === 'runtime:set-token') {
       await setRuntimeTokenOverride(String(message.payload?.token || ''));
       respond({
@@ -749,6 +966,97 @@ reader.on('line', async line => {
       respond({
         requestId,
         payload: result,
+      });
+      return;
+    }
+
+    if (message.type === 'runtime:execution:claim') {
+      const capabilityId = String(message.payload?.capabilityId || '').trim();
+      if (!capabilityId) {
+        throw new Error('capabilityId is required.');
+      }
+      if (!activeActorContext?.userId) {
+        throw new Error('Select a workspace operator before claiming desktop execution.');
+      }
+
+      const bundle = await controlPlaneRequest<CapabilityBundleSnapshot>(
+        `/api/capabilities/${encodeURIComponent(capabilityId)}`,
+        {
+          actorContext: activeActorContext,
+        },
+      );
+      const approvedWorkspaceRoots = getLocalApprovedWorkspaceRoots(bundle.capability);
+      if (approvedWorkspaceRoots.length === 0) {
+        throw new Error(
+          'This desktop does not have any approved local workspace roots for the selected capability.',
+        );
+      }
+
+      executorApprovedWorkspaceRoots = {
+        ...executorApprovedWorkspaceRoots,
+        [capabilityId]: approvedWorkspaceRoots,
+      };
+      await syncExecutorRegistration();
+      ensureDesktopExecutorLoop();
+
+      const result = await controlPlaneRequest<{
+        ownership: unknown;
+      }>(`/api/capabilities/${encodeURIComponent(capabilityId)}/execution/claim`, {
+        method: 'POST',
+        actorContext: activeActorContext,
+        body: {
+          executorId,
+          approvedWorkspaceRoots,
+          forceTakeover: Boolean(message.payload?.forceTakeover),
+        },
+      });
+
+      await syncExecutorRegistration().catch(() => undefined);
+      respond({
+        requestId,
+        payload: result,
+      });
+      return;
+    }
+
+    if (message.type === 'runtime:execution:release') {
+      const capabilityId = String(message.payload?.capabilityId || '').trim();
+      if (!capabilityId) {
+        throw new Error('capabilityId is required.');
+      }
+      if (!activeActorContext?.userId) {
+        throw new Error('Select a workspace operator before releasing desktop execution.');
+      }
+
+      const response = await fetch(
+        new URL(
+          `/api/capabilities/${encodeURIComponent(capabilityId)}/execution/claim?executorId=${encodeURIComponent(executorId)}`,
+          `${controlPlaneUrl}/`,
+        ),
+        {
+          method: 'DELETE',
+          headers: withActorHeaders(activeActorContext),
+        },
+      );
+
+      if (!response.ok) {
+        let errorMessage = `Control plane request failed with status ${response.status}.`;
+        try {
+          const payload = (await response.json()) as { error?: string };
+          if (payload.error) {
+            errorMessage = payload.error;
+          }
+        } catch {
+          // ignore
+        }
+        throw new Error(errorMessage);
+      }
+
+      executorOwnedCapabilityIds = executorOwnedCapabilityIds.filter(id => id !== capabilityId);
+      await syncExecutorRegistration().catch(() => undefined);
+      respond({
+        requestId,
+        payload: { ok: true },
       });
       return;
     }

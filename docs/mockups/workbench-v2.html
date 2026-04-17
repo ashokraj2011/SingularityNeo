@@ -1,0 +1,983 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1440,initial-scale=1" />
+<title>SingularityNeo — Workbench v2 mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f7fb;
+    --panel: #ffffff;
+    --panel-2: #fbfbfe;
+    --ink: #0f172a;
+    --ink-2: #334155;
+    --muted: #64748b;
+    --border: #e5e7eb;
+    --border-2: #eef0f4;
+    --accent: #1e3a8a;
+    --accent-weak: #e8edfb;
+    --ok: #059669;
+    --ok-weak: #ecfdf5;
+    --warn: #b45309;
+    --warn-weak: #fef3c7;
+    --bad: #b91c1c;
+    --bad-weak: #fee2e2;
+    --violet: #6d28d9;
+    --violet-weak: #f3efff;
+    --cyan: #0369a1;
+    --cyan-weak: #e0f2fe;
+    --shadow: 0 1px 2px rgba(15,23,42,0.04), 0 1px 1px rgba(15,23,42,0.03);
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 13px;
+    color: var(--ink);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; }
+
+  /* ========== APP SHELL ========== */
+  .app {
+    display: grid;
+    grid-template-rows: 48px 1fr;
+    height: 100vh;
+    min-height: 780px;
+  }
+
+  /* ========== HEADER ========== */
+  .topbar {
+    display: grid;
+    grid-template-columns: 220px 1fr auto;
+    align-items: center;
+    gap: 16px;
+    padding: 0 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 700;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+  }
+  .brand-dot {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: conic-gradient(from 180deg, #1e3a8a, #6d28d9, #0ea5e9, #1e3a8a);
+  }
+  .cap-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+    cursor: pointer;
+    font-weight: 600;
+    max-width: 100%;
+  }
+  .cap-switch .chev { color: var(--muted); font-size: 10px; }
+  .cap-meta {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .readiness {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--ok-weak);
+    color: var(--ok);
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid #a7f3d0;
+  }
+  .readiness .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--ok); }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--ink-2);
+    font-weight: 500;
+    font-size: 12px;
+  }
+  .pill.danger { background: var(--bad-weak); border-color: #fecaca; color: var(--bad); }
+  .pill.warn   { background: var(--warn-weak); border-color: #fde68a; color: var(--warn); }
+  .pill.ok     { background: var(--ok-weak); border-color: #a7f3d0; color: var(--ok); }
+  .pill.accent { background: var(--accent-weak); border-color: #c7d2fe; color: var(--accent); }
+  .pill.violet { background: var(--violet-weak); border-color: #ddd6fe; color: var(--violet); }
+  .pill.cyan   { background: var(--cyan-weak); border-color: #bae6fd; color: var(--cyan); }
+  .pill .tdot { width: 6px; height: 6px; border-radius: 999px; background: currentColor; opacity: .8; }
+  .kbd {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 2px 5px;
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    background: var(--panel);
+    color: var(--ink-2);
+  }
+  .top-right { display: flex; align-items: center; gap: 8px; }
+  .icon-btn {
+    width: 30px; height: 30px; border: 1px solid var(--border); border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center; background: var(--panel);
+    cursor: pointer; color: var(--ink-2);
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 11px; border-radius: 8px; cursor: pointer;
+    font-weight: 600; border: 1px solid var(--border); background: var(--panel); color: var(--ink);
+  }
+  .btn.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .btn.primary:hover { background: #0b1224; }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
+  .btn.tiny { padding: 3px 8px; font-size: 12px; }
+
+  /* ========== BODY ========== */
+  .body {
+    display: grid;
+    grid-template-columns: 280px 1fr 300px;
+    min-height: 0;
+  }
+  .pane { border-right: 1px solid var(--border); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+  .pane:last-child { border-right: 0; }
+
+  /* ========== QUEUE ========== */
+  .queue-head {
+    padding: 12px 12px 10px; border-bottom: 1px solid var(--border-2);
+  }
+  .queue-title { font-weight: 700; font-size: 12px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+  .queue-smart {
+    display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap;
+  }
+  .chip {
+    padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 500;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--ink-2); cursor: pointer;
+  }
+  .chip.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .queue-list { overflow: auto; padding: 4px 0 12px; }
+  .qitem {
+    display: grid; grid-template-columns: 6px 1fr auto; align-items: stretch;
+    padding: 10px 12px; border-bottom: 1px solid var(--border-2); cursor: pointer;
+    position: relative;
+  }
+  .qitem:hover { background: var(--panel-2); }
+  .qitem.active { background: var(--accent-weak); }
+  .qitem.active::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent);
+  }
+  .qitem .leader {
+    width: 6px; height: 6px; border-radius: 999px; background: var(--muted); margin-top: 6px;
+  }
+  .qitem.active .leader { background: var(--accent); }
+  .qitem .body2 { padding-left: 10px; min-width: 0; }
+  .qid { font-weight: 700; font-size: 11px; color: var(--muted); letter-spacing: .04em; }
+  .qtitle { font-weight: 600; line-height: 1.35; margin: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .qmeta { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 11.5px; }
+  .qright { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+
+  /* ========== CENTER COCKPIT ========== */
+  .cockpit { display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
+  .wi-head {
+    padding: 14px 18px 12px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  .wi-crumbs { color: var(--muted); font-size: 12px; }
+  .wi-crumbs b { color: var(--ink-2); font-weight: 600; }
+  .wi-title {
+    display: flex; align-items: center; gap: 10px; margin: 6px 0 10px; flex-wrap: wrap;
+  }
+  .wi-id { font-family: 'JetBrains Mono', monospace; color: var(--muted); font-weight: 600; }
+  .wi-h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+  .wi-sub { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .role-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 6px; font-weight: 600; font-size: 11.5px; line-height: 1.3;
+    border: 1px solid transparent;
+  }
+  .role-chip .vsn { opacity: .7; font-weight: 500; margin-left: 4px; }
+  .role-BUILDER  { background: #ecfeff; color: #0e7490; border-color: #a5f3fc; }
+  .role-REVIEWER { background: #faf5ff; color: #6b21a8; border-color: #e9d5ff; }
+  .role-CRITIC   { background: #fff1f2; color: #9f1239; border-color: #fecdd3; }
+  .role-ARCHITECT { background: #eef2ff; color: #3730a3; border-color: #c7d2fe; }
+  .role-OWNER    { background: #f0fdf4; color: #166534; border-color: #bbf7d0; }
+  .role-PLANNING { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+  .role-OPERATOR { background: #f1f5f9; color: #334155; border-color: #cbd5e1; }
+
+  .handoff-arrow { color: var(--muted); }
+
+  /* phase stepper */
+  .stepper { display: flex; align-items: center; gap: 4px; margin-top: 4px; overflow-x: auto; }
+  .step {
+    font-size: 11px; color: var(--muted); padding: 2px 8px; border-radius: 999px; background: var(--panel-2);
+    border: 1px solid var(--border); white-space: nowrap;
+  }
+  .step.done { color: var(--ok); border-color: #a7f3d0; background: var(--ok-weak); }
+  .step.active { color: #fff; background: var(--ink); border-color: var(--ink); font-weight: 600; }
+  .step-sep { color: var(--muted); font-size: 10px; }
+
+  /* filters over timeline */
+  .tl-filters {
+    display: flex; gap: 6px; padding: 10px 18px; border-bottom: 1px solid var(--border); background: var(--panel);
+    overflow-x: auto;
+  }
+  .tl-filters .chip { white-space: nowrap; }
+
+  /* ========== TIMELINE STREAM ========== */
+  .tl-stream {
+    flex: 1; overflow: auto; padding: 18px 18px 10px;
+    background:
+      linear-gradient(var(--bg), var(--bg)) 0 0 / 100% 100%;
+  }
+  .tl-day {
+    text-align: center; font-size: 11px; color: var(--muted); margin: 10px 0 14px;
+    position: relative;
+  }
+  .tl-day span { background: var(--bg); padding: 0 10px; position: relative; z-index: 1; }
+  .tl-day::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: var(--border);
+  }
+
+  .ev {
+    display: grid; grid-template-columns: 64px 1fr;
+    gap: 14px; margin-bottom: 10px;
+  }
+  .ev-time { font-size: 11px; color: var(--muted); padding-top: 6px; text-align: right; }
+  .ev-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 10px 12px; box-shadow: var(--shadow); position: relative;
+  }
+  .ev-card.quiet { background: transparent; border: 0; box-shadow: none; padding: 4px 0; }
+
+  .ev-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .ev-head .who { color: var(--ink-2); font-weight: 600; }
+  .ev-body { margin-top: 4px; color: var(--ink-2); line-height: 1.5; }
+  .ev-meta { margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 12px; }
+
+  /* tool call card */
+  .toolcall { border-left: 3px solid var(--accent); }
+  .toolcall .mono-line {
+    font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--ink-2);
+    background: #f8fafc; border: 1px solid var(--border-2); border-radius: 6px; padding: 6px 8px;
+    margin-top: 6px;
+  }
+  .status-pill {
+    padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  }
+  .status-ok   { background: var(--ok-weak); color: var(--ok); }
+  .status-warn { background: var(--warn-weak); color: var(--warn); }
+  .status-bad  { background: var(--bad-weak); color: var(--bad); }
+
+  /* retrieval chip row */
+  .retrieval .src {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 7px; border-radius: 6px; background: var(--cyan-weak); color: var(--cyan);
+    border: 1px solid #bae6fd; font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+    margin-right: 6px; margin-top: 4px;
+  }
+
+  /* agent thought */
+  .thought { border-left: 3px solid var(--violet); background: linear-gradient(180deg, #fbfaff, #fff); }
+  .thought .quote { color: var(--ink-2); }
+
+  /* artifact */
+  .artifact { border-left: 3px solid var(--ok); }
+  .artifact .preview {
+    margin-top: 8px; padding: 10px 12px;
+    background: #0b1224; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+    border-radius: 6px; line-height: 1.55; white-space: pre; overflow: auto; max-height: 140px;
+  }
+  .artifact .preview .add { color: #86efac; }
+  .artifact .preview .rem { color: #fca5a5; }
+  .artifact .preview .hdr { color: #93c5fd; }
+  .artifact .actions { margin-top: 8px; display: flex; gap: 8px; }
+
+  /* approval / wait */
+  .approval { border-left: 3px solid var(--warn); background: #fffdf4; }
+  .approval .ask { font-weight: 600; color: var(--ink); }
+  .approval .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* run lifecycle */
+  .lifecycle.quiet {
+    text-align: center; color: var(--muted); font-size: 12px;
+  }
+  .lifecycle .rule { display: inline-flex; align-items: center; gap: 8px; }
+  .lifecycle .rule::before, .lifecycle .rule::after {
+    content: ""; width: 60px; height: 1px; background: var(--border); display: inline-block;
+  }
+
+  /* avatar bubbles */
+  .avatar {
+    width: 22px; height: 22px; border-radius: 999px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; color: #fff; flex-shrink: 0;
+  }
+  .av-BUILDER { background: #0891b2; }
+  .av-REVIEWER { background: #7c3aed; }
+  .av-CRITIC { background: #e11d48; }
+  .av-ARCHITECT { background: #4338ca; }
+  .av-OWNER { background: #16a34a; }
+  .av-USER { background: #0f172a; }
+  .av-SYSTEM { background: #64748b; }
+
+  /* composer */
+  .composer {
+    padding: 12px 18px 14px; border-top: 1px solid var(--border); background: var(--panel);
+  }
+  .composer-box {
+    display: grid; grid-template-columns: auto 1fr auto;
+    align-items: center; gap: 10px;
+    border: 1px solid var(--border); border-radius: 12px; padding: 8px 10px;
+    background: #fff;
+  }
+  .composer-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
+  .composer input {
+    border: 0; outline: 0; font-size: 13.5px; width: 100%;
+    font-family: inherit; color: var(--ink);
+  }
+  .composer-hint { display: flex; gap: 14px; font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+  .composer-hint b { color: var(--ink-2); font-weight: 600; }
+
+  /* ========== RIGHT RAIL ========== */
+  .rail { padding: 12px; overflow: auto; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    margin-bottom: 10px; overflow: hidden;
+  }
+  .card h5 {
+    margin: 0; padding: 9px 12px; font-size: 11px; font-weight: 700;
+    color: var(--muted); letter-spacing: .08em; text-transform: uppercase;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--border-2); cursor: pointer; user-select: none;
+  }
+  .card .body3 { padding: 10px 12px; }
+  .card .empty { color: var(--muted); font-size: 12px; padding: 6px 0; }
+
+  .kl-src {
+    display: flex; align-items: center; gap: 8px; padding: 6px 0;
+    border-bottom: 1px dashed var(--border-2);
+  }
+  .kl-src:last-child { border-bottom: 0; }
+  .kl-src .path { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--ink-2); }
+  .kl-src .count { margin-left: auto; color: var(--muted); font-size: 11px; }
+
+  .evbundle {
+    display: flex; align-items: center; gap: 8px; padding: 7px 0;
+    border-bottom: 1px dashed var(--border-2);
+  }
+  .evbundle:last-child { border-bottom: 0; }
+  .evbundle .hash { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); }
+
+  .gate {
+    display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 12.5px; color: var(--ink-2);
+  }
+  .gate .chk {
+    width: 14px; height: 14px; border-radius: 4px; background: var(--ok); color: #fff;
+    display: inline-flex; align-items: center; justify-content: center; font-size: 10px;
+  }
+
+  .exec-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+  .exec-row .name { font-weight: 600; }
+  .exec-row .hb { margin-left: auto; font-size: 11px; color: var(--muted); }
+  .hbdot { width: 6px; height: 6px; border-radius: 999px; background: var(--ok); display: inline-block; }
+
+  /* ========== ⌘K overlay ========== */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(15,23,42,0.35); display: none; align-items: flex-start; justify-content: center;
+    padding-top: 12vh; z-index: 50;
+  }
+  .scrim.open { display: flex; }
+  .palette { width: 560px; background: var(--panel); border-radius: 14px; box-shadow: 0 30px 80px rgba(15,23,42,.25); overflow: hidden; }
+  .palette input { width: 100%; border: 0; outline: 0; padding: 14px 16px; font-size: 14px; border-bottom: 1px solid var(--border); font-family: inherit; }
+  .palette ul { list-style: none; margin: 0; padding: 6px; max-height: 420px; overflow: auto; }
+  .palette li { padding: 8px 12px; border-radius: 8px; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .palette li:hover { background: var(--panel-2); }
+  .palette li .k { color: var(--muted); font-size: 11px; margin-left: auto; }
+  .palette .group { padding: 6px 12px 2px; font-size: 10.5px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; font-weight: 700; }
+
+  /* tiny animations */
+  .pulse { position: relative; }
+  .pulse::after {
+    content: ""; position: absolute; inset: -3px; border-radius: 999px; border: 2px solid #a7f3d0;
+    animation: pulse 1.6s ease-out infinite; opacity: 0;
+  }
+  @keyframes pulse {
+    0% { opacity: .8; transform: scale(0.9); }
+    100% { opacity: 0; transform: scale(1.8); }
+  }
+
+  /* simple scrollbar */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #dfe3eb; border-radius: 8px; border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: #c5cad4; }
+
+  /* footer annotation for reviewers */
+  .annotation-bar {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: 14px;
+    background: #0f172a; color: #e2e8f0; padding: 8px 14px; border-radius: 10px;
+    font-size: 12px; box-shadow: 0 10px 30px rgba(15,23,42,.25); z-index: 10; display: flex; gap: 16px; align-items: center;
+  }
+  .annotation-bar b { color: #fff; }
+  .annotation-bar .dot { width: 6px; height: 6px; border-radius: 999px; background: #22d3ee; display: inline-block; margin-right: 6px; }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- ============ TOP BAR ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-dot"></div>
+      <span>SingularityNeo</span>
+    </div>
+
+    <div class="cap-meta">
+      <div class="cap-switch" title="Switch capability">
+        <span>Rule Engine</span>
+        <span class="chev">▾</span>
+      </div>
+      <div class="readiness" title="Readiness Contract — click to see gates" id="readinessBadge">
+        <span class="dot pulse"></span>
+        <span>Ready 6&thinsp;/&thinsp;6</span>
+      </div>
+      <span class="pill"><span class="tdot"></span>2 open</span>
+      <span class="pill warn"><span class="tdot"></span>1 at risk</span>
+      <span class="pill accent"><span class="tdot"></span>1 awaiting approval</span>
+    </div>
+
+    <div class="top-right">
+      <button class="btn ghost" onclick="openPalette()">Search & commands <span class="kbd">⌘K</span></button>
+      <button class="icon-btn" title="Notifications">🔔</button>
+      <button class="btn primary">+ New work item</button>
+    </div>
+  </header>
+
+  <!-- ============ BODY ============ -->
+  <div class="body">
+
+    <!-- ============ LEFT QUEUE ============ -->
+    <aside class="pane">
+      <div class="queue-head">
+        <div class="queue-title">Work queue</div>
+        <div class="queue-smart">
+          <span class="chip active">Needs you</span>
+          <span class="chip">Mine</span>
+          <span class="chip">Team</span>
+          <span class="chip">At risk</span>
+          <span class="chip">All</span>
+        </div>
+      </div>
+      <div class="queue-list">
+
+        <div class="qitem active" onclick="return false;">
+          <span class="leader"></span>
+          <div class="body2">
+            <div class="qid">WI-203</div>
+            <div class="qtitle">Prevent duplicate rule evaluation</div>
+            <div class="qmeta">
+              <span class="pill warn tiny"><span class="tdot"></span>SLA 4h</span>
+              <span class="role-chip role-BUILDER">BUILDER<span class="vsn">v3</span></span>
+            </div>
+          </div>
+          <div class="qright"></div>
+        </div>
+
+        <div class="qitem">
+          <span class="leader"></span>
+          <div class="body2">
+            <div class="qid">WI-198</div>
+            <div class="qtitle">Rule versioning — migrate tenant_id scope</div>
+            <div class="qmeta">
+              <span class="pill tiny"><span class="tdot"></span>phase: QA</span>
+              <span class="role-chip role-REVIEWER">REVIEWER<span class="vsn">v2</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="qitem">
+          <span class="leader"></span>
+          <div class="body2">
+            <div class="qid">WI-191</div>
+            <div class="qtitle">Contract: publish v4 inputs &amp; non-goals</div>
+            <div class="qmeta">
+              <span class="pill accent tiny"><span class="tdot"></span>approval pending</span>
+              <span class="role-chip role-ARCHITECT">ARCHITECT<span class="vsn">v1</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="qitem">
+          <span class="leader"></span>
+          <div class="body2">
+            <div class="qid">WI-187</div>
+            <div class="qtitle">Flaky test: evaluator.rate-limit</div>
+            <div class="qmeta">
+              <span class="pill tiny"><span class="tdot"></span>phase: Dev</span>
+              <span class="role-chip role-BUILDER">BUILDER<span class="vsn">v3</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="qitem">
+          <span class="leader"></span>
+          <div class="body2">
+            <div class="qid">WI-184</div>
+            <div class="qtitle">Observability: emit rule_fired.count metric</div>
+            <div class="qmeta">
+              <span class="pill tiny"><span class="tdot"></span>Done</span>
+              <span class="role-chip role-OPERATOR">OPERATOR<span class="vsn">v1</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="qitem">
+          <span class="leader"></span>
+          <div class="body2">
+            <div class="qid">WI-177</div>
+            <div class="qtitle">Spec contrarian: compare IF-DSL vs JSON-logic</div>
+            <div class="qmeta">
+              <span class="pill tiny"><span class="tdot"></span>phase: Design</span>
+              <span class="role-chip role-CRITIC">CRITIC<span class="vsn">v2</span></span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </aside>
+
+    <!-- ============ CENTER COCKPIT ============ -->
+    <main class="cockpit">
+      <!-- work item header -->
+      <div class="wi-head">
+        <div class="wi-crumbs">
+          <b>Rule Engine</b> &nbsp;›&nbsp; Delivery &nbsp;›&nbsp; Development phase
+        </div>
+        <div class="wi-title">
+          <span class="wi-id">WI-203</span>
+          <span class="wi-h1">Prevent duplicate rule evaluation</span>
+          <span class="pill warn"><span class="tdot"></span>SLA 4h</span>
+          <span class="pill ok"><span class="tdot"></span>on track</span>
+        </div>
+        <div class="wi-sub">
+          <span class="role-chip role-BUILDER">BUILDER · alex-b<span class="vsn">v3</span></span>
+          <span class="handoff-arrow">→</span>
+          <span class="role-chip role-REVIEWER">REVIEWER · priya-r<span class="vsn">v2</span></span>
+          <span class="handoff-arrow">→</span>
+          <span class="role-chip role-OWNER">OWNER · sam-k<span class="vsn">v1</span></span>
+
+          <div class="stepper" style="margin-left: auto">
+            <span class="step done">Backlog</span><span class="step-sep">›</span>
+            <span class="step done">Analysis</span><span class="step-sep">›</span>
+            <span class="step done">Design</span><span class="step-sep">›</span>
+            <span class="step active">Development</span><span class="step-sep">›</span>
+            <span class="step">QA</span><span class="step-sep">›</span>
+            <span class="step">Governance</span><span class="step-sep">›</span>
+            <span class="step">Release</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- filter chips -->
+      <div class="tl-filters">
+        <span class="chip active">All</span>
+        <span class="chip">Chat</span>
+        <span class="chip">Agent thoughts</span>
+        <span class="chip">Tool calls</span>
+        <span class="chip">Retrievals</span>
+        <span class="chip">Artifacts</span>
+        <span class="chip">Approvals</span>
+        <span class="chip">Waits</span>
+        <span class="chip">Run lifecycle</span>
+      </div>
+
+      <!-- timeline -->
+      <div class="tl-stream">
+
+        <div class="tl-day"><span>Today · April 17, 2026</span></div>
+
+        <!-- run lifecycle start -->
+        <div class="ev">
+          <div class="ev-time">10:38</div>
+          <div class="ev-card quiet lifecycle">
+            <span class="rule">
+              <span class="pill accent"><span class="tdot"></span>Run #412 started by <b>alex-b</b></span>
+            </span>
+          </div>
+        </div>
+
+        <!-- chat -->
+        <div class="ev">
+          <div class="ev-time">10:40</div>
+          <div class="ev-card">
+            <div class="ev-head">
+              <span class="avatar av-USER">AK</span>
+              <span class="who">Ashok</span>
+              <span class="pill">chat</span>
+            </div>
+            <div class="ev-body">Can we land a guard that short-circuits when the same rule fires within 50ms? Repro is in <span class="mono" style="color:var(--accent)">WI-203/repro.md</span>.</div>
+          </div>
+        </div>
+
+        <!-- agent thought -->
+        <div class="ev">
+          <div class="ev-time">10:41</div>
+          <div class="ev-card thought">
+            <div class="ev-head">
+              <span class="avatar av-BUILDER">B</span>
+              <span class="who">Builder agent</span>
+              <span class="role-chip role-BUILDER">BUILDER<span class="vsn">v3</span></span>
+              <span class="pill" style="margin-left:auto">thought · cites 2</span>
+            </div>
+            <div class="ev-body quote">
+              Reading the repro — deduplication should be keyed on <code>(tenantId, ruleId, inputHash)</code>. A 50ms window is too narrow for retry storms; I'll propose a token-bucket with 250ms cooldown and an LRU of 10k keys per tenant.
+            </div>
+            <div class="ev-meta">
+              <span class="pill accent">plan: patch evaluator.ts L214–L260</span>
+              <span class="pill">citations: 2</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- retrieval -->
+        <div class="ev">
+          <div class="ev-time">10:41</div>
+          <div class="ev-card retrieval">
+            <div class="ev-head">
+              <span class="avatar av-ARCHITECT">A</span>
+              <span class="who">Knowledge lens updated</span>
+              <span class="pill cyan">retrieval · 3 sources</span>
+            </div>
+            <div class="ev-body">
+              <span class="src">rule_engine/contracts/v3.md</span>
+              <span class="src">evaluator.ts#L180–L280</span>
+              <span class="src">docs/adr/012-dedup.md</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- tool call -->
+        <div class="ev">
+          <div class="ev-time">10:42</div>
+          <div class="ev-card toolcall">
+            <div class="ev-head">
+              <span class="avatar av-BUILDER">B</span>
+              <span class="who">Builder agent</span>
+              <span class="role-chip role-BUILDER">BUILDER<span class="vsn">v3</span></span>
+              <span class="pill accent">tool_call</span>
+              <span class="status-pill status-ok" style="margin-left:auto">SUCCEEDED · 842ms</span>
+            </div>
+            <div class="mono-line">▸ run_tests  --filter=evaluator.dedup  --workspace=/rule-engine</div>
+            <div class="ev-meta">
+              <span class="pill ok">policy: ALLOW</span>
+              <span class="pill">3 tests passed</span>
+              <span class="pill">coverage +1.2%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- tool call denied (for drama & pillar D visibility) -->
+        <div class="ev">
+          <div class="ev-time">10:43</div>
+          <div class="ev-card toolcall" style="border-left-color: var(--bad)">
+            <div class="ev-head">
+              <span class="avatar av-REVIEWER">R</span>
+              <span class="who">Reviewer agent</span>
+              <span class="role-chip role-REVIEWER">REVIEWER<span class="vsn">v2</span></span>
+              <span class="pill accent">tool_call</span>
+              <span class="status-pill status-bad" style="margin-left:auto">BLOCKED BY POLICY</span>
+            </div>
+            <div class="mono-line">▸ workspace_apply_patch  --file=evaluator.ts  --hunks=2</div>
+            <div class="ev-meta">
+              <span class="pill danger">DENY · REVIEWER may not mutate files</span>
+              <span class="pill">policy version 2</span>
+              <a href="#" style="color:var(--accent); font-weight:600">open decision →</a>
+            </div>
+          </div>
+        </div>
+
+        <!-- artifact -->
+        <div class="ev">
+          <div class="ev-time">10:46</div>
+          <div class="ev-card artifact">
+            <div class="ev-head">
+              <span class="avatar av-BUILDER">B</span>
+              <span class="who">Builder agent</span>
+              <span class="role-chip role-BUILDER">BUILDER<span class="vsn">v3</span></span>
+              <span class="pill ok">artifact · patch</span>
+              <span class="pill" style="margin-left:auto">sha <span class="mono">3f9a2c…</span></span>
+            </div>
+            <div class="ev-body"><b>patch-214.diff</b> &nbsp;<span class="mono" style="color:var(--muted)">+42 / −11 across 2 files</span></div>
+            <div class="preview">
+<span class="hdr">--- a/evaluator.ts</span>
+<span class="hdr">+++ b/evaluator.ts</span>
+<span class="hdr">@@ -214,9 +214,19 @@</span>
+   const ctx = buildContext(rule, input);
+<span class="rem">-  return runtime.evaluate(rule, ctx);</span>
+<span class="add">+  const key = dedupeKey(ctx.tenantId, rule.id, ctx.inputHash);</span>
+<span class="add">+  if (dedupCache.has(key)) {</span>
+<span class="add">+    metrics.inc('rule_evaluation.deduped', { tenantId: ctx.tenantId });</span>
+<span class="add">+    return dedupCache.get(key)!;</span>
+<span class="add">+  }</span>
+<span class="add">+  const result = runtime.evaluate(rule, ctx);</span>
+<span class="add">+  dedupCache.set(key, result, { ttlMs: 250 });</span>
+<span class="add">+  return result;</span>
+            </div>
+            <div class="actions">
+              <button class="btn tiny">Preview full diff</button>
+              <button class="btn tiny">Open in workspace</button>
+              <button class="btn tiny primary">📎 Evidence packet</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- reviewer thought w/ cites=3 -->
+        <div class="ev">
+          <div class="ev-time">10:48</div>
+          <div class="ev-card thought">
+            <div class="ev-head">
+              <span class="avatar av-REVIEWER">R</span>
+              <span class="who">Reviewer agent</span>
+              <span class="role-chip role-REVIEWER">REVIEWER<span class="vsn">v2</span></span>
+              <span class="pill" style="margin-left:auto">thought · cites 3 · cannot self-approve</span>
+            </div>
+            <div class="ev-body quote">
+              Patch looks correct. One concern: <b>TTL 250ms + LRU 10k</b> may drop on hot tenants. Suggest emitting <code>dedupCache.evictions</code> with tenantId so we see pressure before it hurts. Approving on condition metric ships in the same PR.
+            </div>
+            <div class="ev-meta">
+              <span class="pill">cite: adr/012-dedup.md</span>
+              <span class="pill">cite: evaluator.ts#L214</span>
+              <span class="pill">cite: observability/metrics.ts</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- wait / approval inline -->
+        <div class="ev">
+          <div class="ev-time">10:49</div>
+          <div class="ev-card approval">
+            <div class="ev-head">
+              <span class="avatar av-SYSTEM">⏸</span>
+              <span class="who">Approval required</span>
+              <span class="pill warn">WAIT · quality bar: peer approval</span>
+            </div>
+            <div class="ev-body ask">
+              Approve <b>patch-214.diff</b> for release branch <span class="mono">rule-engine/release/v4</span>?
+              Builder submitted; policy requires a non-Builder approver.
+            </div>
+            <div class="actions">
+              <button class="btn primary">✓ Approve</button>
+              <button class="btn">Request changes</button>
+              <button class="btn ghost">Add comment</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- critic disagrees (for pillar D richness) -->
+        <div class="ev">
+          <div class="ev-time">10:50</div>
+          <div class="ev-card thought" style="border-left-color: #e11d48; background: linear-gradient(180deg,#fff5f6,#fff);">
+            <div class="ev-head">
+              <span class="avatar av-CRITIC">C</span>
+              <span class="who">Critic agent</span>
+              <span class="role-chip role-CRITIC">CRITIC<span class="vsn">v2</span></span>
+              <span class="pill danger" style="margin-left:auto">contrarian · DISAGREE recorded</span>
+            </div>
+            <div class="ev-body quote">
+              Before we approve — dedupCache is in-process. In a multi-node deploy two evaluators can fire the same rule concurrently. For true deduplication we need a Redis setnx with short TTL, not a local LRU.
+            </div>
+            <div class="ev-meta">
+              <span class="pill">cite: docs/arch/deploy-topology.md</span>
+              <span class="pill">impact: HIGH</span>
+              <a href="#" style="color:var(--accent); font-weight:600">propose handoff to Architect →</a>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- composer -->
+      <div class="composer">
+        <div class="composer-box">
+          <button class="icon-btn" title="Upload">📎</button>
+          <input type="text" placeholder="Type to chat · @ to mention · / for commands · drag file to upload" />
+          <button class="btn primary">Send</button>
+        </div>
+        <div class="composer-hint">
+          <span><b>/</b> commands: /run · /approve · /handoff · /upload · /cancel</span>
+          <span><b>@</b> builder · reviewer · critic · architect · teammate</span>
+          <span style="margin-left:auto">role chips shown per turn · replays preserved in evidence packet</span>
+        </div>
+      </div>
+    </main>
+
+    <!-- ============ RIGHT RAIL ============ -->
+    <aside class="pane">
+      <div class="rail">
+
+        <div class="card">
+          <h5>Readiness contract <span class="pill ok" style="font-size:10.5px">6&thinsp;/&thinsp;6</span></h5>
+          <div class="body3">
+            <div class="gate"><span class="chk">✓</span> Repo connected · <span class="mono" style="color:var(--muted)">acme/rule-engine</span></div>
+            <div class="gate"><span class="chk">✓</span> Workspace root approved</div>
+            <div class="gate"><span class="chk">✓</span> Owner assigned · sam-k</div>
+            <div class="gate"><span class="chk">✓</span> Outcome statement</div>
+            <div class="gate"><span class="chk">✓</span> DoD · 5 checks</div>
+            <div class="gate"><span class="chk">✓</span> Contract v3 published</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h5>Knowledge lens <span class="pill cyan" style="font-size:10.5px">3 pinned</span></h5>
+          <div class="body3">
+            <div class="kl-src">
+              <span class="pill cyan" style="font-size:10.5px">md</span>
+              <span class="path">contracts/v3.md</span>
+              <span class="count">6 refs</span>
+            </div>
+            <div class="kl-src">
+              <span class="pill cyan" style="font-size:10.5px">ts</span>
+              <span class="path">evaluator.ts#L180</span>
+              <span class="count">4 refs</span>
+            </div>
+            <div class="kl-src">
+              <span class="pill cyan" style="font-size:10.5px">adr</span>
+              <span class="path">adr/012-dedup.md</span>
+              <span class="count">2 refs</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h5>Evidence <span class="pill ok" style="font-size:10.5px">run #412 · live</span></h5>
+          <div class="body3">
+            <div class="evbundle">
+              <span class="pill ok" style="font-size:10.5px">patch</span>
+              <span>patch-214.diff</span>
+              <span class="hash" style="margin-left:auto">3f9a2c…</span>
+            </div>
+            <div class="evbundle">
+              <span class="pill" style="font-size:10.5px">test</span>
+              <span>run_tests.jsonl</span>
+              <span class="hash" style="margin-left:auto">7c1d0e…</span>
+            </div>
+            <div class="evbundle">
+              <span class="pill accent" style="font-size:10.5px">policy</span>
+              <span>2 decisions</span>
+              <span class="hash" style="margin-left:auto">a22fbb…</span>
+            </div>
+            <button class="btn tiny primary" style="margin-top:8px; width:100%; justify-content:center">📎 Build evidence packet</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h5>Learning <span class="pill violet" style="font-size:10.5px">auto</span></h5>
+          <div class="body3">
+            <div style="font-size:12.5px; color:var(--ink-2); line-height:1.55">
+              Builder profile updated (2 new signals)<br>
+              • prefers local-first caches, flagged by Critic<br>
+              • dedupe keys standardized on <span class="mono">(tenantId, ruleId, inputHash)</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h5>Executor <span class="pill ok" style="font-size:10.5px">alex-b · FRESH</span></h5>
+          <div class="body3">
+            <div class="exec-row">
+              <span class="hbdot"></span>
+              <span class="name">alex-b@mbp</span>
+              <span class="hb">heartbeat 3s ago</span>
+            </div>
+            <div class="exec-row">
+              <span class="hbdot" style="background:var(--muted)"></span>
+              <span class="name">ci-runner-02</span>
+              <span class="hb">idle</span>
+            </div>
+            <div style="margin-top:6px; font-size:11.5px; color:var(--muted)">desktop owns execution · server is control plane</div>
+          </div>
+        </div>
+
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<!-- ⌘K palette -->
+<div class="scrim" id="scrim" onclick="if(event.target===this) closePalette()">
+  <div class="palette" role="dialog" aria-label="Command palette">
+    <input type="text" placeholder="Search commands, capabilities, work items, agents…" autofocus />
+    <ul>
+      <li class="group">Frequent</li>
+      <li>🏃  Run default workflow for this work item <span class="k">/run</span></li>
+      <li>✓   Approve last submission <span class="k">/approve</span></li>
+      <li>↪   Handoff to another role <span class="k">/handoff</span></li>
+      <li>📎  Generate evidence packet <span class="k">/packet</span></li>
+      <li class="group">Navigate</li>
+      <li>Switch capability → Billing <span class="k">G B</span></li>
+      <li>Open Studio → Role Comparison <span class="k">G R</span></li>
+      <li>Open Studio → Readiness Contract <span class="k">G C</span></li>
+      <li>Open Executors dashboard <span class="k">G X</span></li>
+    </ul>
+  </div>
+</div>
+
+<!-- annotation bar (mockup legend) -->
+<div class="annotation-bar">
+  <span><span class="dot"></span><b>Mockup:</b> Workbench v2 — one cockpit, unified timeline, role chips, readiness in header, packet on every run</span>
+  <a href="#" style="color:#22d3ee" onclick="openPalette(); return false;">Try ⌘K →</a>
+</div>
+
+<script>
+  const scrim = document.getElementById('scrim');
+  function openPalette() { scrim.classList.add('open'); setTimeout(()=>scrim.querySelector('input').focus(), 10); }
+  function closePalette() { scrim.classList.remove('open'); }
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+    if (e.key === 'Escape') closePalette();
+  });
+
+  // filter chip toggle (cosmetic)
+  document.querySelectorAll('.tl-filters .chip, .queue-smart .chip').forEach(c => {
+    c.addEventListener('click', () => {
+      const group = c.parentElement;
+      group.querySelectorAll('.chip').forEach(x => x.classList.remove('active'));
+      c.classList.add('active');
+    });
+  });
+
+  // queue item select (cosmetic)
+  document.querySelectorAll('.qitem').forEach(q => {
+    q.addEventListener('click', () => {
+      document.querySelectorAll('.qitem').forEach(x => x.classList.remove('active'));
+      q.classList.add('active');
+    });
+  });
+
+  // readiness popover (simple alert-style for mockup)
+  document.getElementById('readinessBadge').addEventListener('click', () => {
+    alert('Readiness gates (6/6)\n\n✓ Repo connected: acme/rule-engine\n✓ Workspace root approved\n✓ Owner assigned: sam-k\n✓ Outcome statement present\n✓ Definition of Done (5 checks)\n✓ Contract v3 published\n\nAll gates green — workflow execution is unlocked.');
+  });
+</script>
+
+</body>
+</html>

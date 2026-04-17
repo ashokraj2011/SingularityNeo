@@ -1,10 +1,12 @@
 import {
   ActorContext,
+  AgentTask,
   AgentLearningProfileDetail,
   Artifact,
   ArtifactContentResponse,
   Capability,
   CapabilityAgent,
+  CapabilityExecutionOwnership,
   CapabilityAlmExportPayload,
   CapabilityArchitectureSnapshot,
   CapabilityChatMessage,
@@ -15,6 +17,7 @@ import {
   CapabilityExecutionCommandTemplate,
   CapabilityFlightRecorderSnapshot,
   CapabilityHealthSnapshot,
+  CapabilityInteractionFeed,
   CapabilityWorkspace,
   CollectionRollupSnapshot,
   CommandTemplateValidationResult,
@@ -68,16 +71,41 @@ import {
   WorkflowRun,
   WorkflowRunDetail,
   OperationsDashboardSnapshot,
+  ReadinessContract,
   TeamQueueSnapshot,
   AuditReportSnapshot,
+  EvidencePacket,
+  EvidencePacketSummary,
+  ExecutorRegistryEntry,
+  ExecutorRegistrySummary,
   PermissionAction,
   EffectivePermissionSet,
+  CapabilityIncident,
+  IncidentExportDelivery,
+  IncidentExportTarget,
+  IncidentExportTargetConfig,
+  IncidentCorrelationCandidate,
+  IncidentPacketLink,
+  IncidentServiceCapabilityMap,
+  IncidentSource,
+  IncidentSourceConfig,
+  ModelRiskMonitoringSummary,
+  ApprovalPolicy,
+  ApprovalAssignment,
 } from '../types';
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from './desktop';
 
 export interface RuntimeStatus {
   configured: boolean;
   provider: string;
+  providerKey?: 'github-copilot' | 'local-openai';
+  embeddingProviderKey?: 'local-openai' | 'deterministic-hash';
+  embeddingConfigured?: boolean;
+  availableProviders?: Array<{
+    key: 'github-copilot' | 'local-openai';
+    label: string;
+    configured: boolean;
+  }>;
   endpoint: string;
   runtimeOwner?: 'DESKTOP' | 'SERVER';
   executionRuntimeOwner?: 'DESKTOP' | 'SERVER';
@@ -86,6 +114,12 @@ export interface RuntimeStatus {
   modelCatalogSource?: 'runtime' | 'fallback';
   runtimeAccessMode?: 'copilot-session' | 'headless-cli' | 'http-fallback' | 'unconfigured';
   httpFallbackEnabled?: boolean;
+  executorId?: string;
+  executorHeartbeatAt?: string;
+  executorHeartbeatStatus?: 'FRESH' | 'STALE' | 'OFFLINE';
+  actorUserId?: string;
+  actorDisplayName?: string;
+  ownedCapabilityIds?: string[];
   lastRuntimeError?: string | null;
   streaming?: boolean;
   githubIdentity?: {
@@ -263,8 +297,23 @@ const requestJson = async <T>(input: string, init?: RequestInit): Promise<T> => 
   return response.json() as Promise<T>;
 };
 
+const requestText = async (input: string, init?: RequestInit): Promise<string> => {
+  const response = await fetch(resolveApiUrl(input), {
+    ...init,
+    headers: withActorHeaders(init?.headers),
+  });
+  if (!response.ok) {
+    throw new Error(await getError(response));
+  }
+  return response.text();
+};
+
 export const setCurrentActorContext = (actor: ActorContext | null) => {
   currentActorContext = actor;
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop) {
+    void desktop.setActorContext(actor);
+  }
 };
 
 export const fetchRuntimeStatus = async (): Promise<RuntimeStatus> => {
@@ -300,6 +349,44 @@ export const clearRuntimeCredentials = async (): Promise<RuntimeStatus> => {
   return requestJson<RuntimeStatus>('/api/runtime/credentials', {
     method: 'DELETE',
   });
+};
+
+export const claimCapabilityExecution = async ({
+  capabilityId,
+  forceTakeover,
+}: {
+  capabilityId: string;
+  forceTakeover?: boolean;
+}): Promise<{
+  ownership: CapabilityExecutionOwnership;
+}> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop) {
+    return desktop.claimCapabilityExecution({
+      capabilityId,
+      forceTakeover,
+    }) as Promise<{
+      ownership: CapabilityExecutionOwnership;
+    }>;
+  }
+
+  throw new Error('A desktop runtime is required to claim capability execution.');
+};
+
+export const releaseCapabilityExecution = async ({
+  capabilityId,
+}: {
+  capabilityId: string;
+}): Promise<void> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop) {
+    await (desktop.releaseCapabilityExecution({
+      capabilityId,
+    }) as Promise<unknown>);
+    return;
+  }
+
+  throw new Error('A desktop runtime is required to release capability execution.');
 };
 
 export const sendCapabilityChat = async (
@@ -676,6 +763,314 @@ export const generateWorkItemReviewPacket = async (
       body: JSON.stringify({}),
     },
   );
+
+export const fetchCapabilityReadinessContract = async (
+  capabilityId: string,
+): Promise<ReadinessContract> =>
+  requestJson<ReadinessContract>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/readiness-contract`,
+  );
+
+export const fetchCapabilityInteractionFeed = async ({
+  capabilityId,
+  workItemId,
+}: {
+  capabilityId: string;
+  workItemId?: string;
+}): Promise<CapabilityInteractionFeed> =>
+  requestJson<CapabilityInteractionFeed>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/interaction-feed${
+      workItemId ? `?workItemId=${encodeURIComponent(workItemId)}` : ''
+    }`,
+  );
+
+export const createEvidencePacketForWorkItem = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<EvidencePacketSummary> =>
+  requestJson<EvidencePacketSummary>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/evidence-packets`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const fetchEvidencePacket = async (bundleId: string): Promise<EvidencePacket> =>
+  requestJson<EvidencePacket>(`/api/evidence-packets/${encodeURIComponent(bundleId)}`);
+
+export const listIncidents = async (params?: {
+  capabilityId?: string;
+  severity?: string;
+  status?: string;
+}): Promise<CapabilityIncident[]> => {
+  const search = new URLSearchParams();
+  if (params?.capabilityId) {
+    search.set('capabilityId', params.capabilityId);
+  }
+  if (params?.severity) {
+    search.set('severity', params.severity);
+  }
+  if (params?.status) {
+    search.set('status', params.status);
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : '';
+  return requestJson<CapabilityIncident[]>(`/api/incidents${suffix}`);
+};
+
+export const fetchIncident = async (incidentId: string): Promise<CapabilityIncident> =>
+  requestJson<CapabilityIncident>(`/api/incidents/${encodeURIComponent(incidentId)}`);
+
+export const createIncidentRecord = async (payload: {
+  capabilityId?: string;
+  title: string;
+  severity: string;
+  status?: string;
+  summary?: string;
+  affectedServices?: string[];
+  affectedPaths?: string[];
+  detectedAt?: string;
+  postmortemUrl?: string;
+  initialPacketBundleId?: string;
+}): Promise<CapabilityIncident> =>
+  requestJson<CapabilityIncident>('/api/incidents', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload),
+  });
+
+export const linkIncidentPacket = async (
+  incidentId: string,
+  payload: {
+    packetBundleId: string;
+    correlation?: string;
+    correlationScore?: number;
+    correlationReasons?: string[];
+  },
+): Promise<IncidentPacketLink> =>
+  requestJson<IncidentPacketLink>(`/api/incidents/${encodeURIComponent(incidentId)}/links`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload),
+  });
+
+export const updateIncidentPacketLink = async (
+  incidentId: string,
+  bundleId: string,
+  payload: {
+    correlation: string;
+    correlationScore?: number;
+    correlationReasons?: string[];
+  },
+): Promise<IncidentPacketLink> =>
+  requestJson<IncidentPacketLink>(
+    `/api/incidents/${encodeURIComponent(incidentId)}/links/${encodeURIComponent(bundleId)}`,
+    {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const deleteIncidentPacketLink = async (incidentId: string, bundleId: string) =>
+  requestJson<{ status: 'deleted' }>(
+    `/api/incidents/${encodeURIComponent(incidentId)}/links/${encodeURIComponent(bundleId)}`,
+    {
+      method: 'DELETE',
+    },
+  );
+
+export const fetchPacketIncidentLinks = async (
+  bundleId: string,
+): Promise<IncidentPacketLink[]> =>
+  requestJson<IncidentPacketLink[]>(
+    `/api/incidents/packets/${encodeURIComponent(bundleId)}/links`,
+  );
+
+export const correlateIncidentPackets = async (incidentId: string): Promise<{
+  incident: CapabilityIncident;
+  candidates: IncidentCorrelationCandidate[];
+  persisted: IncidentCorrelationCandidate[];
+}> =>
+  requestJson(`/api/incidents/${encodeURIComponent(incidentId)}/correlate`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({}),
+  });
+
+export const fetchIncidentPostmortemMarkdown = async (incidentId: string): Promise<string> =>
+  requestText(`/api/incidents/${encodeURIComponent(incidentId)}/postmortem.md`);
+
+export const fetchIncidentAlibiMarkdown = async (incidentId: string): Promise<string> =>
+  requestText(`/api/incidents/${encodeURIComponent(incidentId)}/alibi.md`);
+
+export const requestIncidentGuardrailPromotion = async (
+  incidentId: string,
+  bundleId: string,
+  concernText: string,
+): Promise<{
+  promotion: Record<string, unknown>;
+  approvalPolicy: ApprovalPolicy;
+  assignments: ApprovalAssignment[];
+}> =>
+  requestJson(
+    `/api/incidents/${encodeURIComponent(incidentId)}/links/${encodeURIComponent(bundleId)}/promote-guardrail`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ concernText }),
+    },
+  );
+
+export const listIncidentSourceConfigs = async (): Promise<IncidentSourceConfig[]> =>
+  requestJson<IncidentSourceConfig[]>('/api/incidents/config/sources');
+
+export const updateIncidentSourceConfig = async (
+  source: IncidentSource,
+  config: Partial<IncidentSourceConfig>,
+): Promise<IncidentSourceConfig> =>
+  requestJson<IncidentSourceConfig>(`/api/incidents/config/sources/${encodeURIComponent(source)}`, {
+    method: 'PUT',
+    headers: jsonHeaders,
+    body: JSON.stringify(config),
+  });
+
+export const deleteIncidentSourceConfig = async (source: IncidentSource) =>
+  requestJson<{ status: 'deleted' }>(
+    `/api/incidents/config/sources/${encodeURIComponent(source)}`,
+    { method: 'DELETE' },
+  );
+
+export const listIncidentServiceCapabilityMaps = async (): Promise<IncidentServiceCapabilityMap[]> =>
+  requestJson<IncidentServiceCapabilityMap[]>('/api/incidents/config/services');
+
+export const updateIncidentServiceCapabilityMap = async (
+  serviceName: string,
+  payload: {
+    capabilityId: string;
+    defaultAffectedPaths?: string[];
+    ownerEmail?: string;
+  },
+): Promise<IncidentServiceCapabilityMap> =>
+  requestJson<IncidentServiceCapabilityMap>(
+    `/api/incidents/config/services/${encodeURIComponent(serviceName)}`,
+    {
+      method: 'PUT',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const deleteIncidentServiceCapabilityMap = async (serviceName: string) =>
+  requestJson<{ status: 'deleted' }>(
+    `/api/incidents/config/services/${encodeURIComponent(serviceName)}`,
+    { method: 'DELETE' },
+  );
+
+export const listIncidentExportTargetConfigs = async (): Promise<IncidentExportTargetConfig[]> =>
+  requestJson<IncidentExportTargetConfig[]>('/api/incidents/exports/targets');
+
+export const updateIncidentExportTargetConfig = async (
+  target: IncidentExportTarget,
+  config: Partial<IncidentExportTargetConfig>,
+): Promise<IncidentExportTargetConfig> =>
+  requestJson<IncidentExportTargetConfig>(
+    `/api/incidents/exports/targets/${encodeURIComponent(target)}`,
+    {
+      method: 'PUT',
+      headers: jsonHeaders,
+      body: JSON.stringify(config),
+    },
+  );
+
+export const listIncidentExportDeliveries = async (params?: {
+  incidentId?: string;
+  capabilityId?: string;
+  target?: IncidentExportTarget;
+  limit?: number;
+}): Promise<IncidentExportDelivery[]> => {
+  const search = new URLSearchParams();
+  if (params?.incidentId) {
+    search.set('incidentId', params.incidentId);
+  }
+  if (params?.capabilityId) {
+    search.set('capabilityId', params.capabilityId);
+  }
+  if (params?.target) {
+    search.set('target', params.target);
+  }
+  if (params?.limit) {
+    search.set('limit', String(params.limit));
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : '';
+  return requestJson<IncidentExportDelivery[]>(`/api/incidents/exports/deliveries${suffix}`);
+};
+
+export const exportIncidentToTarget = async (
+  incidentId: string,
+  target: IncidentExportTarget,
+): Promise<IncidentExportDelivery> =>
+  requestJson<IncidentExportDelivery>(
+    `/api/incidents/${encodeURIComponent(incidentId)}/export/${encodeURIComponent(target)}`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const fetchModelRiskMonitoringSummary = async (params?: {
+  capabilityId?: string;
+  windowDays?: number;
+}): Promise<ModelRiskMonitoringSummary> => {
+  const search = new URLSearchParams();
+  if (params?.capabilityId) {
+    search.set('capabilityId', params.capabilityId);
+  }
+  if (params?.windowDays) {
+    search.set('windowDays', String(params.windowDays));
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : '';
+  return requestJson<ModelRiskMonitoringSummary>(`/api/mrm/summary${suffix}`);
+};
+
+export const fetchModelRiskMonitoringExport = async (params?: {
+  capabilityId?: string;
+  windowDays?: number;
+  format?: 'markdown' | 'json';
+}): Promise<string> => {
+  const search = new URLSearchParams();
+  if (params?.capabilityId) {
+    search.set('capabilityId', params.capabilityId);
+  }
+  if (params?.windowDays) {
+    search.set('windowDays', String(params.windowDays));
+  }
+  if (params?.format) {
+    search.set('format', params.format);
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : '';
+  return requestText(`/api/mrm/export${suffix}`);
+};
+
+export const exportModelRiskMonitoringToTarget = async ({
+  target,
+  capabilityId,
+  windowDays,
+}: {
+  target: IncidentExportTarget;
+  capabilityId?: string;
+  windowDays?: number;
+}): Promise<IncidentExportDelivery> =>
+  requestJson<IncidentExportDelivery>(`/api/mrm/export/${encodeURIComponent(target)}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      capabilityId,
+      windowDays,
+    }),
+  });
 
 export const fetchCapabilityConnectorContext = async (
   capabilityId: string,
@@ -1425,6 +1820,37 @@ export const fetchOperationsDashboardSnapshot =
   async (): Promise<OperationsDashboardSnapshot> =>
     requestJson<OperationsDashboardSnapshot>('/api/reports/operations');
 
+export const fetchExecutorRegistry = async (): Promise<ExecutorRegistrySummary> =>
+  requestJson<ExecutorRegistrySummary>('/api/runtime/executors');
+
+export const fetchExecutorRegistryEntry = async (
+  executorId: string,
+): Promise<ExecutorRegistryEntry> =>
+  requestJson<ExecutorRegistryEntry>(
+    `/api/runtime/executors/${encodeURIComponent(executorId)}`,
+  );
+
+export const removeDesktopExecutor = async (executorId: string): Promise<void> => {
+  await requestJson<void>(`/api/runtime/executors/${encodeURIComponent(executorId)}`, {
+    method: 'DELETE',
+  });
+};
+
+export const fetchCapabilityTasks = async (
+  capabilityId: string,
+): Promise<AgentTask[]> =>
+  requestJson<AgentTask[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/tasks`,
+  );
+
+export const fetchCapabilityTask = async (
+  capabilityId: string,
+  taskId: string,
+): Promise<AgentTask> =>
+  requestJson<AgentTask>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/tasks/${encodeURIComponent(taskId)}`,
+  );
+
 export const fetchTeamQueueSnapshot = async (
   teamId: string,
 ): Promise<TeamQueueSnapshot> =>
@@ -1548,6 +1974,24 @@ export const refreshAgentLearningProfile = async (
       method: 'POST',
       headers: jsonHeaders,
       body: JSON.stringify({}),
+    },
+  );
+
+export const submitAgentLearningCorrection = async (
+  capabilityId: string,
+  agentId: string,
+  payload: {
+    correction: string;
+    workItemId?: string;
+    runId?: string;
+  },
+): Promise<AgentLearningProfileDetail> =>
+  requestJson<AgentLearningProfileDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning/corrections`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
     },
   );
 

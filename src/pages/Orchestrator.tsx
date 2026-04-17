@@ -56,6 +56,7 @@ import {
   claimCapabilityWorkItemWriteControl,
   createCapabilityWorkItemHandoff,
   createCapabilityWorkItem,
+  createEvidencePacketForWorkItem,
   createCapabilityWorkItemSharedBranch,
   fetchCapabilityWorkItemCollaboration,
   fetchCapabilityWorkItemExecutionContext,
@@ -65,8 +66,10 @@ import {
   initializeCapabilityWorkItemExecutionContext,
   listCapabilityWorkflowRuns,
   moveCapabilityWorkItem,
+  claimCapabilityExecution,
   pauseCapabilityWorkflowRun,
   provideCapabilityWorkflowRunInput,
+  releaseCapabilityExecution,
   resumeCapabilityWorkflowRun,
   restoreCapabilityWorkItem,
   validateOnboardingWorkspacePath,
@@ -806,6 +809,7 @@ const Orchestrator = () => {
   const canReadLiveDetail = canReadCapabilityLiveDetail(permissionSet);
   const canEditCapability = hasPermission(permissionSet, 'capability.edit');
   const canCreateWorkItems = hasPermission(permissionSet, 'workitem.create');
+  const canClaimExecution = hasPermission(permissionSet, 'capability.execution.claim');
   const canControlWorkItems = hasPermission(permissionSet, 'workitem.control');
   const canRestartWorkItems = hasPermission(permissionSet, 'workitem.restart');
   const canDecideApprovals = hasPermission(permissionSet, 'approval.decide');
@@ -885,6 +889,7 @@ const Orchestrator = () => {
   const [dragOverPhase, setDragOverPhase] = useState<WorkItemPhase | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeError, setRuntimeError] = useState('');
+  const [executionClaimBusy, setExecutionClaimBusy] = useState(false);
   const [actionError, setActionError] = useState('');
   const [approvedWorkspaceDraft, setApprovedWorkspaceDraft] = useState('');
   const [approvedWorkspaceValidation, setApprovedWorkspaceValidation] =
@@ -1867,7 +1872,13 @@ const Orchestrator = () => {
   const currentRunIsActive = Boolean(
     currentRun && ACTIVE_RUN_STATUSES.includes(currentRun.status),
   );
-  const runtimeReady = Boolean(runtimeStatus?.configured) && !runtimeError;
+  const runtimeReady = Boolean(
+    runtimeStatus &&
+      (runtimeStatus.runtimeOwner === 'DESKTOP'
+        ? runtimeStatus.configured
+        : runtimeStatus.executionRuntimeOwner === 'DESKTOP' || runtimeStatus.configured) &&
+      !runtimeError,
+  );
   const capabilityExperience = useMemo(
     () =>
       buildCapabilityExperience({
@@ -1877,6 +1888,9 @@ const Orchestrator = () => {
       }),
     [activeCapability, runtimeStatus, workspace],
   );
+  const readinessContract = capabilityExperience.readinessContract;
+  const primaryReadinessGate =
+    readinessContract.gates.find(gate => !gate.satisfied) || null;
   const deliveryBlockingItem = capabilityExperience.blockingReadinessItems[0] || null;
   const primaryCopilotAgent =
     capabilityExperience.primaryCopilotAgent ||
@@ -1885,6 +1899,25 @@ const Orchestrator = () => {
       : null) ||
     selectedAgent ||
     null;
+  const executionOwnership = workspace.executionOwnership || null;
+  const currentDesktopOwnsExecution = Boolean(
+    executionOwnership?.executorId &&
+      runtimeStatus?.executorId &&
+      executionOwnership.executorId === runtimeStatus.executorId,
+  );
+  const executionOwnerLabel = executionOwnership
+    ? `${executionOwnership.actorDisplayName}${
+        currentDesktopOwnsExecution ? ' (this desktop)' : ''
+      }`
+    : 'No desktop owner';
+  const executionDispatchLabel =
+    workspace.executionDispatchState === 'ASSIGNED'
+      ? 'Desktop assigned'
+      : workspace.executionDispatchState === 'WAITING_FOR_EXECUTOR'
+      ? 'Waiting for desktop'
+      : workspace.executionDispatchState === 'STALE_EXECUTOR'
+      ? 'Desktop disconnected'
+      : 'Unassigned';
   const selectedCanTakeControl = Boolean(
     selectedWorkItem &&
       selectedWorkItem.status !== 'ARCHIVED' &&
@@ -2407,6 +2440,33 @@ const Orchestrator = () => {
     },
     [activeCapability.id, showError],
   );
+  const handleOpenTaskFromTimeline = useCallback(
+    (taskId: string) => {
+      navigate(`/tasks?taskId=${encodeURIComponent(taskId)}`);
+    },
+    [navigate],
+  );
+  const handleCreateEvidencePacket = useCallback(async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    await withAction(
+      'evidencePacket',
+      async () => {
+        const packet = await createEvidencePacketForWorkItem(
+          activeCapability.id,
+          selectedWorkItem.id,
+        );
+        navigate(`/e/${encodeURIComponent(packet.bundleId)}`);
+      },
+      {
+        title: 'Evidence packet created',
+        description:
+          'A durable evidence packet was generated from the current work item context and opened in the packet viewer.',
+      },
+    );
+  }, [activeCapability.id, navigate, selectedWorkItem]);
   const selectedStateSummary = useMemo(() => {
     if (!selectedWorkItem) {
       return 'Select a work item to see the current delivery state.';
@@ -2972,6 +3032,61 @@ const Orchestrator = () => {
         description: `${selectedWorkItem.title} is available for another team member to take over.`,
       },
     );
+  };
+
+  const handleClaimDesktopExecution = async (forceTakeover = false) => {
+    if (
+      !requirePermission(
+        canClaimExecution,
+        'This operator cannot claim desktop execution for the selected capability.',
+      )
+    ) {
+      return;
+    }
+
+    setExecutionClaimBusy(true);
+    try {
+      const result = await claimCapabilityExecution({
+        capabilityId: activeCapability.id,
+        forceTakeover,
+      });
+      await refreshCapabilityBundle(activeCapability.id);
+      success(
+        forceTakeover ? 'Desktop execution taken over' : 'Desktop execution claimed',
+        `${result.ownership.actorDisplayName} now owns automated execution for ${activeCapability.name}.`,
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to claim desktop execution.');
+    } finally {
+      setExecutionClaimBusy(false);
+    }
+  };
+
+  const handleReleaseDesktopExecution = async () => {
+    if (
+      !requirePermission(
+        canClaimExecution,
+        'This operator cannot release desktop execution for the selected capability.',
+      )
+    ) {
+      return;
+    }
+
+    setExecutionClaimBusy(true);
+    try {
+      await releaseCapabilityExecution({
+        capabilityId: activeCapability.id,
+      });
+      await refreshCapabilityBundle(activeCapability.id);
+      success(
+        'Desktop execution released',
+        `${activeCapability.name} is now waiting for a desktop executor to claim it.`,
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to release desktop execution.');
+    } finally {
+      setExecutionClaimBusy(false);
+    }
   };
 
   const handleInitializeExecutionContext = async () => {
@@ -5017,6 +5132,19 @@ const Orchestrator = () => {
                     </button>
                     <button
                       type="button"
+                      onClick={() => void handleCreateEvidencePacket()}
+                      disabled={!selectedWorkItem || busyAction !== null}
+                      className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {busyAction === 'evidencePacket' ? (
+                        <LoaderCircle size={16} className="animate-spin" />
+                      ) : (
+                        <FileText size={16} />
+                      )}
+                      Evidence packet
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => void handleOpenFullChat()}
                       disabled={!selectedAgent || !canReadChat}
                       className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
@@ -6088,6 +6216,69 @@ const Orchestrator = () => {
             </p>
           </div>
 
+          <div className="workspace-meta-card border-outline-variant/50">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="workspace-meta-label">Desktop execution owner</p>
+                <p className="mt-2 text-sm font-semibold text-on-surface">{executionOwnerLabel}</p>
+                <p className="mt-2 text-xs leading-relaxed text-secondary">
+                  {workspace.executionDispatchState === 'ASSIGNED'
+                    ? `Automation is routed through ${executionOwnerLabel}.`
+                    : workspace.executionQueueReason === 'EXECUTOR_DISCONNECTED'
+                    ? 'The previous desktop owner disconnected. Queued runs will resume after a desktop takes ownership again.'
+                    : workspace.executionQueueReason === 'EXECUTOR_RELEASED'
+                    ? 'Execution was released and queued work is waiting for a new desktop owner.'
+                    : 'Queued runs stay visible until an eligible desktop claims this capability.'}
+                </p>
+              </div>
+              <StatusBadge
+                tone={
+                  workspace.executionDispatchState === 'ASSIGNED'
+                    ? 'success'
+                    : workspace.executionDispatchState === 'STALE_EXECUTOR'
+                    ? 'warning'
+                    : 'neutral'
+                }
+              >
+                {executionDispatchLabel}
+              </StatusBadge>
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              {!currentDesktopOwnsExecution ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handleClaimDesktopExecution(
+                      Boolean(
+                        executionOwnership &&
+                          executionOwnership.executorId !== runtimeStatus?.executorId,
+                      ),
+                    )
+                  }
+                  disabled={!canClaimExecution || executionClaimBusy || !runtimeStatus?.executorId}
+                  className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Bot size={16} />
+                  {executionOwnership &&
+                  executionOwnership.executorId !== runtimeStatus?.executorId
+                    ? 'Take over desktop execution'
+                    : 'Claim desktop execution'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void handleReleaseDesktopExecution()}
+                  disabled={!canClaimExecution || executionClaimBusy}
+                  className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Square size={16} />
+                  Release desktop execution
+                </button>
+              )}
+            </div>
+          </div>
+
           <div className="grid gap-3 md:grid-cols-2">
             <div className="workspace-meta-card">
               <p className="workspace-meta-label">Primary role</p>
@@ -6712,6 +6903,19 @@ const Orchestrator = () => {
                       </button>
                       <button
                         type="button"
+                        onClick={() => void handleCreateEvidencePacket()}
+                        disabled={!selectedWorkItem || busyAction !== null}
+                        className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {busyAction === 'evidencePacket' ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <FileText size={16} />
+                        )}
+                        Evidence packet
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => void handleOpenFullChat()}
                         disabled={!selectedAgent || !canReadChat}
                         className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
@@ -6957,6 +7161,89 @@ const Orchestrator = () => {
                       ) : null}
                     </div>
 
+                    <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+                      <div className="workspace-meta-card">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Readiness contract</p>
+                            <p className="mt-2 text-sm leading-relaxed text-secondary">
+                              Starts and restarts are now gated by six hard readiness checks.
+                            </p>
+                          </div>
+                          <StatusBadge tone={readinessContract.allReady ? 'success' : 'warning'}>
+                            {readinessContract.allReady ? 'Ready to start' : 'Execution gated'}
+                          </StatusBadge>
+                        </div>
+                        <p className="mt-3 text-sm font-semibold text-on-surface">
+                          {readinessContract.summary}
+                        </p>
+                        {primaryReadinessGate ? (
+                          <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+                            <p className="text-xs font-bold uppercase tracking-[0.16em] text-amber-800">
+                              Blocking gate
+                            </p>
+                            <p className="mt-2 text-sm font-semibold text-amber-950">
+                              {primaryReadinessGate.label}
+                            </p>
+                            <p className="mt-2 text-xs leading-relaxed text-amber-800">
+                              {primaryReadinessGate.blockingReason ||
+                                primaryReadinessGate.nextRequiredAction ||
+                                primaryReadinessGate.summary}
+                            </p>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div className="workspace-meta-card">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Task projection</p>
+                            <p className="mt-2 text-sm leading-relaxed text-secondary">
+                              Lower-level workflow task records stay visible here so you can keep
+                              operating from Work.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => navigate('/tasks')}
+                            className="enterprise-button enterprise-button-secondary"
+                          >
+                            Open tasks
+                          </button>
+                        </div>
+                        {selectedTasks.length === 0 ? (
+                          <p className="mt-3 text-sm leading-relaxed text-secondary">
+                            No workflow-managed tasks are linked to this work item yet.
+                          </p>
+                        ) : (
+                          <div className="mt-4 space-y-2">
+                            {selectedTasks.slice(0, 3).map(task => (
+                              <button
+                                key={task.id}
+                                type="button"
+                                onClick={() =>
+                                  navigate(`/tasks?taskId=${encodeURIComponent(task.id)}`)
+                                }
+                                className="w-full rounded-2xl border border-outline-variant/25 bg-white px-4 py-3 text-left transition hover:border-primary/20 hover:bg-primary/5"
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <p className="text-sm font-semibold text-on-surface">
+                                    {task.title}
+                                  </p>
+                                  <StatusBadge tone={getStatusTone(task.status)}>
+                                    {task.status}
+                                  </StatusBadge>
+                                </div>
+                                <p className="mt-2 text-xs leading-relaxed text-secondary">
+                                  {task.workflowStepId || 'Workflow task'} • {task.agent}
+                                </p>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
                     {selectedAgent ? (
                       <div className="grid gap-3 xl:grid-cols-3">
                         <div className="workspace-meta-card">
@@ -6998,6 +7285,7 @@ const Orchestrator = () => {
                       emptyMessage="This work item has not produced a linked interaction story yet."
                       onOpenArtifact={handleOpenArtifactFromTimeline}
                       onOpenRun={runId => void handleOpenRunFromTimeline(runId)}
+                      onOpenTask={handleOpenTaskFromTimeline}
                     />
 
                     {selectedAttentionReason && (

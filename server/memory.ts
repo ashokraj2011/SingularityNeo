@@ -3,6 +3,7 @@ import path from 'node:path';
 import type {
   Capability,
   CapabilityWorkspace,
+  EmbeddingProviderKey,
   MemoryChunk,
   MemoryDocument,
   MemoryReference,
@@ -13,7 +14,17 @@ import type {
 import { getPlatformFeatureState, query, transaction } from './db';
 import { getCapabilityBundle } from './repository';
 import { getAgentLearningProfile, queueAgentLearningJob } from './agentLearning/repository';
+import {
+  executionRuntimeRpc,
+  isRemoteExecutionClient,
+} from './execution/runtimeClient';
 import { getCapabilityWorkspaceRoots } from './workspacePaths';
+import { requestLocalOpenAIEmbeddings } from './localOpenAIProvider';
+import {
+  DEFAULT_EMBEDDING_PROVIDER_KEY,
+  HASH_EMBEDDING_PROVIDER_KEY,
+} from './providerRegistry';
+import { getWorkspaceFileIndex } from './workspaceIndex';
 
 const EMBEDDING_DIMENSIONS = getPlatformFeatureState().memoryEmbeddingDimensions;
 
@@ -80,7 +91,7 @@ const splitIntoChunks = (content: string, limit = 900) => {
   return chunks;
 };
 
-const embedText = (content: string) => {
+const hashEmbedText = (content: string) => {
   const vector = Array.from({ length: EMBEDDING_DIMENSIONS }, () => 0);
   const tokens = normalizeText(content)
     .toLowerCase()
@@ -98,6 +109,67 @@ const embedText = (content: string) => {
 
   const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value ** 2, 0)) || 1;
   return vector.map(value => Number((value / magnitude).toFixed(6)));
+};
+
+const tokenize = (value: string) =>
+  normalizeText(value)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(token => token.length > 1);
+
+const lexicalOverlapScore = (queryText: string, content: string) => {
+  const queryTokens = new Set(tokenize(queryText));
+  if (queryTokens.size === 0) {
+    return 0;
+  }
+
+  const contentTokens = new Set(tokenize(content));
+  let hits = 0;
+  queryTokens.forEach(token => {
+    if (contentTokens.has(token)) {
+      hits += 1;
+    }
+  });
+  return hits / Math.max(queryTokens.size, 1);
+};
+
+const getSourceBoost = (document: MemoryDocument) => {
+  switch (document.sourceType) {
+    case 'ARTIFACT':
+    case 'HANDOFF':
+      return 0.08;
+    case 'HUMAN_INTERACTION':
+      return 0.06;
+    case 'WORK_ITEM':
+      return 0.04;
+    case 'CAPABILITY_METADATA':
+      return 0.03;
+    default:
+      return 0;
+  }
+};
+
+const embedTexts = async (
+  texts: string[],
+): Promise<{
+  providerKey: EmbeddingProviderKey;
+  model: string;
+  vectors: number[][];
+}> => {
+  const response = await requestLocalOpenAIEmbeddings({
+    texts,
+    dimensions: EMBEDDING_DIMENSIONS,
+  });
+
+  if (response.providerKey === DEFAULT_EMBEDDING_PROVIDER_KEY && response.vectors.length === texts.length) {
+    return response;
+  }
+
+  return {
+    providerKey: HASH_EMBEDDING_PROVIDER_KEY,
+    model: 'deterministic-hash-v2',
+    vectors: texts.map(text => hashEmbedText(text)),
+  };
 };
 
 const serializeVector = (values: number[]) => `[${values.join(',')}]`;
@@ -118,6 +190,32 @@ const cosineSimilarity = (left: number[], right: number[]) => {
 
   const magnitude = Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude) || 1;
   return dot / magnitude;
+};
+
+const scoreMemoryCandidate = ({
+  queryText,
+  queryEmbedding,
+  document,
+  content,
+  embedding,
+}: {
+  queryText: string;
+  queryEmbedding: number[];
+  document: MemoryDocument;
+  content: string;
+  embedding: number[];
+}) => {
+  const semanticScore = cosineSimilarity(queryEmbedding, embedding);
+  const lexicalScore = lexicalOverlapScore(queryText, content);
+  const rerankScore =
+    semanticScore * 0.72 + lexicalScore * 0.24 + getSourceBoost(document);
+
+  return {
+    semanticScore,
+    lexicalScore,
+    rerankScore,
+    retrievalMethod: lexicalScore > 0 ? 'BLENDED' : 'SEMANTIC',
+  } as const;
 };
 
 const documentFromRow = (row: Record<string, any>): MemoryDocument => ({
@@ -170,10 +268,12 @@ const replaceDocumentChunksTx = async ({
     [capabilityId, documentId],
   );
 
+  const embeddingResult = await embedTexts(chunks.map(chunk => chunk.content));
+
   for (const [index, chunk] of chunks.entries()) {
     const chunkId = createId('MEMCHUNK');
     const embeddingId = createId('MEMEMBED');
-    const embedding = embedText(chunk.content);
+    const embedding = embeddingResult.vectors[index] || hashEmbedText(chunk.content);
     await query(
       `
         INSERT INTO capability_memory_chunks (
@@ -215,7 +315,7 @@ const replaceDocumentChunksTx = async ({
         embeddingId,
         documentId,
         chunkId,
-        'deterministic-hash-v1',
+        embeddingResult.model,
         JSON.stringify(embedding),
       ],
     );
@@ -489,99 +589,39 @@ const TEXT_EXTENSIONS = new Set([
   '.jsx',
 ]);
 
-const SKIP_DIRECTORIES = new Set([
-  '.git',
-  'node_modules',
-  'dist',
-  'build',
-  'coverage',
-  '.next',
-  '.turbo',
-]);
+const buildRepositoryFileScore = (relativePath: string) => {
+  const fileName = path.basename(relativePath);
+  const extension = path.extname(fileName).toLowerCase();
+  const isReadme = /^readme/i.test(fileName);
+  const isDocPath = relativePath.startsWith('docs/');
+  const isConfig =
+    fileName === 'package.json' ||
+    fileName === 'pyproject.toml' ||
+    fileName === 'requirements.txt' ||
+    fileName === 'setup.py' ||
+    fileName === 'Pipfile' ||
+    fileName === 'pytest.ini' ||
+    fileName === 'tox.ini' ||
+    fileName === 'tsconfig.json' ||
+    fileName.endsWith('.config.ts') ||
+    fileName.endsWith('.config.js');
 
-const collectRepositoryFiles = (directoryPath: string, limit = 12) => {
-  const resolvedRoot = path.resolve(directoryPath);
-  if (!fs.existsSync(resolvedRoot)) {
-    return [] as Array<{ absolutePath: string; relativePath: string }>;
+  if (!(isReadme || isDocPath || isConfig || TEXT_EXTENSIONS.has(extension))) {
+    return -1;
   }
 
-  const matches: Array<{ absolutePath: string; relativePath: string; score: number }> = [];
+  let score = 10;
+  if (isReadme) score += 50;
+  if (isDocPath) score += 30;
+  if (isConfig) score += 20;
+  if (/artifact|workflow|design|requirement|runbook|architecture/i.test(relativePath)) {
+    score += 12;
+  }
 
-  const visit = (currentPath: string, depth: number) => {
-    if (matches.length >= limit) {
-      return;
-    }
-
-    const entries = fs.readdirSync(currentPath, { withFileTypes: true });
-    for (const entry of entries) {
-      if (matches.length >= limit) {
-        return;
-      }
-
-      const absolutePath = path.join(currentPath, entry.name);
-      const relativePath = path.relative(resolvedRoot, absolutePath);
-
-      if (entry.isDirectory()) {
-        if (depth >= 3 || SKIP_DIRECTORIES.has(entry.name)) {
-          continue;
-        }
-        visit(absolutePath, depth + 1);
-        continue;
-      }
-
-      if (!entry.isFile()) {
-        continue;
-      }
-
-      const extension = path.extname(entry.name).toLowerCase();
-      const isReadme = /^readme/i.test(entry.name);
-      const isDocPath = relativePath.startsWith(`docs${path.sep}`);
-      const isConfig =
-        entry.name === 'package.json' ||
-        entry.name === 'pyproject.toml' ||
-        entry.name === 'requirements.txt' ||
-        entry.name === 'setup.py' ||
-        entry.name === 'Pipfile' ||
-        entry.name === 'pytest.ini' ||
-        entry.name === 'tox.ini' ||
-        entry.name === 'tsconfig.json' ||
-        entry.name.endsWith('.config.ts') ||
-        entry.name.endsWith('.config.js');
-
-      if (!(isReadme || isDocPath || isConfig || TEXT_EXTENSIONS.has(extension))) {
-        continue;
-      }
-
-      try {
-        const stat = fs.statSync(absolutePath);
-        if (stat.size > 80_000) {
-          continue;
-        }
-      } catch {
-        continue;
-      }
-
-      let score = 10;
-      if (isReadme) score += 50;
-      if (isDocPath) score += 30;
-      if (isConfig) score += 20;
-      if (/artifact|workflow|design|requirement|runbook|architecture/i.test(relativePath)) {
-        score += 12;
-      }
-
-      matches.push({ absolutePath, relativePath, score });
-    }
-  };
-
-  visit(resolvedRoot, 0);
-
-  return matches
-    .sort((left, right) => right.score - left.score)
-    .slice(0, limit)
-    .map(({ absolutePath, relativePath }) => ({ absolutePath, relativePath }));
+  return score;
 };
 
-const buildRepositoryFileSources = (capability: Capability) => {
+const buildRepositoryFileSources = async (capability: Capability) => {
   const repoSources: Array<{
     id: string;
     title: string;
@@ -593,12 +633,29 @@ const buildRepositoryFileSources = (capability: Capability) => {
     content: string;
   }> = [];
 
-  getCapabilityWorkspaceRoots(capability).forEach(directoryPath => {
-    collectRepositoryFiles(directoryPath).forEach(file => {
+  for (const directoryPath of getCapabilityWorkspaceRoots(capability)) {
+    const indexedFiles = await getWorkspaceFileIndex(directoryPath, {
+      maxFiles: 5_000,
+    }).catch(() => []);
+    const candidateFiles = indexedFiles
+      .map(relativePath => ({
+        absolutePath: path.join(directoryPath, relativePath),
+        relativePath,
+        score: buildRepositoryFileScore(relativePath),
+      }))
+      .filter(file => file.score >= 0)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 120);
+
+    for (const file of candidateFiles) {
       try {
+        const stat = fs.statSync(file.absolutePath);
+        if (stat.size > 120_000) {
+          continue;
+        }
         const content = fs.readFileSync(file.absolutePath, 'utf8').trim();
         if (!content) {
-          return;
+          continue;
         }
 
         const sourceId = `${directoryPath}:${file.relativePath}`;
@@ -619,8 +676,8 @@ const buildRepositoryFileSources = (capability: Capability) => {
       } catch {
         // Ignore unreadable repository files.
       }
-    });
-  });
+    }
+  }
 
   return repoSources;
 };
@@ -642,10 +699,16 @@ export const refreshCapabilityMemory = async (
   capabilityId: string,
   options?: { requeueAgents?: boolean; requestReason?: string },
 ) => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<MemoryDocument[]>('refreshCapabilityMemory', {
+      capabilityId,
+    });
+  }
+
   const bundle = await getCapabilityBundle(capabilityId);
   const sources = [
     ...buildSources(bundle.capability, bundle.workspace),
-    ...buildRepositoryFileSources(bundle.capability),
+    ...(await buildRepositoryFileSources(bundle.capability)),
   ];
 
   await transaction(async () => {
@@ -734,6 +797,10 @@ export const searchCapabilityMemory = async ({
     return [];
   }
 
+  const queryEmbeddingResult = await embedTexts([normalizedQuery]);
+  const queryEmbedding =
+    queryEmbeddingResult.vectors[0] || hashEmbedText(normalizedQuery);
+
   const result = await query(
     `
       SELECT
@@ -744,7 +811,8 @@ export const searchCapabilityMemory = async ({
         chunks.token_estimate,
         chunks.metadata AS chunk_metadata,
         chunks.created_at AS chunk_created_at,
-        embeddings.embedding_json
+        embeddings.embedding_json,
+        embeddings.vector_model
       FROM capability_memory_documents docs
       JOIN capability_memory_chunks chunks
         ON chunks.capability_id = docs.capability_id
@@ -758,7 +826,6 @@ export const searchCapabilityMemory = async ({
     [capabilityId],
   );
 
-  const queryEmbedding = embedText(normalizedQuery);
   return result.rows
     .map(row => {
       const record = row as Record<string, any>;
@@ -767,7 +834,13 @@ export const searchCapabilityMemory = async ({
         : [];
       const document = documentFromRow(record);
       const chunk = chunkFromRow(record);
-      const score = cosineSimilarity(queryEmbedding, embedding);
+      const score = scoreMemoryCandidate({
+        queryText: normalizedQuery,
+        queryEmbedding,
+        document,
+        content: `${document.title}\n${document.contentPreview}\n${chunk.content}`,
+        embedding,
+      });
 
       return {
         reference: {
@@ -776,13 +849,19 @@ export const searchCapabilityMemory = async ({
           title: document.title,
           sourceType: document.sourceType,
           tier: document.tier,
-          score,
+          score: score.rerankScore,
+          retrievalMethod: score.retrievalMethod,
+          semanticScore: score.semanticScore,
+          lexicalScore: score.lexicalScore,
+          rerankScore: score.rerankScore,
         } satisfies MemoryReference,
         document,
         chunk,
+        embeddingProviderKey: queryEmbeddingResult.providerKey,
+        vectorModel: String(record.vector_model || queryEmbeddingResult.model || ''),
       };
     })
-    .sort((left, right) => (right.reference.score || 0) - (left.reference.score || 0))
+    .sort((left, right) => (right.reference.rerankScore || 0) - (left.reference.rerankScore || 0))
     .filter(item => {
       if (sourceFilter === null) {
         return true;
@@ -790,6 +869,42 @@ export const searchCapabilityMemory = async ({
       return sourceFilter.has(item.document.id);
     })
     .slice(0, limit);
+};
+
+export const rankMemoryCorpusByQuery = async ({
+  corpus,
+  queryText,
+}: {
+  corpus: Awaited<ReturnType<typeof getCapabilityMemoryCorpus>>;
+  queryText: string;
+}) => {
+  const normalizedQuery = normalizeText(queryText);
+  if (!normalizedQuery || corpus.length === 0) {
+    return corpus.map(item => ({ ...item, score: 0 }));
+  }
+
+  const queryEmbeddingResult = await embedTexts([normalizedQuery]);
+  const queryEmbedding =
+    queryEmbeddingResult.vectors[0] || hashEmbedText(normalizedQuery);
+  const corpusEmbeddings = await embedTexts(
+    corpus.map(item => `${item.document.title}\n${item.document.contentPreview}\n${item.combinedContent}`),
+  );
+
+  return corpus
+    .map((item, index) => {
+      const score = scoreMemoryCandidate({
+        queryText: normalizedQuery,
+        queryEmbedding,
+        document: item.document,
+        content: `${item.document.title}\n${item.document.contentPreview}\n${item.combinedContent}`,
+        embedding: corpusEmbeddings.vectors[index] || hashEmbedText(item.combinedContent),
+      });
+      return {
+        ...item,
+        score: score.rerankScore,
+      };
+    })
+    .sort((left, right) => right.score - left.score);
 };
 
 export const getCapabilityMemoryCorpus = async (
@@ -877,6 +992,18 @@ export const buildMemoryContext = async ({
   queryText: string;
   limit?: number;
 }) => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<{
+      results: MemorySearchResult[];
+      prompt: string;
+    }>('buildMemoryContext', {
+      capabilityId,
+      agentId,
+      queryText,
+      limit,
+    });
+  }
+
   const results = await searchCapabilityMemory({ capabilityId, agentId, queryText, limit });
   return {
     results,

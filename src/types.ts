@@ -2,6 +2,8 @@ export type Status = 'PENDING' | 'VERIFIED' | 'RUNNING' | 'STABLE' | 'ALERT' | '
 
 export type SkillKind = 'GENERAL' | 'ROLE' | 'CUSTOM' | 'LEARNING';
 export type SkillOrigin = 'FOUNDATION' | 'CAPABILITY';
+export type ProviderKey = 'github-copilot' | 'local-openai';
+export type EmbeddingProviderKey = 'local-openai' | 'deterministic-hash';
 export type AgentRoleStarterKey =
   | 'OWNER'
   | 'PLANNING'
@@ -162,6 +164,7 @@ export type WorkspaceRole =
   | 'WORKSPACE_ADMIN'
   | 'PORTFOLIO_OWNER'
   | 'TEAM_LEAD'
+  | 'INCIDENT_COMMANDER'
   | 'OPERATOR'
   | 'AUDITOR'
   | 'VIEWER';
@@ -187,6 +190,7 @@ export type PermissionAction =
   | 'capability.read'
   | 'capability.read.rollup'
   | 'capability.edit'
+  | 'capability.execution.claim'
   | 'workflow.edit'
   | 'agents.manage'
   | 'contract.publish'
@@ -544,7 +548,10 @@ export interface CapabilityDeploymentTarget {
   workspacePath?: string;
 }
 
+export type ExecutionMode = 'LIVE' | 'SHADOW';
+
 export interface CapabilityExecutionConfig {
+  executionMode?: ExecutionMode;
   defaultWorkspacePath?: string;
   allowedWorkspacePaths: string[];
   commandTemplates: CapabilityExecutionCommandTemplate[];
@@ -576,6 +583,15 @@ export interface CapabilityOnboardingDraft {
   allowedWorkspacePaths: string[];
   commandTemplates: CapabilityExecutionCommandTemplate[];
   deploymentTargets: CapabilityDeploymentTarget[];
+}
+
+export interface OperatingPolicySnapshot {
+  id: string;
+  capabilityId: string;
+  operatingPolicySummary: string;
+  triggeredByUserId?: string;
+  chatMessageId?: string;
+  createdAt: string;
 }
 
 export interface ConnectorValidationItem {
@@ -1135,7 +1151,9 @@ export interface CapabilityAgent {
   learningNotes?: string[];
   skillIds: string[];
   preferredToolIds?: ToolAdapterId[];
-  provider: 'GitHub Copilot SDK' | 'GitHub Copilot API';
+  provider: string;
+  providerKey?: ProviderKey;
+  embeddingProviderKey?: EmbeddingProviderKey;
   model: string;
   tokenLimit: number;
   usage: AgentUsage;
@@ -1183,6 +1201,7 @@ export interface AgentTask {
   title: string;
   agent: string;
   capabilityId: string;
+  taskSubtype?: 'WORKFLOW' | 'DELEGATED_RUN';
   workItemId?: string;
   workflowId?: string;
   workflowStepId?: string;
@@ -1196,6 +1215,11 @@ export interface AgentTask {
   executionNotes?: string;
   runId?: string;
   runStepId?: string;
+  parentTaskId?: string;
+  parentRunId?: string;
+  parentRunStepId?: string;
+  delegatedAgentId?: string;
+  handoffPacketId?: string;
   toolInvocationId?: string;
   linkedArtifacts?: { name: string; size: string; type: 'table' | 'scale' | 'file' }[];
   producedOutputs?: {
@@ -1223,6 +1247,8 @@ export type ArtifactKind =
   | 'PHASE_OUTPUT'
   | 'CODE_DIFF'
   | 'HANDOFF_PACKET'
+  | 'DELEGATION_RESULT'
+  | 'LEARNING_NOTE'
   | 'APPROVAL_RECORD'
   | 'UPLOAD'
   | 'INPUT_NOTE'
@@ -1302,12 +1328,38 @@ export type WorkItemPhase = WorkflowPhaseId;
 
 export type WorkflowStepType = 'DELIVERY' | 'GOVERNANCE_GATE' | 'HUMAN_APPROVAL';
 
+export interface AgentBounty {
+  id: string;
+  capabilityId: string;
+  sourceAgentId: string;
+  targetRole?: string;
+  instructions: string;
+  status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' | 'FAILED';
+  createdAt: string;
+  timeoutMs?: number;
+}
+
+export interface AgentBountySignal {
+  bountyId: string;
+  status: 'RESOLVED' | 'FAILED';
+  resultSummary?: string;
+  detailPayload?: Record<string, any>;
+  resolvedByAgentId?: string;
+  resolvedAt: string;
+}
+
 export type ToolAdapterId =
   | 'workspace_list'
   | 'workspace_read'
   | 'workspace_search'
   | 'git_status'
   | 'workspace_write'
+  | 'workspace_replace_block'
+  | 'workspace_apply_patch'
+  | 'delegate_task'
+  | 'publish_bounty'
+  | 'resolve_bounty'
+  | 'wait_for_signal'
   | 'run_build'
   | 'run_test'
   | 'run_docs'
@@ -1669,7 +1721,9 @@ export type CapabilityInteractionType =
   | 'RUN_EVENT'
   | 'WAIT'
   | 'APPROVAL'
-  | 'LEARNING';
+  | 'LEARNING'
+  | 'ARTIFACT'
+  | 'TASK';
 
 export interface CapabilityInteractionRecord {
   id: string;
@@ -1709,7 +1763,37 @@ export interface CapabilityInteractionFeed {
     waitCount: number;
     approvalCount: number;
     learningCount: number;
+    artifactCount: number;
+    taskCount: number;
   };
+}
+
+export type ReadinessGateId =
+  | 'OWNER_ASSIGNED'
+  | 'OUTCOME_CONTRACT_COMPLETE'
+  | 'SOURCE_CONTEXT_CONNECTED'
+  | 'APPROVED_WORKSPACE_PRESENT'
+  | 'WORKFLOW_VALID_AND_PUBLISHED'
+  | 'EXECUTION_RUNTIME_READY';
+
+export interface ReadinessGate {
+  id: ReadinessGateId;
+  label: string;
+  satisfied: boolean;
+  summary: string;
+  blockingReason?: string;
+  actionLabel: string;
+  path: string;
+  nextRequiredAction?: string;
+}
+
+export interface ReadinessContract {
+  capabilityId: string;
+  generatedAt: string;
+  allReady: boolean;
+  summary: string;
+  nextRequiredAction?: string;
+  gates: ReadinessGate[];
 }
 
 export type GoldenPathStepStatus = 'COMPLETE' | 'CURRENT' | 'UP_NEXT' | 'BLOCKED';
@@ -1745,6 +1829,9 @@ export interface LearningUpdate {
     | 'GUIDANCE'
     | 'STAGE_CONTROL'
     | 'CONFLICT_RESOLUTION'
+    | 'EXPERIENCE_DISTILLATION'
+    | 'INCIDENT_DERIVED'
+    | 'USER_CORRECTION'
     | 'MANUAL_REFRESH'
     | 'SKILL_CHANGE';
   relatedWorkItemId?: string;
@@ -1759,6 +1846,74 @@ export type WorkItemStatus =
   | 'COMPLETED'
   | 'CANCELLED'
   | 'ARCHIVED';
+
+export type ExecutionDispatchState =
+  | 'UNASSIGNED'
+  | 'WAITING_FOR_EXECUTOR'
+  | 'ASSIGNED'
+  | 'STALE_EXECUTOR';
+
+export type WorkflowRunQueueReason =
+  | 'WAITING_FOR_EXECUTOR'
+  | 'EXECUTOR_DISCONNECTED'
+  | 'EXECUTOR_RELEASED'
+  | 'MANUAL_REQUEUE';
+
+export type ExecutorHeartbeatStatus = 'FRESH' | 'STALE' | 'OFFLINE';
+
+export interface DesktopExecutorRegistration {
+  id: string;
+  actorUserId?: string;
+  actorDisplayName: string;
+  actorTeamIds: string[];
+  ownedCapabilityIds: string[];
+  approvedWorkspaceRoots: Record<string, string[]>;
+  heartbeatStatus: ExecutorHeartbeatStatus;
+  heartbeatAt: string;
+  createdAt: string;
+  updatedAt: string;
+  runtimeSummary?: {
+    provider?: string;
+    endpoint?: string;
+    defaultModel?: string;
+    runtimeAccessMode?: string;
+  };
+}
+
+export interface ExecutorRegistryCapabilitySummary {
+  capabilityId: string;
+  capabilityName: string;
+  approvedWorkspaceRoots: string[];
+  activeRunCount: number;
+  queuedRunCount: number;
+}
+
+export interface ExecutorRegistryEntry {
+  registration: DesktopExecutorRegistration;
+  runAssignmentCount: number;
+  ownedCapabilities: ExecutorRegistryCapabilitySummary[];
+}
+
+export interface ExecutorRegistrySummary {
+  generatedAt: string;
+  entries: ExecutorRegistryEntry[];
+  activeCount: number;
+  staleCount: number;
+  disconnectedCount: number;
+}
+
+export interface CapabilityExecutionOwnership {
+  capabilityId: string;
+  executorId: string;
+  actorUserId?: string;
+  actorDisplayName: string;
+  actorTeamIds: string[];
+  approvedWorkspaceRoots: string[];
+  heartbeatStatus: ExecutorHeartbeatStatus;
+  claimedAt: string;
+  heartbeatAt: string;
+  updatedAt: string;
+}
 
 export interface WorkItemPendingRequest {
   type: 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION';
@@ -1860,6 +2015,8 @@ export interface WorkItemHandoffPacket {
   recommendedNextStep?: string;
   artifactIds: string[];
   traceIds: string[];
+  delegationOriginTaskId?: string;
+  delegationOriginAgentId?: string;
   createdAt: string;
   acceptedAt?: string;
 }
@@ -1967,6 +2124,8 @@ export interface WorkflowRun {
   workItemId: string;
   workflowId: string;
   status: WorkflowRunStatus;
+  queueReason?: WorkflowRunQueueReason;
+  assignedExecutorId?: string;
   attemptNumber: number;
   workflowSnapshot: Workflow;
   currentNodeId?: string;
@@ -2030,6 +2189,7 @@ export interface ToolInvocation {
   capabilityId: string;
   runId: string;
   runStepId: string;
+  taskId?: string;
   traceId?: string;
   spanId?: string;
   toolId: ToolAdapterId;
@@ -2566,6 +2726,8 @@ export interface PhaseHandoffPacket {
   receivingTeamAcceptedAt?: string;
   receivingTeamAcceptedByUserId?: string;
   summary?: string;
+  delegationOriginTaskId?: string;
+  delegationOriginAgentId?: string;
 }
 
 export type ConnectorSyncStatus = 'READY' | 'NEEDS_CONFIGURATION' | 'ERROR';
@@ -2693,6 +2855,10 @@ export interface MemoryReference {
   sourceType: MemorySourceType;
   tier: MemoryStoreTier;
   score?: number;
+  retrievalMethod?: 'SEMANTIC' | 'LEXICAL' | 'BLENDED';
+  semanticScore?: number;
+  lexicalScore?: number;
+  rerankScore?: number;
 }
 
 export interface MemoryDocument {
@@ -2725,6 +2891,59 @@ export interface MemorySearchResult {
   reference: MemoryReference;
   document: MemoryDocument;
   chunk: MemoryChunk;
+  embeddingProviderKey?: EmbeddingProviderKey;
+  vectorModel?: string;
+}
+
+export type DelegationStatus =
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'PROMOTED_TO_HANDOFF';
+
+export interface DelegationRequest {
+  delegatedAgentId: string;
+  title: string;
+  prompt: string;
+  allowedToolIds?: ToolAdapterId[];
+  promoteToHandoff?: boolean;
+  handoffSummary?: string;
+}
+
+export interface DelegationArtifact {
+  artifactId: string;
+  handoffPacketId?: string;
+  promotedToHandoff?: boolean;
+}
+
+export interface DelegationResult {
+  summary: string;
+  childTaskId: string;
+  status: DelegationStatus;
+  artifactIds: string[];
+  handoffPacketId?: string;
+}
+
+export interface DelegatedRun {
+  id: string;
+  capabilityId: string;
+  workItemId?: string;
+  parentRunId: string;
+  parentRunStepId: string;
+  parentTaskId?: string;
+  delegatedAgentId: string;
+  delegatedAgentName: string;
+  title: string;
+  prompt: string;
+  status: DelegationStatus;
+  summary?: string;
+  artifactIds: string[];
+  handoffPacketId?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
 }
 
 export interface EvalSuite {
@@ -2822,6 +3041,7 @@ export interface ChatStreamEvent {
 export interface CapabilityWorkspace {
   capabilityId: string;
   briefing: CapabilityBriefing;
+  readinessContract?: ReadinessContract;
   agents: CapabilityAgent[];
   workflows: Workflow[];
   artifacts: Artifact[];
@@ -2834,7 +3054,209 @@ export interface CapabilityWorkspace {
   primaryCopilotAgentId?: string;
   goldenPathProgress?: GoldenPathProgress;
   interactionFeed?: CapabilityInteractionFeed;
+  executionOwnership?: CapabilityExecutionOwnership | null;
+  executionDispatchState?: ExecutionDispatchState;
+  executionQueueReason?: WorkflowRunQueueReason;
   createdAt: string;
+}
+
+export interface EvidencePacketSummary {
+  bundleId: string;
+  capabilityId: string;
+  workItemId: string;
+  title: string;
+  digestSha256: string;
+  createdAt: string;
+  generatedBy: string;
+  runId?: string;
+  summary: string;
+  touchedPaths?: string[];
+}
+
+export interface EvidencePacket extends EvidencePacketSummary {
+  payload: {
+    capabilityBriefing: CapabilityBriefing;
+    readinessContract: ReadinessContract;
+    interactionFeed: CapabilityInteractionFeed;
+    workItem: WorkItem;
+    latestRun?: WorkflowRun;
+    workflow?: Workflow;
+    runDetail?: WorkflowRunDetail;
+    runEvents: RunEvent[];
+    artifacts: Artifact[];
+    tasks: AgentTask[];
+    explain?: WorkItemExplainDetail;
+    connectors?: CapabilityConnectorContext;
+    evidence?: CompletedWorkOrderDetail;
+  };
+  incidentLinks?: IncidentPacketLink[];
+}
+
+export type IncidentSeverity = 'SEV1' | 'SEV2' | 'SEV3' | 'SEV4';
+export type IncidentSource = 'pagerduty' | 'servicenow' | 'incident-io' | 'manual';
+export type IncidentCorrelation = 'CONFIRMED' | 'SUSPECTED' | 'BLAST_RADIUS' | 'DISMISSED';
+export type IncidentStatus = 'triggered' | 'investigating' | 'resolved' | 'closed';
+export type IncidentExportTarget = 'datadog' | 'servicenow';
+export type IncidentExportKind = 'INCIDENT' | 'MRM';
+export type IncidentExportDeliveryStatus = 'QUEUED' | 'DELIVERED' | 'FAILED';
+export type IncidentExportAuthType = 'API_KEY' | 'BASIC';
+export type IncidentJobType = 'CORRELATE' | 'EXPORT_INCIDENT' | 'EXPORT_MRM';
+export type IncidentJobStatus = 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+export type IncidentSourceAuthType = 'HMAC_SHA256' | 'BASIC';
+
+export interface IncidentPacketLink {
+  incidentId: string;
+  packetBundleId: string;
+  correlation: IncidentCorrelation;
+  correlationScore?: number;
+  correlationReasons: string[];
+  linkedAt: string;
+  linkedBy?: string;
+  linkedByActorDisplayName?: string;
+  packetTitle?: string;
+  workItemId?: string;
+  runId?: string;
+  touchedPaths?: string[];
+}
+
+export interface CapabilityIncident {
+  id: string;
+  externalId?: string;
+  source: IncidentSource;
+  capabilityId?: string;
+  title: string;
+  severity: IncidentSeverity;
+  status: IncidentStatus;
+  detectedAt: string;
+  resolvedAt?: string;
+  affectedServices: string[];
+  affectedPaths: string[];
+  summary?: string;
+  postmortemUrl?: string;
+  rawPayload?: Record<string, unknown>;
+  createdByActorUserId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  linkedPackets: IncidentPacketLink[];
+}
+
+export interface IncidentSourceConfig {
+  source: IncidentSource;
+  enabled: boolean;
+  authType: IncidentSourceAuthType;
+  secretReference?: string;
+  basicUsername?: string;
+  signatureHeader?: string;
+  rateLimitPerMinute: number;
+  settings?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface IncidentServiceCapabilityMap {
+  serviceName: string;
+  capabilityId: string;
+  defaultAffectedPaths: string[];
+  ownerEmail?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface IncidentExportTargetConfig {
+  target: IncidentExportTarget;
+  enabled: boolean;
+  authType: IncidentExportAuthType;
+  baseUrl?: string;
+  secretReference?: string;
+  basicUsername?: string;
+  settings?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface IncidentExportDelivery {
+  id: string;
+  target: IncidentExportTarget;
+  exportKind: IncidentExportKind;
+  incidentId?: string;
+  capabilityId?: string;
+  windowDays?: number;
+  status: IncidentExportDeliveryStatus;
+  requestPayload?: Record<string, unknown>;
+  responseStatus?: number;
+  responsePreview?: string;
+  externalReference?: string;
+  triggeredByActorUserId?: string;
+  triggeredByActorDisplayName?: string;
+  createdAt: string;
+  exportedAt?: string;
+  updatedAt: string;
+}
+
+export interface IncidentJob {
+  id: string;
+  source: IncidentSource;
+  incidentId?: string;
+  type: IncidentJobType;
+  status: IncidentJobStatus;
+  payload: Record<string, unknown>;
+  attempts: number;
+  lastError?: string;
+  availableAt: string;
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IncidentCorrelationCandidate {
+  incidentId: string;
+  packet: EvidencePacketSummary;
+  correlation: IncidentCorrelation;
+  score: number;
+  overlapCount: number;
+  matchedPaths: string[];
+  reasons: string[];
+}
+
+export interface ModelRiskMonitoringSummary {
+  capabilityId?: string;
+  windowDays: number;
+  totals: {
+    incidents: number;
+    confirmedContributors: number;
+    suspectedContributors: number;
+    blastRadiusLinks: number;
+    totalPackets: number;
+    incidentContributionRate: number;
+    meanTimeToAttributionHours: number;
+    overrideToIncidentRate: number;
+    guardrailPromotionsRequested: number;
+    incidentDerivedLearningCount: number;
+  };
+  bySeverity: Array<{
+    severity: IncidentSeverity;
+    incidentCount: number;
+    confirmedContributors: number;
+  }>;
+  byProvider: Array<{
+    providerKey: ProviderKey | 'unknown';
+    model: string;
+    confirmedContributors: number;
+    suspectedContributors: number;
+  }>;
+  recentIncidents: CapabilityIncident[];
+  guardrailPromotions: Array<{
+    incidentId: string;
+    packetBundleId: string;
+    capabilityId: string;
+    concernText: string;
+    status: 'PENDING' | 'APPROVED' | 'REJECTED';
+    requestedAt: string;
+    requestedBy?: string;
+  }>;
+  exportTargets?: IncidentExportTargetConfig[];
+  recentDeliveries?: IncidentExportDelivery[];
 }
 
 export interface ReportFilter {
@@ -2990,4 +3412,78 @@ export interface ReportExportPayload {
     | CollectionRollupSnapshot
     | ExecutiveSummarySnapshot
     | AuditReportSnapshot;
+}
+
+export interface SsoIdentityLink {
+  userId: string;
+  ssoProvider: string;
+  ssoSubjectId: string;
+  linkedAt: string;
+}
+
+export interface DirectoryGroupMapping {
+  id: string;
+  directoryGroupName: string;
+  workspaceRole: string;
+  createdAt: string;
+}
+
+export interface ServiceAccountPrincipal {
+  userId: string;
+  description?: string;
+  isInteractiveLoginDisabled: boolean;
+  createdAt: string;
+}
+
+export interface SegregationOfDutiesPolicy {
+  id: string;
+  policyName: string;
+  description?: string;
+  restrictedAction: string;
+  makerRole?: string;
+  checkerRole?: string;
+  preventSelfApproval: boolean;
+  isActive: boolean;
+  updatedAt: string;
+}
+
+export interface AccessAttestationRecord {
+  id: string;
+  userId: string;
+  capabilityId?: string;
+  roleAttested: string;
+  attestedByUserId: string;
+  attestedAt: string;
+}
+
+export type BusinessCriticality = 'HIGH' | 'MEDIUM' | 'LOW';
+
+export interface CapabilityServiceProfile {
+  capabilityId: string;
+  businessCriticality: BusinessCriticality;
+  serviceTier: string;
+  controlOwnerUserId?: string;
+  productionOwnerUserId?: string;
+  dataClassification: string;
+  rtoRpoTarget?: string;
+  updatedAt: string;
+}
+
+export type ExecutionLaneType = 'DESKTOP' | 'MANAGED_POOL' | 'AUDIT_ONLY';
+
+export interface ExecutionLane {
+  id: string;
+  name: string;
+  laneType: ExecutionLaneType;
+  description?: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface RuntimeLanePolicy {
+  id: string;
+  capabilityId: string;
+  executionLaneId: string;
+  priority: number;
+  createdAt: string;
 }

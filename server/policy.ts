@@ -6,6 +6,12 @@ import type {
   ToolAdapterId,
 } from '../src/types';
 import { query } from './db';
+import { listIncidents } from './incidents/repository';
+import { matchesPathGlob } from './incidents/correlation';
+import {
+  executionRuntimeRpc,
+  isRemoteExecutionClient,
+} from './execution/runtimeClient';
 
 const createId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
@@ -25,7 +31,12 @@ const decisionFromRow = (row: Record<string, any>): PolicyDecision => ({
   createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
 });
 
-const HIGH_IMPACT_TOOLS = new Set<ToolAdapterId>(['workspace_write', 'run_deploy']);
+const HIGH_IMPACT_TOOLS = new Set<ToolAdapterId>([
+  'workspace_write',
+  'workspace_replace_block',
+  'workspace_apply_patch',
+  'run_deploy',
+]);
 
 export const createPolicyDecision = async (
   decision: Omit<PolicyDecision, 'id' | 'createdAt'> & { id?: string; createdAt?: string },
@@ -105,9 +116,30 @@ export const evaluateToolPolicy = async ({
   targetId?: string;
   hasApprovalBypass?: boolean;
 }) => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<PolicyDecision>('evaluateToolPolicy', {
+      capability,
+      traceId,
+      toolId,
+      requestedByAgentId,
+      runId,
+      runStepId,
+      targetId,
+      hasApprovalBypass,
+    });
+  }
+
   let actionType: PolicyActionType =
-    toolId === 'workspace_write' || toolId === 'run_build' || toolId === 'run_test' || toolId === 'run_docs' || toolId === 'run_deploy'
-      ? toolId
+    toolId === 'workspace_write' ||
+    toolId === 'workspace_replace_block' ||
+    toolId === 'workspace_apply_patch' ||
+    toolId === 'run_build' ||
+    toolId === 'run_test' ||
+    toolId === 'run_docs' ||
+    toolId === 'run_deploy'
+      ? toolId === 'workspace_replace_block' || toolId === 'workspace_apply_patch'
+        ? 'workspace_write'
+        : toolId
       : 'custom';
   let decision: PolicyDecisionResult = 'ALLOW';
   let reason = `${toolId} is allowed under the current execution policy.`;
@@ -117,11 +149,31 @@ export const evaluateToolPolicy = async ({
     reason = hasApprovalBypass
       ? 'Deployment approval has been satisfied for this run.'
       : 'Deployment commands are always human-approved in this environment.';
-  } else if (toolId === 'workspace_write') {
-    decision = hasApprovalBypass ? 'ALLOW' : 'REQUIRE_APPROVAL';
-    reason = hasApprovalBypass
-      ? 'Workspace mutation is allowed after explicit human approval.'
-      : 'Workspace writes require explicit human approval before execution.';
+  } else if (
+    toolId === 'workspace_write' ||
+    toolId === 'workspace_replace_block' ||
+    toolId === 'workspace_apply_patch'
+  ) {
+    let blastIncident = undefined;
+    if (targetId) {
+      const recentIncidents = await listIncidents({ capabilityId: capability.id, limit: 50 });
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000).getTime();
+      blastIncident = recentIncidents.find(inc => 
+        new Date(inc.detectedAt).getTime() > thirtyDaysAgo &&
+        (inc.severity === 'SEV1' || inc.severity === 'SEV2') &&
+        inc.affectedPaths.some(glob => matchesPathGlob(targetId, glob))
+      );
+    }
+    
+    if (blastIncident) {
+      decision = 'REQUIRE_APPROVAL';
+      reason = `⚠️ BLAST RADIUS WARNING: The file ${targetId} was implicated in a ${blastIncident.severity} incident (${blastIncident.id}). Mandatory human-in-the-loop approval enforced.`;
+    } else {
+      decision = hasApprovalBypass ? 'ALLOW' : 'REQUIRE_APPROVAL';
+      reason = hasApprovalBypass
+        ? 'Workspace mutation is allowed after explicit human approval.'
+        : 'Workspace writes require explicit human approval before execution.';
+    }
   } else if (HIGH_IMPACT_TOOLS.has(toolId)) {
     decision = 'REQUIRE_APPROVAL';
     reason = `${toolId} is treated as a high-impact action and requires approval.`;

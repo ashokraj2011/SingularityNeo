@@ -5,6 +5,10 @@ import type {
   WorkflowRun,
 } from '../src/types';
 import { query } from './db';
+import {
+  executionRuntimeRpc,
+  isRemoteExecutionClient,
+} from './execution/runtimeClient';
 
 const createId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
@@ -75,6 +79,21 @@ export const startTelemetrySpan = async ({
 > & {
   startedAt?: string;
 }) => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<TelemetrySpan>('startTelemetrySpan', {
+      capabilityId,
+      traceId,
+      parentSpanId,
+      entityType,
+      entityId,
+      name,
+      status,
+      model,
+      attributes,
+      startedAt,
+    });
+  }
+
   const result = await query(
     `
       INSERT INTO capability_trace_spans (
@@ -128,6 +147,18 @@ export const finishTelemetrySpan = async ({
   attributes?: Record<string, any>;
   endedAt?: string;
 }) => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<TelemetrySpan>('finishTelemetrySpan', {
+      capabilityId,
+      spanId,
+      status,
+      costUsd,
+      tokenUsage,
+      attributes,
+      endedAt,
+    });
+  }
+
   const result = await query(
     `
       UPDATE capability_trace_spans
@@ -168,6 +199,12 @@ export const recordMetricSample = async (
     recordedAt?: string;
   },
 ) => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<TelemetryMetricSample>('recordMetricSample', {
+      sample,
+    });
+  }
+
   const result = await query(
     `
       INSERT INTO capability_metric_samples (
@@ -221,6 +258,20 @@ export const recordUsageMetrics = async ({
   costUsd?: number;
   tags?: Record<string, string>;
 }) => {
+  if (isRemoteExecutionClient()) {
+    await executionRuntimeRpc<void>('recordUsageMetrics', {
+      capabilityId,
+      traceId,
+      scopeType,
+      scopeId,
+      latencyMs,
+      totalTokens,
+      costUsd,
+      tags,
+    });
+    return;
+  }
+
   const metrics: Promise<unknown>[] = [];
   if (typeof latencyMs === 'number') {
     metrics.push(

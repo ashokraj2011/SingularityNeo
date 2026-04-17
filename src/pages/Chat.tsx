@@ -25,6 +25,7 @@ import {
 import {
   fetchRuntimeStatus,
   refreshAgentLearningProfile,
+  submitAgentLearningCorrection,
   streamCapabilityChat,
   type RuntimeStatus,
   type RuntimeUsage,
@@ -289,6 +290,8 @@ const Chat = () => {
   const [inspectorOpen, setInspectorOpen] = useState(defaultInspectorOpen);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>(defaultInspectorTab);
   const [refreshingAgentId, setRefreshingAgentId] = useState('');
+  const [learningCorrection, setLearningCorrection] = useState('');
+  const [submittingLearningCorrection, setSubmittingLearningCorrection] = useState(false);
   const [messageAnnotations, setMessageAnnotations] = useState<
     Record<string, ChatMessageAnnotation>
   >({});
@@ -407,6 +410,40 @@ const Chat = () => {
       showError('Learning refresh failed', description);
     } finally {
       setRefreshingAgentId('');
+    }
+  };
+
+  const handleSubmitLearningCorrection = async () => {
+    if (!activeAgent || submittingLearningCorrection) {
+      return;
+    }
+
+    const correction = learningCorrection.trim();
+    if (!correction) {
+      warning('Add a correction', 'Tell the agent what it learned incorrectly before saving.');
+      return;
+    }
+
+    setSubmittingLearningCorrection(true);
+
+    try {
+      await submitAgentLearningCorrection(activeCapability.id, activeAgent.id, {
+        correction,
+      });
+      await refreshCapabilityBundle(activeCapability.id);
+      setLearningCorrection('');
+      success(
+        'Learning correction saved',
+        `${activeAgent.name} will use this correction immediately and refresh its distilled learning.`,
+      );
+    } catch (nextError) {
+      const description =
+        nextError instanceof Error
+          ? nextError.message
+          : 'Unable to save the learning correction right now.';
+      showError('Learning correction failed', description);
+    } finally {
+      setSubmittingLearningCorrection(false);
     }
   };
 
@@ -1122,6 +1159,12 @@ const Chat = () => {
             { label: 'Runtime mode', value: runtimeStatus?.runtimeAccessMode || 'Unknown' },
             { label: 'Token source', value: runtimeStatus?.tokenSource || 'Unknown' },
             { label: 'Provider', value: runtimeStatus?.provider || 'Unknown' },
+            {
+              label: 'Execution owner',
+              value:
+                workspace.executionOwnership?.actorDisplayName ||
+                (runtimeStatus?.executorId ? 'This desktop' : 'Unassigned'),
+            },
             { label: 'GitHub identity', value: runtimeIdentityLabel },
           ].map(item => (
             <div key={item.label} className="workspace-meta-card">
@@ -1353,6 +1396,42 @@ const Chat = () => {
           {activeKnowledgeLens ? (
             <AgentKnowledgeLensPanel lens={activeKnowledgeLens} />
           ) : null}
+
+          <div className="workspace-surface">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="workspace-section-title">Correct learning</p>
+                <p className="workspace-section-copy">
+                  Capture a hard-earned rule, edge case, or correction so the agent updates its
+                  future guidance instead of repeating the mistake.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleSubmitLearningCorrection()}
+                disabled={submittingLearningCorrection || !learningCorrection.trim()}
+                className="enterprise-button enterprise-button-primary"
+              >
+                {submittingLearningCorrection ? (
+                  <LoaderCircle size={14} className="animate-spin" />
+                ) : (
+                  <Sparkles size={14} />
+                )}
+                Save correction
+              </button>
+            </div>
+            <textarea
+              value={learningCorrection}
+              onChange={event => setLearningCorrection(event.target.value)}
+              placeholder="Example: When patching large files, never rewrite the whole file. Use workspace_replace_block unless the file is newly created."
+              rows={4}
+              className="mt-3 min-h-[112px] w-full rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
+            />
+            <p className="mt-2 text-xs text-secondary">
+              We store the raw correction immediately, then a reflection pass folds it into the
+              agent&apos;s distilled learning, generated skill notes, and guardrails.
+            </p>
+          </div>
 
           {activeAgent.learningProfile.lastError ? (
             <div className="workspace-inline-alert workspace-inline-alert-danger">

@@ -8,6 +8,7 @@ import {
   Workflow,
   WorkflowRun,
   WorkflowRunDetail,
+  WorkflowRunQueueReason,
   WorkflowRunStep,
   WorkflowRunStatus,
   WorkItem,
@@ -18,6 +19,15 @@ import {
 import { query, transaction } from '../db';
 import { publishRunEvent } from '../eventBus';
 import { createSpanId, createTraceId } from '../telemetry';
+import {
+  listOwnedCapabilityIdsForExecutor,
+  reconcileDesktopExecutionOwnerships,
+  resolveQueuedRunDispatch,
+} from '../executionOwnership';
+import {
+  executionRuntimeRpc,
+  isRemoteExecutionClient,
+} from './runtimeClient';
 import {
   findFirstExecutableNode,
   findFirstExecutableNodeForPhase,
@@ -65,6 +75,8 @@ const runFromRow = (row: Record<string, any>): WorkflowRun => ({
   workItemId: row.work_item_id,
   workflowId: row.workflow_id,
   status: row.status,
+  queueReason: row.queue_reason || undefined,
+  assignedExecutorId: row.assigned_executor_id || undefined,
   attemptNumber: Number(row.attempt_number || 1),
   workflowSnapshot: asJson<Workflow>(row.workflow_snapshot, {
     id: row.workflow_id,
@@ -395,12 +407,25 @@ export const getWorkflowRunDetail = async (
   capabilityId: string,
   runId: string,
 ): Promise<WorkflowRunDetail> =>
+  isRemoteExecutionClient()
+    ? executionRuntimeRpc<WorkflowRunDetail>('getWorkflowRunDetail', {
+        capabilityId,
+        runId,
+      })
+    :
   transaction(client => getRunDetailTx(client, capabilityId, runId));
 
 export const getWorkflowRunStatus = async (
   capabilityId: string,
   runId: string,
 ): Promise<WorkflowRunStatus> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<WorkflowRunStatus>('getWorkflowRunStatus', {
+      capabilityId,
+      runId,
+    });
+  }
+
   const result = await query(
     `
       SELECT status
@@ -429,6 +454,13 @@ export const getLatestRunForWorkItem = async (
   capabilityId: string,
   workItemId: string,
 ): Promise<WorkflowRun | null> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<WorkflowRun | null>('getLatestRunForWorkItem', {
+      capabilityId,
+      workItemId,
+    });
+  }
+
   const result = await query(
     `
       SELECT *
@@ -447,6 +479,13 @@ export const getActiveRunForWorkItem = async (
   capabilityId: string,
   workItemId: string,
 ): Promise<WorkflowRun | null> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<WorkflowRun | null>('getActiveRunForWorkItem', {
+      capabilityId,
+      workItemId,
+    });
+  }
+
   const result = await query(
     `
       SELECT *
@@ -527,12 +566,15 @@ export const createWorkflowRun = async ({
     const completedNodeIds = orderedNodes
       .slice(0, Math.max(startingIndex, 0))
       .map(node => node!.id);
+    const queuedDispatch = await resolveQueuedRunDispatch({ capabilityId });
     const run: WorkflowRun = {
       id: runId,
       capabilityId,
       workItemId: workItem.id,
       workflowId: normalizedWorkflow.id,
       status: 'QUEUED',
+      queueReason: queuedDispatch.queueReason,
+      assignedExecutorId: queuedDispatch.assignedExecutorId,
       attemptNumber,
       workflowSnapshot: normalizedWorkflow,
       currentNodeId: startingNode.id,
@@ -560,6 +602,8 @@ export const createWorkflowRun = async ({
           work_item_id,
           workflow_id,
           status,
+          queue_reason,
+          assigned_executor_id,
           attempt_number,
           workflow_snapshot,
           current_node_id,
@@ -570,7 +614,7 @@ export const createWorkflowRun = async ({
           restart_from_phase,
           trace_id
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
       `,
       [
         capabilityId,
@@ -578,6 +622,8 @@ export const createWorkflowRun = async ({
         workItem.id,
         normalizedWorkflow.id,
         run.status,
+        run.queueReason || null,
+        run.assignedExecutorId || null,
         run.attemptNumber,
         JSON.stringify(normalizedWorkflow),
         run.currentNodeId || null,
@@ -678,27 +724,34 @@ export const createWorkflowRun = async ({
   });
 
 export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDetail> =>
+  isRemoteExecutionClient()
+    ? executionRuntimeRpc<WorkflowRunDetail>('updateWorkflowRun', {
+        run,
+      })
+    :
   transaction(async client => {
     await client.query(
       `
         UPDATE capability_workflow_runs
         SET
           status = $3,
-          workflow_snapshot = $4,
-          current_node_id = $5,
-          current_step_id = $6,
-          current_phase = $7,
-          assigned_agent_id = $8,
-          branch_state = $9,
-          pause_reason = $10,
-          current_wait_id = $11,
-          terminal_outcome = $12,
-          restart_from_phase = $13,
-          trace_id = $14,
-          lease_owner = $15,
-          lease_expires_at = $16,
-          started_at = $17,
-          completed_at = $18,
+          queue_reason = $4,
+          assigned_executor_id = $5,
+          workflow_snapshot = $6,
+          current_node_id = $7,
+          current_step_id = $8,
+          current_phase = $9,
+          assigned_agent_id = $10,
+          branch_state = $11,
+          pause_reason = $12,
+          current_wait_id = $13,
+          terminal_outcome = $14,
+          restart_from_phase = $15,
+          trace_id = $16,
+          lease_owner = $17,
+          lease_expires_at = $18,
+          started_at = $19,
+          completed_at = $20,
           updated_at = NOW()
         WHERE capability_id = $1
           AND id = $2
@@ -708,6 +761,8 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
         run.capabilityId,
         run.id,
         run.status,
+        run.queueReason || null,
+        run.assignedExecutorId || null,
         JSON.stringify(run.workflowSnapshot),
         run.currentNodeId || null,
         run.currentStepId || null,
@@ -730,27 +785,34 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
   });
 
 export const updateWorkflowRunControl = async (run: WorkflowRun): Promise<WorkflowRunDetail> =>
+  isRemoteExecutionClient()
+    ? executionRuntimeRpc<WorkflowRunDetail>('updateWorkflowRunControl', {
+        run,
+      })
+    :
   transaction(async client => {
     await client.query(
       `
         UPDATE capability_workflow_runs
         SET
           status = $3,
-          workflow_snapshot = $4,
-          current_node_id = $5,
-          current_step_id = $6,
-          current_phase = $7,
-          assigned_agent_id = $8,
-          branch_state = $9,
-          pause_reason = $10,
-          current_wait_id = $11,
-          terminal_outcome = $12,
-          restart_from_phase = $13,
-          trace_id = $14,
-          lease_owner = $15,
-          lease_expires_at = $16,
-          started_at = $17,
-          completed_at = $18,
+          queue_reason = $4,
+          assigned_executor_id = $5,
+          workflow_snapshot = $6,
+          current_node_id = $7,
+          current_step_id = $8,
+          current_phase = $9,
+          assigned_agent_id = $10,
+          branch_state = $11,
+          pause_reason = $12,
+          current_wait_id = $13,
+          terminal_outcome = $14,
+          restart_from_phase = $15,
+          trace_id = $16,
+          lease_owner = $17,
+          lease_expires_at = $18,
+          started_at = $19,
+          completed_at = $20,
           updated_at = NOW()
         WHERE capability_id = $1
           AND id = $2
@@ -760,6 +822,8 @@ export const updateWorkflowRunControl = async (run: WorkflowRun): Promise<Workfl
         run.capabilityId,
         run.id,
         run.status,
+        run.queueReason || null,
+        run.assignedExecutorId || null,
         JSON.stringify(run.workflowSnapshot),
         run.currentNodeId || null,
         run.currentStepId || null,
@@ -784,6 +848,11 @@ export const updateWorkflowRunControl = async (run: WorkflowRun): Promise<Workfl
 export const updateWorkflowRunStep = async (
   step: WorkflowRunStep,
 ): Promise<WorkflowRunStep> =>
+  isRemoteExecutionClient()
+    ? executionRuntimeRpc<WorkflowRunStep>('updateWorkflowRunStep', {
+        step,
+      })
+    :
   transaction(async client => {
     const result = await client.query(
       `
@@ -825,6 +894,12 @@ export const updateWorkflowRunStep = async (
   });
 
 export const insertRunEvent = async (event: RunEvent): Promise<RunEvent> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<RunEvent>('insertRunEvent', {
+      event,
+    });
+  }
+
   const result = await query(
     `
       INSERT INTO capability_run_events (
@@ -878,6 +953,12 @@ export const createRunEvent = (
 export const createRunWait = async (
   wait: Omit<RunWait, 'id' | 'createdAt'> & { id?: string; createdAt?: string },
 ): Promise<RunWait> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<RunWait>('createRunWait', {
+      wait,
+    });
+  }
+
   const result = await query(
     `
       INSERT INTO capability_run_waits (
@@ -948,6 +1029,17 @@ export const resolveRunWait = async ({
   resolvedByActorUserId?: string;
   resolvedByActorTeamIds?: string[];
 }): Promise<RunWait> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<RunWait>('resolveRunWait', {
+      capabilityId,
+      waitId,
+      resolution,
+      resolvedBy,
+      resolvedByActorUserId,
+      resolvedByActorTeamIds,
+    });
+  }
+
   const result = await query(
     `
       UPDATE capability_run_waits
@@ -982,6 +1074,12 @@ export const resolveRunWait = async ({
 export const createApprovalAssignments = async (
   assignments: ApprovalAssignment[],
 ): Promise<ApprovalAssignment[]> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<ApprovalAssignment[]>('createApprovalAssignments', {
+      assignments,
+    });
+  }
+
   const created: ApprovalAssignment[] = [];
 
   for (const assignment of assignments) {
@@ -1039,6 +1137,15 @@ export const updateApprovalAssignmentsForWait = async ({
   waitId: string;
   status: ApprovalAssignment['status'];
 }) => {
+  if (isRemoteExecutionClient()) {
+    await executionRuntimeRpc<void>('updateApprovalAssignmentsForWait', {
+      capabilityId,
+      waitId,
+      status,
+    });
+    return;
+  }
+
   await query(
     `
       UPDATE capability_approval_assignments
@@ -1056,6 +1163,12 @@ export const updateApprovalAssignmentsForWait = async ({
 export const createApprovalDecision = async (
   decision: ApprovalDecision,
 ): Promise<ApprovalDecision> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<ApprovalDecision>('createApprovalDecision', {
+      decision,
+    });
+  }
+
   const result = await query(
     `
       INSERT INTO capability_approval_decisions (
@@ -1096,6 +1209,13 @@ export const listActiveWorkItemClaims = async (
   capabilityId: string,
   workItemId?: string,
 ): Promise<WorkItemClaim[]> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<WorkItemClaim[]>('listActiveWorkItemClaims', {
+      capabilityId,
+      workItemId,
+    });
+  }
+
   const result = await query(
     `
       SELECT *
@@ -1114,6 +1234,12 @@ export const listActiveWorkItemClaims = async (
 export const upsertWorkItemClaim = async (
   claim: WorkItemClaim,
 ): Promise<WorkItemClaim> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<WorkItemClaim>('upsertWorkItemClaim', {
+      claim,
+    });
+  }
+
   const result = await query(
     `
       INSERT INTO capability_work_item_claims (
@@ -1159,6 +1285,15 @@ export const releaseWorkItemClaim = async ({
   workItemId: string;
   userId: string;
 }) => {
+  if (isRemoteExecutionClient()) {
+    await executionRuntimeRpc<void>('releaseWorkItemClaim', {
+      capabilityId,
+      workItemId,
+      userId,
+    });
+    return;
+  }
+
   await query(
     `
       UPDATE capability_work_item_claims
@@ -1234,6 +1369,14 @@ export const updateRunWaitPayload = async ({
   waitId: string;
   payload: RunWait['payload'];
 }): Promise<RunWait> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<RunWait>('updateRunWaitPayload', {
+      capabilityId,
+      waitId,
+      payload,
+    });
+  }
+
   const result = await query(
     `
       UPDATE capability_run_waits
@@ -1256,6 +1399,12 @@ export const updateRunWaitPayload = async ({
 export const createToolInvocation = async (
   invocation: Omit<ToolInvocation, 'createdAt'> & { createdAt?: string },
 ): Promise<ToolInvocation> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<ToolInvocation>('createToolInvocation', {
+      invocation,
+    });
+  }
+
   const result = await query(
     `
       INSERT INTO capability_tool_invocations (
@@ -1318,6 +1467,12 @@ export const createToolInvocation = async (
 export const updateToolInvocation = async (
   invocation: ToolInvocation,
 ): Promise<ToolInvocation> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<ToolInvocation>('updateToolInvocation', {
+      invocation,
+    });
+  }
+
   const result = await query(
     `
       UPDATE capability_tool_invocations
@@ -1410,6 +1565,89 @@ export const claimRunnableRuns = async ({
     return result.rows.map(runFromRow);
   });
 
+export const claimNextRunnableRunForExecutor = async ({
+  executorId,
+  leaseMs,
+}: {
+  executorId: string;
+  leaseMs: number;
+}): Promise<WorkflowRun | null> => {
+  await reconcileDesktopExecutionOwnerships();
+  const ownedCapabilityIds = await listOwnedCapabilityIdsForExecutor(executorId);
+
+  if (ownedCapabilityIds.length === 0) {
+    return null;
+  }
+
+  const result = await transaction(async client =>
+    client.query(
+      `
+        WITH candidates AS (
+          SELECT capability_id, id
+          FROM capability_workflow_runs
+          WHERE capability_id = ANY($1::text[])
+            AND status = 'QUEUED'
+            AND (
+              assigned_executor_id IS NULL
+              OR assigned_executor_id = $2
+            )
+            AND (
+              lease_expires_at IS NULL
+              OR lease_expires_at <= NOW()
+            )
+          ORDER BY updated_at ASC, created_at ASC
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED
+        )
+        UPDATE capability_workflow_runs runs
+        SET
+          status = 'RUNNING',
+          queue_reason = NULL,
+          assigned_executor_id = $2,
+          lease_owner = $3,
+          lease_expires_at = NOW() + ($4 * INTERVAL '1 millisecond'),
+          started_at = COALESCE(runs.started_at, NOW()),
+          updated_at = NOW()
+        FROM candidates
+        WHERE runs.capability_id = candidates.capability_id
+          AND runs.id = candidates.id
+        RETURNING runs.*
+      `,
+      [ownedCapabilityIds, executorId, `desktop-executor:${executorId}`, leaseMs],
+    ),
+  );
+
+  return result.rowCount ? runFromRow(result.rows[0]) : null;
+};
+
+export const renewExecutorRunLease = async ({
+  capabilityId,
+  runId,
+  executorId,
+  leaseMs,
+}: {
+  capabilityId: string;
+  runId: string;
+  executorId: string;
+  leaseMs: number;
+}) => {
+  await query(
+    `
+      UPDATE capability_workflow_runs
+      SET
+        assigned_executor_id = $3,
+        lease_owner = $4,
+        lease_expires_at = NOW() + ($5 * INTERVAL '1 millisecond'),
+        updated_at = NOW()
+      WHERE capability_id = $1
+        AND id = $2
+        AND status = 'RUNNING'
+        AND assigned_executor_id = $3
+    `,
+    [capabilityId, runId, executorId, `desktop-executor:${executorId}`, leaseMs],
+  );
+};
+
 export const renewRunLease = async ({
   capabilityId,
   runId,
@@ -1444,6 +1682,14 @@ export const releaseRunLease = async ({
   capabilityId: string;
   runId: string;
 }) => {
+  if (isRemoteExecutionClient()) {
+    await executionRuntimeRpc<void>('releaseRunLease', {
+      capabilityId,
+      runId,
+    });
+    return;
+  }
+
   await query(
     `
       UPDATE capability_workflow_runs
@@ -1464,6 +1710,14 @@ export const markOpenToolInvocationsAborted = async ({
   capabilityId: string;
   runId: string;
 }) => {
+  if (isRemoteExecutionClient()) {
+    await executionRuntimeRpc<void>('markOpenToolInvocationsAborted', {
+      capabilityId,
+      runId,
+    });
+    return;
+  }
+
   await query(
     `
       UPDATE capability_tool_invocations
@@ -1487,6 +1741,14 @@ export const cancelOpenWaitsForRun = async ({
   capabilityId: string;
   runId: string;
 }) => {
+  if (isRemoteExecutionClient()) {
+    await executionRuntimeRpc<void>('cancelOpenWaitsForRun', {
+      capabilityId,
+      runId,
+    });
+    return;
+  }
+
   await query(
     `
       UPDATE capability_run_waits
