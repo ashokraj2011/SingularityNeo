@@ -2797,9 +2797,10 @@ const Orchestrator = () => {
         success(successMessage.title, successMessage.description);
       }
     } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : 'The orchestration action failed.',
-      );
+      const message =
+        error instanceof Error ? error.message : 'The orchestration action failed.';
+      setActionError(message);
+      showError('Action failed', message);
     } finally {
       setBusyAction(null);
     }
