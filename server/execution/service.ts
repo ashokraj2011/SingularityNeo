@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import {
   ActorContext,
   ApprovalAssignment,
@@ -4367,15 +4368,202 @@ export const cancelWorkItemControl = async ({
   note?: string;
   actor?: ActorContext;
 }) => {
+  const purgeWorkItemDataTx = async (
+    client: PoolClient,
+    params: { capabilityId: string; workItemId: string },
+  ) => {
+    const [runsResult, tasksResult, artifactsResult] = await Promise.all([
+      client.query<{ id: string }>(
+        `
+          SELECT id
+          FROM capability_workflow_runs
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+      client.query<{ id: string }>(
+        `
+          SELECT id
+          FROM capability_tasks
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+      client.query<{ id: string }>(
+        `
+          SELECT id
+          FROM capability_artifacts
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+    ]);
+
+    const runIds = runsResult.rows.map(row => row.id);
+    const taskIds = tasksResult.rows.map(row => row.id);
+    const artifactIds = artifactsResult.rows.map(row => row.id);
+
+    if (artifactIds.length > 0) {
+      await client.query(
+        `
+          DELETE FROM capability_artifact_files
+          WHERE capability_id = $1 AND artifact_id = ANY($2::text[])
+        `,
+        [params.capabilityId, artifactIds],
+      );
+    }
+
+    await client.query(
+      `
+        DELETE FROM capability_artifacts
+        WHERE capability_id = $1 AND work_item_id = $2
+      `,
+      [params.capabilityId, params.workItemId],
+    );
+
+    await client.query(
+      `
+        DELETE FROM capability_tasks
+        WHERE capability_id = $1 AND work_item_id = $2
+      `,
+      [params.capabilityId, params.workItemId],
+    );
+
+    await client.query(
+      `
+        DELETE FROM capability_execution_logs
+        WHERE capability_id = $1
+          AND (
+            task_id = $2
+            OR task_id = ANY($3::text[])
+            OR run_id = ANY($4::text[])
+          )
+      `,
+      [params.capabilityId, params.workItemId, taskIds, runIds],
+    );
+
+    await client.query(
+      `
+        DELETE FROM capability_learning_updates
+        WHERE capability_id = $1 AND related_work_item_id = $2
+      `,
+      [params.capabilityId, params.workItemId],
+    );
+
+    await client.query(
+      `
+        DELETE FROM capability_messages
+        WHERE capability_id = $1 AND work_item_id = $2
+      `,
+      [params.capabilityId, params.workItemId],
+    );
+
+    await Promise.all([
+      client.query(
+        `
+          DELETE FROM capability_work_item_repository_assignments
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+      client.query(
+        `
+          DELETE FROM capability_work_item_branches
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+      client.query(
+        `
+          DELETE FROM capability_work_item_code_claims
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+      client.query(
+        `
+          DELETE FROM capability_work_item_checkout_sessions
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+      client.query(
+        `
+          DELETE FROM capability_work_item_handoff_packets
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+      client.query(
+        `
+          DELETE FROM capability_work_item_claims
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+      client.query(
+        `
+          DELETE FROM capability_work_item_presence
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+      client.query(
+        `
+          DELETE FROM capability_ownership_transfers
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+      client.query(
+        `
+          DELETE FROM capability_phase_handoffs
+          WHERE capability_id = $1 AND work_item_id = $2
+        `,
+        [params.capabilityId, params.workItemId],
+      ),
+    ]);
+
+    if (runIds.length > 0) {
+      await Promise.all([
+        client.query(
+          `
+            DELETE FROM capability_approval_assignments
+            WHERE capability_id = $1 AND run_id = ANY($2::text[])
+          `,
+          [params.capabilityId, runIds],
+        ),
+        client.query(
+          `
+            DELETE FROM capability_approval_decisions
+            WHERE capability_id = $1 AND run_id = ANY($2::text[])
+          `,
+          [params.capabilityId, runIds],
+        ),
+      ]);
+    }
+
+    // Removing workflow runs removes run steps/tool invocations/events/waits via cascade.
+    await client.query(
+      `
+        DELETE FROM capability_workflow_runs
+        WHERE capability_id = $1 AND work_item_id = $2
+      `,
+      [params.capabilityId, params.workItemId],
+    );
+
+    return { runIds };
+  };
+
   const actorName = getActorDisplayName(actor, 'User');
-  const cancellationNote = note?.trim() || 'Work item cancelled by user.';
+  const resetNote = note?.trim() || 'Work item reset to intake by user.';
 
   const activeRun = await getActiveRunForWorkItem(capabilityId, workItemId);
   if (activeRun) {
     await cancelWorkflowRun({
       capabilityId,
       runId: activeRun.id,
-      note: cancellationNote,
+      note: resetNote,
     });
   }
 
@@ -4396,47 +4584,100 @@ export const cancelWorkItemControl = async ({
   ]);
 
   const projection = await resolveProjectionContext(capabilityId, workItemId);
+  const shouldClaim = Boolean(actor?.userId);
+  const backlogOwnerTeamId = resolveWorkItemPhaseOwnerTeamId({
+    capability: projection.capability,
+    phaseId: 'BACKLOG',
+  });
 
-  const nextWorkItem: WorkItem = {
+  const resetEntry = createHistoryEntry(
+    actorName,
+    'Work item reset',
+    resetNote,
+    'BACKLOG',
+    'ACTIVE',
+  );
+  const claimEntry =
+    shouldClaim && actor?.userId
+      ? createHistoryEntry(
+          actorName,
+          'Operator control claimed',
+          `${actorName} claimed operator control while resetting the work item.`,
+          'BACKLOG',
+          'ACTIVE',
+        )
+      : null;
+  const nextHistory = claimEntry ? [resetEntry, claimEntry] : [resetEntry];
+
+  await transaction(async client => {
+    await purgeWorkItemDataTx(client, { capabilityId, workItemId });
+
+    await client.query(
+      `
+        UPDATE capability_work_items
+        SET
+          phase = $3,
+          phase_owner_team_id = $4,
+          claim_owner_user_id = $5,
+          watched_by_user_ids = $6,
+          pending_handoff = NULL,
+          current_step_id = NULL,
+          assigned_agent_id = NULL,
+          status = $7,
+          pending_request = NULL,
+          blocker = NULL,
+          active_run_id = NULL,
+          last_run_id = NULL,
+          history = $8::jsonb,
+          record_version = record_version + 1,
+          updated_at = NOW()
+        WHERE capability_id = $1 AND id = $2
+      `,
+      [
+        capabilityId,
+        workItemId,
+        'BACKLOG',
+        backlogOwnerTeamId || null,
+        shouldClaim ? actor?.userId || null : null,
+        shouldClaim && actor?.userId ? [actor.userId] : [],
+        'ACTIVE',
+        JSON.stringify(nextHistory),
+      ],
+    );
+  });
+
+  if (shouldClaim && actor?.userId) {
+    await upsertWorkItemClaim({
+      capabilityId,
+      workItemId,
+      userId: actor.userId,
+      teamId: getActorTeamIds(actor)[0],
+      status: 'ACTIVE',
+      claimedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+    });
+  }
+
+  await refreshCapabilityMemory(capabilityId).catch(() => undefined);
+
+  return {
     ...projection.workItem,
-    status: 'CANCELLED',
+    phase: 'BACKLOG',
+    phaseOwnerTeamId: backlogOwnerTeamId || undefined,
+    claimOwnerUserId: shouldClaim ? actor?.userId : undefined,
+    watchedByUserIds: shouldClaim && actor?.userId ? [actor.userId] : [],
+    currentStepId: undefined,
+    assignedAgentId: undefined,
+    status: 'ACTIVE',
     pendingRequest: undefined,
     blocker: undefined,
     pendingHandoff: undefined,
     activeRunId: undefined,
-    claimOwnerUserId: undefined,
+    lastRunId: undefined,
+    executionContext: undefined,
     recordVersion: (projection.workItem.recordVersion || 1) + 1,
-    history: [
-      ...projection.workItem.history,
-      createHistoryEntry(
-        actorName,
-        'Work item cancelled',
-        cancellationNote,
-        projection.workItem.phase,
-        'CANCELLED',
-      ),
-    ],
+    history: nextHistory,
   };
-
-  await persistProjection({
-    capabilityId,
-    workspace: projection.workspace,
-    workItem: nextWorkItem,
-    workflow: projection.workflow,
-    logsToAppend: [
-      createExecutionLog({
-        capabilityId,
-        taskId: workItemId,
-        agentId: projection.workItem.assignedAgentId || projection.capability.specialAgentId || 'SYSTEM',
-        message: cancellationNote,
-        level: 'WARN',
-        runId: activeRun?.id,
-      }),
-    ],
-  });
-  await refreshCapabilityMemory(capabilityId).catch(() => undefined);
-
-  return nextWorkItem;
 };
 
 export const archiveWorkItemControl = async ({

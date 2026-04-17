@@ -394,6 +394,28 @@ export const normalizeWorkspaceOrganization = (
 
   const normalizedUsers = ensureWorkspaceAdmin(users.length > 0 ? users : fallback.users);
 
+  const resolveDefaultUserId = () => {
+    if (currentUserId && normalizedUsers.some(user => user.id === currentUserId)) {
+      return currentUserId;
+    }
+
+    const workspaceAdmin = normalizedUsers.find(user =>
+      (user.workspaceRoles || []).includes('WORKSPACE_ADMIN'),
+    );
+    if (workspaceAdmin) {
+      return workspaceAdmin.id;
+    }
+
+    const operator = normalizedUsers.find(user =>
+      (user.workspaceRoles || []).includes('OPERATOR'),
+    );
+    if (operator) {
+      return operator.id;
+    }
+
+    return normalizedUsers[0]?.id || fallback.currentUserId;
+  };
+
   return {
     users: normalizedUsers,
     teams: teams.length > 0 ? teams : fallback.teams,
@@ -405,10 +427,7 @@ export const normalizeWorkspaceOrganization = (
     userPreferences,
     notificationRules,
     accessAuditEvents,
-    currentUserId:
-      currentUserId ||
-      normalizedUsers[0]?.id ||
-      fallback.currentUserId,
+    currentUserId: resolveDefaultUserId(),
   };
 };
 

@@ -1463,12 +1463,16 @@ const Orchestrator = () => {
           ? item.status === 'ARCHIVED'
           : Boolean(actorUserId && item.watchedByUserIds?.includes(actorUserId));
 
+      const hideArchivedByDefault =
+        item.status === 'ARCHIVED' && queueView !== 'ARCHIVE' && statusFilter === 'ALL';
+
       return (
         matchesQuery &&
         matchesWorkflow &&
         matchesStatus &&
         matchesPriority &&
-        matchesQueueView
+        matchesQueueView &&
+        !hideArchivedByDefault
       );
     });
   }, [
@@ -3829,7 +3833,9 @@ const Orchestrator = () => {
     }
 
     const note =
-      cancelWorkItemNote.trim() || resolutionNote.trim() || 'Work item cancelled from the control plane.';
+      cancelWorkItemNote.trim() ||
+      resolutionNote.trim() ||
+      'Work item reset to the initial state from the control plane.';
 
     await withAction(
       'cancelWorkItem',
@@ -3838,11 +3844,12 @@ const Orchestrator = () => {
         setCancelWorkItemNote('');
         setResolutionNote('');
         setIsCancelWorkItemOpen(false);
+        setQueueView('MY_QUEUE');
         await refreshSelection(selectedWorkItem.id);
       },
       {
-        title: 'Work item cancelled',
-        description: `${selectedWorkItem.title} was cancelled and removed from the active queue.`,
+        title: 'Work item reset',
+        description: `${selectedWorkItem.title} was reset to the initial state and is ready to start again.`,
       },
     );
   };
@@ -3871,6 +3878,7 @@ const Orchestrator = () => {
         setArchiveWorkItemNote('');
         setResolutionNote('');
         setIsArchiveWorkItemOpen(false);
+        setQueueView('ARCHIVE');
         await refreshSelection(selectedWorkItem.id);
       },
       {
@@ -3904,6 +3912,7 @@ const Orchestrator = () => {
         setRestoreWorkItemNote('');
         setResolutionNote('');
         setIsRestoreWorkItemOpen(false);
+        setQueueView('MY_QUEUE');
         await refreshSelection(selectedWorkItem.id);
       },
       {
@@ -4454,10 +4463,10 @@ const Orchestrator = () => {
 
 	          <div className="px-5 pb-5 pt-4">
 	            <div className="relative">
-	              <div className="absolute left-0 right-0 top-1/2 h-3 -translate-y-1/2 rounded-full bg-outline-variant/30" />
+	              <div className="absolute left-0 right-0 top-1/2 h-3 -translate-y-1/2 rounded-full bg-gradient-to-r from-outline-variant/30 via-outline-variant/50 to-outline-variant/30" />
 	              {selectedWorkItem ? (
 	                <div
-	                  className="absolute left-0 top-1/2 h-3 -translate-y-1/2 rounded-full bg-primary/30 animate-pulse"
+	                  className="absolute left-0 top-1/2 h-3 -translate-y-1/2 rounded-full bg-gradient-to-r from-primary/20 via-primary/45 to-primary/70 shadow-[0_0_18px_rgba(0,132,61,0.18)] animate-pulse"
 	                  style={{ width: `${phaseRailProgress}%` }}
 	                />
 	              ) : null}
@@ -4472,9 +4481,20 @@ const Orchestrator = () => {
                     <button
                       key={phase}
                       type="button"
-                      disabled={!canMove}
+                      aria-disabled={!canMove}
                       onClick={() => {
                         if (!selectedWorkItem) {
+                          return;
+                        }
+                        if (
+                          !requirePermission(
+                            canControlWorkItems,
+                            'This operator cannot move work items across phases.',
+                          )
+                        ) {
+                          return;
+                        }
+                        if (busyAction !== null || isCurrent) {
                           return;
                         }
                         setActionError('');
@@ -4484,10 +4504,24 @@ const Orchestrator = () => {
                           targetPhase: phase,
                         });
                       }}
-                      onDragOver={event => event.preventDefault()}
+                      onDragOver={event => {
+                        if (!canControlWorkItems) {
+                          return;
+                        }
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = 'move';
+                      }}
 	                      onDrop={event => {
 	                        event.preventDefault();
-	                        if (!selectedWorkItem || !canControlWorkItems) {
+	                        if (
+	                          !requirePermission(
+	                            canControlWorkItems,
+	                            'This operator cannot move work items across phases.',
+	                          )
+	                        ) {
+	                          return;
+	                        }
+	                        if (busyAction !== null) {
 	                          return;
 	                        }
 
@@ -4495,30 +4529,33 @@ const Orchestrator = () => {
 	                          event.dataTransfer.getData('application/x-singularity-work-item') ||
 	                          event.dataTransfer.getData('text/plain');
 	                        const normalizedDraggedId = draggedId.trim();
-	                        if (!normalizedDraggedId || normalizedDraggedId !== selectedWorkItem.id) {
+	                        if (!normalizedDraggedId) {
 	                          return;
 	                        }
 
                         setActionError('');
                         setPhaseMoveNote('');
+                        if (normalizedDraggedId !== selectedWorkItem?.id) {
+                          selectWorkItem(normalizedDraggedId);
+                        }
                         setPhaseMoveRequest({
-                          workItemId: selectedWorkItem.id,
+                          workItemId: normalizedDraggedId,
                           targetPhase: phase,
                         });
 	                      }}
 	                      className={cn(
-	                        'relative z-10 flex h-10 w-10 items-center justify-center rounded-full transition',
+	                        'relative z-10 flex h-12 w-12 items-center justify-center rounded-full transition',
 	                        canMove ? 'hover:bg-primary/10' : 'cursor-not-allowed opacity-60',
 	                      )}
 	                      aria-label={`Move to ${label}`}
 	                      title={canMove ? `Move to ${label}` : label}
 	                    >
 	                      {isCurrent ? (
-	                        <span className="absolute h-9 w-9 rounded-full bg-primary/20 animate-ping" />
+	                        <span className="absolute h-10 w-10 rounded-full bg-primary/20 animate-ping" />
 	                      ) : null}
 	                      <span
 	                        className={cn(
-	                          'relative h-5 w-5 rounded-full border-2 shadow-[0_0_0_4px_rgba(255,255,255,0.7)]',
+	                          'relative h-6 w-6 rounded-full border-2 shadow-[0_0_0_6px_rgba(255,255,255,0.82)] shadow-sm',
 	                          isCurrent
 	                            ? 'border-primary bg-primary'
 	                            : isReached
@@ -4541,9 +4578,19 @@ const Orchestrator = () => {
             </div>
 
             {!canControlWorkItems ? (
-              <p className="mt-3 text-xs leading-relaxed text-secondary">
-                You have read-only visibility here. Switch Current Operator to someone with `workitem.control` to pause, cancel, or move phases.
-              </p>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs leading-relaxed text-secondary">
+                <p>
+                  You have read-only visibility here. Switch Current Operator to someone with `workitem.control` to pause, cancel, or move phases.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => navigate('/login')}
+                  className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem]"
+                >
+                  <ArrowRight size={14} />
+                  Switch operator
+                </button>
+              </div>
             ) : (
               <p className="mt-3 text-xs leading-relaxed text-secondary">
                 Tip: click a dot to move phases. You will confirm, and any in-flight run will be cancelled first.
@@ -4559,7 +4606,7 @@ const Orchestrator = () => {
           </div>
         ) : null}
 
-	        <div className="grid gap-4 xl:grid-cols-[21rem_minmax(0,30rem)_minmax(0,44rem)]">
+	        <div className="grid gap-4 xl:grid-cols-[21rem_minmax(0,26rem)_minmax(0,1fr)]">
 	          <aside className="workspace-surface overflow-hidden p-0">
             <div className="border-b border-outline-variant/25 px-4 pb-4 pt-5">
               <div className="flex items-start justify-between gap-3">
@@ -4681,6 +4728,15 @@ const Orchestrator = () => {
                             focusDockComposer();
                           }
                         }}
+                        draggable={canControlWorkItems}
+                        onDragStart={event => {
+                          event.dataTransfer.effectAllowed = 'move';
+                          event.dataTransfer.setData('text/plain', entry.item.id);
+                          event.dataTransfer.setData(
+                            'application/x-singularity-work-item',
+                            entry.item.id,
+                          );
+                        }}
                         onKeyDown={event => {
                           if (event.key === 'Enter' || event.key === ' ') {
                             event.preventDefault();
@@ -4693,6 +4749,7 @@ const Orchestrator = () => {
                         className={cn(
                           'orchestrator-navigator-item',
                           selectedWorkItemId === entry.item.id && 'orchestrator-navigator-item-active',
+                          canControlWorkItems && 'cursor-grab',
                         )}
                         role="button"
                         tabIndex={0}
@@ -4727,7 +4784,7 @@ const Orchestrator = () => {
                                   workItemTitle: entry.item.title,
                                 });
                               }}
-                              disabled={!canControlWorkItems || busyAction !== null}
+                              disabled={busyAction !== null}
                               className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
                             >
                               {busyAction === `pause-${entry.item.id}` ? (
@@ -4749,7 +4806,7 @@ const Orchestrator = () => {
                                   workItemTitle: entry.item.title,
                                 });
                               }}
-                              disabled={!canControlWorkItems || busyAction !== null}
+                              disabled={busyAction !== null}
                               className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
                             >
                               {busyAction === `resume-${entry.item.id}` ? (
@@ -4770,7 +4827,7 @@ const Orchestrator = () => {
                                 setRestoreWorkItemNote('');
                                 setIsRestoreWorkItemOpen(true);
                               }}
-                              disabled={!canControlWorkItems || busyAction !== null}
+                              disabled={busyAction !== null}
                               className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
                             >
                               <RefreshCw size={14} />
@@ -4786,7 +4843,7 @@ const Orchestrator = () => {
                                 setArchiveWorkItemNote('');
                                 setIsArchiveWorkItemOpen(true);
                               }}
-                              disabled={!canControlWorkItems || busyAction !== null}
+                              disabled={busyAction !== null}
                               className={cn(
                                 'enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40',
                                 'border-red-200 text-red-700 hover:bg-red-50',
@@ -4808,7 +4865,7 @@ const Orchestrator = () => {
                                 setCancelWorkItemNote('');
                                 setIsCancelWorkItemOpen(true);
                               }}
-                              disabled={!canControlWorkItems || busyAction !== null}
+                              disabled={busyAction !== null}
                               className="enterprise-button enterprise-button-danger px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
                             >
                               <X size={14} />
@@ -9713,7 +9770,7 @@ const Orchestrator = () => {
           <ModalShell
             title={`Cancel work item · ${selectedWorkItem.title}`}
             eyebrow="Cancel Work Item"
-            description="Cancelling marks the work item as cancelled, stops any active runs, and releases claims so the queue stays clean."
+            description="Cancel returns the work item to the initial state (Backlog) and clears runs, logs, uploads, and copilot thread so you can start fresh."
             className="relative z-[1] w-full max-w-2xl"
             actions={
               <button
@@ -9727,7 +9784,7 @@ const Orchestrator = () => {
           >
 	            <div className="space-y-4">
 	              <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-relaxed text-red-900">
-	                This cannot be undone. You can create a new work item later if needed.
+	                This will wipe attempts, uploaded files, and chat history for this work item. The title and description stay, and you can restart the workflow after cancel.
 	              </div>
 
 	              {!canControlWorkItems ? (
@@ -9760,8 +9817,8 @@ const Orchestrator = () => {
 	                </div>
 	              ) : null}
 
-	              <label className="block space-y-2">
-	                <span className="field-label">Cancellation note (optional)</span>
+                <label className="block space-y-2">
+                  <span className="field-label">Cancel note (optional)</span>
 	                <textarea
 	                  value={cancelWorkItemNote}
                   onChange={event => setCancelWorkItemNote(event.target.value)}
