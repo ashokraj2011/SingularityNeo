@@ -118,6 +118,7 @@ export const evaluateToolPolicy = async ({
 }) => {
   if (isRemoteExecutionClient()) {
     return executionRuntimeRpc<PolicyDecision>('evaluateToolPolicy', {
+      capabilityId: capability.id,
       capability,
       traceId,
       toolId,

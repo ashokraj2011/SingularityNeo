@@ -178,14 +178,16 @@ const getActorIdentity = (
     (actor?.userId
       ? organization.users.find(user => user.id === actor.userId)
       : null) || fallbackUser;
-  const actorTeamIds = uniq([
-    ...(currentUser?.teamIds || []),
-    ...(actor?.teamIds || []),
-  ]).filter(Boolean);
   const workspaceRoles = uniq([
     ...(currentUser?.workspaceRoles || []),
     ...(actor?.workspaceRoles || []),
   ]) as WorkspaceRole[];
+  const isWorkspaceAdmin = workspaceRoles.includes('WORKSPACE_ADMIN');
+  const actorTeamIds = uniq([
+    ...(currentUser?.teamIds || []),
+    ...(actor?.teamIds || []),
+    ...(isWorkspaceAdmin ? organization.teams.map(team => team.id) : []),
+  ]).filter(Boolean);
 
   return {
     userId: currentUser?.id,

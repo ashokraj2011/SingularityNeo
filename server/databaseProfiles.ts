@@ -254,3 +254,50 @@ export const writeWorkspaceDatabaseBootstrapProfileSnapshot = async (
     'utf8',
   );
 };
+
+export const writeWorkspaceDatabaseBootstrapEnvSnapshot = async (
+  filePath: string,
+  snapshot: WorkspaceDatabaseBootstrapProfileSnapshot,
+) => {
+  const normalizedSnapshot: WorkspaceDatabaseBootstrapProfileSnapshot = {
+    activeProfileId: trimOrEmpty(snapshot.activeProfileId) || undefined,
+    profiles: normalizeWorkspaceDatabaseBootstrapProfiles(snapshot.profiles),
+  };
+  const activeProfile =
+    normalizedSnapshot.profiles.find(
+      profile => profile.id === normalizedSnapshot.activeProfileId,
+    ) || normalizedSnapshot.profiles[0];
+
+  let contents = '';
+  if (fs.existsSync(filePath)) {
+    contents = await fs.promises.readFile(filePath, 'utf8');
+  }
+
+  contents = upsertEnvLine(
+    contents,
+    PROFILE_ENV_KEY,
+    encodeWorkspaceDatabaseBootstrapProfileSnapshot(normalizedSnapshot),
+  );
+  contents = upsertEnvLine(
+    contents,
+    ACTIVE_PROFILE_ENV_KEY,
+    normalizedSnapshot.activeProfileId || activeProfile?.id || '',
+  );
+
+  if (activeProfile) {
+    contents = upsertEnvLine(contents, 'PGHOST', activeProfile.host);
+    contents = upsertEnvLine(contents, 'PGPORT', String(toPort(activeProfile.port)));
+    contents = upsertEnvLine(contents, 'PGDATABASE', activeProfile.databaseName);
+    contents = upsertEnvLine(contents, 'PGUSER', activeProfile.user);
+    contents = upsertEnvLine(
+      contents,
+      'PGADMIN_DATABASE',
+      activeProfile.adminDatabaseName || 'postgres',
+    );
+    if (activeProfile.password !== undefined) {
+      contents = upsertEnvLine(contents, 'PGPASSWORD', activeProfile.password);
+    }
+  }
+
+  await fs.promises.writeFile(filePath, contents, 'utf8');
+};

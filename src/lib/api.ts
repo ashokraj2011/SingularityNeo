@@ -92,6 +92,7 @@ import {
   ModelRiskMonitoringSummary,
   ApprovalPolicy,
   ApprovalAssignment,
+  AgentSessionScope,
 } from '../types';
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from './desktop';
 
@@ -1364,6 +1365,23 @@ export const appendCapabilityMessageRecord = async (
       method: 'POST',
       headers: jsonHeaders,
       body: JSON.stringify(message),
+    },
+  );
+
+export const clearCapabilityMessageHistoryRecord = async (
+  capabilityId: string,
+  payload?: {
+    workItemId?: string;
+    sessionScope?: AgentSessionScope;
+    sessionScopeId?: string;
+  },
+): Promise<CapabilityWorkspace> =>
+  requestJson<CapabilityWorkspace>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/messages`,
+    {
+      method: 'DELETE',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
     },
   );
 

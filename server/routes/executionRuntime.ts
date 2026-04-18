@@ -239,13 +239,23 @@ const requireExecutorActor = async ({
   return registration;
 };
 
-const collectCapabilityIds = (value: unknown, capabilityIds = new Set<string>()) => {
+const collectCapabilityIds = (
+  value: unknown,
+  capabilityIds = new Set<string>(),
+  visited = new WeakSet<object>(),
+) => {
   if (!value || typeof value !== 'object') {
     return capabilityIds;
   }
 
+  if (visited.has(value)) {
+    return capabilityIds;
+  }
+
+  visited.add(value);
+
   if (Array.isArray(value)) {
-    value.forEach(item => collectCapabilityIds(item, capabilityIds));
+    value.forEach(item => collectCapabilityIds(item, capabilityIds, visited));
     return capabilityIds;
   }
 
@@ -254,18 +264,17 @@ const collectCapabilityIds = (value: unknown, capabilityIds = new Set<string>())
     capabilityIds.add(record.capabilityId.trim());
   }
 
-  [
-    record.run,
-    record.step,
-    record.event,
-    record.wait,
-    record.invocation,
-    record.claim,
-    record.decision,
-    record.sample,
-    record.assignments,
-  ].forEach(item => collectCapabilityIds(item, capabilityIds));
+  const nestedCapability = record.capability;
+  if (
+    nestedCapability &&
+    typeof nestedCapability === 'object' &&
+    typeof (nestedCapability as { id?: unknown }).id === 'string' &&
+    (nestedCapability as { id: string }).id.trim()
+  ) {
+    capabilityIds.add((nestedCapability as { id: string }).id.trim());
+  }
 
+  Object.values(record).forEach(item => collectCapabilityIds(item, capabilityIds, visited));
   return capabilityIds;
 };
 

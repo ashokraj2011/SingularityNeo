@@ -64,11 +64,13 @@ import {
   resolveActiveWorkspaceDatabaseBootstrapProfileId,
   upsertWorkspaceDatabaseBootstrapProfile,
   writeWorkspaceDatabaseBootstrapProfileSnapshot,
+  writeWorkspaceDatabaseBootstrapEnvSnapshot,
 } from './databaseProfiles';
 import {
   addCapabilityAgentRecord,
   addCapabilitySkillRecord,
   appendCapabilityMessageRecord,
+  clearCapabilityMessageHistoryRecord,
   createCapabilityArtifactUploadRecord,
   createCapabilityRecord,
   fetchAppState,
@@ -563,6 +565,7 @@ const persistDatabaseBootstrapProfileSnapshot = async (
     databaseBootstrapStatePath,
     snapshot,
   );
+  await writeWorkspaceDatabaseBootstrapEnvSnapshot(envLocalPath, snapshot);
 };
 
 const hydratePersistedDatabaseBootstrapRuntime = async () => {
@@ -1291,6 +1294,7 @@ app.post(
         }),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2193,6 +2197,7 @@ app.get(
       });
       response.json(await listCompletedWorkOrders(request.params.capabilityId));
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2259,6 +2264,7 @@ app.get(
         ),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2280,6 +2286,7 @@ app.get(
         ),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2301,6 +2308,7 @@ app.post(
         ),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2324,6 +2332,7 @@ app.post(
         }),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2398,6 +2407,7 @@ app.post(
         }),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2436,6 +2446,7 @@ app.get(
           : JSON.stringify(detail, null, 2),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2519,6 +2530,7 @@ app.post(
         await syncCapabilityConfluenceContext(bundle.capability, settings.connectors),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2541,6 +2553,7 @@ app.post(
         }),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2588,6 +2601,7 @@ app.get(
       );
       response.send(file.bytes);
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2840,6 +2854,7 @@ app.post(
 
       response.status(201).json({ artifacts: createdArtifacts });
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -2865,6 +2880,7 @@ app.get(
       );
       response.send(JSON.stringify(bundle, null, 2));
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3280,6 +3296,36 @@ app.patch('/api/capabilities/:capabilityId/chat-agent', async (request, response
   }
 });
 
+app.delete('/api/capabilities/:capabilityId/messages', async (request, response) => {
+  try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'chat.write',
+    });
+    response.json(
+      await clearCapabilityMessageHistoryRecord(request.params.capabilityId, {
+        workItemId:
+          typeof request.body?.workItemId === 'string'
+            ? request.body.workItemId
+            : undefined,
+        sessionScope:
+          request.body?.sessionScope === 'GENERAL_CHAT' ||
+          request.body?.sessionScope === 'WORK_ITEM' ||
+          request.body?.sessionScope === 'TASK'
+            ? request.body.sessionScope
+            : undefined,
+        sessionScopeId:
+          typeof request.body?.sessionScopeId === 'string'
+            ? request.body.sessionScopeId
+            : undefined,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
 app.patch('/api/capabilities/:capabilityId/workspace', async (request, response) => {
   try {
     await assertCapabilityPermission({
@@ -3441,6 +3487,7 @@ app.post(
         }),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3469,6 +3516,7 @@ app.post(
         }),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3497,6 +3545,7 @@ app.post(
         }),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3517,6 +3566,7 @@ app.get(
       ]);
       response.json({ claims, presence });
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3543,6 +3593,7 @@ app.get(
       ]);
       response.json({ context, handoffs });
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3565,6 +3616,7 @@ app.post(
       });
       response.status(201).json(context);
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3669,6 +3721,7 @@ app.post(
         repository,
       });
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3709,6 +3762,7 @@ app.post(
       });
       response.status(201).json({ claim, context });
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3737,6 +3791,7 @@ app.delete(
       });
       response.status(204).end();
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3758,6 +3813,7 @@ app.get(
         }),
       );
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3816,6 +3872,7 @@ app.post(
       });
       response.status(201).json(packet);
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3852,6 +3909,7 @@ app.post(
       });
       response.json({ packet, context });
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3889,6 +3947,7 @@ app.post(
       });
       response.status(201).json(session);
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3950,6 +4009,7 @@ app.post(
       });
       response.status(201).json({ claim, workItem: nextWorkItem });
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -3990,6 +4050,7 @@ app.delete(
       });
       response.status(204).end();
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },
@@ -4020,6 +4081,7 @@ app.post(
       });
       response.status(201).json(presence);
     } catch (error) {
+      console.error("API ERROR:", error);
       sendRepositoryError(response, error);
     }
   },

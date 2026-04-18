@@ -30,6 +30,9 @@ let localWorker = null;
 const pendingWorkerRequests = new Map();
 const cancelledStreamIds = new Set();
 
+const DEFAULT_WORKER_TIMEOUT_MS = 45_000;
+const STREAM_WORKER_IDLE_TIMEOUT_MS = 5 * 60_000;
+
 const createDesktopContext = () => ({
   isDesktop: true,
   controlPlaneUrl,
@@ -47,7 +50,7 @@ const sendWorkerMessage = message => {
   localWorker.stdin.write(`${JSON.stringify(message)}\n`);
 };
 
-const requestWorker = (type, payload = {}) =>
+const requestWorker = (type, payload = {}, options = {}) =>
   new Promise((resolve, reject) => {
     if (!localWorker?.stdin || localWorker.killed) {
       reject(new Error('Local worker is not available.'));
@@ -55,15 +58,34 @@ const requestWorker = (type, payload = {}) =>
     }
 
     const requestId = randomUUID();
-    const timeout = setTimeout(() => {
-      pendingWorkerRequests.delete(requestId);
-      reject(new Error(`Worker request timed out: ${type}`));
-    }, 45_000);
+    const timeoutMs =
+      Number.isFinite(options?.timeoutMs) && options.timeoutMs > 0
+        ? options.timeoutMs
+        : DEFAULT_WORKER_TIMEOUT_MS;
+    const createTimeout = () =>
+      setTimeout(() => {
+        pendingWorkerRequests.delete(requestId);
+        reject(new Error(`Worker request timed out: ${type}`));
+      }, timeoutMs);
+    let timeout = createTimeout();
+    const resetTimeout = () => {
+      clearTimeout(timeout);
+      timeout = createTimeout();
+      const pending = pendingWorkerRequests.get(requestId);
+      if (pending) {
+        pending.timeout = timeout;
+      }
+    };
 
     pendingWorkerRequests.set(requestId, {
       resolve,
       reject,
       timeout,
+      streamId:
+        typeof payload?.streamId === 'string' && payload.streamId.trim()
+          ? payload.streamId.trim()
+          : undefined,
+      resetTimeout,
     });
 
     sendWorkerMessage({
@@ -109,6 +131,12 @@ const startLocalWorker = () => {
       if (cancelledStreamIds.has(message.streamId)) {
         return;
       }
+
+      pendingWorkerRequests.forEach(pending => {
+        if (pending.streamId === message.streamId && typeof pending.resetTimeout === 'function') {
+          pending.resetTimeout();
+        }
+      });
 
       mainWindow?.webContents.send(
         `desktop:runtime:chat-stream:${message.streamId}`,
@@ -222,6 +250,8 @@ ipcMain.handle('desktop:runtime:chat-stream', async (_event, payload) => {
   return requestWorker('runtime:chat-stream', {
     ...(payload || {}),
     streamId,
+  }, {
+    timeoutMs: STREAM_WORKER_IDLE_TIMEOUT_MS,
   });
 });
 ipcMain.handle('desktop:runtime:chat-stream:cancel', async (_event, payload) => {

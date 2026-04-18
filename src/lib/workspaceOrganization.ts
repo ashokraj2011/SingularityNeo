@@ -548,11 +548,17 @@ export const getCurrentWorkspaceUser = (
 export const buildActorContextFromOrganization = (
   organization?: WorkspaceOrganization | null,
 ): ActorContext => {
-  const currentUser = getCurrentWorkspaceUser(organization);
+  const normalizedOrganization = normalizeWorkspaceOrganization(organization);
+  const currentUser = getCurrentWorkspaceUser(normalizedOrganization);
+  const isWorkspaceAdmin = Boolean(currentUser?.workspaceRoles?.includes('WORKSPACE_ADMIN'));
+  const effectiveTeamIds = isWorkspaceAdmin
+    ? normalizedOrganization.teams.map(team => team.id)
+    : currentUser?.teamIds || [];
+
   return {
     userId: currentUser?.id,
     displayName: currentUser?.name || 'Workspace Operator',
-    teamIds: currentUser?.teamIds || [],
+    teamIds: Array.from(new Set(effectiveTeamIds)),
     workspaceRoles: currentUser?.workspaceRoles || [],
   };
 };

@@ -52,6 +52,7 @@ import {
   archiveCapabilityWorkItem,
   cancelCapabilityWorkItem,
   cancelCapabilityWorkflowRun,
+  clearCapabilityMessageHistoryRecord,
   claimCapabilityWorkItemControl,
   claimCapabilityWorkItemWriteControl,
   createCapabilityWorkItemHandoff,
@@ -105,6 +106,7 @@ import {
 } from '../lib/workItemTaskTypes';
 import { buildAgentKnowledgeLens } from '../lib/agentKnowledge';
 import { buildCapabilityInteractionFeed } from '../lib/interactionFeed';
+import { parseCopilotTranscriptBlocks } from '../lib/copilotTranscript';
 import { normalizeCompiledStepContext } from '../lib/workflowRuntime';
 import { cn } from '../lib/utils';
 import type {
@@ -407,6 +409,121 @@ const normalizeMarkdownishText = (value?: string) => {
     )
     .join('\n')
     .trim();
+};
+
+const CopilotMessageBody = ({
+  content,
+  tone,
+}: {
+  content: string;
+  tone: 'agent' | 'user' | 'draft';
+}) => {
+  const blocks = parseCopilotTranscriptBlocks(content);
+  const textTone =
+    tone === 'user'
+      ? 'text-white'
+      : tone === 'draft'
+      ? 'text-slate-800'
+      : 'text-on-surface';
+  const metaTone =
+    tone === 'user'
+      ? 'text-white/75'
+      : tone === 'draft'
+      ? 'text-slate-500'
+      : 'text-secondary';
+  const panelTone =
+    tone === 'user'
+      ? 'border-white/15 bg-white/10 text-white'
+      : tone === 'draft'
+      ? 'border-slate-200 bg-slate-50/90 text-slate-900'
+      : 'border-slate-200 bg-slate-50/85 text-slate-900';
+  const codeTone =
+    tone === 'user'
+      ? 'border-white/10 bg-slate-950/35 text-white'
+      : 'border-slate-200 bg-white text-slate-900';
+
+  if (blocks.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-3 space-y-3">
+      {blocks.map((block, index) => {
+        if (block.type === 'text') {
+          return (
+            <p
+              key={`${block.type}-${index}`}
+              className={cn('whitespace-pre-wrap text-sm leading-6', textTone)}
+            >
+              {block.text}
+            </p>
+          );
+        }
+
+        if (block.type === 'system') {
+          return (
+            <div
+              key={`${block.type}-${index}`}
+              className={cn(
+                'rounded-2xl border px-3 py-2 text-xs leading-6',
+                tone === 'user'
+                  ? 'border-white/15 bg-slate-950/25 text-white/90'
+                  : 'border-slate-200 bg-white/85 text-slate-700',
+              )}
+            >
+              <span className="font-semibold uppercase tracking-[0.14em]">System</span>
+              <span className="ml-2">{block.text}</span>
+            </div>
+          );
+        }
+
+        return (
+          <div
+            key={`${block.type}-${index}`}
+            className={cn('rounded-2xl border px-3 py-3 shadow-sm', panelTone)}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span
+                className={cn(
+                  'text-[0.68rem] font-semibold uppercase tracking-[0.16em]',
+                  metaTone,
+                )}
+              >
+                Tool call
+              </span>
+              <span className={cn('text-sm font-semibold', textTone)}>
+                {block.toolName || 'Tool'}
+              </span>
+            </div>
+            {block.parameters.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                {block.parameters.map(parameter => (
+                  <div key={`${parameter.name}-${parameter.value.slice(0, 24)}`}>
+                    <p
+                      className={cn(
+                        'text-[0.68rem] font-semibold uppercase tracking-[0.14em]',
+                        metaTone,
+                      )}
+                    >
+                      {parameter.name}
+                    </p>
+                    <pre
+                      className={cn(
+                        'mt-1 whitespace-pre-wrap break-all rounded-2xl border px-3 py-2 text-xs leading-6',
+                        codeTone,
+                      )}
+                    >
+                      {parameter.value}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
 };
 
 const getAttentionReason = ({
@@ -882,11 +999,14 @@ const Orchestrator = () => {
   const [priorityFilter, setPriorityFilter] = useState<WorkItemPriorityFilter>(() =>
     readSessionValue(STORAGE_KEYS.priority, 'ALL') as WorkItemPriorityFilter,
   );
+  const [workItemOverrides, setWorkItemOverrides] = useState<Record<string, WorkItem>>({});
   const [queueView, setQueueView] = useState<WorkbenchQueueView>(() =>
     readSessionValue(STORAGE_KEYS.queueView, 'MY_QUEUE') as WorkbenchQueueView,
   );
   const [draggedWorkItemId, setDraggedWorkItemId] = useState<string | null>(null);
   const [dragOverPhase, setDragOverPhase] = useState<WorkItemPhase | null>(null);
+  const [phaseRailPreviewPhase, setPhaseRailPreviewPhase] = useState<WorkItemPhase | null>(null);
+  const [isPhaseRailDragging, setIsPhaseRailDragging] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeError, setRuntimeError] = useState('');
   const [executionClaimBusy, setExecutionClaimBusy] = useState(false);
@@ -940,6 +1060,7 @@ const Orchestrator = () => {
   const stageChatThreadRef = useRef<HTMLDivElement | null>(null);
   const stageChatStickToBottomRef = useRef(true);
   const stageChatRequestRef = useRef(0);
+  const autoOpenedApprovalWaitIdsRef = useRef<Set<string>>(new Set());
 
   const [dockInput, setDockInput] = useState('');
   const [dockDraft, setDockDraft] = useState('');
@@ -956,6 +1077,7 @@ const Orchestrator = () => {
   const dockUploadsRef = useRef(dockUploads);
   const dockThreadRef = useRef<HTMLDivElement | null>(null);
   const dockTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const phaseRailTrackRef = useRef<HTMLDivElement | null>(null);
   const dockStickToBottomRef = useRef(true);
   const dockRequestRef = useRef(0);
   const selectionFocusRef = useRef<WorkbenchSelectionFocus | null>(null);
@@ -999,7 +1121,13 @@ const Orchestrator = () => {
     () => new Map(workspace.agents.map(agent => [agent.id, agent])),
     [workspace.agents],
   );
-  const workItems = workspace.workItems;
+  const workItems = useMemo(() => {
+    const nextById = new Map(workspace.workItems.map(item => [item.id, item]));
+    Object.values(workItemOverrides).forEach(item => {
+      nextById.set(item.id, item);
+    });
+    return Array.from(nextById.values());
+  }, [workspace.workItems, workItemOverrides]);
   const visibleLifecyclePhases = useMemo(
     () => getCapabilityVisibleLifecyclePhases(activeCapability.lifecycle),
     [activeCapability.lifecycle],
@@ -1195,6 +1323,29 @@ const Orchestrator = () => {
       );
     });
   }, [loadSelectedRunData, selectedWorkItemId]);
+
+  useEffect(() => {
+    setWorkItemOverrides(current => {
+      let changed = false;
+      const next: Record<string, WorkItem> = { ...current };
+      const serverItemsById = new Map(workspace.workItems.map(item => [item.id, item]));
+
+      Object.entries(current).forEach(([workItemId, override]) => {
+        const serverItem = serverItemsById.get(workItemId);
+        if (
+          serverItem &&
+          serverItem.recordVersion >= override.recordVersion &&
+          serverItem.status === override.status &&
+          serverItem.phase === override.phase
+        ) {
+          delete next[workItemId];
+          changed = true;
+        }
+      });
+
+      return changed ? next : current;
+    });
+  }, [workspace.workItems]);
 
   useEffect(() => {
     if (!selectedWorkItemId || !currentActorContext.userId) {
@@ -1471,6 +1622,8 @@ const Orchestrator = () => {
 
       const hideArchivedByDefault =
         item.status === 'ARCHIVED' && queueView !== 'ARCHIVE' && statusFilter === 'ALL';
+      const hideBacklogByDefault =
+        item.phase === 'BACKLOG' && queueView !== 'ALL_WORK' && statusFilter === 'ALL';
 
       return (
         matchesQuery &&
@@ -1478,7 +1631,8 @@ const Orchestrator = () => {
         matchesStatus &&
         matchesPriority &&
         matchesQueueView &&
-        !hideArchivedByDefault
+        !hideArchivedByDefault &&
+        !hideBacklogByDefault
       );
     });
   }, [
@@ -1681,6 +1835,12 @@ const Orchestrator = () => {
     ? workflowsById.get(selectedWorkItem.workflowId) || null
     : null;
   const selectedRunRecord = selectedRunDetail?.run || null;
+
+  useEffect(() => {
+    setPhaseRailPreviewPhase(null);
+    setIsPhaseRailDragging(false);
+  }, [selectedWorkItemId, selectedWorkItem?.phase, view]);
+
   const selectedRunSteps = useMemo(
     () => (Array.isArray(selectedRunDetail?.steps) ? selectedRunDetail.steps : []),
     [selectedRunDetail?.steps],
@@ -1869,6 +2029,8 @@ const Orchestrator = () => {
     .filter(Boolean) as NonNullable<typeof selectedClaimOwner>[];
 
   const currentRun = selectedRunRecord || selectedRunHistory[0] || null;
+  const currentRunId =
+    currentRun?.id || selectedWorkItem?.activeRunId || selectedRunHistory[0]?.id || null;
   const currentRunIsActive = Boolean(
     currentRun && ACTIVE_RUN_STATUSES.includes(currentRun.status),
   );
@@ -1970,7 +2132,7 @@ const Orchestrator = () => {
   );
 
   const canRestartFromPhase =
-    Boolean(selectedWorkItem && currentRun && !selectedWorkItem.activeRunId) &&
+    Boolean(selectedWorkItem && currentRunId) &&
     selectedWorkItem?.status !== 'ARCHIVED' &&
     selectedWorkItem?.status !== 'COMPLETED' &&
     selectedWorkItem?.status !== 'CANCELLED' &&
@@ -2011,6 +2173,36 @@ const Orchestrator = () => {
           : selectedCanGuideBlockedAgent
             ? 'Guide the next attempt. Explain what changed, what the agent should do differently, and any constraints it must respect.'
             : 'Approval note, human input, restart note, or cancellation reason.';
+  const dockComposerLabel = selectedOpenWait
+    ? 'Resolve wait mode'
+    : selectedCanGuideBlockedAgent
+    ? 'Guide blocked execution'
+    : canStartExecution
+    ? 'Start and guide execution'
+    : 'Ask copilot';
+  const dockComposerPlaceholder = selectedOpenWait
+    ? selectedOpenWait.type === 'APPROVAL'
+      ? 'Approval decisions now happen in the review window. Use this dock to ask the agent follow-up questions or capture context before you open the approval review.'
+      : resolutionPlaceholder
+    : selectedCanGuideBlockedAgent
+    ? 'Explain what changed, what the next attempt should do differently, and any constraints it must respect.'
+    : canStartExecution
+    ? 'Add optional kickoff guidance, file hints, or execution constraints before starting the workflow.'
+    : 'Ask the copilot about this work item, upload context, or steer the next step.';
+  const dockPrimaryActionLabel = selectedOpenWait
+    ? selectedOpenWait.type === 'APPROVAL'
+      ? 'Open approval review'
+      : actionButtonLabel
+    : selectedCanGuideBlockedAgent
+    ? 'Guide and restart'
+    : canStartExecution
+    ? 'Start execution'
+    : 'Send';
+  const dockInterventionMode =
+    selectedOpenWait?.type === 'INPUT' ||
+    selectedOpenWait?.type === 'CONFLICT_RESOLUTION' ||
+    selectedCanGuideBlockedAgent;
+  const dockAllowsChatOnly = !dockInterventionMode;
 
   const resolutionIsRequired =
     selectedOpenWait?.type === 'INPUT' ||
@@ -2065,14 +2257,26 @@ const Orchestrator = () => {
   );
 
   const selectedArtifacts = useMemo(() => {
-    if (!selectedRunDetail) {
+    if (!selectedWorkItem) {
       return [];
+    }
+
+    if (!selectedRunDetail) {
+      return workspace.artifacts
+        .filter(artifact => artifact.workItemId === selectedWorkItem.id)
+        .slice()
+        .sort(
+          (left, right) =>
+            new Date(right.created).getTime() - new Date(left.created).getTime(),
+        );
     }
 
     return workspace.artifacts
       .filter(
         artifact =>
           artifact.runId === selectedRunRecord?.id ||
+          artifact.sourceRunId === selectedRunRecord?.id ||
+          artifact.workItemId === selectedWorkItem.id ||
           (artifact.runStepId && selectedRunStepIds.has(artifact.runStepId)),
       )
       .slice()
@@ -2080,7 +2284,7 @@ const Orchestrator = () => {
         (left, right) =>
           new Date(right.created).getTime() - new Date(left.created).getTime(),
       );
-  }, [selectedRunRecord?.id, selectedRunStepIds, workspace.artifacts]);
+  }, [selectedRunDetail, selectedRunRecord?.id, selectedRunStepIds, selectedWorkItem, workspace.artifacts]);
   const selectedRunIds = useMemo(
     () =>
       new Set(
@@ -2458,6 +2662,7 @@ const Orchestrator = () => {
           activeCapability.id,
           selectedWorkItem.id,
         );
+        await refreshCapabilityBundle(activeCapability.id);
         navigate(`/e/${encodeURIComponent(packet.bundleId)}`);
       },
       {
@@ -2466,7 +2671,38 @@ const Orchestrator = () => {
           'A durable evidence packet was generated from the current work item context and opened in the packet viewer.',
       },
     );
-  }, [activeCapability.id, navigate, selectedWorkItem]);
+  }, [activeCapability.id, navigate, refreshCapabilityBundle, selectedWorkItem]);
+  const handleClearDockChat = useCallback(async () => {
+    if (!selectedWorkItem) {
+      return;
+    }
+
+    const shouldClear = window.confirm(
+      `Clear the copilot thread for ${selectedWorkItem.id}? This also resets the saved work-item chat session so the next turn starts cleanly.`,
+    );
+    if (!shouldClear) {
+      return;
+    }
+
+    await withAction(
+      'clearDockChat',
+      async () => {
+        await clearCapabilityMessageHistoryRecord(activeCapability.id, {
+          workItemId: selectedWorkItem.id,
+        });
+        await refreshCapabilityBundle(activeCapability.id);
+        setDockInput('');
+        setDockUploads([]);
+        setDockDraft('');
+        setDockError('');
+      },
+      {
+        title: 'Work-item chat cleared',
+        description:
+          'The copilot dock thread was cleared and the saved work-item session was reset.',
+      },
+    );
+  }, [activeCapability.id, refreshCapabilityBundle, selectedWorkItem, withAction]);
   const selectedStateSummary = useMemo(() => {
     if (!selectedWorkItem) {
       return 'Select a work item to see the current delivery state.';
@@ -2869,11 +3105,11 @@ const Orchestrator = () => {
     }));
   }, [sanitizeDraftPhaseStakeholderAssignments]);
 
-  const withAction = async (
+  async function withAction(
     label: string,
     action: () => Promise<void>,
     successMessage?: { title: string; description?: string },
-  ) => {
+  ) {
     setBusyAction(label);
     setActionError('');
     try {
@@ -2889,7 +3125,7 @@ const Orchestrator = () => {
     } finally {
       setBusyAction(null);
     }
-  };
+  }
 
 	  const handleApproveWorkspacePath = async (options?: { unblock?: boolean }) => {
 	    const requestedPath = approvedWorkspaceDraft.trim();
@@ -3373,10 +3609,14 @@ const Orchestrator = () => {
 
   const handleRestartExecution = async () => {
     if (
-      !currentRun ||
       !selectedWorkItem ||
       !requirePermission(canRestartWorkItems, 'This operator cannot restart workflow execution.')
     ) {
+      return;
+    }
+
+    const restartRunId = currentRunId;
+    if (!restartRunId) {
       return;
     }
 
@@ -3392,13 +3632,26 @@ const Orchestrator = () => {
     await withAction(
       'restart',
       async () => {
-        await restartCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+        let restartRun = currentRun;
+        if (!restartRun || restartRun.id !== restartRunId) {
+          const detail = await fetchCapabilityWorkflowRun(activeCapability.id, restartRunId);
+          restartRun = detail.run;
+          setSelectedRunDetail(detail);
+        }
+
+        if (restartRun && ACTIVE_RUN_STATUSES.includes(restartRun.status)) {
+          await cancelCapabilityWorkflowRun(activeCapability.id, restartRun.id, {
+            note: `Run cancelled so ${selectedWorkItem.title} can restart from ${getPhaseMeta(selectedWorkItem.phase).label}.`,
+          });
+        }
+
+        await restartCapabilityWorkflowRun(activeCapability.id, restartRunId, {
           restartFromPhase: selectedWorkItem.phase,
         });
         await refreshSelection(selectedWorkItem.id);
       },
       {
-        title: 'Execution restarted',
+        title: 'Phase restarted',
         description: `${selectedWorkItem.title} restarted from ${getPhaseMeta(selectedWorkItem.phase).label}.`,
       },
     );
@@ -3570,6 +3823,11 @@ const Orchestrator = () => {
       return;
     }
 
+    if (selectedOpenWait.type === 'APPROVAL') {
+      handleOpenApprovalReview();
+      return;
+    }
+
     if (
       selectedOpenWait.type === 'INPUT' &&
       waitRequiresApprovedWorkspace &&
@@ -3638,8 +3896,113 @@ const Orchestrator = () => {
     );
   };
 
+  const handleDockStartExecution = async () => {
+    if (
+      !selectedWorkItem ||
+      !canStartExecution ||
+      !requirePermission(
+        canControlWorkItems,
+        'This operator cannot start workflow execution from the dock.',
+      )
+    ) {
+      return;
+    }
+
+    if (deliveryBlockingItem) {
+      const message =
+        deliveryBlockingItem.nextRequiredAction ||
+        deliveryBlockingItem.blockingReason ||
+        deliveryBlockingItem.description;
+      setDockError(message);
+      setActionError(message);
+      return;
+    }
+
+    const guidance = dockInput.trim() || undefined;
+
+    await withAction(
+      'dockStartExecution',
+      async () => {
+        await uploadDockFilesIfNeeded();
+        await startCapabilityWorkflowRun(activeCapability.id, selectedWorkItem.id, {
+          guidance,
+          guidedBy: currentActorContext.displayName,
+        });
+        setDockInput('');
+        setDockError('');
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Execution started from dock',
+        description: guidance
+          ? `${selectedWorkItem.title} started with your kickoff guidance attached to the run.`
+          : `${selectedWorkItem.title} is now running through the workflow from the dock.`,
+      },
+    );
+  };
+
+  const handleDockGuideAndRestart = async () => {
+    if (
+      !selectedWorkItem ||
+      !selectedCanGuideBlockedAgent ||
+      !requirePermission(
+        canRestartWorkItems,
+        'This operator cannot guide and restart blocked work from the dock.',
+      )
+    ) {
+      return;
+    }
+
+    const guidance = dockInput.trim();
+    if (!guidance) {
+      const message = 'Add clear operator guidance before restarting the blocked work item.';
+      setDockError(message);
+      setActionError(message);
+      return;
+    }
+
+    await withAction(
+      'dockGuideRestart',
+      async () => {
+        await uploadDockFilesIfNeeded();
+
+        if (currentRun) {
+          await restartCapabilityWorkflowRun(activeCapability.id, currentRun.id, {
+            restartFromPhase: selectedWorkItem.phase,
+            guidance,
+            guidedBy: currentActorContext.displayName,
+          });
+        } else {
+          await startCapabilityWorkflowRun(activeCapability.id, selectedWorkItem.id, {
+            restartFromPhase: selectedWorkItem.phase,
+            guidance,
+            guidedBy: currentActorContext.displayName,
+          });
+        }
+
+        setDockInput('');
+        setDockError('');
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: 'Blocked work restarted from dock',
+        description: `${selectedWorkItem.title} restarted from ${getPhaseMeta(selectedWorkItem.phase).label} with your guidance attached to the next attempt.`,
+      },
+    );
+  };
+
   const handleDockAskAgent = async () => {
     if (!selectedWorkItem) {
+      return;
+    }
+
+    if (selectedOpenWait?.type === 'INPUT' || selectedOpenWait?.type === 'CONFLICT_RESOLUTION') {
+      await handleDockResolveWait();
+      return;
+    }
+
+    if (selectedCanGuideBlockedAgent) {
+      await handleDockGuideAndRestart();
       return;
     }
 
@@ -4002,16 +4365,30 @@ const Orchestrator = () => {
       cancelWorkItemNote.trim() ||
       resolutionNote.trim() ||
       'Work item reset to the initial state from the control plane.';
+    const nextVisibleWorkItemId =
+      filteredWorkItems.find(item => item.id !== selectedWorkItem.id && item.phase !== 'BACKLOG')
+        ?.id || null;
 
     await withAction(
       'cancelWorkItem',
       async () => {
-        await cancelCapabilityWorkItem(activeCapability.id, selectedWorkItem.id, { note });
+        const nextWorkItem = await cancelCapabilityWorkItem(activeCapability.id, selectedWorkItem.id, {
+          note,
+        });
+        setWorkItemOverrides(current => ({
+          ...current,
+          [nextWorkItem.id]: nextWorkItem,
+        }));
         setCancelWorkItemNote('');
         setResolutionNote('');
         setIsCancelWorkItemOpen(false);
         setQueueView('MY_QUEUE');
-        await refreshSelection(selectedWorkItem.id);
+        if (nextVisibleWorkItemId) {
+          setSelectedWorkItemId(nextVisibleWorkItemId);
+        } else {
+          clearSelectedWorkItem();
+        }
+        await refreshSelection(nextWorkItem.id).catch(() => undefined);
       },
       {
         title: 'Work item reset',
@@ -4036,16 +4413,31 @@ const Orchestrator = () => {
       archiveWorkItemNote.trim() ||
       resolutionNote.trim() ||
       'Work item archived from the control plane.';
+    const nextVisibleWorkItemId =
+      filteredWorkItems.find(item => item.id !== selectedWorkItem.id && item.status !== 'ARCHIVED')
+        ?.id || null;
 
     await withAction(
       'archiveWorkItem',
       async () => {
-        await archiveCapabilityWorkItem(activeCapability.id, selectedWorkItem.id, { note });
+        const nextWorkItem = await archiveCapabilityWorkItem(
+          activeCapability.id,
+          selectedWorkItem.id,
+          { note },
+        );
+        setWorkItemOverrides(current => ({
+          ...current,
+          [nextWorkItem.id]: nextWorkItem,
+        }));
         setArchiveWorkItemNote('');
         setResolutionNote('');
         setIsArchiveWorkItemOpen(false);
-        setQueueView('ARCHIVE');
-        await refreshSelection(selectedWorkItem.id);
+        if (nextVisibleWorkItemId) {
+          setSelectedWorkItemId(nextVisibleWorkItemId);
+        } else {
+          clearSelectedWorkItem();
+        }
+        await refreshSelection(nextWorkItem.id).catch(() => undefined);
       },
       {
         title: 'Work item archived',
@@ -4074,12 +4466,20 @@ const Orchestrator = () => {
     await withAction(
       'restoreWorkItem',
       async () => {
-        await restoreCapabilityWorkItem(activeCapability.id, selectedWorkItem.id, { note });
+        const nextWorkItem = await restoreCapabilityWorkItem(
+          activeCapability.id,
+          selectedWorkItem.id,
+          { note },
+        );
+        setWorkItemOverrides(current => ({
+          ...current,
+          [nextWorkItem.id]: nextWorkItem,
+        }));
         setRestoreWorkItemNote('');
         setResolutionNote('');
         setIsRestoreWorkItemOpen(false);
         setQueueView('MY_QUEUE');
-        await refreshSelection(selectedWorkItem.id);
+        await refreshSelection(nextWorkItem.id).catch(() => undefined);
       },
       {
         title: 'Work item restored',
@@ -4171,6 +4571,31 @@ const Orchestrator = () => {
     });
   };
 
+  const openPhaseMoveDialog = (
+    workItemId: string,
+    targetPhase: WorkItemPhase,
+  ) => {
+    const item = workItems.find(current => current.id === workItemId);
+    if (
+      !item ||
+      item.phase === targetPhase ||
+      !requirePermission(canControlWorkItems, 'This operator cannot move work items across phases.') ||
+      busyAction !== null
+    ) {
+      return;
+    }
+
+    setActionError('');
+    setPhaseMoveNote('');
+    if (selectedWorkItem?.id !== workItemId) {
+      selectWorkItem(workItemId);
+    }
+    setPhaseMoveRequest({
+      workItemId,
+      targetPhase,
+    });
+  };
+
   const handleStageControlRefresh = async () => {
     if (!selectedWorkItem) {
       return;
@@ -4215,6 +4640,7 @@ const Orchestrator = () => {
     }
 
     setApprovalReviewWaitSnapshot(selectedOpenWait);
+    setApprovalArtifactFilter('ALL');
     setSelectedApprovalArtifactId(null);
     setIsApprovalReviewHydrated(false);
     setIsApprovalReviewOpen(true);
@@ -4247,6 +4673,24 @@ const Orchestrator = () => {
 
     return () => window.cancelAnimationFrame(frame);
   }, [isApprovalReviewOpen]);
+
+  useEffect(() => {
+    if (selectedOpenWait?.type !== 'APPROVAL' || !selectedWorkItem) {
+      return;
+    }
+
+    setApprovalReviewWaitSnapshot(selectedOpenWait);
+
+    if (autoOpenedApprovalWaitIdsRef.current.has(selectedOpenWait.id)) {
+      return;
+    }
+
+    autoOpenedApprovalWaitIdsRef.current.add(selectedOpenWait.id);
+    setApprovalArtifactFilter('ALL');
+    setSelectedApprovalArtifactId(null);
+    setIsApprovalReviewHydrated(false);
+    setIsApprovalReviewOpen(true);
+  }, [selectedOpenWait, selectedWorkItem]);
 
   const handleStageChatSend = async (event?: React.FormEvent) => {
     event?.preventDefault();
@@ -4468,13 +4912,131 @@ const Orchestrator = () => {
         ),
     );
 
-    const phaseRailIndex = selectedWorkItem
+    const phaseRailCurrentIndex = selectedWorkItem
       ? lifecycleBoardPhases.indexOf(selectedWorkItem.phase)
       : -1;
-    const phaseRailProgress =
-      lifecycleBoardPhases.length > 1 && phaseRailIndex >= 0
-        ? Math.min(100, Math.max(0, (phaseRailIndex / (lifecycleBoardPhases.length - 1)) * 100))
-        : 0;
+    const phaseRailTargetPhase =
+      selectedWorkItem &&
+      phaseRailPreviewPhase &&
+      lifecycleBoardPhases.includes(phaseRailPreviewPhase)
+        ? phaseRailPreviewPhase
+        : selectedWorkItem?.phase || null;
+    const phaseRailTargetIndex =
+      phaseRailTargetPhase !== null
+        ? lifecycleBoardPhases.indexOf(phaseRailTargetPhase)
+        : -1;
+    const phaseRailInsetPx = 16;
+    const phaseRailCanInteract = Boolean(
+      selectedWorkItem && canControlWorkItems && busyAction === null,
+    );
+    const phaseRailPreviewingMove = Boolean(
+      selectedWorkItem &&
+        phaseRailTargetPhase &&
+        phaseRailTargetPhase !== selectedWorkItem.phase,
+    );
+
+    const resolvePhaseFromClientX = (clientX: number): WorkItemPhase | null => {
+      const track = phaseRailTrackRef.current;
+      if (!track || lifecycleBoardPhases.length === 0) {
+        return null;
+      }
+
+      if (lifecycleBoardPhases.length === 1) {
+        return lifecycleBoardPhases[0] || null;
+      }
+
+      const bounds = track.getBoundingClientRect();
+      if (!bounds.width) {
+        return selectedWorkItem?.phase || null;
+      }
+
+      const railStart = bounds.left + phaseRailInsetPx;
+      const railEnd = bounds.right - phaseRailInsetPx;
+      const usableWidth = Math.max(1, railEnd - railStart);
+      const clampedClientX = Math.min(railEnd, Math.max(railStart, clientX));
+      const ratio = Math.min(1, Math.max(0, (clampedClientX - railStart) / usableWidth));
+      const nextIndex = Math.round(ratio * (lifecycleBoardPhases.length - 1));
+      return lifecycleBoardPhases[nextIndex] || null;
+    };
+
+    const previewPhaseFromClientX = (clientX: number) => {
+      const nextPhase = resolvePhaseFromClientX(clientX);
+      if (nextPhase) {
+        setPhaseRailPreviewPhase(nextPhase);
+      }
+      return nextPhase;
+    };
+
+    const phaseRailMeasureForIndex = (index: number) => {
+      if (lifecycleBoardPhases.length <= 1) {
+        return { ratio: 0, cssValue: `${phaseRailInsetPx}px` };
+      }
+
+      const ratio = Math.min(
+        1,
+        Math.max(0, index / (lifecycleBoardPhases.length - 1)),
+      );
+      const offsetPx = (1 - ratio * 2) * phaseRailInsetPx;
+      return {
+        ratio,
+        cssValue: `calc(${(ratio * 100).toFixed(4)}% + ${offsetPx.toFixed(2)}px)`,
+      };
+    };
+
+    const commitPhaseRailPreview = (targetPhase?: WorkItemPhase | null) => {
+      setIsPhaseRailDragging(false);
+      const nextPhase = targetPhase || phaseRailPreviewPhase || selectedWorkItem?.phase || null;
+      setPhaseRailPreviewPhase(null);
+      if (!selectedWorkItem || !nextPhase || nextPhase === selectedWorkItem.phase) {
+        return;
+      }
+      openPhaseMoveDialog(selectedWorkItem.id, nextPhase);
+    };
+
+    const handlePhaseRailPointerDown = (
+      event: React.PointerEvent<HTMLDivElement | HTMLButtonElement>,
+    ) => {
+      if (!phaseRailCanInteract || !selectedWorkItem) {
+        return;
+      }
+
+      if ((event.target as HTMLElement).closest('[data-phase-station-button="true"]')) {
+        return;
+      }
+
+      event.preventDefault();
+      setIsPhaseRailDragging(true);
+      const initialPhase = previewPhaseFromClientX(event.clientX);
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        previewPhaseFromClientX(moveEvent.clientX);
+      };
+
+      const completeDrag = (pointerEvent?: PointerEvent) => {
+        window.removeEventListener('pointermove', handlePointerMove);
+        window.removeEventListener('pointerup', handlePointerUp);
+        window.removeEventListener('pointercancel', handlePointerCancel);
+        commitPhaseRailPreview(
+          pointerEvent ? previewPhaseFromClientX(pointerEvent.clientX) : initialPhase,
+        );
+      };
+
+      const handlePointerUp = (upEvent: PointerEvent) => {
+        completeDrag(upEvent);
+      };
+
+      const handlePointerCancel = () => {
+        window.removeEventListener('pointermove', handlePointerMove);
+        window.removeEventListener('pointerup', handlePointerUp);
+        window.removeEventListener('pointercancel', handlePointerCancel);
+        setIsPhaseRailDragging(false);
+        setPhaseRailPreviewPhase(null);
+      };
+
+      window.addEventListener('pointermove', handlePointerMove);
+      window.addEventListener('pointerup', handlePointerUp);
+      window.addEventListener('pointercancel', handlePointerCancel);
+    };
 
     return (
       <div className="orchestrator-page-shell space-y-4">
@@ -4608,29 +5170,14 @@ const Orchestrator = () => {
                     <StatusBadge tone={getStatusTone(selectedWorkItem.status)}>
                       {WORK_ITEM_STATUS_META[selectedWorkItem.status].label}
                     </StatusBadge>
-                    <div
-	                      draggable={canControlWorkItems}
-	                      onDragStart={event => {
-	                        event.dataTransfer.effectAllowed = 'move';
-	                        event.dataTransfer.setData('text/plain', selectedWorkItem.id);
-	                        event.dataTransfer.setData(
-	                          'application/x-singularity-work-item',
-	                          selectedWorkItem.id,
-	                        );
-	                      }}
-                      className={cn(
-                        'inline-flex items-center gap-2 rounded-full border border-outline-variant/30 bg-white px-3 py-2 text-xs font-semibold text-on-surface shadow-sm',
-                        canControlWorkItems ? 'cursor-grab' : 'cursor-default opacity-60',
-                      )}
-                      title={
-                        canControlWorkItems
-                          ? 'Drag this chip onto a phase dot to move the work item.'
-                          : undefined
-                      }
-                    >
-                      <FileCode size={14} className="text-secondary" />
-                      Drag {selectedWorkItem.id}
-                    </div>
+                    <StatusBadge tone="neutral">
+                      Current · {getPhaseMeta(selectedWorkItem.phase).label}
+                    </StatusBadge>
+                    {phaseRailPreviewingMove && phaseRailTargetPhase ? (
+                      <StatusBadge tone="brand">
+                        Preview · {getPhaseMeta(phaseRailTargetPhase).label}
+                      </StatusBadge>
+                    ) : null}
                   </>
                 ) : (
                   <StatusBadge tone="neutral">No selection</StatusBadge>
@@ -4639,124 +5186,123 @@ const Orchestrator = () => {
             </div>
           </div>
 
-	          <div className="px-5 pb-5 pt-4">
-	            <div className="relative">
-	              <div className="absolute left-0 right-0 top-1/2 h-3 -translate-y-1/2 rounded-full bg-gradient-to-r from-outline-variant/30 via-outline-variant/50 to-outline-variant/30" />
-	              {selectedWorkItem ? (
-	                <div
-	                  className="absolute left-0 top-1/2 h-3 -translate-y-1/2 rounded-full bg-gradient-to-r from-primary/20 via-primary/45 to-primary/70 shadow-[0_0_18px_rgba(0,132,61,0.18)] animate-pulse"
-	                  style={{ width: `${phaseRailProgress}%` }}
-	                />
-	              ) : null}
-	              <div className="relative flex items-center justify-between">
+          <div className="orchestrator-phase-rail-shell px-5 pb-5 pt-4">
+            <div
+              ref={phaseRailTrackRef}
+              className="orchestrator-phase-rail-track"
+              onPointerDown={handlePhaseRailPointerDown}
+            >
+              <div className="orchestrator-phase-rail-progress" />
+              {selectedWorkItem ? (
+                <div
+                  className="orchestrator-phase-rail-progress-current"
+                  style={{ width: phaseRailMeasureForIndex(phaseRailCurrentIndex).cssValue }}
+                />
+              ) : null}
+              {selectedWorkItem ? (
+                <div
+                  className={cn(
+                    'orchestrator-phase-rail-progress-preview',
+                    phaseRailPreviewingMove && 'orchestrator-phase-rail-progress-preview-active',
+                  )}
+                  style={{ width: phaseRailMeasureForIndex(phaseRailTargetIndex).cssValue }}
+                />
+              ) : null}
+
+              <div className="orchestrator-phase-rail-stations">
                 {lifecycleBoardPhases.map((phase, index) => {
                   const isCurrent = Boolean(selectedWorkItem && phase === selectedWorkItem.phase);
-                  const isReached = Boolean(selectedWorkItem && phaseRailIndex >= 0 && index <= phaseRailIndex);
+                  const isPreview = Boolean(selectedWorkItem && phase === phaseRailTargetPhase);
+                  const isReached =
+                    selectedWorkItem &&
+                    phaseRailTargetIndex >= 0 &&
+                    index <= phaseRailTargetIndex;
+                  const phaseRailPosition = phaseRailMeasureForIndex(index);
                   const label = getPhaseMeta(phase).label;
-                  const canMove = Boolean(selectedWorkItem && canControlWorkItems && busyAction === null && !isCurrent);
+                  const canMove = Boolean(
+                    selectedWorkItem &&
+                      canControlWorkItems &&
+                      busyAction === null &&
+                      !isCurrent,
+                  );
 
                   return (
                     <button
                       key={phase}
                       type="button"
+                      data-phase-station-button="true"
                       aria-disabled={!canMove}
+                      onPointerDown={event => {
+                        event.stopPropagation();
+                      }}
                       onClick={() => {
-                        if (!selectedWorkItem) {
+                        if (!selectedWorkItem || !canMove) {
                           return;
                         }
-                        if (
-                          !requirePermission(
-                            canControlWorkItems,
-                            'This operator cannot move work items across phases.',
-                          )
-                        ) {
-                          return;
-                        }
-                        if (busyAction !== null || isCurrent) {
-                          return;
-                        }
-                        setActionError('');
-                        setPhaseMoveNote('');
-                        setPhaseMoveRequest({
-                          workItemId: selectedWorkItem.id,
-                          targetPhase: phase,
-                        });
+                        openPhaseMoveDialog(selectedWorkItem.id, phase);
                       }}
-                      onDragOver={event => {
-                        if (!canControlWorkItems) {
-                          return;
-                        }
-                        event.preventDefault();
-                        event.dataTransfer.dropEffect = 'move';
-                      }}
-	                      onDrop={event => {
-	                        event.preventDefault();
-	                        if (
-	                          !requirePermission(
-	                            canControlWorkItems,
-	                            'This operator cannot move work items across phases.',
-	                          )
-	                        ) {
-	                          return;
-	                        }
-	                        if (busyAction !== null) {
-	                          return;
-	                        }
-
-	                        const draggedId =
-	                          event.dataTransfer.getData('application/x-singularity-work-item') ||
-	                          event.dataTransfer.getData('text/plain');
-	                        const normalizedDraggedId = draggedId.trim();
-	                        if (!normalizedDraggedId) {
-	                          return;
-	                        }
-
-                        setActionError('');
-                        setPhaseMoveNote('');
-                        if (normalizedDraggedId !== selectedWorkItem?.id) {
-                          selectWorkItem(normalizedDraggedId);
-                        }
-                        setPhaseMoveRequest({
-                          workItemId: normalizedDraggedId,
-                          targetPhase: phase,
-                        });
-	                      }}
-	                      className={cn(
-	                        'relative z-10 flex h-12 w-12 items-center justify-center rounded-full transition',
-	                        canMove ? 'hover:bg-primary/10' : 'cursor-not-allowed opacity-60',
-	                      )}
-	                      aria-label={`Move to ${label}`}
-	                      title={canMove ? `Move to ${label}` : label}
-	                    >
-	                      {isCurrent ? (
-	                        <span className="absolute h-10 w-10 rounded-full bg-primary/20 animate-ping" />
-	                      ) : null}
-	                      <span
-	                        className={cn(
-	                          'relative h-6 w-6 rounded-full border-2 shadow-[0_0_0_6px_rgba(255,255,255,0.82)] shadow-sm',
-	                          isCurrent
-	                            ? 'border-primary bg-primary'
-	                            : isReached
-	                            ? 'border-primary/70 bg-primary/60'
-                            : 'border-outline-variant/40 bg-white',
-                        )}
-                      />
+                      className={cn(
+                        'orchestrator-phase-station',
+                        isCurrent && 'orchestrator-phase-station-active',
+                        isPreview && 'orchestrator-phase-station-preview',
+                        isReached && !isPreview && 'orchestrator-phase-station-reached',
+                        !canMove && !isCurrent && 'cursor-default opacity-70',
+                      )}
+                      style={{ left: phaseRailPosition.cssValue }}
+                      aria-label={`Move to ${label}`}
+                      title={canMove ? `Move to ${label}` : label}
+                    >
+                      <span className="orchestrator-phase-station-dot" />
+                      <span className="orchestrator-phase-station-label">{label}</span>
                     </button>
                   );
                 })}
               </div>
-            </div>
 
-            <div className="mt-3 flex items-start justify-between gap-2 text-[0.7rem] font-semibold text-secondary">
-              {lifecycleBoardPhases.map(phase => (
-                <span key={phase} className="w-0 flex-1 text-center leading-tight">
-                  {getPhaseMeta(phase).label}
-                </span>
-              ))}
+              {selectedWorkItem && phaseRailTargetIndex >= 0 ? (
+                <button
+                  type="button"
+                  aria-label={`Lifecycle rail handle at ${getPhaseMeta(
+                    phaseRailTargetPhase || selectedWorkItem.phase,
+                  ).label}`}
+                  disabled={!phaseRailCanInteract}
+                  onPointerDown={handlePhaseRailPointerDown}
+                  onKeyDown={event => {
+                    if (!phaseRailCanInteract || !selectedWorkItem) {
+                      return;
+                    }
+
+                    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                      event.preventDefault();
+                      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+                      const nextIndex = Math.min(
+                        lifecycleBoardPhases.length - 1,
+                        Math.max(0, phaseRailTargetIndex + direction),
+                      );
+                      setPhaseRailPreviewPhase(lifecycleBoardPhases[nextIndex] || null);
+                      return;
+                    }
+
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      commitPhaseRailPreview();
+                    }
+                  }}
+                  className={cn(
+                    'orchestrator-phase-slider-handle',
+                    phaseRailCanInteract && 'orchestrator-phase-slider-handle-interactive',
+                    isPhaseRailDragging && 'orchestrator-phase-slider-handle-dragging',
+                  )}
+                  style={{ left: phaseRailMeasureForIndex(phaseRailTargetIndex).cssValue }}
+                >
+                  <span className="sr-only">Drag to preview a new lifecycle phase</span>
+                  <span className="orchestrator-phase-slider-handle-core" />
+                </button>
+              ) : null}
             </div>
 
             {!canControlWorkItems ? (
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs leading-relaxed text-secondary">
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs leading-relaxed text-secondary">
                 <p>
                   You have read-only visibility here. Switch Current Operator to someone with `workitem.control` to pause, cancel, or move phases.
                 </p>
@@ -4770,8 +5316,8 @@ const Orchestrator = () => {
                 </button>
               </div>
             ) : (
-              <p className="mt-3 text-xs leading-relaxed text-secondary">
-                Tip: click a dot to move phases. You will confirm, and any in-flight run will be cancelled first.
+              <p className="mt-4 text-xs leading-relaxed text-secondary">
+                Drag the rail handle to preview a phase, or click any phase station to move with confirmation. In-flight runs are cancelled safely before the move.
               </p>
             )}
           </div>
@@ -4784,8 +5330,9 @@ const Orchestrator = () => {
           </div>
         ) : null}
 
-	        <div className="grid gap-4 xl:grid-cols-[21rem_minmax(0,26rem)_minmax(0,1fr)]">
-	          <aside className="workspace-surface overflow-hidden p-0">
+        <div className="orchestrator-list-workspace">
+          <div className="orchestrator-list-top-grid">
+            <aside className="workspace-surface overflow-hidden p-0">
             <div className="border-b border-outline-variant/25 px-4 pb-4 pt-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -4877,7 +5424,7 @@ const Orchestrator = () => {
               </div>
             </div>
 
-            <div className="max-h-[70vh] overflow-y-auto px-4 py-4">
+            <div className="custom-scrollbar max-h-[28rem] overflow-y-auto px-4 py-4 xl:max-h-[31rem]">
               {inboxEntries.length === 0 ? (
                 <EmptyState
                   title="Nothing in the inbox"
@@ -5072,13 +5619,13 @@ const Orchestrator = () => {
             </div>
           </aside>
 
-          <main className="workspace-surface overflow-hidden p-0">
+          <section className="workspace-surface overflow-hidden p-0">
             {!selectedWorkItem ? (
               <EmptyState
                 title="Select a work item"
-                description="Choose an item from the inbox to see what is needed next."
+                description="Choose an item from the inbox to see the current state, controls, and next action."
                 icon={WorkflowIcon}
-                className="h-full min-h-[36rem]"
+                className="h-full min-h-[28rem]"
               />
             ) : (
               <div className="flex h-full flex-col">
@@ -5248,7 +5795,7 @@ const Orchestrator = () => {
                   </div>
                 </div>
 
-                <div className="flex-1 overflow-y-auto px-5 py-4">
+                <div className="custom-scrollbar flex-1 overflow-y-auto px-5 py-4">
                   {actionError ? (
                     <div className="workspace-inline-alert workspace-inline-alert-danger">
                       <AlertCircle size={18} className="mt-0.5 shrink-0" />
@@ -5259,7 +5806,7 @@ const Orchestrator = () => {
                     </div>
                   ) : null}
 
-                  <div className="grid gap-3 md:grid-cols-2">
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                     <div className="workspace-meta-card">
                       <p className="workspace-meta-label">What’s next</p>
                       <p className="mt-2 text-sm font-semibold text-on-surface">
@@ -5283,249 +5830,379 @@ const Orchestrator = () => {
                         </p>
                       ) : null}
                     </div>
+                    <div className="workspace-meta-card">
+                      <p className="workspace-meta-label">Current state</p>
+                      <p className="mt-2 text-sm leading-relaxed text-on-surface">
+                        {selectedStateSummary}
+                      </p>
+                    </div>
+                    <div className="workspace-meta-card">
+                      <p className="workspace-meta-label">What is blocked</p>
+                      <p className="mt-2 text-sm leading-relaxed text-on-surface">
+                        {selectedBlockerSummary}
+                      </p>
+                    </div>
                   </div>
                 </div>
               </div>
             )}
-          </main>
+          </section>
+        </div>
 
-	          <aside className="workspace-surface flex min-h-0 flex-col overflow-hidden p-0">
-	            <div className="border-b border-outline-variant/25 px-5 pb-4 pt-5">
-	              <p className="form-kicker">Capability Copilot</p>
-	              <h2 className="mt-1 text-lg font-bold text-on-surface">Operate from one dock</h2>
-	              <p className="mt-1 text-sm leading-relaxed text-secondary">
-	                Upload evidence, ask questions, and resolve pending requests without switching screens.
-	              </p>
-                {primaryCopilotAgent ? (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <StatusBadge tone="brand">{primaryCopilotAgent.name}</StatusBadge>
-                    <StatusBadge tone="neutral">
-                      {selectedAgent?.id === primaryCopilotAgent.id
-                        ? 'Primary copilot active'
-                        : `Routing with ${selectedAgent?.name || primaryCopilotAgent.role}`}
-                    </StatusBadge>
+          <section className="workspace-surface flex min-h-0 flex-col overflow-hidden p-0">
+            <div className="border-b border-outline-variant/25 px-5 pb-4 pt-5">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p className="form-kicker">Capability Copilot</p>
+                  <h2 className="mt-1 text-lg font-bold text-on-surface">Operate from one dock</h2>
+                  <p className="mt-1 text-sm leading-relaxed text-secondary">
+                    Upload evidence, ask questions, and resolve pending requests without switching screens.
+                  </p>
+                  {primaryCopilotAgent ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <StatusBadge tone="brand">{primaryCopilotAgent.name}</StatusBadge>
+                      <StatusBadge tone="neutral">
+                        {selectedAgent?.id === primaryCopilotAgent.id
+                          ? 'Primary copilot active'
+                          : `Routing with ${selectedAgent?.name || primaryCopilotAgent.role}`}
+                      </StatusBadge>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusBadge tone="neutral">
+                    {dockMessages.length} message{dockMessages.length === 1 ? '' : 's'}
+                  </StatusBadge>
+                  <button
+                    type="button"
+                    onClick={() => void handleClearDockChat()}
+                    disabled={!selectedWorkItem || dockMessages.length === 0 || busyAction !== null}
+                    className="enterprise-button enterprise-button-secondary border-red-200 px-3 py-2 text-[0.72rem] text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Trash2 size={14} />
+                    Clear chat
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="orchestrator-copilot-dock-body">
+              <div className="orchestrator-copilot-dock-status custom-scrollbar">
+                {!selectedWorkItem ? (
+                  <div className="workspace-meta-card">
+                    Select a work item to see pending requests and start a focused copilot thread.
                   </div>
-                ) : null}
-	            </div>
-	
-		            <div className="flex min-h-0 flex-1 flex-col px-5 py-4">
-		              {!selectedWorkItem ? (
-		                <div className="workspace-meta-card">
-		                  Select a work item to see pending requests and start a focused copilot thread.
-		                </div>
-		              ) : (
-                    <>
-                      {selectedWorkItem.status === 'PAUSED' && currentRun?.status === 'PAUSED' ? (
-                        <div className="workspace-meta-card border-slate-200 bg-slate-50/60">
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div>
-                              <p className="workspace-meta-label">Paused</p>
-                              <p className="mt-2 text-sm font-semibold text-on-surface">
-                                Execution is paused
-                              </p>
-                              <p className="mt-1 text-xs leading-relaxed text-secondary">
-                                Resume to continue, or to resolve pending requests.
-                              </p>
+                ) : (
+                  <>
+                    {!currentRun && deliveryBlockingItem ? (
+                      <div className="workspace-meta-card border-amber-200/80 bg-amber-50/60">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Execution blocked</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              {deliveryBlockingItem.label}
+                            </p>
+                            <p className="mt-1 text-xs leading-relaxed text-secondary">
+                              {deliveryBlockingItem.nextRequiredAction ||
+                                deliveryBlockingItem.blockingReason ||
+                                deliveryBlockingItem.description}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => navigate(deliveryBlockingItem.path)}
+                            className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem]"
+                          >
+                            <ArrowRight size={14} />
+                            {deliveryBlockingItem.actionLabel}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {!currentRun && !deliveryBlockingItem && canStartExecution ? (
+                      <div className="workspace-meta-card border-emerald-200/70 bg-emerald-50/55">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Execution ready</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              This work item can start from the dock
+                            </p>
+                            <p className="mt-1 text-xs leading-relaxed text-secondary">
+                              Add optional kickoff guidance below, upload context if needed, then start execution to generate real workflow artifacts, waits, and approvals.
+                            </p>
+                          </div>
+                          <StatusBadge tone="success">{executionDispatchLabel}</StatusBadge>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {selectedWorkItem && currentRun && canRestartFromPhase ? (
+                      <div className="workspace-meta-card border-primary/20 bg-primary/5">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Current phase</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              {getPhaseMeta(selectedWorkItem.phase).label}
+                            </p>
+                            <p className="mt-1 text-xs leading-relaxed text-secondary">
+                              Restart this phase if you want to rerun the current stage from a clean attempt.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void handleRestartExecution()}
+                            disabled={busyAction !== null}
+                            className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {busyAction === 'restart' ? (
+                              <LoaderCircle size={14} className="animate-spin" />
+                            ) : (
+                              <RefreshCw size={14} />
+                            )}
+                            Restart {getPhaseMeta(selectedWorkItem.phase).label}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {!currentRun && selectedCanGuideBlockedAgent ? (
+                      <div className="workspace-meta-card border-primary/20 bg-primary/5">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Blocked execution</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              Restart from this dock with explicit guidance
+                            </p>
+                            <p className="mt-1 text-xs leading-relaxed text-secondary">
+                              Explain what changed and what the next attempt should do differently, then restart directly from the composer below.
+                            </p>
+                          </div>
+                          <StatusBadge tone="brand">Restart-ready</StatusBadge>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {selectedWorkItem.status === 'PAUSED' && currentRun?.status === 'PAUSED' ? (
+                      <div className="workspace-meta-card border-slate-200 bg-slate-50/60">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Paused</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              Execution is paused
+                            </p>
+                            <p className="mt-1 text-xs leading-relaxed text-secondary">
+                              Resume to continue, or resolve pending requests from this dock.
+                            </p>
+                          </div>
+                          {currentRun ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void handleResumeRunById({
+                                  runId: currentRun.id,
+                                  workItemId: selectedWorkItem.id,
+                                  workItemTitle: selectedWorkItem.title,
+                                })
+                              }
+                              disabled={!canControlWorkItems || busyAction !== null}
+                              className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {busyAction === `resume-${selectedWorkItem.id}` ? (
+                                <LoaderCircle size={14} className="animate-spin" />
+                              ) : (
+                                <Play size={14} />
+                              )}
+                              Resume
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {selectedOpenWait ? (
+                      <div className="workspace-meta-card border-amber-200/80 bg-amber-50/50">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="workspace-meta-label">Pending request</p>
+                            <p className="mt-2 text-sm font-semibold text-on-surface">
+                              {selectedAttentionLabel}
+                            </p>
+                          </div>
+                          <StatusBadge tone="warning">
+                            {formatEnumLabel(selectedOpenWait.type)}
+                          </StatusBadge>
+                        </div>
+                        <div className="mt-3 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
+                          <MarkdownContent
+                            content={normalizeMarkdownishText(selectedOpenWait.message)}
+                          />
+                        </div>
+
+                        {dockMissingFields.length > 0 ? (
+                          <div className="mt-4">
+                            <p className="text-xs leading-relaxed text-secondary">
+                              Click a chip to add it to your response.
+                            </p>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {dockMissingFields.map(field => (
+                                <button
+                                  key={field.id}
+                                  type="button"
+                                  onClick={() => handleDockFieldChipClick(field.label)}
+                                  className="rounded-full border border-outline-variant/30 bg-white/85 px-3 py-1 text-xs font-semibold text-on-surface"
+                                >
+                                  {field.label}
+                                </button>
+                              ))}
                             </div>
-                            {currentRun ? (
+                          </div>
+                        ) : null}
+
+                        {waitRequiresApprovedWorkspace ? (
+                          <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
+                            <p className="workspace-meta-label">Approved workspace path</p>
+                            {hasApprovedWorkspaceConfigured ? (
+                              <>
+                                <p className="mt-2 text-xs leading-relaxed text-secondary">
+                                  Configured roots:
+                                </p>
+                                <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
+                                  {approvedWorkspaceRoots.slice(0, 4).map(root => (
+                                    <li key={root} className="font-mono text-[0.72rem]">
+                                      {root}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </>
+                            ) : (
+                              <p className="mt-2 text-xs leading-relaxed text-secondary">
+                                No approved workspace paths are configured yet.
+                              </p>
+                            )}
+
+                            <p className="mt-3 text-xs leading-relaxed text-secondary">
+                              {hasApprovedWorkspaceConfigured
+                                ? 'Add another path if this work item needs a different codebase.'
+                                : 'Add a local directory path that tools are allowed to read and write.'}
+                            </p>
+                            <input
+                              value={approvedWorkspaceDraft}
+                              onChange={event => {
+                                setApprovedWorkspaceDraft(event.target.value);
+                                setApprovedWorkspaceValidation(null);
+                              }}
+                              placeholder="/Users/you/projects/my-repo"
+                              className="mt-3 field-input font-mono text-[0.8rem]"
+                            />
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {selectedExecutionRepository?.localRootHint ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setApprovedWorkspaceDraft(
+                                      selectedExecutionRepository.localRootHint || '',
+                                    );
+                                    setApprovedWorkspaceValidation(null);
+                                    focusDockComposer();
+                                  }}
+                                  className="enterprise-button enterprise-button-secondary"
+                                >
+                                  Use repo root hint
+                                </button>
+                              ) : null}
+                              {approvedWorkspaceRoots.slice(0, 2).map(root => (
+                                <button
+                                  key={root}
+                                  type="button"
+                                  onClick={() => {
+                                    setApprovedWorkspaceDraft(root);
+                                    setApprovedWorkspaceValidation(null);
+                                    focusDockComposer();
+                                  }}
+                                  className="enterprise-button enterprise-button-secondary"
+                                >
+                                  {root}
+                                </button>
+                              ))}
+                              {activeCapability.localDirectories.slice(0, 2).map(root => (
+                                <button
+                                  key={root}
+                                  type="button"
+                                  onClick={() => {
+                                    setApprovedWorkspaceDraft(root);
+                                    setApprovedWorkspaceValidation(null);
+                                    focusDockComposer();
+                                  }}
+                                  className="enterprise-button enterprise-button-secondary"
+                                >
+                                  {root}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2">
                               <button
                                 type="button"
-                                onClick={() =>
-                                  void handleResumeRunById({
-                                    runId: currentRun.id,
-                                    workItemId: selectedWorkItem.id,
-                                    workItemTitle: selectedWorkItem.title,
-                                  })
-                                }
-                                disabled={!canControlWorkItems || busyAction !== null}
-                                className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+                                onClick={() => void handleApproveWorkspacePath({ unblock: true })}
+                                disabled={busyAction !== null}
+                                className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                               >
-                                {busyAction === `resume-${selectedWorkItem.id}` ? (
-                                  <LoaderCircle size={14} className="animate-spin" />
+                                {busyAction === 'approveWorkspacePath' ? (
+                                  <LoaderCircle size={16} className="animate-spin" />
                                 ) : (
-                                  <Play size={14} />
+                                  <ShieldCheck size={16} />
                                 )}
-                                Resume
+                                Approve and continue
                               </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleApproveWorkspacePath()}
+                                disabled={busyAction !== null}
+                                className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                Approve only
+                              </button>
+                            </div>
+                            {approvedWorkspaceValidation ? (
+                              <p
+                                className={cn(
+                                  'mt-2 text-xs font-medium',
+                                  approvedWorkspaceValidation.valid
+                                    ? 'text-emerald-700'
+                                    : 'text-amber-800',
+                                )}
+                              >
+                                {approvedWorkspaceValidation.message}
+                              </p>
+                            ) : null}
+                            {!canEditCapability ? (
+                              <p className="mt-2 text-xs font-medium text-amber-800">
+                                Approving new paths requires capability edit access. Switch Current Operator to a workspace admin if needed.
+                              </p>
                             ) : null}
                           </div>
-                        </div>
-                      ) : null}
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="workspace-meta-card">
+                        No open approval, input, or conflict wait is attached to the selected work item right now.
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
 
-                      {selectedOpenWait ? (
-                        <div className="workspace-meta-card border-amber-200/80 bg-amber-50/50">
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div>
-                              <p className="workspace-meta-label">Pending request</p>
-                              <p className="mt-2 text-sm font-semibold text-on-surface">
-                                {selectedAttentionLabel}
-                              </p>
-                            </div>
-                            <StatusBadge tone="warning">{formatEnumLabel(selectedOpenWait.type)}</StatusBadge>
-                          </div>
-                          <div className="mt-3 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
-                            <MarkdownContent content={normalizeMarkdownishText(selectedOpenWait.message)} />
-                          </div>
-
-		                  {dockMissingFields.length > 0 ? (
-		                    <div className="mt-4">
-		                      <p className="text-xs leading-relaxed text-secondary">
-		                        Click a chip to add it to your response.
-	                      </p>
-	                      <div className="mt-2 flex flex-wrap gap-2">
-	                        {dockMissingFields.map(field => (
-	                          <button
-	                            key={field.id}
-	                            type="button"
-	                            onClick={() => handleDockFieldChipClick(field.label)}
-	                            className="rounded-full border border-outline-variant/30 bg-white/85 px-3 py-1 text-xs font-semibold text-on-surface"
-	                          >
-	                            {field.label}
-	                          </button>
-	                        ))}
-	                      </div>
-	                    </div>
-	                  ) : null}
-
-	                  {waitRequiresApprovedWorkspace ? (
-	                    <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
-	                      <p className="workspace-meta-label">Approved workspace path</p>
-	                      {hasApprovedWorkspaceConfigured ? (
-	                        <>
-	                          <p className="mt-2 text-xs leading-relaxed text-secondary">
-	                            Configured roots:
-	                          </p>
-	                          <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
-	                            {approvedWorkspaceRoots.slice(0, 4).map(root => (
-	                              <li key={root} className="font-mono text-[0.72rem]">
-	                                {root}
-	                              </li>
-	                            ))}
-	                          </ul>
-	                        </>
-	                      ) : (
-	                        <p className="mt-2 text-xs leading-relaxed text-secondary">
-	                          No approved workspace paths are configured yet.
-	                        </p>
-	                      )}
-
-	                      <p className="mt-3 text-xs leading-relaxed text-secondary">
-	                        {hasApprovedWorkspaceConfigured
-	                          ? 'Add another path if this work item needs a different codebase.'
-	                          : 'Add a local directory path that tools are allowed to read and write.'}
-	                      </p>
-	                      <input
-	                        value={approvedWorkspaceDraft}
-	                        onChange={event => {
-	                          setApprovedWorkspaceDraft(event.target.value);
-	                          setApprovedWorkspaceValidation(null);
-	                        }}
-	                        placeholder="/Users/you/projects/my-repo"
-	                        className="mt-3 field-input font-mono text-[0.8rem]"
-	                      />
-	                      <div className="mt-3 flex flex-wrap gap-2">
-	                        {selectedExecutionRepository?.localRootHint ? (
-	                          <button
-	                            type="button"
-	                            onClick={() => {
-	                              setApprovedWorkspaceDraft(selectedExecutionRepository.localRootHint || '');
-	                              setApprovedWorkspaceValidation(null);
-	                              focusDockComposer();
-	                            }}
-	                            className="enterprise-button enterprise-button-secondary"
-	                          >
-	                            Use repo root hint
-	                          </button>
-	                        ) : null}
-	                        {approvedWorkspaceRoots.slice(0, 2).map(root => (
-	                          <button
-	                            key={root}
-	                            type="button"
-	                            onClick={() => {
-	                              setApprovedWorkspaceDraft(root);
-	                              setApprovedWorkspaceValidation(null);
-	                              focusDockComposer();
-	                            }}
-	                            className="enterprise-button enterprise-button-secondary"
-	                          >
-	                            {root}
-	                          </button>
-	                        ))}
-	                        {activeCapability.localDirectories.slice(0, 2).map(root => (
-	                          <button
-	                            key={root}
-	                            type="button"
-	                            onClick={() => {
-	                              setApprovedWorkspaceDraft(root);
-	                              setApprovedWorkspaceValidation(null);
-	                              focusDockComposer();
-	                            }}
-	                            className="enterprise-button enterprise-button-secondary"
-	                          >
-	                            {root}
-	                          </button>
-	                        ))}
-	                      </div>
-	                      <div className="mt-3 flex flex-wrap gap-2">
-	                        <button
-	                          type="button"
-	                          onClick={() => void handleApproveWorkspacePath({ unblock: true })}
-	                          disabled={busyAction !== null}
-	                          className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
-	                        >
-	                          {busyAction === 'approveWorkspacePath' ? (
-	                            <LoaderCircle size={16} className="animate-spin" />
-	                          ) : (
-	                            <ShieldCheck size={16} />
-	                          )}
-	                          Approve and continue
-	                        </button>
-	                        <button
-	                          type="button"
-	                          onClick={() => void handleApproveWorkspacePath()}
-	                          disabled={busyAction !== null}
-	                          className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
-	                        >
-	                          Approve only
-	                        </button>
-	                      </div>
-	                      {approvedWorkspaceValidation ? (
-	                        <p
-	                          className={cn(
-	                            'mt-2 text-xs font-medium',
-	                            approvedWorkspaceValidation.valid
-	                              ? 'text-emerald-700'
-	                              : 'text-amber-800',
-	                          )}
-	                        >
-	                          {approvedWorkspaceValidation.message}
-	                        </p>
-	                      ) : null}
-		                      {!canEditCapability ? (
-		                        <p className="mt-2 text-xs font-medium text-amber-800">
-		                          Approving new paths requires capability edit access. Switch Current Operator to a workspace admin if needed.
-		                        </p>
-		                      ) : null}
-		                    </div>
-		                  ) : null}
-                        </div>
-                      ) : (
-                        <div className="workspace-meta-card">
-                          No open approval, input, or conflict wait is attached to the selected work item right now.
-                        </div>
-                      )}
-                    </>
-                  )}
-
-	              <div
-	                ref={dockThreadRef}
-	                className="orchestrator-stage-chat-thread orchestrator-stage-chat-thread-dock flex-1"
-	                onScroll={event => {
-	                  const target = event.currentTarget;
-	                  const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
-	                  dockStickToBottomRef.current = distanceFromBottom < 48;
-	                }}
-	              >
+              <div
+                ref={dockThreadRef}
+                className="orchestrator-stage-chat-thread orchestrator-stage-chat-thread-dock custom-scrollbar"
+                onScroll={event => {
+                  const target = event.currentTarget;
+                  const distanceFromBottom =
+                    target.scrollHeight - target.scrollTop - target.clientHeight;
+                  dockStickToBottomRef.current = distanceFromBottom < 48;
+                }}
+              >
                 {dockMessages.length === 0 && !dockDraft ? (
                   <div className="orchestrator-stage-chat-empty">
                     This work item does not have a copilot thread yet. Ask a question or upload evidence to start one.
@@ -5550,9 +6227,10 @@ const Orchestrator = () => {
                           </span>
                           <span>{message.timestamp}</span>
                         </div>
-                        <p className="mt-3 whitespace-pre-wrap text-sm leading-6">
-                          {message.content}
-                        </p>
+                        <CopilotMessageBody
+                          content={message.content}
+                          tone={message.role === 'user' ? 'user' : 'agent'}
+                        />
                       </div>
                     ))}
                     {dockDraft ? (
@@ -5561,7 +6239,7 @@ const Orchestrator = () => {
                           <span>{selectedAgent?.name || 'Agent'}</span>
                           <span>Streaming</span>
                         </div>
-                        <p className="mt-3 whitespace-pre-wrap text-sm leading-6">{dockDraft}</p>
+                        <CopilotMessageBody content={dockDraft} tone="draft" />
                       </div>
                     ) : null}
                   </>
@@ -5569,7 +6247,7 @@ const Orchestrator = () => {
               </div>
 
               {dockError ? (
-                <div className="workspace-inline-alert workspace-inline-alert-danger mt-3">
+                <div className="workspace-inline-alert workspace-inline-alert-danger mx-5 mt-4">
                   <AlertCircle size={18} className="mt-0.5 shrink-0" />
                   <div>
                     <p className="text-sm font-semibold">Copilot dock error</p>
@@ -5579,36 +6257,46 @@ const Orchestrator = () => {
               ) : null}
 
               <div
-                className="mt-3 rounded-[1.35rem] border border-outline-variant/28 bg-white/90 px-4 py-4"
+                className="orchestrator-copilot-dock-composer"
                 onDragOver={event => event.preventDefault()}
                 onDrop={event => {
                   event.preventDefault();
                   addDockUploadFiles(event.dataTransfer.files);
                 }}
               >
-	                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-secondary">
-	                  {selectedOpenWait ? 'Resolve wait mode' : 'Ask copilot'}
-	                </p>
-		                <textarea
-		                  ref={dockTextareaRef}
-		                  value={dockInput}
-		                  onChange={event => setDockInput(event.target.value)}
-		                  placeholder={resolutionPlaceholder}
-		                  className="mt-3 min-h-[5.5rem] w-full resize-none rounded-2xl border border-outline-variant/35 bg-surface-container-low/35 px-4 py-3 text-sm leading-6 text-on-surface shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] focus:border-primary/40 focus:outline-none"
-		                />
-		                {selectedOpenWait &&
-		                dockResolutionRequired &&
-		                !dockInput.trim() &&
-		                !waitOnlyRequestsApprovedWorkspace ? (
-		                  <p className="mt-2 text-xs leading-relaxed text-secondary">
-		                    Add a short response above to enable "{actionButtonLabel}".
-		                  </p>
-		                ) : null}
-	
-	                {dockUploads.length > 0 ? (
-	                  <div className="mt-3 flex flex-wrap gap-2">
-	                    {dockUploads.map(upload => (
-	                      <div
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-secondary">
+                  {dockComposerLabel}
+                </p>
+                <textarea
+                  ref={dockTextareaRef}
+                  value={dockInput}
+                  onChange={event => setDockInput(event.target.value)}
+                  placeholder={dockComposerPlaceholder}
+                  className="mt-3 min-h-[6.5rem] w-full resize-none rounded-2xl border border-outline-variant/35 bg-surface-container-low/35 px-4 py-3 text-sm leading-6 text-on-surface shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] focus:border-primary/40 focus:outline-none"
+                />
+                {selectedOpenWait &&
+                dockResolutionRequired &&
+                !dockInput.trim() &&
+                !waitOnlyRequestsApprovedWorkspace ? (
+                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+                    Add a short response above to enable "{actionButtonLabel}".
+                  </p>
+                ) : null}
+                {selectedCanGuideBlockedAgent && !dockInput.trim() ? (
+                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+                    Add a restart note above so the next attempt knows exactly what changed.
+                  </p>
+                ) : null}
+                {dockInterventionMode ? (
+                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+                    The text in this composer is applied to unblock the workflow, not sent as a separate chat turn.
+                  </p>
+                ) : null}
+
+                {dockUploads.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {dockUploads.map(upload => (
+                      <div
                         key={upload.id}
                         className="flex items-center gap-2 rounded-2xl border border-outline-variant/30 bg-white px-3 py-2 text-xs font-semibold text-on-surface"
                       >
@@ -5622,7 +6310,9 @@ const Orchestrator = () => {
                           <FileText size={14} className="text-secondary" />
                         )}
                         <span className="max-w-[10rem] truncate">{upload.file.name}</span>
-                        <span className="text-secondary">{formatAttachmentSizeLabel(upload.file.size)}</span>
+                        <span className="text-secondary">
+                          {formatAttachmentSizeLabel(upload.file.size)}
+                        </span>
                         <button
                           type="button"
                           onClick={() => removeDockUpload(upload.id)}
@@ -5653,15 +6343,21 @@ const Orchestrator = () => {
                   <div className="flex flex-wrap items-center gap-2">
                     {selectedOpenWait ? (
                       <>
-                        <button
-                          type="button"
-                          onClick={() => void handleDockAskAgent()}
-                          disabled={isDockSending || !canWriteChat}
-                          className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          {isDockSending ? <RefreshCw size={16} className="animate-spin" /> : <Send size={16} />}
-                          Ask agent
-                        </button>
+                        {dockAllowsChatOnly ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleDockAskAgent()}
+                            disabled={isDockSending || !canWriteChat}
+                            className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {isDockSending ? (
+                              <RefreshCw size={16} className="animate-spin" />
+                            ) : (
+                              <Send size={16} />
+                            )}
+                            Ask agent
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           onClick={() => void handleDockResolveWait()}
@@ -5670,10 +6366,57 @@ const Orchestrator = () => {
                         >
                           {busyAction === 'dockResolveWait' ? (
                             <LoaderCircle size={16} className="animate-spin" />
+                          ) : selectedOpenWait?.type === 'APPROVAL' ? (
+                            <ShieldCheck size={16} />
                           ) : (
                             <ArrowRight size={16} />
                           )}
-                          {actionButtonLabel}
+                          {dockPrimaryActionLabel}
+                        </button>
+                      </>
+                    ) : selectedCanGuideBlockedAgent ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void handleDockGuideAndRestart()}
+                          disabled={busyAction !== null || !dockInput.trim()}
+                          className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {busyAction === 'dockGuideRestart' ? (
+                            <LoaderCircle size={16} className="animate-spin" />
+                          ) : (
+                            <ArrowRight size={16} />
+                          )}
+                          {dockPrimaryActionLabel}
+                        </button>
+                      </>
+                    ) : canStartExecution ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void handleDockAskAgent()}
+                          disabled={isDockSending || !canWriteChat}
+                          className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {isDockSending ? (
+                            <RefreshCw size={16} className="animate-spin" />
+                          ) : (
+                            <Send size={16} />
+                          )}
+                          Ask copilot
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDockStartExecution()}
+                          disabled={busyAction !== null || !canStartExecution}
+                          className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {busyAction === 'dockStartExecution' ? (
+                            <LoaderCircle size={16} className="animate-spin" />
+                          ) : (
+                            <Play size={16} />
+                          )}
+                          {dockPrimaryActionLabel}
                         </button>
                       </>
                     ) : (
@@ -5683,7 +6426,11 @@ const Orchestrator = () => {
                         disabled={isDockSending || !canWriteChat}
                         className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        {isDockSending ? <RefreshCw size={16} className="animate-spin" /> : <Send size={16} />}
+                        {isDockSending ? (
+                          <RefreshCw size={16} className="animate-spin" />
+                        ) : (
+                          <Send size={16} />
+                        )}
                         Send
                       </button>
                     )}
@@ -5691,7 +6438,7 @@ const Orchestrator = () => {
                 </div>
               </div>
             </div>
-          </aside>
+          </section>
         </div>
 
         {isCreateSheetOpen && (
@@ -7004,7 +7751,7 @@ const Orchestrator = () => {
                           ) : (
                             <RefreshCw size={16} />
                           )}
-                          Restart run
+                          Restart {selectedWorkItem ? getPhaseMeta(selectedWorkItem.phase).label : 'phase'}
                         </button>
 
                         <button
@@ -8590,16 +9337,10 @@ const Orchestrator = () => {
                                         </span>
                                         <span>{message.timestamp}</span>
                                       </div>
-                                      <p
-                                        className={cn(
-                                          'mt-2 whitespace-pre-wrap text-sm leading-7',
-                                          message.role === 'user'
-                                            ? 'text-white'
-                                            : 'text-on-surface',
-                                        )}
-                                      >
-                                        {message.content}
-                                      </p>
+                                      <CopilotMessageBody
+                                        content={message.content}
+                                        tone={message.role === 'user' ? 'user' : 'agent'}
+                                      />
                                       {message.deliveryState &&
                                       message.deliveryState !== 'clean' ? (
                                         <p className="mt-2 text-xs text-secondary">
@@ -8620,9 +9361,7 @@ const Orchestrator = () => {
                                         </span>
                                         <span>Typing…</span>
                                       </div>
-                                      <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-on-surface">
-                                        {stageChatDraft}
-                                      </p>
+                                      <CopilotMessageBody content={stageChatDraft} tone="draft" />
                                     </div>
                                   )}
                                 </>
@@ -9145,7 +9884,7 @@ const Orchestrator = () => {
           />
           <ModalShell
             title={`Approval review · ${selectedWorkItem.title}`}
-            description="Review all work-item documents captured so far before you approve continuation or send the work back for changes."
+            description="Review the full approval context here: the work-item artifacts, attempt story, approval routing, and your final decision all live in this screen."
             eyebrow="Human Approval Gate"
             className="relative z-[1] max-w-7xl"
             actions={
@@ -9187,6 +9926,33 @@ const Orchestrator = () => {
                     <p className="mt-2 text-sm leading-relaxed text-secondary">
                       {approvalReviewWait.message}
                     </p>
+                  </div>
+                  <div className="workspace-meta-card">
+                    <p className="workspace-meta-label">Current context</p>
+                    <div className="mt-3 space-y-2 text-sm text-secondary">
+                      <p>
+                        Phase:{' '}
+                        <strong className="text-on-surface">
+                          {getPhaseMeta(selectedWorkItem.phase).label}
+                        </strong>
+                      </p>
+                      <p>
+                        Step:{' '}
+                        <strong className="text-on-surface">
+                          {selectedCurrentStep?.name || 'Awaiting orchestration'}
+                        </strong>
+                      </p>
+                      <p>
+                        Run:{' '}
+                        <strong className="text-on-surface">
+                          {currentRun?.id || selectedWorkItem.activeRunId || 'Not attached'}
+                        </strong>
+                      </p>
+                      <p>
+                        All approval decisions for this gate must be recorded from this review
+                        window.
+                      </p>
+                    </div>
                   </div>
                   <div className="workspace-meta-card">
                     <p className="workspace-meta-label">Review facts</p>
@@ -9299,6 +10065,15 @@ const Orchestrator = () => {
                       </div>
                     ) : null}
                   </div>
+                  <InteractionTimeline
+                    feed={selectedInteractionFeed}
+                    maxItems={6}
+                    title="Context story"
+                    emptyMessage="No linked interaction context is available for this approval yet."
+                    onOpenArtifact={handleOpenArtifactFromTimeline}
+                    onOpenRun={runId => void handleOpenRunFromTimeline(runId)}
+                    onOpenTask={handleOpenTaskFromTimeline}
+                  />
                   {selectedHasCodeDiffApproval && (
                     <button
                       type="button"

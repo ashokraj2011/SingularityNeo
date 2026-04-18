@@ -619,6 +619,18 @@ const canActorApproveWait = ({
     );
   }
 
+  const hasOnlyImplicitTeamAssignments = pendingAssignments.every(
+    assignment => assignment.targetType === 'TEAM' && !assignment.approvalPolicyId,
+  );
+  if (
+    hasOnlyImplicitTeamAssignments &&
+    actor?.userId &&
+    workItem.claimOwnerUserId &&
+    actor.userId === workItem.claimOwnerUserId
+  ) {
+    return true;
+  }
+
   return pendingAssignments.some(assignment => {
     if (assignment.targetType === 'USER') {
       return Boolean(actor.userId) && (assignment.assignedUserId || assignment.targetId) === actor.userId;
@@ -631,6 +643,10 @@ const canActorApproveWait = ({
 
     return Boolean(actor.userId) || actorTeamIds.length > 0;
   });
+};
+
+export const __executionServiceTestUtils = {
+  canActorApproveWait,
 };
 
 const buildApprovalAssignmentsForWait = ({

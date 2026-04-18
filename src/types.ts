@@ -1248,6 +1248,7 @@ export type ArtifactKind =
   | 'CODE_DIFF'
   | 'HANDOFF_PACKET'
   | 'DELEGATION_RESULT'
+  | 'EVIDENCE_PACKET'
   | 'LEARNING_NOTE'
   | 'APPROVAL_RECORD'
   | 'UPLOAD'

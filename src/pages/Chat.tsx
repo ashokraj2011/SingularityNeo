@@ -19,10 +19,12 @@ import {
   ShieldCheck,
   Sparkles,
   StopCircle,
+  Trash2,
   User,
   XCircle,
 } from 'lucide-react';
 import {
+  clearCapabilityMessageHistoryRecord,
   fetchRuntimeStatus,
   refreshAgentLearningProfile,
   submitAgentLearningCorrection,
@@ -299,6 +301,7 @@ const Chat = () => {
   const [runtimeErrorDetail, setRuntimeErrorDetail] = useState('');
   const [diagnosticsOpenSignal, setDiagnosticsOpenSignal] = useState(0);
   const [now, setNow] = useState(() => Date.now());
+  const [isClearingChat, setIsClearingChat] = useState(false);
   const [lastSessionSnapshot, setLastSessionSnapshot] = useState<{
     sessionId?: string;
     sessionScope?: AgentSessionSummary['scope'];
@@ -329,6 +332,26 @@ const Chat = () => {
       ) ||
       activeAgent?.sessionSummaries[0],
     [activeAgent, activeCapability.id],
+  );
+  const generalChatMessages = useMemo(
+    () =>
+      workspace.messages.filter(message => {
+        if (message.workItemId) {
+          return false;
+        }
+        if (message.sessionScope && message.sessionScope !== 'GENERAL_CHAT') {
+          return false;
+        }
+        if (
+          message.sessionScope === 'GENERAL_CHAT' &&
+          message.sessionScopeId &&
+          message.sessionScopeId !== activeCapability.id
+        ) {
+          return false;
+        }
+        return true;
+      }),
+    [activeCapability.id, workspace.messages],
   );
   const capabilityExperience = useMemo(
     () =>
@@ -450,17 +473,17 @@ const Chat = () => {
   const filteredMessages = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
     if (!normalizedQuery) {
-      return workspace.messages;
+      return generalChatMessages;
     }
 
-    return workspace.messages.filter(message =>
+    return generalChatMessages.filter(message =>
       [message.content, message.agentName, message.role]
         .filter(Boolean)
         .join(' ')
         .toLowerCase()
         .includes(normalizedQuery),
     );
-  }, [searchQuery, workspace.messages]);
+  }, [generalChatMessages, searchQuery]);
 
   const runtimeIdentityLabel = runtimeStatus?.githubIdentity
     ? [
@@ -688,7 +711,7 @@ const Chat = () => {
     const userMessageId = `${Date.now()}-user`;
     const userTimestamp = formatTimestamp();
     const historyForRequest = [
-      ...workspace.messages.slice(-10),
+      ...generalChatMessages.slice(-10),
       {
         id: userMessageId,
         capabilityId: activeCapability.id,
@@ -920,6 +943,48 @@ const Chat = () => {
 
   const handleStopStreaming = () => {
     abortControllerRef.current?.abort();
+  };
+
+  const handleClearChat = async () => {
+    if (isSending || isClearingChat || generalChatMessages.length === 0) {
+      return;
+    }
+
+    const shouldClear = window.confirm(
+      'Clear the capability copilot transcript? This also resets the saved general chat session so the next turn starts fresh.',
+    );
+    if (!shouldClear) {
+      return;
+    }
+
+    setIsClearingChat(true);
+    try {
+      await clearCapabilityMessageHistoryRecord(activeCapability.id, {
+        sessionScope: 'GENERAL_CHAT',
+        sessionScopeId: activeCapability.id,
+      });
+      await refreshCapabilityBundle(activeCapability.id);
+      setSearchQuery('');
+      setInput('');
+      setError('');
+      setRuntimeErrorDetail('');
+      setStreamedDraft('');
+      setLastMemoryReferences([]);
+      setMessageAnnotations({});
+      setLastSessionSnapshot(null);
+      setPendingSessionMode('resume');
+      success(
+        'Chat cleared',
+        'The capability transcript was cleared and the saved general chat session was reset.',
+      );
+    } catch (nextError) {
+      showError(
+        'Unable to clear chat',
+        nextError instanceof Error ? nextError.message : 'Unable to clear the transcript right now.',
+      );
+    } finally {
+      setIsClearingChat(false);
+    }
   };
 
   const runtimeBadge = runtimeStatus?.configured
@@ -1712,6 +1777,19 @@ const Chat = () => {
               </button>
               <button
                 type="button"
+                onClick={handleClearChat}
+                disabled={isSending || isClearingChat || generalChatMessages.length === 0}
+                className="enterprise-button enterprise-button-secondary border-red-200 text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {isClearingChat ? (
+                  <LoaderCircle size={14} className="animate-spin" />
+                ) : (
+                  <Trash2 size={14} />
+                )}
+                Clear chat
+              </button>
+              <button
+                type="button"
                 onClick={() => setInspectorOpen(current => !current)}
                 className="enterprise-button enterprise-button-secondary"
               >
@@ -1755,7 +1833,7 @@ const Chat = () => {
                 <span>
                   {searchQuery
                     ? `${filteredMessages.length} match${filteredMessages.length === 1 ? '' : 'es'}`
-                    : `${workspace.messages.length} message${workspace.messages.length === 1 ? '' : 's'}`}
+                    : `${generalChatMessages.length} message${generalChatMessages.length === 1 ? '' : 's'}`}
                 </span>
               </div>
             </div>

@@ -1,9 +1,13 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   decodeWorkspaceDatabaseBootstrapProfileSnapshot,
   encodeWorkspaceDatabaseBootstrapProfileSnapshot,
   resolveActiveWorkspaceDatabaseBootstrapProfileId,
   upsertWorkspaceDatabaseBootstrapProfile,
+  writeWorkspaceDatabaseBootstrapEnvSnapshot,
 } from '../databaseProfiles';
 
 describe('databaseProfiles', () => {
@@ -83,5 +87,33 @@ describe('databaseProfiles', () => {
         adminDatabaseName: 'postgres',
       }),
     ).toBe(decoded.profiles[0]?.id);
+  });
+
+  it('syncs the active runtime profile into the env file', async () => {
+    const snapshot = upsertWorkspaceDatabaseBootstrapProfile(
+      { profiles: [] },
+      {
+        host: '127.0.0.1',
+        port: 5432,
+        databaseName: 'sing5',
+        user: 'ashokraj',
+        adminDatabaseName: 'postgres',
+      },
+      { makeActive: true },
+    );
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'db-profile-env-'));
+    const envPath = path.join(tempDir, '.env.local');
+
+    await fs.writeFile(envPath, 'PORT=3001\nPGDATABASE=singmaster\n', 'utf8');
+    await writeWorkspaceDatabaseBootstrapEnvSnapshot(envPath, snapshot);
+
+    const contents = await fs.readFile(envPath, 'utf8');
+    expect(contents).toContain('PGDATABASE=sing5');
+    expect(contents).toContain('PGHOST=127.0.0.1');
+    expect(contents).toContain('PGUSER=ashokraj');
+    expect(contents).toContain(
+      `WORKSPACE_ACTIVE_DB_PROFILE_ID=${snapshot.activeProfileId}`,
+    );
   });
 });
