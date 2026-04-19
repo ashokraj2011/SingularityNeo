@@ -1,0 +1,16 @@
+{
+  "activeKeyId": null,
+  "keys": {
+    "__scaffold__": {
+      "note": "This file is a scaffold. Populate it with one or more Ed25519 public keys before enabling governance signature verification.",
+      "example": {
+        "signing_key_id": "svc-ed25519-2026-04",
+        "algorithm": "ed25519",
+        "publicKeyPem": "-----BEGIN PUBLIC KEY-----\n...base64 spki...\n-----END PUBLIC KEY-----\n",
+        "validFrom": "2026-04-01T00:00:00Z",
+        "validUntil": null,
+        "retired": false
+      }
+    }
+  }
+}

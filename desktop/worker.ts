@@ -808,6 +808,16 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
   const tokenSource = getConfiguredTokenSource();
   const headlessCli = tokenSource === 'headless-cli';
   const configured = headlessCli || Boolean(token);
+  const controlPlaneRuntimeStatus = await controlPlaneRequest<
+    Pick<
+      RuntimeStatus,
+      'databaseRuntime' | 'activeDatabaseProfileId' | 'activeDatabaseProfileLabel'
+    >
+  >('/api/runtime/status').catch(() => ({
+    databaseRuntime: undefined,
+    activeDatabaseProfileId: null,
+    activeDatabaseProfileLabel: null,
+  }));
   const { models, fromRuntime } = await listAvailableRuntimeModels();
   const runtimeDefaultModel = configured
     ? await getRuntimeDefaultModel()
@@ -836,6 +846,9 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
       token,
       modelCatalogFromRuntime: fromRuntime,
     }),
+    databaseRuntime: controlPlaneRuntimeStatus.databaseRuntime,
+    activeDatabaseProfileId: controlPlaneRuntimeStatus.activeDatabaseProfileId ?? null,
+    activeDatabaseProfileLabel: controlPlaneRuntimeStatus.activeDatabaseProfileLabel ?? null,
     httpFallbackEnabled: process.env.ALLOW_GITHUB_MODELS_HTTP_FALLBACK === 'true',
     lastRuntimeError: identityResult.error,
     streaming: true,

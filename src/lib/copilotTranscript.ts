@@ -7,14 +7,38 @@ export type CopilotTranscriptBlock =
     }
   | { type: 'system'; text: string };
 
-const WRAPPER_TAG_PATTERN = /<\/?(?:function_calls|tool_calls|thinking)>|<\/invoke_tool_name>/gi;
+// Scaffold tags that different model families wrap around tool invocations.
+// Stripped from raw text so they never leak into rendered message bodies.
+// Covers: Anthropic `<*>`, OpenAI-style `<function_calls>/<tool_calls>`,
+// Llama/Qwen/DeepSeek `<tool_call>`, and generic `<thinking>/<invoke>` tokens.
+//
+// We intentionally match these as *standalone* tags (open OR close, with or
+// without attributes) so that malformed/unbalanced fragments streamed from
+// the model still get cleaned up — e.g. a stray `</tool_call>` by itself, or
+// a `<function_name>foo</parameter>` with mismatched closers.
+const SCAFFOLD_TAGS = [
+  'antml:function_calls',
+  'antml:invoke',
+  'antml:parameter',
+  'function_calls',
+  'tool_calls',
+  'tool_call',
+  'invoke',
+  'parameter',
+  'invoke_tool_name',
+  'function_name',
+  'thinking',
+  'system_notification',
+].join('|');
+const SCAFFOLD_TAG_PATTERN = new RegExp(`<\\/?(?:${SCAFFOLD_TAGS})\\b[^>]*>`, 'gi');
+
 const TOKEN_PATTERN =
-  /<invoke_tool_name>([\s\S]*?)<\/invoke_tool_name>|<parameter\s+name="([^"]+)">([\s\S]*?)<\/parameter>|<system_notification>([\s\S]*?)<\/system_notification>/gi;
+  /<(?:antml:invoke|invoke)\s+name="([^"]+)"[^>]*>|<invoke_tool_name>([\s\S]*?)<\/invoke_tool_name>|<function_name>([\s\S]*?)<\/function_name>|<(?:antml:parameter|parameter)\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/(?:antml:parameter|parameter)>|<system_notification>([\s\S]*?)<\/system_notification>/gi;
 
 const normalizeChunk = (value: string) =>
   String(value || '')
     .replace(/\r\n/g, '\n')
-    .replace(WRAPPER_TAG_PATTERN, '\n')
+    .replace(SCAFFOLD_TAG_PATTERN, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
@@ -58,14 +82,37 @@ export const parseCopilotTranscriptBlocks = (
   for (const match of normalized.matchAll(TOKEN_PATTERN)) {
     appendText(normalized.slice(lastIndex, match.index));
 
-    if (typeof match[1] === 'string') {
+    // Groups:
+    //   1 — <invoke name="X"> / <invoke name="X">  (tool name via attr)
+    //   2 — <invoke_tool_name>X</invoke_tool_name>        (legacy tool name)
+    //   3 — <function_name>X</function_name>              (OSS tool name)
+    //   4 — parameter name attr  (paired with group 5)
+    //   5 — parameter value      (paired with group 4)
+    //   6 — <system_notification>X</system_notification>
+    const toolNameFromAttr = match[1];
+    const toolNameFromInvoke = match[2];
+    const toolNameFromFunction = match[3];
+    const parameterName = match[4];
+    const parameterValue = match[5];
+    const systemText = match[6];
+
+    const resolvedToolName =
+      typeof toolNameFromAttr === 'string'
+        ? toolNameFromAttr
+        : typeof toolNameFromInvoke === 'string'
+        ? toolNameFromInvoke
+        : typeof toolNameFromFunction === 'string'
+        ? toolNameFromFunction
+        : null;
+
+    if (resolvedToolName !== null) {
       flushPendingTool();
       pendingTool = {
         type: 'tool',
-        toolName: normalizeChunk(match[1]),
+        toolName: normalizeChunk(resolvedToolName),
         parameters: [],
       };
-    } else if (typeof match[2] === 'string') {
+    } else if (typeof parameterName === 'string') {
       if (!pendingTool) {
         pendingTool = {
           type: 'tool',
@@ -74,12 +121,12 @@ export const parseCopilotTranscriptBlocks = (
         };
       }
       pendingTool.parameters.push({
-        name: normalizeChunk(match[2]) || 'value',
-        value: normalizeChunk(match[3] || ''),
+        name: normalizeChunk(parameterName) || 'value',
+        value: normalizeChunk(parameterValue || ''),
       });
-    } else if (typeof match[4] === 'string') {
+    } else if (typeof systemText === 'string') {
       flushPendingTool();
-      const text = normalizeChunk(match[4]);
+      const text = normalizeChunk(systemText);
       if (text) {
         blocks.push({ type: 'system', text });
       }

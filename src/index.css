@@ -83,6 +83,7 @@
 
   .app-shell {
     @apply flex min-h-screen bg-surface;
+    --shell-sidebar-width: 0px;
   }
 
   .shell-sidebar {
@@ -353,6 +354,26 @@
     @apply fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto px-4 py-16;
   }
 
+  .desktop-content-overlay {
+    @apply fixed inset-0 z-[90];
+  }
+
+  .desktop-content-overlay-backdrop {
+    @apply absolute inset-0 bg-slate-950/35;
+  }
+
+  .desktop-content-overlay-panel-right {
+    @apply absolute right-0 top-0 h-full;
+  }
+
+  .desktop-content-modal-overlay {
+    @apply fixed inset-0 z-[92] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-12 backdrop-blur-sm;
+  }
+
+  .desktop-content-modal-backdrop {
+    @apply absolute inset-0;
+  }
+
   .team-command-bar {
     @apply flex flex-col gap-4 rounded-[2rem] border border-primary/10 bg-white/95 px-5 py-5 shadow-[0_18px_46px_rgba(12,23,39,0.07)] xl:flex-row xl:items-center xl:justify-between;
   }
@@ -546,36 +567,132 @@
   }
 
   .orchestrator-list-top-grid {
-    @apply grid gap-4 xl:grid-cols-[21rem_minmax(0,1fr)];
+    @apply grid items-start gap-4 xl:grid-cols-[22rem_minmax(0,1fr)];
+  }
+
+  .orchestrator-list-inbox-panel {
+    @apply flex min-h-[44rem] flex-col;
+    /* Let the inbox grow with the viewport so it comfortably holds a dozen+
+       cards without feeling cramped. Old ceiling was 42rem; now we trade off
+       against the shell chrome (~14rem) instead of the stats rail (22rem). */
+    max-height: min(60rem, calc(100vh - 14rem));
+  }
+
+  .orchestrator-list-inbox-scroll {
+    @apply min-h-0 flex-1 overflow-y-auto px-4 py-4;
+  }
+
+  .orchestrator-list-summary-panel {
+    @apply flex min-h-[34rem] flex-col;
+    max-height: min(42rem, calc(100vh - 22rem));
+  }
+
+  .orchestrator-navigator-card {
+    @apply rounded-[1.35rem] border border-outline-variant/30 bg-white shadow-[0_8px_24px_rgba(12,23,39,0.05)] transition-all;
+  }
+
+  .orchestrator-navigator-card-active {
+    @apply border-primary/35 bg-primary/5 shadow-[0_14px_30px_rgba(0,132,61,0.12)];
   }
 
   .orchestrator-phase-rail-shell {
     @apply space-y-0;
   }
 
+  /* Shared axis so the line, station dots, and slider handle all snap to the
+     same y coordinate — no more manual 1.25rem repeated across rules. */
   .orchestrator-phase-rail-track {
     @apply relative overflow-visible px-4 pb-14 pt-2;
+    --phase-rail-axis: 1.25rem;
+    --phase-rail-dot: 0.75rem; /* 12px station dot */
     min-height: 8.5rem;
     touch-action: none;
   }
 
+  /* Hairline base rail + a continuously-flowing labyrinth shimmer that loops
+     forever. The shimmer is rendered inside ::after so it clips cleanly to
+     the rounded rail and does not bleed into the track shell. */
   .orchestrator-phase-rail-progress {
-    @apply absolute left-4 right-4 h-3 -translate-y-1/2 rounded-full bg-gradient-to-r from-outline-variant/30 via-outline-variant/50 to-outline-variant/30;
-    top: 1.25rem;
+    @apply absolute left-4 right-4 rounded-full;
+    top: var(--phase-rail-axis);
+    height: 2px;
+    transform: translateY(-50%);
+    background: linear-gradient(
+      90deg,
+      rgba(148, 163, 184, 0.22) 0%,
+      rgba(148, 163, 184, 0.45) 50%,
+      rgba(148, 163, 184, 0.22) 100%
+    );
+    overflow: hidden;
   }
 
+  .orchestrator-phase-rail-progress::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: repeating-linear-gradient(
+      90deg,
+      transparent 0,
+      transparent 20px,
+      rgba(0, 132, 61, 0.35) 20px,
+      rgba(0, 132, 61, 0.55) 24px,
+      rgba(0, 132, 61, 0.35) 28px,
+      transparent 28px,
+      transparent 48px
+    );
+    background-size: 48px 100%;
+    animation: orchestrator-phase-rail-loop 4.2s linear infinite;
+    opacity: 0.7;
+    pointer-events: none;
+  }
+
+  @keyframes orchestrator-phase-rail-loop {
+    from { background-position: 0 0; }
+    to   { background-position: 96px 0; }
+  }
+
+  /* Current-progress fill — same 2px hairline with a breathing halo so the
+     reached portion feels "alive" without competing with the base loop. */
   .orchestrator-phase-rail-progress-current {
-    @apply absolute left-4 h-3 -translate-y-1/2 rounded-full bg-gradient-to-r from-primary/10 via-primary/20 to-primary/30;
-    top: 1.25rem;
+    @apply absolute left-4 rounded-full;
+    top: var(--phase-rail-axis);
+    height: 2px;
+    transform: translateY(-50%);
+    background: linear-gradient(
+      90deg,
+      rgba(0, 132, 61, 0.55) 0%,
+      rgba(0, 132, 61, 0.85) 60%,
+      rgba(0, 132, 61, 1) 100%
+    );
+    box-shadow: 0 0 6px rgba(0, 132, 61, 0.45);
+    animation: orchestrator-phase-rail-breathe 2.6s ease-in-out infinite;
   }
 
+  @keyframes orchestrator-phase-rail-breathe {
+    0%, 100% { box-shadow: 0 0 4px rgba(0, 132, 61, 0.32); }
+    50%      { box-shadow: 0 0 12px rgba(0, 132, 61, 0.58); }
+  }
+
+  /* Preview overlay — thicker than the current fill so it reads as a forecast,
+     but still thinner than the old 12px bar. */
   .orchestrator-phase-rail-progress-preview {
-    @apply absolute left-4 h-3 -translate-y-1/2 rounded-full bg-gradient-to-r from-primary/20 via-primary/40 to-primary/65 opacity-80 transition-all duration-150;
-    top: 1.25rem;
+    @apply absolute left-4 rounded-full transition-all duration-150;
+    top: var(--phase-rail-axis);
+    height: 2px;
+    transform: translateY(-50%);
+    background: linear-gradient(
+      90deg,
+      rgba(0, 132, 61, 0.25) 0%,
+      rgba(0, 132, 61, 0.6) 50%,
+      rgba(0, 132, 61, 0.9) 100%
+    );
+    opacity: 0.7;
   }
 
   .orchestrator-phase-rail-progress-preview-active {
-    @apply opacity-100 shadow-[0_0_18px_rgba(0,132,61,0.2)];
+    opacity: 1;
+    box-shadow: 0 0 14px rgba(0, 132, 61, 0.3);
   }
 
   .orchestrator-phase-rail-stations {
@@ -583,23 +700,51 @@
     pointer-events: none;
   }
 
+  /* Station button starts at the top of the stations layer and uses
+     padding-top to place the dot exactly on the shared axis. Keeps dot,
+     label, and hit target in one natural flex column. */
   .orchestrator-phase-station {
-    @apply absolute flex min-w-0 -translate-x-1/2 flex-col items-center gap-3 rounded-[1.25rem] px-2 py-2 text-center transition-all hover:bg-primary/5;
-    top: 0.625rem;
+    @apply absolute flex min-w-0 -translate-x-1/2 flex-col items-center gap-2.5 rounded-[1rem] px-2 text-center transition-colors duration-150 hover:bg-primary/5;
+    top: 0;
+    padding-top: calc(var(--phase-rail-axis) - (var(--phase-rail-dot) / 2));
+    padding-bottom: 0.5rem;
     width: clamp(5rem, 10vw, 7rem);
     pointer-events: auto;
   }
 
   .orchestrator-phase-station-dot {
-    @apply h-5 w-5 rounded-full border-2 border-outline-variant/45 bg-white shadow-[0_0_0_8px_rgba(255,255,255,0.84)] transition-all;
+    @apply rounded-full border bg-white transition-all duration-200;
+    width: var(--phase-rail-dot);
+    height: var(--phase-rail-dot);
+    border-color: rgba(148, 163, 184, 0.55);
+    box-shadow:
+      0 0 0 3px rgba(255, 255, 255, 0.95),
+      0 1px 2px rgba(0, 0, 0, 0.05);
   }
 
   .orchestrator-phase-station-label {
-    @apply text-[0.72rem] font-semibold leading-tight text-secondary;
+    @apply text-[0.72rem] font-semibold leading-tight text-secondary transition-colors duration-150;
   }
 
   .orchestrator-phase-station-active .orchestrator-phase-station-dot {
-    @apply border-primary bg-primary shadow-[0_0_0_10px_rgba(0,132,61,0.14)];
+    border-color: rgba(0, 132, 61, 1);
+    background: rgba(0, 132, 61, 1);
+    animation: orchestrator-phase-station-pulse 2.4s ease-in-out infinite;
+  }
+
+  @keyframes orchestrator-phase-station-pulse {
+    0%, 100% {
+      box-shadow:
+        0 0 0 3px rgba(255, 255, 255, 0.95),
+        0 0 0 5px rgba(0, 132, 61, 0.22),
+        0 0 10px rgba(0, 132, 61, 0.42);
+    }
+    50% {
+      box-shadow:
+        0 0 0 3px rgba(255, 255, 255, 0.95),
+        0 0 0 8px rgba(0, 132, 61, 0.08),
+        0 0 18px rgba(0, 132, 61, 0.6);
+    }
   }
 
   .orchestrator-phase-station-active .orchestrator-phase-station-label,
@@ -608,28 +753,53 @@
   }
 
   .orchestrator-phase-station-preview .orchestrator-phase-station-dot {
-    @apply border-primary bg-primary/75 shadow-[0_0_0_10px_rgba(0,132,61,0.16)];
+    border-color: rgba(0, 132, 61, 1);
+    background: rgba(0, 132, 61, 0.75);
+    box-shadow:
+      0 0 0 3px rgba(255, 255, 255, 0.95),
+      0 0 0 5px rgba(0, 132, 61, 0.18);
   }
 
   .orchestrator-phase-station-reached .orchestrator-phase-station-dot {
-    @apply border-primary/60 bg-primary/45;
+    border-color: rgba(0, 132, 61, 0.6);
+    background: rgba(0, 132, 61, 0.5);
   }
 
+  /* Slider handle — slimmer disc with a soft backdrop so the dot shows
+     through while the edge stays legible on busy lists underneath. */
   .orchestrator-phase-slider-handle {
-    @apply absolute z-20 flex h-10 w-10 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-primary/15 bg-primary/10 transition-all duration-150;
-    top: 1.25rem;
+    @apply absolute z-20 flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-primary/30 backdrop-blur-sm transition-all duration-150;
+    top: var(--phase-rail-axis);
+    background: rgba(255, 255, 255, 0.88);
+    box-shadow:
+      0 2px 10px rgba(0, 132, 61, 0.18),
+      0 0 0 4px rgba(255, 255, 255, 0.75);
   }
 
   .orchestrator-phase-slider-handle-interactive {
-    @apply cursor-ew-resize hover:scale-[1.04] focus:outline-none focus:ring-2 focus:ring-primary/25 focus:ring-offset-2;
+    @apply cursor-ew-resize hover:scale-[1.06] focus:outline-none focus:ring-2 focus:ring-primary/25 focus:ring-offset-2;
   }
 
   .orchestrator-phase-slider-handle-dragging {
-    @apply scale-110 bg-primary/15 shadow-[0_18px_36px_rgba(0,132,61,0.22)];
+    @apply scale-110;
+    box-shadow:
+      0 12px 28px rgba(0, 132, 61, 0.3),
+      0 0 0 4px rgba(255, 255, 255, 0.9);
   }
 
   .orchestrator-phase-slider-handle-core {
-    @apply h-5 w-5 rounded-full bg-primary shadow-[0_0_0_7px_rgba(255,255,255,0.94)];
+    @apply rounded-full bg-primary;
+    width: 0.625rem;
+    height: 0.625rem;
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.98);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .orchestrator-phase-rail-progress::after,
+    .orchestrator-phase-rail-progress-current,
+    .orchestrator-phase-station-active .orchestrator-phase-station-dot {
+      animation: none !important;
+    }
   }
 
   .orchestrator-board-shell {
@@ -737,11 +907,11 @@
   }
 
   .orchestrator-navigator-item {
-    @apply w-full rounded-[1.35rem] border border-outline-variant/30 bg-white px-4 py-4 text-left transition-all hover:border-primary/20 hover:bg-primary/5 hover:shadow-[0_12px_26px_rgba(15,23,42,0.08)];
+    @apply w-full rounded-[1.35rem] px-4 py-4 text-left transition-all hover:bg-primary/5 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:ring-offset-2;
   }
 
   .orchestrator-navigator-item-active {
-    @apply border-primary/35 bg-primary/5 shadow-[0_14px_30px_rgba(0,132,61,0.12)];
+    @apply bg-primary/5;
   }
 
   .orchestrator-navigator-empty {
@@ -809,14 +979,75 @@
   }
 
   .orchestrator-stage-chat-thread-dock {
-    @apply mt-0 min-h-0 flex-1 overflow-y-scroll pr-1;
-    overscroll-behavior: contain;
+    @apply mt-0 min-h-0 flex-1 overflow-y-auto pr-1;
+    /* Override the dark Operate-tab thread look with a soft, Claude-style surface */
+    background: linear-gradient(180deg, rgba(250, 251, 255, 0.97), rgba(240, 243, 250, 0.95));
+    max-height: none;
+    /* `auto` (not `contain`) so wheel events chain to the page when the
+       thread is at its top/bottom boundary — lets users scroll the whole
+       page from over the copilot dock. */
+    overscroll-behavior: auto;
     scrollbar-gutter: stable both-edges;
+    scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
+  }
+
+  .orchestrator-stage-chat-thread-dock::-webkit-scrollbar-track {
+    background: transparent;
+    border-radius: 999px;
+  }
+
+  .orchestrator-stage-chat-thread-dock::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.5);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .orchestrator-stage-chat-thread-dock .orchestrator-stage-chat-empty {
+    @apply rounded-[1.25rem] border border-dashed border-outline-variant/45 bg-white/75 text-secondary;
+  }
+
+  .orchestrator-stage-chat-thread-dock .orchestrator-stage-chat-message {
+    @apply shadow-[0_10px_24px_rgba(15,23,42,0.07)];
+  }
+
+  .orchestrator-stage-chat-thread-dock .orchestrator-stage-chat-message-user {
+    @apply ml-auto max-w-[82%] bg-primary text-white shadow-[0_10px_24px_rgba(0,132,61,0.22)];
+  }
+
+  .orchestrator-stage-chat-thread-dock .orchestrator-stage-chat-message-agent {
+    @apply max-w-full border border-outline-variant/35 bg-white/96 text-slate-900;
+  }
+
+  .orchestrator-stage-chat-thread-dock .orchestrator-stage-chat-message-meta {
+    @apply text-secondary;
+  }
+
+  .orchestrator-stage-chat-thread-dock
+    .orchestrator-stage-chat-message-user
+    .orchestrator-stage-chat-message-meta {
+    @apply text-white/85;
+  }
+
+  .orchestrator-stage-chat-message-thinking {
+    @apply bg-white/90;
+  }
+
+  .orchestrator-copilot-dock-shell {
+    /* Clip the card's rounded corners without swallowing wheel events on the
+       header. The body uses a bounded height so internal scroll stays local
+       while wheel events over the header still bubble to the page. */
+    @apply overflow-hidden;
+    contain: paint;
   }
 
   .orchestrator-copilot-dock-body {
-    @apply flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-5 py-4;
-    min-height: clamp(28rem, 62vh, 52rem);
+    /* No overflow-hidden here — the shell already clips rounded corners,
+       and the inner thread/status each manage their own scroll. Keeping this
+       container free of a scroll box lets wheel events bubble through to the
+       page when the thread is at a boundary. */
+    @apply flex min-h-0 flex-1 flex-col gap-4 px-5 py-4;
+    min-height: clamp(22rem, 48vh, 40rem);
+    max-height: calc(100vh - 18rem);
   }
 
   .orchestrator-copilot-dock-status {
@@ -885,6 +1116,11 @@
       @apply grid-cols-1;
     }
 
+    .orchestrator-list-inbox-panel,
+    .orchestrator-list-summary-panel {
+      max-height: none;
+    }
+
     .orchestrator-detail-panel {
       @apply min-h-0;
     }
@@ -909,6 +1145,13 @@
 
     .orchestrator-list-row {
       @apply grid-cols-1 gap-2;
+    }
+  }
+
+  @media (min-width: 1024px) {
+    .desktop-content-overlay,
+    .desktop-content-modal-overlay {
+      left: var(--shell-sidebar-width, 0px);
     }
   }
 
@@ -982,6 +1225,181 @@
 
   .markdown-content td {
     @apply border-t border-outline-variant/20 px-4 py-3 text-sm leading-7 text-secondary align-top;
+  }
+
+  /* Copilot message body — markdown rendering scoped to chat bubbles.
+     Overrides the default .markdown-content palette so text is legible on
+     each tone (user bubble = white-on-primary, agent/draft = dark-on-light). */
+  .copilot-md {
+    @apply mt-0 space-y-2.5 text-[0.9375rem] leading-7;
+  }
+
+  .copilot-md > *:first-child {
+    @apply mt-0;
+  }
+
+  .copilot-md > *:last-child {
+    @apply mb-0;
+  }
+
+  .copilot-md p {
+    @apply text-[0.9375rem] leading-7;
+  }
+
+  .copilot-md-agent,
+  .copilot-md-agent p,
+  .copilot-md-agent li,
+  .copilot-md-agent blockquote,
+  .copilot-md-draft,
+  .copilot-md-draft p,
+  .copilot-md-draft li,
+  .copilot-md-draft blockquote {
+    @apply text-slate-800;
+  }
+
+  .copilot-md-agent h1,
+  .copilot-md-agent h2,
+  .copilot-md-agent h3,
+  .copilot-md-draft h1,
+  .copilot-md-draft h2,
+  .copilot-md-draft h3 {
+    @apply text-slate-900;
+  }
+
+  .copilot-md-agent code,
+  .copilot-md-draft code {
+    @apply bg-slate-900/10 text-slate-900;
+  }
+
+  .copilot-md-agent pre,
+  .copilot-md-draft pre {
+    @apply rounded-xl border border-slate-900/10 bg-slate-950 px-4 py-3 text-[0.8125rem] leading-6 text-slate-100 shadow-inner;
+  }
+
+  .copilot-md-agent pre code,
+  .copilot-md-draft pre code {
+    @apply bg-transparent text-slate-100;
+  }
+
+  .copilot-md-agent a,
+  .copilot-md-draft a {
+    @apply text-primary underline decoration-primary/40 underline-offset-4;
+  }
+
+  .copilot-md-agent blockquote,
+  .copilot-md-draft blockquote {
+    @apply border-l-2 border-primary/35 bg-primary/5 pl-4 italic;
+  }
+
+  .copilot-md-user,
+  .copilot-md-user p,
+  .copilot-md-user li,
+  .copilot-md-user blockquote,
+  .copilot-md-user h1,
+  .copilot-md-user h2,
+  .copilot-md-user h3 {
+    @apply text-white;
+  }
+
+  .copilot-md-user code {
+    @apply bg-white/18 text-white;
+  }
+
+  .copilot-md-user pre {
+    @apply rounded-xl border border-white/15 bg-slate-950/45 px-4 py-3 text-[0.8125rem] leading-6 text-white;
+  }
+
+  .copilot-md-user pre code {
+    @apply bg-transparent text-white;
+  }
+
+  .copilot-md-user a {
+    @apply text-white underline decoration-white/60 underline-offset-4;
+  }
+
+  .copilot-md-user blockquote {
+    @apply border-l-2 border-white/40 bg-white/10;
+  }
+
+  /* When the copilot body renders directly inside a chat bubble, drop the
+     default `mt-3` top gap — the bubble already provides its own padding. */
+  .chat-message-bubble > div.mt-3 {
+    @apply mt-0;
+  }
+  .chat-message-bubble > div.mt-3 > :first-child {
+    @apply mt-0;
+  }
+
+  /* Streaming caret — blinks at the tail of the last text block while tokens arrive. */
+  .copilot-md-block-streaming > .copilot-md > *:last-child::after {
+    content: '';
+    display: inline-block;
+    width: 0.45rem;
+    height: 1.05em;
+    margin-left: 0.18rem;
+    vertical-align: -0.18em;
+    background-color: currentColor;
+    opacity: 0.55;
+    border-radius: 1px;
+    animation: copilot-caret-blink 1.05s steps(2, end) infinite;
+  }
+
+  @keyframes copilot-caret-blink {
+    0%, 100% {
+      opacity: 0.55;
+    }
+    50% {
+      opacity: 0;
+    }
+  }
+
+  /* Thinking indicator — three bouncing dots with an optional inline label.
+     Used both as a meta-row dock/stage indicator and as the primary content
+     of a pre-stream "thinking" bubble. */
+  .copilot-thinking-indicator {
+    @apply inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-secondary;
+  }
+
+  .copilot-thinking-indicator-user {
+    @apply text-white/85;
+  }
+
+  .copilot-thinking-dots {
+    @apply inline-flex items-end gap-1;
+  }
+
+  .copilot-thinking-dot {
+    @apply block h-1.5 w-1.5 rounded-full bg-primary/75;
+    animation: copilot-thinking-bounce 1.15s ease-in-out infinite;
+  }
+
+  .copilot-thinking-indicator-user .copilot-thinking-dot {
+    @apply bg-white/85;
+  }
+
+  .copilot-thinking-dot:nth-child(2) {
+    animation-delay: 0.14s;
+  }
+
+  .copilot-thinking-dot:nth-child(3) {
+    animation-delay: 0.28s;
+  }
+
+  .copilot-thinking-label {
+    @apply normal-case tracking-normal text-[0.72rem];
+  }
+
+  @keyframes copilot-thinking-bounce {
+    0%,
+    80%,
+    100% {
+      transform: translateY(0);
+      opacity: 0.35;
+    }
+    40% {
+      transform: translateY(-4px);
+      opacity: 1;
+    }
   }
 
   .designer-studio-shell {

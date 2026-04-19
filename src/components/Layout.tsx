@@ -33,6 +33,7 @@ import {
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
+import { fetchRuntimeStatus, type RuntimeStatus } from '../lib/api';
 import {
   getVisibleAdvancedToolDescriptors,
   type AdvancedToolId,
@@ -110,6 +111,7 @@ const Sidebar = ({
   onToggleAdvancedNav: () => void;
 }) => {
   const navigate = useNavigate();
+  const location = useLocation();
   const {
     activeCapability,
     bootStatus,
@@ -122,6 +124,7 @@ const Sidebar = ({
   } = useCapability();
   const { success } = useToast();
   const [isCapabilityMenuOpen, setIsCapabilityMenuOpen] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const activeCapabilities = useMemo(
@@ -148,6 +151,48 @@ const Sidebar = ({
   useEffect(() => {
     setIsCapabilityMenuOpen(false);
   }, [isCollapsed]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadRuntimeStatus = () => {
+      void fetchRuntimeStatus()
+        .then(status => {
+          if (isMounted) {
+            setRuntimeStatus(status);
+          }
+        })
+        .catch(() => {
+          if (isMounted) {
+            setRuntimeStatus(current => current);
+          }
+        });
+    };
+
+    loadRuntimeStatus();
+    const refreshInterval = window.setInterval(loadRuntimeStatus, 15000);
+    const handleFocus = () => loadRuntimeStatus();
+
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      isMounted = false;
+      window.clearInterval(refreshInterval);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [location.pathname]);
+
+  const runtimeDatabaseTone =
+    runtimeStatus?.databaseRuntime?.lastConnectionError
+      ? 'danger'
+      : runtimeStatus?.activeDatabaseProfileId
+      ? 'success'
+      : 'warning';
+  const runtimeDatabaseName =
+    runtimeStatus?.databaseRuntime?.databaseName || 'Unknown DB';
+  const runtimeDatabaseLabel =
+    runtimeStatus?.activeDatabaseProfileLabel ||
+    runtimeStatus?.activeDatabaseProfileId ||
+    'Unsaved runtime target';
 
   const handleCapabilityStatusToggle = () => {
     void (async () => {
@@ -247,14 +292,50 @@ const Sidebar = ({
           <p className="mt-2 text-xs leading-relaxed text-secondary">
             Daily execution lives in Work. Home summarizes health, and specialist views stay one click away when you need them.
           </p>
+          <button
+            type="button"
+            onClick={() => navigate('/workspace/databases')}
+            className="mt-3 flex w-full items-start justify-between gap-3 rounded-xl border border-primary/10 bg-white/80 px-3 py-2.5 text-left transition hover:border-primary/20 hover:bg-white"
+            title={`Runtime database: ${runtimeDatabaseName}`}
+          >
+            <div className="min-w-0">
+              <p className="text-[0.62rem] font-bold uppercase tracking-[0.16em] text-outline">
+                Active DB
+              </p>
+              <p className="truncate text-sm font-semibold text-on-surface">
+                {runtimeDatabaseName}
+              </p>
+              <p className="truncate text-[0.72rem] text-secondary">
+                {runtimeDatabaseLabel}
+              </p>
+            </div>
+            <StatusBadge tone={runtimeDatabaseTone} className="shrink-0">
+              {runtimeStatus?.databaseRuntime?.lastConnectionError
+                ? 'Error'
+                : runtimeStatus?.activeDatabaseProfileId
+                ? 'Live'
+                : 'Ad hoc'}
+            </StatusBadge>
+          </button>
         </div>
       ) : (
         <div className="flex justify-center">
-          <div
-            className="flex h-11 w-11 items-center justify-center rounded-2xl border border-primary/15 bg-primary/10 text-primary"
-            title="Capability-scoped enterprise workspace"
-          >
-            <Sparkles size={18} />
+          <div className="flex flex-col items-center gap-2">
+            <div
+              className="flex h-11 w-11 items-center justify-center rounded-2xl border border-primary/15 bg-primary/10 text-primary"
+              title="Capability-scoped enterprise workspace"
+            >
+              <Sparkles size={18} />
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/workspace/databases')}
+              className="flex h-10 w-10 items-center justify-center rounded-2xl border border-outline-variant/45 bg-white text-secondary transition hover:border-primary/20 hover:bg-primary/5 hover:text-primary"
+              title={`Active DB: ${runtimeDatabaseName}`}
+              aria-label={`Active DB: ${runtimeDatabaseName}`}
+            >
+              <Database size={16} />
+            </button>
           </div>
         </div>
       )}
@@ -1048,7 +1129,19 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
   }, [isCommandPaletteOpen]);
 
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      style={
+        {
+          '--shell-sidebar-width':
+            !isImmersiveRoute && typeof window !== 'undefined'
+              ? isSidebarCollapsed
+                ? '5.5rem'
+                : '17rem'
+              : '0px',
+        } as React.CSSProperties
+      }
+    >
       {!isImmersiveRoute ? (
         <Sidebar
           isCollapsed={isSidebarCollapsed}

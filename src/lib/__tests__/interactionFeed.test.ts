@@ -229,4 +229,55 @@ describe('buildCapabilityInteractionFeed', () => {
       ]),
     );
   });
+
+  it('caps oversized feeds to recent records so the workbench does not render unbounded history', () => {
+    const oversizedWorkspace = workspace();
+    oversizedWorkspace.messages = Array.from({ length: 320 }, (_, index) => ({
+      id: `MSG-${index}`,
+      capabilityId: 'CAP-FEED',
+      role: 'agent' as const,
+      content: `Message ${index}`,
+      timestamp: new Date(Date.UTC(2026, 3, 15, 10, 0, index)).toISOString(),
+      agentId: 'AGENT-1',
+      agentName: 'Software Developer',
+      workItemId: 'WI-1',
+      runId: 'RUN-1',
+      workflowStepId: 'STEP-1',
+    }));
+    oversizedWorkspace.executionLogs = Array.from({ length: 220 }, (_, index) => ({
+      id: `LOG-${index}`,
+      taskId: 'WI-1',
+      capabilityId: 'CAP-FEED',
+      agentId: 'AGENT-1',
+      timestamp: new Date(Date.UTC(2026, 3, 15, 11, 0, index)).toISOString(),
+      level: 'INFO' as const,
+      message: `Log ${index}`,
+      runId: 'RUN-1',
+      runStepId: 'RUNSTEP-1',
+      metadata: {},
+    }));
+
+    const feed = buildCapabilityInteractionFeed({
+      capability: capability(),
+      workspace: oversizedWorkspace,
+      workItemId: 'WI-1',
+      runDetail: runDetail(),
+      runEvents: Array.from({ length: 180 }, (_, index) => ({
+        id: `EVENT-${index}`,
+        capabilityId: 'CAP-FEED',
+        runId: 'RUN-1',
+        workItemId: 'WI-1',
+        timestamp: new Date(Date.UTC(2026, 3, 15, 12, 0, index)).toISOString(),
+        level: 'INFO',
+        type: 'STEP_INFO',
+        message: `Event ${index}`,
+      })),
+    });
+
+    expect(feed.records.length).toBeLessThanOrEqual(240);
+    expect(feed.summary.totalCount).toBe(feed.records.length);
+    expect(feed.records[0].timestamp >= feed.records[feed.records.length - 1].timestamp).toBe(
+      true,
+    );
+  });
 });

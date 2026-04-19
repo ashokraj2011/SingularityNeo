@@ -60,6 +60,7 @@ import { buildCapabilityBriefing } from '../lib/capabilityBriefing';
 import { buildCapabilityExperience } from '../lib/capabilityExperience';
 import { enrichCapabilityAgentProfile, selectPrimaryCopilotAgentId } from '../lib/agentProfiles';
 import { buildCapabilityInteractionFeed } from '../lib/interactionFeed';
+import { summarizeCapabilityWorkspaceForBootstrap } from '../lib/workspaceBootstrap';
 import { getDefaultCapabilityWorkflows } from '../lib/standardWorkflow';
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowGraph';
@@ -851,17 +852,21 @@ const readInitialState = () => {
     DEFAULT_CAPABILITY_PREFERENCE_KEY,
     '',
   );
+  const activeCapability =
+    getPreferredActiveCapability(capabilities, preferredCapabilityId) ||
+    EMPTY_CAPABILITY;
   const workspaceOrganization = normalizeWorkspaceOrganization();
 
   return {
     capabilities,
     preferredCapabilityId,
-    activeCapability:
-      getPreferredActiveCapability(capabilities, preferredCapabilityId) ||
-      EMPTY_CAPABILITY,
-    capabilityWorkspaces: capabilities.map(capability =>
-      buildCapabilityWorkspace(capability, true),
-    ),
+    activeCapability,
+    capabilityWorkspaces: capabilities.map(capability => {
+      const workspace = buildCapabilityWorkspace(capability, true);
+      return capability.id === activeCapability.id
+        ? workspace
+        : summarizeCapabilityWorkspaceForBootstrap(workspace);
+    }),
     workspaceSettings: EMPTY_WORKSPACE_SETTINGS,
     workspaceOrganization,
   };
@@ -872,14 +877,6 @@ const normalizeAppState = (
   preferredActiveCapabilityId?: string,
 ) => {
   const nextCapabilities = mergeCapabilities(state.capabilities || []);
-  const nextWorkspaces = nextCapabilities.map(capability =>
-    normalizeWorkspace(
-      capability,
-      state.capabilityWorkspaces?.find(
-        workspace => workspace.capabilityId === capability.id,
-      ),
-    ),
-  );
   const workspaceOrganization = normalizeWorkspaceOrganization(
     state.workspaceOrganization,
   );
@@ -893,6 +890,18 @@ const normalizeAppState = (
       currentUserPreference?.defaultCapabilityId || preferredActiveCapabilityId,
     ) ||
     EMPTY_CAPABILITY;
+  const nextWorkspaces = nextCapabilities.map(capability => {
+    const matchingWorkspace = state.capabilityWorkspaces?.find(
+      workspace => workspace.capabilityId === capability.id,
+    );
+
+    return normalizeWorkspace(
+      capability,
+      matchingWorkspace && capability.id !== nextActiveCapability.id
+        ? summarizeCapabilityWorkspaceForBootstrap(matchingWorkspace)
+        : matchingWorkspace,
+    );
+  });
 
   return {
     capabilities: nextCapabilities,

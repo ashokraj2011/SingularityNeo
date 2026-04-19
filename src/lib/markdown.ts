@@ -21,8 +21,9 @@ export const stripMarkdownToText = (value?: string) =>
     .trim();
 
 export const compactMarkdownPreview = (value?: string, maxLength = 220) => {
-  const plainText = stripMarkdownToText(value);
-  if (plainText.length <= maxLength) {
+  const safeSubstring = String(value || '').slice(0, maxLength * 3 + 100);
+  const plainText = stripMarkdownToText(safeSubstring);
+  if (plainText.length <= maxLength && safeSubstring.length === String(value || '').length) {
     return plainText;
   }
 

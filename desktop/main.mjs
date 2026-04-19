@@ -1,5 +1,6 @@
+import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
@@ -19,11 +20,27 @@ const tsxCliPath = path.join(
 );
 
 const normalizeUrl = value => String(value || '').trim().replace(/\/+$/, '');
+const normalizeStartupRoute = value => {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (trimmed.startsWith('#')) {
+    return trimmed;
+  }
+  if (trimmed.startsWith('/')) {
+    return `#${trimmed}`;
+  }
+  return `#/${trimmed}`;
+};
 
 const controlPlaneUrl = normalizeUrl(
   process.env.SINGULARITY_CONTROL_PLANE_URL || 'http://127.0.0.1:3001',
 );
 const rendererDevUrl = normalizeUrl(process.env.SINGULARITY_ELECTRON_DEV_SERVER_URL || '');
+const startupRouteHash = normalizeStartupRoute(
+  process.env.SINGULARITY_ELECTRON_START_ROUTE || '',
+);
 
 let mainWindow = null;
 let localWorker = null;
@@ -32,6 +49,56 @@ const cancelledStreamIds = new Set();
 
 const DEFAULT_WORKER_TIMEOUT_MS = 45_000;
 const STREAM_WORKER_IDLE_TIMEOUT_MS = 5 * 60_000;
+
+const detectDesktopRendererIssue = () => {
+  const distIndexPath = path.join(projectRoot, 'dist', 'index.html');
+  if (!fs.existsSync(distIndexPath)) {
+    return 'No desktop renderer build was found. Run `npm run desktop:build` or use `npm run dev` to launch against the live development server.';
+  }
+
+  const html = fs.readFileSync(distIndexPath, 'utf8');
+  if (/src="\/assets\//.test(html) || /href="\/assets\//.test(html)) {
+    return 'The current dist/ renderer was built for the web with absolute /assets paths. Electron cannot load that from file://, so run `npm run desktop:build` or start the live desktop stack with `npm run dev`.';
+  }
+
+  return null;
+};
+
+const loadStartupIssuePage = async issue => {
+  const body = `<!doctype html>
+  <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Singularity Desktop Startup</title>
+      <style>
+        :root { color-scheme: light; font-family: Inter, system-ui, sans-serif; }
+        body { margin: 0; background: #f4f7fb; color: #102034; }
+        main { max-width: 760px; margin: 8vh auto; padding: 32px; }
+        .card { background: #fff; border: 1px solid #d7e1ee; border-radius: 24px; padding: 28px; box-shadow: 0 20px 60px rgba(16,32,52,.08); }
+        h1 { margin: 0 0 12px; font-size: 28px; }
+        p { line-height: 1.6; margin: 0 0 12px; }
+        code { background: #eef4fb; border-radius: 8px; padding: 2px 6px; }
+        ul { padding-left: 20px; line-height: 1.7; }
+      </style>
+    </head>
+    <body>
+      <main>
+        <div class="card">
+          <h1>Desktop renderer could not start</h1>
+          <p>${issue}</p>
+          <ul>
+            <li>Use <code>npm run dev</code> to launch the live desktop development stack.</li>
+            <li>Or run <code>npm run desktop:build</code> and then <code>npm run desktop:start</code> for a packaged renderer.</li>
+            <li>Make sure the backend is running on <code>${controlPlaneUrl}</code> for data-backed screens.</li>
+          </ul>
+        </div>
+      </main>
+    </body>
+  </html>`;
+
+  await mainWindow.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(body)}`);
+};
 
 const createDesktopContext = () => ({
   isDesktop: true,
@@ -211,12 +278,27 @@ const createWindow = async () => {
   });
 
   if (rendererDevUrl) {
-    await mainWindow.loadURL(rendererDevUrl);
+    const targetUrl =
+      startupRouteHash && !rendererDevUrl.includes('#')
+        ? `${rendererDevUrl.replace(/\/+$/, '')}/${startupRouteHash}`
+        : rendererDevUrl;
+    await mainWindow.loadURL(targetUrl);
     mainWindow.webContents.openDevTools({ mode: 'detach' });
     return;
   }
 
-  await mainWindow.loadFile(path.join(projectRoot, 'dist', 'index.html'));
+  const rendererIssue = detectDesktopRendererIssue();
+  if (rendererIssue) {
+    await loadStartupIssuePage(rendererIssue);
+    return;
+  }
+
+  const packagedRendererUrl = pathToFileURL(
+    path.join(projectRoot, 'dist', 'index.html'),
+  ).toString();
+  await mainWindow.loadURL(
+    startupRouteHash ? `${packagedRendererUrl}${startupRouteHash}` : packagedRendererUrl,
+  );
 };
 
 ipcMain.handle('desktop:get-shell-context', async () => createDesktopContext());

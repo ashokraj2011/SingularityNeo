@@ -12,9 +12,20 @@ import type {
   WorkflowRunDetail,
 } from '../types';
 
+const MAX_FEED_MESSAGES = 80;
+const MAX_FEED_LOGS = 80;
+const MAX_FEED_RUN_EVENTS = 80;
+const MAX_FEED_TOOL_INVOCATIONS = 40;
+const MAX_FEED_ARTIFACTS = 60;
+const MAX_FEED_TASKS = 60;
+const MAX_FEED_LEARNING_UPDATES = 40;
+const MAX_FEED_WAITS = 20;
+const MAX_FEED_RECORDS_TOTAL = 240;
+
 const truncate = (value: string, limit = 220) => {
-  const normalized = value.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= limit) {
+  const safeSubstring = String(value || '').slice(0, limit * 3 + 100);
+  const normalized = safeSubstring.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= limit && safeSubstring.length === String(value || '').length) {
     return normalized;
   }
   return `${normalized.slice(0, Math.max(0, limit - 3)).trimEnd()}...`;
@@ -27,6 +38,18 @@ const toTimestamp = (value?: string) => {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
 };
+
+const takeNewest = <T>(
+  items: T[],
+  limit: number,
+  getTimestamp: (item: T) => string | undefined,
+) =>
+  items.length <= limit
+    ? items.slice()
+    : items
+        .slice()
+        .sort((left, right) => toTimestamp(getTimestamp(right)) - toTimestamp(getTimestamp(left)))
+        .slice(0, limit);
 
 const decisionToRecord = ({
   capabilityId,
@@ -283,6 +306,7 @@ export const buildCapabilityInteractionFeed = ({
     }
     return true;
   });
+  const limitedMessages = takeNewest(relevantMessages, MAX_FEED_MESSAGES, message => message.timestamp);
 
   const relevantLogs = workspace.executionLogs.filter(log => {
     if (runDetail?.run?.id && log.runId === runDetail.run.id) {
@@ -293,6 +317,7 @@ export const buildCapabilityInteractionFeed = ({
     }
     return !workItemId && (!agentId || log.agentId === agentId);
   });
+  const limitedLogs = takeNewest(relevantLogs, MAX_FEED_LOGS, log => log.timestamp);
 
   const relevantLearning = workspace.learningUpdates.filter(update => {
     if (agentId && update.agentId !== agentId) {
@@ -306,6 +331,11 @@ export const buildCapabilityInteractionFeed = ({
     }
     return true;
   });
+  const limitedLearning = takeNewest(
+    relevantLearning,
+    MAX_FEED_LEARNING_UPDATES,
+    update => update.timestamp,
+  );
 
   const relevantArtifacts = workspace.artifacts.filter(artifact => {
     if (workItemId) {
@@ -316,6 +346,7 @@ export const buildCapabilityInteractionFeed = ({
     }
     return true;
   });
+  const limitedArtifacts = takeNewest(relevantArtifacts, MAX_FEED_ARTIFACTS, artifact => artifact.created);
 
   const relevantTasks = workspace.tasks.filter(task => {
     if (workItemId) {
@@ -326,8 +357,25 @@ export const buildCapabilityInteractionFeed = ({
     }
     return true;
   });
+  const limitedTasks = takeNewest(relevantTasks, MAX_FEED_TASKS, task => task.timestamp);
+  const limitedRunEvents = takeNewest(
+    runEvents.filter(event => !workItemId || event.workItemId === workItemId),
+    MAX_FEED_RUN_EVENTS,
+    event => event.timestamp,
+  );
+  const limitedToolInvocations = takeNewest(
+    runDetail?.toolInvocations || [],
+    MAX_FEED_TOOL_INVOCATIONS,
+    toolInvocation =>
+      toolInvocation.completedAt || toolInvocation.startedAt || toolInvocation.createdAt,
+  );
+  const limitedWaits = takeNewest(
+    runDetail?.waits || [],
+    MAX_FEED_WAITS,
+    wait => wait.createdAt,
+  );
 
-  const waitRecords = (runDetail?.waits || []).flatMap(wait => {
+  const waitRecords = limitedWaits.flatMap(wait => {
     const records: CapabilityInteractionRecord[] = [
       {
         id: `wait-${wait.id}`,
@@ -363,21 +411,19 @@ export const buildCapabilityInteractionFeed = ({
   });
 
   const records = [
-    ...relevantMessages.map(mapChatMessage),
-    ...relevantLogs.map(mapExecutionLog),
-    ...runEvents
-      .filter(event => !workItemId || event.workItemId === workItemId)
-      .map(mapRunEvent),
-    ...(runDetail?.toolInvocations || []).map(toolInvocation =>
+    ...limitedMessages.map(mapChatMessage),
+    ...limitedLogs.map(mapExecutionLog),
+    ...limitedRunEvents.map(mapRunEvent),
+    ...limitedToolInvocations.map(toolInvocation =>
       mapToolInvocation({
         toolInvocation,
         workItemId,
       }),
     ),
     ...waitRecords,
-    ...relevantArtifacts.map(mapArtifact),
-    ...relevantTasks.map(mapTask),
-    ...relevantLearning.map(update => ({
+    ...limitedArtifacts.map(mapArtifact),
+    ...limitedTasks.map(mapTask),
+    ...limitedLearning.map(update => ({
       id: `learning-${update.id}`,
       capabilityId: update.capabilityId,
       interactionType: 'LEARNING' as const,
@@ -398,7 +444,8 @@ export const buildCapabilityInteractionFeed = ({
     })),
   ]
     .slice()
-    .sort((left, right) => toTimestamp(right.timestamp) - toTimestamp(left.timestamp));
+    .sort((left, right) => toTimestamp(right.timestamp) - toTimestamp(left.timestamp))
+    .slice(0, MAX_FEED_RECORDS_TOTAL);
 
   return {
     capabilityId: capability.id,

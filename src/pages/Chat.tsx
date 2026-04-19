@@ -36,6 +36,10 @@ import AgentKnowledgeLensPanel from '../components/AgentKnowledgeLensPanel';
 import CapabilityBriefingPanel from '../components/CapabilityBriefingPanel';
 import { EmptyState, StatusBadge } from '../components/EnterpriseUI';
 import InteractionTimeline from '../components/InteractionTimeline';
+import {
+  CopilotThinkingIndicator,
+  MemoizedCopilotMessageBody,
+} from '../components/orchestrator/OrchestratorCopilotTranscript';
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
@@ -1115,7 +1119,7 @@ const Chat = () => {
 
             <div
               className={cn(
-                'rounded-[22px] border px-4 py-3.5 shadow-sm',
+                'chat-message-bubble rounded-[22px] border px-4 py-3.5 shadow-sm',
                 isUser
                   ? 'rounded-tr-md border-primary/15 bg-primary text-white'
                   : annotation?.deliveryState === 'interrupted'
@@ -1125,7 +1129,10 @@ const Chat = () => {
                       : 'rounded-tl-md border-slate-200 bg-white text-slate-900',
               )}
             >
-              <p className="whitespace-pre-wrap text-sm leading-7">{message.content}</p>
+              <MemoizedCopilotMessageBody
+                content={message.content}
+                tone={isUser ? 'user' : 'agent'}
+              />
 
               {!isUser && (annotation?.model || annotation?.usage || annotation?.traceId) ? (
                 <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-black/5 pt-3 text-[0.6875rem] text-slate-500">
@@ -1886,7 +1893,9 @@ const Chat = () => {
                           <span className="font-semibold uppercase tracking-[0.16em] text-slate-400">
                             {activeAgent.name}
                           </span>
-                          <span>Working…</span>
+                          <CopilotThinkingIndicator
+                            label={streamedDraft ? 'Streaming' : 'Thinking'}
+                          />
                           {lastMemoryReferences.length > 0 ? (
                             <StatusBadge tone="info">
                               {lastMemoryReferences.length} memory refs
@@ -1896,11 +1905,23 @@ const Chat = () => {
                             {pendingSessionMode === 'fresh' ? 'Fresh session' : 'Resume context'}
                           </StatusBadge>
                         </div>
-                        <div className="rounded-[22px] rounded-tl-md border border-slate-200 bg-slate-50 px-4 py-3.5 text-sm leading-7 text-slate-800 shadow-sm">
-                          {streamedDraft ||
-                            `Using ${activeCapability.name} memory, ${activeAgent.name}'s learning profile, and ${
-                              pendingSessionMode === 'fresh' ? 'a fresh session' : 'the stored session context'
-                            }.`}
+                        <div className="chat-message-bubble rounded-[22px] rounded-tl-md border border-slate-200 bg-slate-50 px-4 py-3.5 shadow-sm">
+                          {streamedDraft ? (
+                            <MemoizedCopilotMessageBody
+                              content={streamedDraft}
+                              tone="draft"
+                              isStreaming
+                            />
+                          ) : (
+                            <p className="text-sm leading-7 text-slate-700">
+                              Using {activeCapability.name} memory, {activeAgent.name}'s learning
+                              profile, and{' '}
+                              {pendingSessionMode === 'fresh'
+                                ? 'a fresh session'
+                                : 'the stored session context'}
+                              .
+                            </p>
+                          )}
                         </div>
                       </div>
                     </div>

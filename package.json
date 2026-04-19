@@ -14,7 +14,7 @@
     "desktop:up": "node scripts/desktop-start.mjs",
     "desktop:down": "node scripts/desktop-stop.mjs",
     "desktop:stop": "node scripts/desktop-stop.mjs",
-    "desktop:start": "electron .",
+    "desktop:start": "node scripts/desktop-launch.mjs",
     "desktop:build": "node scripts/electron-build.mjs",
     "export:schema": "tsx scripts/export-schema-sql.ts",
     "export:seed": "tsx scripts/export-seed-sql.ts",

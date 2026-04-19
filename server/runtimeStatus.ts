@@ -1,4 +1,8 @@
-import { getPlatformFeatureState } from './db';
+import { getDatabaseRuntimeInfo, getPlatformFeatureState } from './db';
+import {
+  decodeWorkspaceDatabaseBootstrapProfileSnapshot,
+  resolveActiveWorkspaceDatabaseBootstrapProfileId,
+} from './databaseProfiles';
 import {
   defaultModel,
   getConfiguredGitHubIdentity,
@@ -24,6 +28,18 @@ import {
 import { resolveRuntimeAccessMode } from './runtimePolicy';
 
 export const buildRuntimeStatus = async () => {
+  const databaseRuntime = getDatabaseRuntimeInfo();
+  const databaseProfileSnapshot = decodeWorkspaceDatabaseBootstrapProfileSnapshot({
+    encodedProfiles: process.env.WORKSPACE_DB_PROFILES_B64,
+    activeProfileId: process.env.WORKSPACE_ACTIVE_DB_PROFILE_ID,
+  });
+  const activeDatabaseProfileId =
+    resolveActiveWorkspaceDatabaseBootstrapProfileId(
+      databaseProfileSnapshot,
+      databaseRuntime,
+    ) || null;
+  const activeDatabaseProfile =
+    databaseProfileSnapshot.profiles.find(profile => profile.id === activeDatabaseProfileId) || null;
   const token = getConfiguredToken();
   const tokenSource = getConfiguredTokenSource();
   const headlessCli = tokenSource === 'headless-cli';
@@ -82,6 +98,9 @@ export const buildRuntimeStatus = async () => {
       token,
       modelCatalogFromRuntime: fromRuntime,
     }),
+    databaseRuntime,
+    activeDatabaseProfileId,
+    activeDatabaseProfileLabel: activeDatabaseProfile?.label || null,
     httpFallbackEnabled: process.env.ALLOW_GITHUB_MODELS_HTTP_FALLBACK === 'true',
     lastRuntimeError: identityResult.error,
     availableModels: models,

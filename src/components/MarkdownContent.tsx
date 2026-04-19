@@ -149,6 +149,15 @@ const parseBlocks = (value: string): MarkdownBlock[] => {
         type: 'paragraph',
         text: paragraphLines.join(' '),
       });
+    } else {
+      // Fallback: If a line was skipped by the paragraph builder due to a strict
+      // match (like isCodeFence) but failed its dedicated block parser (like fenceMatch),
+      // force it to render as a paragraph string to avoid a parsing infinite loop.
+      blocks.push({
+        type: 'paragraph',
+        text: line,
+      });
+      index += 1;
     }
   }
 

@@ -2,6 +2,7 @@ import { Suspense, lazy, type ReactNode } from 'react';
 import {
   BrowserRouter,
   HashRouter,
+  Navigate,
   Routes,
   Route,
   useLocation,
@@ -89,6 +90,13 @@ export default function App() {
                   <Route path="/chat" element={<Chat />} />
                   <Route path="/orchestrator" element={<Orchestrator />} />
                   <Route path="/work" element={<Orchestrator />} />
+                  {/* Legacy approval-workspace URLs now redirect to the
+                      orchestrator, which surfaces the Human Approval Gate
+                      modal for any work item in an approval state. */}
+                  <Route
+                    path="/work/approvals/:capabilityId/:runId/:waitId"
+                    element={<Navigate to="/work" replace />}
+                  />
                   <Route path="/operations" element={<Operations />} />
                   <Route path="/incidents" element={<Incidents />} />
                   <Route path="/mrm" element={<ModelRiskMonitoring />} />

@@ -38,4 +38,43 @@ Now let me inspect the code.
       { type: 'text', text: 'Simple answer.' },
     ]);
   });
+
+  it('parses OSS-style <tool_call><function_name> markup and hides scaffolding', () => {
+    const blocks = parseCopilotTranscriptBlocks(`
+Looking that up now.
+
+<tool_call>
+<function_name>workspace_search</function_name>
+<parameter name="query">approval workspace</parameter>
+</tool_call>
+
+Here is the result.
+    `);
+
+    expect(blocks).toEqual([
+      { type: 'text', text: 'Looking that up now.' },
+      {
+        type: 'tool',
+        toolName: 'workspace_search',
+        parameters: [{ name: 'query', value: 'approval workspace' }],
+      },
+      { type: 'text', text: 'Here is the result.' },
+    ]);
+  });
+
+  it('strips stray/unbalanced tool-call fragments so they never leak into text blocks', () => {
+    const blocks = parseCopilotTranscriptBlocks(`
+</tool_call>
+
+<tool_call> <function_name>workspace_search</parameter>
+    `);
+
+    // The input is garbled markup with no parseable tool call. Expectation:
+    // whatever text we surface does NOT contain raw < or > scaffolding.
+    for (const block of blocks) {
+      if (block.type === 'text') {
+        expect(block.text).not.toMatch(/<\/?(tool_call|function_name|parameter|invoke)/i);
+      }
+    }
+  });
 });
