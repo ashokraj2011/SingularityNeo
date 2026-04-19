@@ -18,6 +18,7 @@
     "desktop:build": "node scripts/electron-build.mjs",
     "export:schema": "tsx scripts/export-schema-sql.ts",
     "export:seed": "tsx scripts/export-seed-sql.ts",
+    "governance:init-key": "node scripts/governance-init-key.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "start": "NODE_ENV=production tsx server/index.ts",

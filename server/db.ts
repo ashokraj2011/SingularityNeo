@@ -1177,6 +1177,69 @@ export const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS governance_controls (
+      control_id     TEXT PRIMARY KEY,
+      framework      TEXT NOT NULL,
+      control_code   TEXT NOT NULL,
+      control_family TEXT NOT NULL,
+      title          TEXT NOT NULL,
+      description    TEXT NOT NULL,
+      owner_role     TEXT,
+      severity       TEXT NOT NULL DEFAULT 'STANDARD',
+      status         TEXT NOT NULL DEFAULT 'ACTIVE',
+      seed_version   TEXT,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (framework, control_code)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS governance_control_bindings (
+      binding_id       TEXT PRIMARY KEY,
+      control_id       TEXT NOT NULL REFERENCES governance_controls(control_id) ON DELETE CASCADE,
+      policy_selector  JSONB NOT NULL DEFAULT '{}'::jsonb,
+      binding_kind     TEXT NOT NULL,
+      capability_scope TEXT,
+      seed_version     TEXT,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_by       TEXT
+    )
+  `,
+  // Slice 3 — exception lifecycle. An exception is a time-bound, auditable
+  // waiver of a policy decision: the REQUIRE_APPROVAL path flips to ALLOW
+  // while an active exception matches. Every state transition is recorded
+  // on governance_exception_events for the audit trail.
+  `
+    CREATE TABLE IF NOT EXISTS governance_exceptions (
+      exception_id     TEXT PRIMARY KEY,
+      capability_id    TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      control_id       TEXT NOT NULL REFERENCES governance_controls(control_id),
+      requested_by     TEXT NOT NULL,
+      requested_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reason           TEXT NOT NULL,
+      scope_selector   JSONB NOT NULL DEFAULT '{}'::jsonb,
+      status           TEXT NOT NULL DEFAULT 'REQUESTED',
+      decided_by       TEXT,
+      decided_at       TIMESTAMPTZ,
+      decision_comment TEXT,
+      expires_at       TIMESTAMPTZ,
+      revoked_at       TIMESTAMPTZ,
+      revoked_by       TEXT,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS governance_exception_events (
+      event_id        TEXT PRIMARY KEY,
+      exception_id    TEXT NOT NULL REFERENCES governance_exceptions(exception_id) ON DELETE CASCADE,
+      event_type      TEXT NOT NULL,
+      actor_user_id   TEXT,
+      details         JSONB NOT NULL DEFAULT '{}'::jsonb,
+      at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS capability_memory_documents (
       capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
       id TEXT NOT NULL,
@@ -2197,6 +2260,97 @@ export const migrationStatements = [
     ALTER TABLE capability_agent_learning_profile_versions
     ADD COLUMN IF NOT EXISTS frozen_at TIMESTAMPTZ
   `,
+  // Slice 2 — governance controls catalog indexes. The framework filter is
+  // the hot path for the UI ("show me all NIST CSF controls"); the bindings
+  // control_idx is the hot path for "what policies satisfy this control?".
+  `
+    CREATE INDEX IF NOT EXISTS governance_controls_framework_idx
+    ON governance_controls (framework, control_code)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS governance_controls_status_idx
+    ON governance_controls (status)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS governance_control_bindings_control_idx
+    ON governance_control_bindings (control_id)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS governance_control_bindings_scope_idx
+    ON governance_control_bindings (capability_scope)
+  `,
+  // Slice 3 — exception lifecycle indexes + policy-decision stamping columns.
+  // `gex_active_idx` is the hot path for evaluateToolPolicy's active-exception
+  // lookup; `gex_expiry_idx` is the hot path for the scheduler's expire sweep.
+  `
+    CREATE INDEX IF NOT EXISTS gex_active_idx
+    ON governance_exceptions (capability_id, control_id, status)
+    WHERE status IN ('APPROVED', 'REQUESTED')
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS gex_expiry_idx
+    ON governance_exceptions (expires_at)
+    WHERE status = 'APPROVED'
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS gex_capability_idx
+    ON governance_exceptions (capability_id, status)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS gex_events_exception_idx
+    ON governance_exception_events (exception_id, at DESC)
+  `,
+  `
+    ALTER TABLE capability_policy_decisions
+    ADD COLUMN IF NOT EXISTS exception_id TEXT
+  `,
+  `
+    ALTER TABLE capability_policy_decisions
+    ADD COLUMN IF NOT EXISTS exception_expires_at TIMESTAMPTZ
+  `,
+  // ──────────────────────────────────────────────────────────────────
+  // Slice 4 — prove-the-negative provenance. touched_paths is a
+  // normalized array of filesystem paths a tool invocation touched
+  // (extracted per-tool at write time); actor_kind distinguishes AI
+  // vs HUMAN invocations. Both are additive and cheap to leave in
+  // place on rollback. The GIN index powers the @> containment probe
+  // in /provenance/prove-no-touch.
+  // ──────────────────────────────────────────────────────────────────
+  `
+    ALTER TABLE capability_tool_invocations
+    ADD COLUMN IF NOT EXISTS touched_paths TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]
+  `,
+  `
+    ALTER TABLE capability_tool_invocations
+    ADD COLUMN IF NOT EXISTS actor_kind TEXT NOT NULL DEFAULT 'AI'
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS cti_touched_paths_gin
+    ON capability_tool_invocations USING GIN (touched_paths)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS cti_actor_started_idx
+    ON capability_tool_invocations (actor_kind, started_at DESC)
+  `,
+  // Durability ring: every prove-the-negative answer references the
+  // exact coverage window so "no match" never silently masks a gap
+  // in logging. Populated by the backfill script + the write-side
+  // hook when logging resumes after an outage.
+  `
+    CREATE TABLE IF NOT EXISTS governance_provenance_coverage (
+      coverage_id   TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      window_start  TIMESTAMPTZ NOT NULL,
+      window_end    TIMESTAMPTZ NOT NULL,
+      source        TEXT NOT NULL,
+      notes         TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS gpc_capability_window_idx
+    ON governance_provenance_coverage (capability_id, window_start, window_end)
+  `,
 ];
 
 const detectOptionalPlatformExtensions = async (client: PoolClient) => {
@@ -2481,6 +2635,13 @@ export const initializeDatabase = async () => {
         await client.query(statement);
       }
       await ensureOptionalVectorSchema(client);
+      // Slice 2 — governance controls catalog is owned by the seed module.
+      // Upsert happens inside the same connection so a bootstrap failure
+      // here rolls back cleanly (the seed is small and idempotent).
+      // Dynamic import keeps the governance module off the cold path for
+      // test-only bootstraps that stub the DB layer.
+      const { ensureControlsSeeded } = await import('./governance/controls');
+      await ensureControlsSeeded(client);
     });
     lastDatabaseConnectionError = null;
   } catch (error) {

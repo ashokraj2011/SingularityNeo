@@ -724,15 +724,24 @@ export const getAttestationChain = async (
  * the chain terminates at chain_root_bundle_id with no gaps. digestMatches
  * recomputes the digest over the stored payload to catch tampering.
  */
-export const verifyEvidencePacket = async (
-  bundleId: string,
-): Promise<{
+export type EvidencePacketVerification = {
   bundleId: string;
+  capabilityId: string;
+  workItemId: string;
   signatureValid: boolean;
   digestMatches: boolean;
   chainIntact: boolean;
+  chainDepth: number;
+  chainRootBundleId: string;
+  signingKeyId: string | null;
+  signingAlgo: string | null;
+  attestationVersion: number;
   reason?: string;
-} | null> => {
+};
+
+export const verifyEvidencePacket = async (
+  bundleId: string,
+): Promise<EvidencePacketVerification | null> => {
   const { verifyAttestationSignature } = await import('./governance/signer');
   const rowResult = await query(
     `SELECT * FROM capability_evidence_packets WHERE bundle_id = $1`,
@@ -762,6 +771,7 @@ export const verifyEvidencePacket = async (
   let cursor = packet;
   let chainIntact = true;
   let chainReason: string | undefined;
+  let chainDepth = 0;
   while (cursor.prevBundleId) {
     if (visited.has(cursor.prevBundleId)) {
       chainIntact = false;
@@ -779,6 +789,7 @@ export const verifyEvidencePacket = async (
       break;
     }
     cursor = evidencePacketFromRow(prior.rows[0]);
+    chainDepth += 1;
   }
   if (chainIntact && cursor.bundleId !== (packet.chainRootBundleId ?? packet.bundleId)) {
     chainIntact = false;
@@ -787,9 +798,16 @@ export const verifyEvidencePacket = async (
 
   return {
     bundleId: packet.bundleId,
+    capabilityId: packet.capabilityId,
+    workItemId: packet.workItemId,
     signatureValid: verifyResult.signatureValid,
     digestMatches: verifyResult.digestMatches,
     chainIntact,
+    chainDepth,
+    chainRootBundleId: packet.chainRootBundleId ?? packet.bundleId,
+    signingKeyId: packet.signingKeyId ?? null,
+    signingAlgo: packet.signingAlgo ?? null,
+    attestationVersion: packet.attestationVersion ?? ATTESTATION_VERSION,
     reason: chainReason || verifyResult.reason,
   };
 };

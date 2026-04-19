@@ -9,6 +9,11 @@ Instead of treating delivery as scattered tools for planning, coding, and report
 SingularityNeo isn't just about running agents; it's about **Enterprise Safety and Observability**. We've built state-of-the-art governance right into the core loop:
 
 *   🛡️ **Dynamic Learning & Atomic Rollbacks**: Agents don't just act; they learn. When operators provide corrections, agents distill these into new guardrails. If a bad habit is learned, our **Agent State Versioning** lets you instantly roll back an agent's brain to a previous operational policy snapshot.
+*   🔏 **Signed Change Attestations & Tamper-Evident Chain**: Every evidence packet is Ed25519-signed and linked into a `prev_bundle_id` chain rooted at the work item's first attestation. The packet page shows a `Signed · chain intact` chip and a verify drawer that walks the chain, recomputes the digest, and surfaces any gap/cycle/root mismatch. See [Governance](./docs/governance.md).
+*   🧭 **Controls Catalog + Framework Mapping**: Every enforced policy binds to external controls across NIST CSF 2.0, SOC 2 TSC 2017, and ISO/IEC 27001:2022 — ~45 seeded controls visible at `/governance/controls` with an audit-legible binding graph so decisions read against a framework instead of an internal tool name.
+*   ⏱️ **Time-Bound Exception Lifecycle**: Policy denials can be waived through a first-class request → approve → expire flow. An active exception flips `evaluateToolPolicy` from `REQUIRE_APPROVAL` to `ALLOW` and stamps an `exception_id` on the audit row; the sweeper auto-expires at the deadline. Live at `/governance/exceptions`.
+*   🔎 **Prove-the-Negative Provenance**: A single API call answers "did any AI touch `services/billing/**` between T1 and T2?" with three honest states — touched / not touched / gap. Logging gaps never masquerade as a silent "no". Live at `/governance/provenance`.
+*   📊 **One-Screen Compliance Posture**: `/governance/posture` aggregates signer ratio, control coverage by framework, active / expiring-soon exceptions, recent denials joined to their bound control, and provenance coverage gaps — the screen to open first during an audit walkthrough.
 *   🧪 **Gated, Versioned, Drift-Aware Learning Loop**: Every profile refresh is committed as an immutable version. Shape checks block empty-or-malformed distillations from going live, an async LLM-judge scores every new version against fixtures from real sessions, per-version canary counters feed a drift detector that surfaces regressions for operator-driven revert, and an advisory-lock + append-only audit path makes concurrent corrections race-safe. See [Self-Learning Loop](./docs/self-learning-loop.md).
 *   👻 **Shadow Mode Execution**: Need to test a high-stakes deployment without risking production? Toggle a capability into **Shadow Mode**. The execution layer intercepts destructive commands across the entire platform, simulating successful runs to let you validate agent reasoning in a 100% risk-free environment.
 *   📋 **Evidence-Based Execution**: Every run leaves behind a durable cryptographic-style evidence trail. Artifacts, handoffs, approvals, and wait states are comprehensively logged in the Flight Recorder, so you never have to ask "why did the agent do that?"
@@ -40,6 +45,7 @@ The product is strongest when a team wants to:
 - `Chat` gives capability-scoped and execution-aware collaboration.
 - `Evidence` provides artifacts, completed work, approvals, and flight recorder history.
 - `Designer` defines workflows, lifecycle lanes, and operating rules.
+- `Governance` (admins) collects four audit-grade surfaces: `Posture` (one-screen compliance view), `Controls` (framework catalog), `Exceptions` (time-bound deviation lifecycle), and `Provenance` (prove-the-negative queries). See [Governance](./docs/governance.md).
 
 ## Core Product Ideas
 
@@ -190,6 +196,8 @@ server/
   execution/         runs, waits, worker, tools, orchestration
   agentLearning/     learning profiles, jobs, summaries, quality gate,
                      drift detector, versioning, race hardening
+  governance/        signer, controls catalog, exceptions, provenance
+                     extractor, posture aggregator
   ledger.ts          evidence aggregation and artifact access
   flightRecorder.ts  explainability and audit reconstruction
 ```
@@ -280,8 +288,83 @@ Recommended:
 - use a dedicated database for e2e
 - or clean up test capabilities after the run
 
+## Compliance Posture
+
+SingularityNeo ships an audit-grade governance layer across five slices,
+all live today. Open `/governance/posture` for a one-screen snapshot of
+every pillar below.
+
+### Signed evidence (Slice 1)
+
+Every evidence packet is Ed25519-signed and chained to its predecessor.
+Enable signing in three commands:
+
+```bash
+npm run governance:init-key
+export GOVERNANCE_SIGNING_KEY_PATH="$(pwd)/.secrets/governance-signing.pem"
+export GOVERNANCE_SIGNING_ACTIVE_KEY_ID="<printed key id>"
+```
+
+Then restart the backend. New packets land with `signature` and
+`signing_key_id` set; the packet detail page shows a
+`Signed · chain intact` chip and a verify drawer that re-runs signature +
+chain verification on demand. Packets produced before a key was
+provisioned stay valid and verify as `Unsigned (legacy)`.
+
+The **public** half of every known key lives in
+`governance/signing-keys.json` (committed) so downstream verifiers can
+check signatures offline with only the repo checkout. The **private** key
+stays in `.secrets/` (gitignored); move it to a KMS or sealed secret store
+before production use.
+
+### Controls catalog + framework mapping (Slice 2)
+
+`/governance/controls` renders ~45 seeded controls across NIST CSF 2.0,
+SOC 2 TSC 2017, and ISO/IEC 27001:2022 Annex A. Internal policies
+(`workspace_write`, `run_deploy`, etc.) bind to control codes so
+auditors can read platform decisions against a framework instead of an
+internal tool name.
+
+### Exception lifecycle (Slice 3)
+
+`/governance/exceptions` is the request → approve → expire flow.
+Approved exceptions flip `evaluateToolPolicy` from `REQUIRE_APPROVAL` to
+`ALLOW` with `exception_id` stamped on the audit row. The scheduler
+auto-expires past-due waivers every ~15 min on the existing learning-worker
+tick. `GOVERNANCE_EXCEPTIONS_ENABLED=false` makes the policy hook inert
+without losing CRUD or event history.
+
+### Prove-the-negative provenance (Slice 4)
+
+`/governance/provenance` answers "did any AI touch `services/billing/**`
+between T1 and T2?" with three honest states — touched / not touched /
+gap. A `touched_paths TEXT[]` GIN-indexed column is populated at write
+time by a per-tool extractor; the query refines glob matches in-memory
+so single-segment `*` behaves correctly. A one-shot backfill script
+covers the last 90 days:
+
+```bash
+node scripts/governance-backfill-provenance.mjs
+```
+
+`GOVERNANCE_PROVENANCE_ENABLED=false` returns a conservative
+"inconclusive" without querying; `touched_paths` keeps populating so
+the flag is reversible without data loss.
+
+### Posture dashboard (Slice 5)
+
+`/governance/posture` aggregates signer ratio, control coverage by
+framework, active + expiring-soon exceptions, recent denials joined to
+their bound control, and provenance coverage gaps. Every query runs
+behind a safe-query wrapper — a missing subsystem table surfaces as a
+warning string, never a 500, so the dashboard is always honest about
+what it knows.
+
+Full reference: [docs/governance.md](./docs/governance.md).
+
 ## Additional Docs
 
+- [Governance & Compliance — signer, controls catalog, exceptions, provenance, posture](./docs/governance.md)
 - [Self-Learning Loop — versioning, quality gate, drift, race hardening](./docs/self-learning-loop.md)
 - [Competitive positioning and product gap assessment](./docs/research/competitive-positioning.md)
 - [Capability Mermaid diagrams](./docs/capability-mermaid-diagrams.md)

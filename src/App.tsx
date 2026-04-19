@@ -36,6 +36,10 @@ const MemoryExplorer = lazy(() => import('./pages/MemoryExplorer'));
 const EvalCenter = lazy(() => import('./pages/EvalCenter'));
 const Login = lazy(() => import('./pages/Login'));
 const EvidencePacketPage = lazy(() => import('./pages/EvidencePacket'));
+const GovernanceControlsPage = lazy(() => import('./pages/GovernanceControls'));
+const GovernanceExceptionsPage = lazy(() => import('./pages/GovernanceExceptions'));
+const GovernanceProvenancePage = lazy(() => import('./pages/GovernanceProvenance'));
+const GovernancePosturePage = lazy(() => import('./pages/GovernancePosture'));
 
 const RouteLoader = () => (
   <div className="section-card ambient-shadow min-h-[calc(100vh-12rem)] p-8">
@@ -105,6 +109,10 @@ export default function App() {
                   <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />
                   <Route path="/architecture" element={<Architecture />} />
                   <Route path="/access" element={<UsersAccess />} />
+                  <Route path="/governance/controls" element={<GovernanceControlsPage />} />
+                  <Route path="/governance/exceptions" element={<GovernanceExceptionsPage />} />
+                  <Route path="/governance/provenance" element={<GovernanceProvenancePage />} />
+                  <Route path="/governance/posture" element={<GovernancePosturePage />} />
                   <Route path="/login" element={<Login />} />
                   <Route path="/capabilities/databases" element={<CapabilityDatabases />} />
                   <Route path="/workspace/databases" element={<CapabilityDatabases />} />

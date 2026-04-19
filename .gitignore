@@ -20,3 +20,4 @@ test-results/
 .env*
 !.env.example
 .singularity/
+.secrets/

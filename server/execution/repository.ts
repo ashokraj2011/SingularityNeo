@@ -29,6 +29,10 @@ import {
   isRemoteExecutionClient,
 } from './runtimeClient';
 import {
+  extractTouchedPaths,
+  isMappedProvenanceTool,
+} from '../governance/provenanceExtractor';
+import {
   findFirstExecutableNode,
   findFirstExecutableNodeForPhase,
   getDisplayStepIdForNode,
@@ -1405,6 +1409,15 @@ export const createToolInvocation = async (
     });
   }
 
+  // Slice 4 — extract touched_paths at write time. A null result means the
+  // tool isn't mapped yet; log-and-continue (we log once per-tool to avoid
+  // spam) so the invocation row still lands while telemetry catches drift.
+  const extracted = extractTouchedPaths(invocation.toolId, invocation.request);
+  const touchedPaths = extracted ?? [];
+  if (extracted === null && !isMappedProvenanceTool(invocation.toolId)) {
+    warnUnmappedProvenanceTool(invocation.toolId);
+  }
+
   const result = await query(
     `
       INSERT INTO capability_tool_invocations (
@@ -1429,10 +1442,12 @@ export const createToolInvocation = async (
         cost_usd,
         started_at,
         completed_at,
+        touched_paths,
+        actor_kind,
         created_at,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW())
       RETURNING *
     `,
     [
@@ -1457,11 +1472,26 @@ export const createToolInvocation = async (
       invocation.costUsd ?? null,
       invocation.startedAt || null,
       invocation.completedAt || null,
+      touchedPaths,
+      'AI', // all tool invocations are AI-initiated today; HUMAN is a
+            // follow-up when operator-triggered actions land.
       invocation.createdAt || new Date().toISOString(),
     ],
   );
 
   return toolFromRow(result.rows[0]);
+};
+
+// Rate-limited "unmapped tool" warning so Slice 4 extractor drift is
+// surfaced via logs instead of a silent coverage hole. We keep a Set of
+// tools we've already warned about so the logs don't spam.
+const warnedUnmappedTools = new Set<string>();
+const warnUnmappedProvenanceTool = (toolId: string) => {
+  if (warnedUnmappedTools.has(toolId)) return;
+  warnedUnmappedTools.add(toolId);
+  console.warn(
+    `[governance.provenance] tool "${toolId}" has no touched_paths extractor; invocation will land with an empty touched_paths array. Add a handler in server/governance/provenanceExtractor.ts.`,
+  );
 };
 
 export const updateToolInvocation = async (

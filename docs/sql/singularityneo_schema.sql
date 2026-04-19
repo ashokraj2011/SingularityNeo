@@ -918,6 +918,12 @@ CREATE TABLE IF NOT EXISTS capability_tool_invocations (
       cost_usd NUMERIC(12,6),
       started_at TIMESTAMPTZ,
       completed_at TIMESTAMPTZ,
+      -- Slice 4 — prove-the-negative provenance columns. touched_paths is a
+      -- normalized array of filesystem paths the invocation touched, extracted
+      -- per-tool at write time. actor_kind distinguishes AI vs HUMAN so the
+      -- "was anything _human_ in this window" question is also answerable.
+      touched_paths TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+      actor_kind TEXT NOT NULL DEFAULT 'AI',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id),
@@ -1121,7 +1127,92 @@ CREATE TABLE IF NOT EXISTS capability_policy_decisions (
       reason TEXT NOT NULL,
       requested_by_agent_id TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      -- Slice 3: when a matching active governance exception flipped
+      -- REQUIRE_APPROVAL → ALLOW, the decision row stamps the exception id
+      -- + its expiry so audits can reconstruct "why did this pass?".
+      exception_id TEXT,
+      exception_expires_at TIMESTAMPTZ,
       PRIMARY KEY (capability_id, id)
+    );
+
+-- Slice 2 — Governance controls catalog. governance_controls enumerates the
+-- external frameworks (NIST CSF 2.0, SOC 2 TSC, ISO 27001) the platform
+-- claims to enforce; governance_control_bindings ties an internal policy
+-- selector (by tool, approval type, etc.) to one or more controls so
+-- auditors can read decisions against a framework.
+CREATE TABLE IF NOT EXISTS governance_controls (
+      control_id     TEXT PRIMARY KEY,
+      framework      TEXT NOT NULL,
+      control_code   TEXT NOT NULL,
+      control_family TEXT NOT NULL,
+      title          TEXT NOT NULL,
+      description    TEXT NOT NULL,
+      owner_role     TEXT,
+      severity       TEXT NOT NULL DEFAULT 'STANDARD',
+      status         TEXT NOT NULL DEFAULT 'ACTIVE',
+      seed_version   TEXT,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (framework, control_code)
+    );
+
+CREATE TABLE IF NOT EXISTS governance_control_bindings (
+      binding_id       TEXT PRIMARY KEY,
+      control_id       TEXT NOT NULL REFERENCES governance_controls(control_id) ON DELETE CASCADE,
+      policy_selector  JSONB NOT NULL DEFAULT '{}'::jsonb,
+      binding_kind     TEXT NOT NULL,
+      capability_scope TEXT,
+      seed_version     TEXT,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_by       TEXT
+    );
+
+-- Slice 3 — Governance exception lifecycle. An exception is a time-bound,
+-- auditable deviation from a policy: while a matching exception is APPROVED
+-- and unexpired, evaluateToolPolicy flips REQUIRE_APPROVAL → ALLOW and
+-- stamps the decision row with exception_id. governance_exception_events
+-- captures every state transition for audit.
+CREATE TABLE IF NOT EXISTS governance_exceptions (
+      exception_id     TEXT PRIMARY KEY,
+      capability_id    TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      control_id       TEXT NOT NULL REFERENCES governance_controls(control_id),
+      requested_by     TEXT NOT NULL,
+      requested_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reason           TEXT NOT NULL,
+      scope_selector   JSONB NOT NULL DEFAULT '{}'::jsonb,
+      status           TEXT NOT NULL DEFAULT 'REQUESTED',
+      decided_by       TEXT,
+      decided_at       TIMESTAMPTZ,
+      decision_comment TEXT,
+      expires_at       TIMESTAMPTZ,
+      revoked_at       TIMESTAMPTZ,
+      revoked_by       TEXT,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+CREATE TABLE IF NOT EXISTS governance_exception_events (
+      event_id        TEXT PRIMARY KEY,
+      exception_id    TEXT NOT NULL REFERENCES governance_exceptions(exception_id) ON DELETE CASCADE,
+      event_type      TEXT NOT NULL,
+      actor_user_id   TEXT,
+      details         JSONB NOT NULL DEFAULT '{}'::jsonb,
+      at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+-- Slice 4 — prove-the-negative provenance. Every "no AI touched path X
+-- between T1 and T2" answer must cite the exact window logging was known
+-- to be healthy; otherwise "no match" could silently mean "we weren't
+-- logging." A coverage row is inserted by the backfill script and when the
+-- write-side hook resumes after a restart.
+CREATE TABLE IF NOT EXISTS governance_provenance_coverage (
+      coverage_id   TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      window_start  TIMESTAMPTZ NOT NULL,
+      window_end    TIMESTAMPTZ NOT NULL,
+      source        TEXT NOT NULL,
+      notes         TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
 CREATE TABLE IF NOT EXISTS capability_memory_documents (
@@ -1634,6 +1725,13 @@ ALTER TABLE capability_tool_invocations
 ALTER TABLE capability_tool_invocations
     ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(12,6);
 
+-- Slice 4 — prove-the-negative provenance columns.
+ALTER TABLE capability_tool_invocations
+    ADD COLUMN IF NOT EXISTS touched_paths TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+
+ALTER TABLE capability_tool_invocations
+    ADD COLUMN IF NOT EXISTS actor_kind TEXT NOT NULL DEFAULT 'AI';
+
 ALTER TABLE capability_run_events
     ADD COLUMN IF NOT EXISTS trace_id TEXT;
 
@@ -1723,6 +1821,44 @@ CREATE INDEX IF NOT EXISTS capability_metric_samples_scope_idx
 
 CREATE INDEX IF NOT EXISTS capability_policy_decisions_run_idx
     ON capability_policy_decisions (capability_id, run_id, created_at DESC);
+
+-- Slice 2 — governance controls catalog indexes.
+CREATE INDEX IF NOT EXISTS governance_controls_framework_idx
+    ON governance_controls (framework, control_code);
+
+CREATE INDEX IF NOT EXISTS governance_controls_status_idx
+    ON governance_controls (status);
+
+CREATE INDEX IF NOT EXISTS governance_control_bindings_control_idx
+    ON governance_control_bindings (control_id);
+
+CREATE INDEX IF NOT EXISTS governance_control_bindings_scope_idx
+    ON governance_control_bindings (capability_scope);
+
+-- Slice 3 — exception lifecycle indexes.
+CREATE INDEX IF NOT EXISTS gex_active_idx
+    ON governance_exceptions (capability_id, control_id, status)
+    WHERE status IN ('APPROVED', 'REQUESTED');
+
+CREATE INDEX IF NOT EXISTS gex_expiry_idx
+    ON governance_exceptions (expires_at)
+    WHERE status = 'APPROVED';
+
+CREATE INDEX IF NOT EXISTS gex_capability_idx
+    ON governance_exceptions (capability_id, status);
+
+CREATE INDEX IF NOT EXISTS gex_events_exception_idx
+    ON governance_exception_events (exception_id, at DESC);
+
+-- Slice 4 — prove-the-negative provenance indexes.
+CREATE INDEX IF NOT EXISTS cti_touched_paths_gin
+    ON capability_tool_invocations USING GIN (touched_paths);
+
+CREATE INDEX IF NOT EXISTS cti_actor_started_idx
+    ON capability_tool_invocations (actor_kind, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS gpc_capability_window_idx
+    ON governance_provenance_coverage (capability_id, window_start, window_end);
 
 CREATE INDEX IF NOT EXISTS capability_memory_documents_source_idx
     ON capability_memory_documents (capability_id, source_type, updated_at DESC);

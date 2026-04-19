@@ -107,7 +107,11 @@ export type AdvancedToolId =
   | 'skills'
   | 'artifact-designer'
   | 'tasks'
-  | 'studio';
+  | 'studio'
+  | 'governance-controls'
+  | 'governance-exceptions'
+  | 'governance-provenance'
+  | 'governance-posture';
 
 export type AdvancedToolAudience =
   | 'ALL'
@@ -302,6 +306,50 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     audience: 'BUILDERS',
     exposureMode: 'ON_DEMAND',
     contextTriggers: ['HAS_AGENT_ROSTER'],
+  },
+  {
+    id: 'governance-controls',
+    label: 'Governance Controls',
+    shortName: 'Controls',
+    path: '/governance/controls',
+    description:
+      'Review the NIST CSF 2.0, SOC 2 TSC, and ISO 27001 controls the platform claims to enforce, and the policies bound to each.',
+    audience: 'ADMINS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'governance-exceptions',
+    label: 'Governance Exceptions',
+    shortName: 'Exceptions',
+    path: '/governance/exceptions',
+    description:
+      'Review, approve, and revoke time-bound deviations that waive policy approval gates for individual capabilities.',
+    audience: 'ADMINS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'governance-provenance',
+    label: 'Prove the Negative',
+    shortName: 'Provenance',
+    path: '/governance/provenance',
+    description:
+      'Audit whether a path was touched by an AI (or a human) in a time window. Gaps in logging are surfaced rather than silently reported as "no".',
+    audience: 'ADMINS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'governance-posture',
+    label: 'Posture Dashboard',
+    shortName: 'Posture',
+    path: '/governance/posture',
+    description:
+      'One-screen read over signer health, control coverage, active exceptions, and provenance integrity — the view auditors and operators open first.',
+    audience: 'ADMINS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
   },
 ];
 

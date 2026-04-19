@@ -9,8 +9,10 @@ import {
   ListChecks,
   RefreshCw,
   ShieldCheck,
+  ShieldOff,
   Sparkles,
   Workflow,
+  X,
 } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import ArtifactPreview from '../components/ArtifactPreview';
@@ -25,9 +27,20 @@ import {
   StatusBadge,
 } from '../components/EnterpriseUI';
 import { useToast } from '../context/ToastContext';
-import { fetchEvidencePacket } from '../lib/api';
+import {
+  fetchAttestationChain,
+  fetchEvidencePacket,
+  verifyEvidencePacket,
+} from '../lib/api';
 import { getWorkItemTaskTypeLabel } from '../lib/workItemTaskTypes';
-import type { Artifact, CapabilityBriefing, EvidencePacket, RunEvent } from '../types';
+import type {
+  Artifact,
+  AttestationChain,
+  CapabilityBriefing,
+  EvidencePacket,
+  EvidencePacketVerification,
+  RunEvent,
+} from '../types';
 
 const formatTimestamp = (value?: string) => {
   if (!value) {
@@ -124,6 +137,274 @@ const artifactTone = (artifact: Artifact) => {
   return 'neutral' as const;
 };
 
+/**
+ * Slice 1 — Signed Change Attestations. Summarizes a packet's verification
+ * state into a compact chip band the operator can scan at a glance:
+ *   Signed        — signature_valid=true, signed with a known key
+ *   Unsigned      — no signature present (legacy packet or signer off)
+ *   Tampered      — signature present but signature_valid=false OR digest_matches=false
+ *   Chain intact  — prev_bundle_id walk reached chain_root cleanly
+ *   Chain broken  — walk hit a missing prev or cycle
+ * Clicking any chip opens the verify drawer for the full detail.
+ */
+const AttestationChipBand = ({
+  verification,
+  loading,
+  onOpenDrawer,
+}: {
+  verification: EvidencePacketVerification | null;
+  loading: boolean;
+  onOpenDrawer: () => void;
+}) => {
+  if (loading && !verification) {
+    return (
+      <div className="flex flex-wrap gap-2">
+        <StatusBadge tone="neutral">Checking attestation...</StatusBadge>
+      </div>
+    );
+  }
+  if (!verification) {
+    return (
+      <div className="flex flex-wrap gap-2">
+        <StatusBadge tone="neutral">Verification unavailable</StatusBadge>
+      </div>
+    );
+  }
+  const isSigned = Boolean(verification.signingKeyId);
+  const isTampered =
+    (isSigned && !verification.signatureValid) || !verification.digestMatches;
+  let signatureTone: 'success' | 'warning' | 'danger' | 'neutral';
+  let signatureLabel: string;
+  if (isTampered) {
+    signatureTone = 'danger';
+    signatureLabel = verification.signatureValid
+      ? 'Digest mismatch'
+      : 'Signature invalid';
+  } else if (isSigned) {
+    signatureTone = 'success';
+    signatureLabel = `Signed · ${verification.signingKeyId}`;
+  } else {
+    signatureTone = 'warning';
+    signatureLabel = 'Unsigned (legacy)';
+  }
+  const chainTone = verification.chainIntact ? 'success' : 'danger';
+  const chainLabel = verification.chainIntact
+    ? `Chain v${verification.attestationVersion} intact · depth ${verification.chainDepth}`
+    : `Chain broken · ${verification.reason || 'gap'}`;
+  return (
+    <button
+      type="button"
+      onClick={onOpenDrawer}
+      className="group flex flex-wrap items-center gap-2 rounded-full border border-transparent text-left transition hover:border-outline-variant/60 hover:bg-surface-container-low focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 px-1 py-0.5"
+      aria-label="Open attestation verification drawer"
+    >
+      <StatusBadge tone={signatureTone}>{signatureLabel}</StatusBadge>
+      <StatusBadge tone={chainTone}>{chainLabel}</StatusBadge>
+      <span className="text-[0.68rem] font-medium uppercase tracking-wide text-secondary group-hover:text-on-surface">
+        Verify ↗
+      </span>
+    </button>
+  );
+};
+
+/**
+ * Slice 1 — drawer surfacing the full signed-attestation audit: per-link
+ * signature/digest/chain state for the whole work-item chain, with the
+ * verify reason code surfaced verbatim so operators can hand the output
+ * to an auditor without additional translation.
+ */
+const AttestationVerifyDrawer = ({
+  open,
+  onClose,
+  verification,
+  chain,
+  chainLoading,
+  verificationLoading,
+  onRefresh,
+}: {
+  open: boolean;
+  onClose: () => void;
+  verification: EvidencePacketVerification | null;
+  chain: AttestationChain | null;
+  chainLoading: boolean;
+  verificationLoading: boolean;
+  onRefresh: () => void;
+}) => {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-scrim/40"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Attestation verification"
+      onClick={onClose}
+    >
+      <div
+        className="flex h-full w-full max-w-xl flex-col overflow-hidden bg-white shadow-2xl"
+        onClick={event => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between border-b border-outline-variant/40 px-6 py-4">
+          <div>
+            <p className="form-kicker">Signed Change Attestation</p>
+            <h2 className="text-lg font-semibold text-on-surface">Verify packet &amp; chain</h2>
+            <p className="mt-1 text-xs leading-relaxed text-secondary">
+              Recomputes the packet digest, validates the Ed25519 signature against the
+              registered public key, and walks prev_bundle_id back to the chain root.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full p-2 text-secondary hover:bg-surface-container-low hover:text-on-surface focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            aria-label="Close verification drawer"
+          >
+            <X size={18} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+          {verification ? (
+            <div className="rounded-2xl border border-outline-variant/40 bg-surface-container-low px-4 py-3 space-y-3">
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <p className="workspace-meta-label">Signature</p>
+                  <StatusBadge
+                    tone={
+                      verification.signingKeyId
+                        ? verification.signatureValid
+                          ? 'success'
+                          : 'danger'
+                        : 'warning'
+                    }
+                  >
+                    {verification.signingKeyId
+                      ? verification.signatureValid
+                        ? 'valid'
+                        : 'invalid'
+                      : 'unsigned'}
+                  </StatusBadge>
+                </div>
+                <div>
+                  <p className="workspace-meta-label">Digest</p>
+                  <StatusBadge tone={verification.digestMatches ? 'success' : 'danger'}>
+                    {verification.digestMatches ? 'matches' : 'mismatch'}
+                  </StatusBadge>
+                </div>
+                <div>
+                  <p className="workspace-meta-label">Chain</p>
+                  <StatusBadge tone={verification.chainIntact ? 'success' : 'danger'}>
+                    {verification.chainIntact ? `intact · depth ${verification.chainDepth}` : 'broken'}
+                  </StatusBadge>
+                </div>
+                <div>
+                  <p className="workspace-meta-label">Attestation version</p>
+                  <p className="mt-1 text-sm font-semibold text-on-surface">
+                    v{verification.attestationVersion}
+                  </p>
+                </div>
+              </div>
+              {verification.reason ? (
+                <p className="text-xs leading-relaxed text-secondary">
+                  Reason: <span className="font-mono">{verification.reason}</span>
+                </p>
+              ) : null}
+              <div className="text-xs leading-relaxed text-secondary">
+                <p>
+                  <span className="workspace-meta-label">Chain root:</span>{' '}
+                  <span className="font-mono">{verification.chainRootBundleId}</span>
+                </p>
+                {verification.signingKeyId ? (
+                  <p>
+                    <span className="workspace-meta-label">Signed by:</span>{' '}
+                    <span className="font-mono">{verification.signingKeyId}</span>
+                    {verification.signingAlgo ? (
+                      <span className="ml-2 text-[0.7rem] uppercase tracking-wide text-secondary">
+                        {verification.signingAlgo}
+                      </span>
+                    ) : null}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-outline-variant/40 bg-surface-container-low px-4 py-3 text-sm text-secondary">
+              {verificationLoading ? 'Verifying...' : 'Verification unavailable.'}
+            </div>
+          )}
+
+          <div className="rounded-2xl border border-outline-variant/40 bg-white">
+            <div className="flex items-center justify-between border-b border-outline-variant/40 px-4 py-3">
+              <div>
+                <p className="workspace-meta-label">Attestation chain</p>
+                <p className="mt-1 text-xs leading-relaxed text-secondary">
+                  Root-first ordering — every earlier link must be present for
+                  this packet's chain to count as intact.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onRefresh}
+                className="enterprise-button enterprise-button-secondary"
+              >
+                <RefreshCw size={14} />
+                Refresh
+              </button>
+            </div>
+            {chainLoading && !chain ? (
+              <div className="px-4 py-3 text-sm text-secondary">Loading chain...</div>
+            ) : chain && chain.entries.length > 0 ? (
+              <ol className="divide-y divide-outline-variant/40">
+                {chain.entries.map((entry, index) => (
+                  <li key={entry.bundleId} className="flex items-start gap-3 px-4 py-3">
+                    <span className="mt-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[0.7rem] font-semibold text-primary">
+                      {index + 1}
+                    </span>
+                    <div className="flex-1">
+                      <p className="text-sm font-semibold text-on-surface">
+                        {entry.title || entry.bundleId}
+                      </p>
+                      <p className="mt-0.5 text-[0.7rem] font-mono text-secondary">
+                        {entry.bundleId}
+                      </p>
+                      <p className="mt-1 text-xs text-secondary">
+                        {formatTimestamp(entry.createdAt)} · v{entry.attestationVersion ?? 1}
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {entry.signingKeyId ? (
+                          <StatusBadge tone="success">
+                            <ShieldCheck size={12} />
+                            <span className="ml-1">Signed</span>
+                          </StatusBadge>
+                        ) : (
+                          <StatusBadge tone="warning">
+                            <ShieldOff size={12} />
+                            <span className="ml-1">Unsigned</span>
+                          </StatusBadge>
+                        )}
+                        {entry.isAiAssisted ? (
+                          <StatusBadge tone="info">AI assisted</StatusBadge>
+                        ) : (
+                          <StatusBadge tone="neutral">Human</StatusBadge>
+                        )}
+                        {entry.bundleId === chain.rootBundleId ? (
+                          <StatusBadge tone="neutral">Root</StatusBadge>
+                        ) : null}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <div className="px-4 py-3 text-sm text-secondary">
+                No chain entries are available.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const BriefingDigest = ({
   briefing,
   sections,
@@ -173,6 +454,30 @@ const EvidencePacketPage = () => {
   const [loading, setLoading] = useState(true);
   const [isIncidentDialogOpen, setIsIncidentDialogOpen] = useState(false);
 
+  // Slice 1 — Signed Change Attestations. Auto-verify on load so operators
+  // see the signed/unsigned/chain-intact state immediately; the drawer pulls
+  // the full chain on demand.
+  const [verification, setVerification] = useState<EvidencePacketVerification | null>(null);
+  const [verificationLoading, setVerificationLoading] = useState(false);
+  const [isVerifyDrawerOpen, setIsVerifyDrawerOpen] = useState(false);
+  const [attestationChain, setAttestationChain] = useState<AttestationChain | null>(null);
+  const [chainLoading, setChainLoading] = useState(false);
+
+  const loadVerification = async () => {
+    if (!bundleId) return;
+    setVerificationLoading(true);
+    try {
+      setVerification(await verifyEvidencePacket(bundleId));
+    } catch (error) {
+      setVerification(null);
+      // Don't surface a toast for every packet — the chip will render as
+      // "Verification unavailable" and the drawer can be opened for detail.
+      console.error('Packet verification failed:', error);
+    } finally {
+      setVerificationLoading(false);
+    }
+  };
+
   const loadPacket = async () => {
     if (!bundleId) {
       setPacket(null);
@@ -196,7 +501,20 @@ const EvidencePacketPage = () => {
 
   useEffect(() => {
     void loadPacket();
+    void loadVerification();
   }, [bundleId]);
+
+  useEffect(() => {
+    if (!isVerifyDrawerOpen || !bundleId) return;
+    if (attestationChain) return;
+    setChainLoading(true);
+    fetchAttestationChain(bundleId)
+      .then(chain => setAttestationChain(chain))
+      .catch(error => {
+        console.error('Attestation chain load failed:', error);
+      })
+      .finally(() => setChainLoading(false));
+  }, [isVerifyDrawerOpen, bundleId, attestationChain]);
 
   const topTouchedPaths = useMemo(() => packet?.touchedPaths?.slice(0, 12) || [], [packet]);
   const hiddenTouchedPathCount = Math.max(
@@ -450,6 +768,13 @@ const EvidencePacketPage = () => {
             value={compactHash(packet.digestSha256)}
             helper="Content-addressed internal packet reference"
             tone="info"
+          />
+        </div>
+        <div className="mt-4">
+          <AttestationChipBand
+            verification={verification}
+            loading={verificationLoading}
+            onOpenDrawer={() => setIsVerifyDrawerOpen(true)}
           />
         </div>
         {packet.incidentLinks && packet.incidentLinks.length > 0 ? (
@@ -1076,6 +1401,19 @@ const EvidencePacketPage = () => {
         onClose={() => setIsIncidentDialogOpen(false)}
         onLinked={() => {
           void loadPacket();
+        }}
+      />
+
+      <AttestationVerifyDrawer
+        open={isVerifyDrawerOpen}
+        onClose={() => setIsVerifyDrawerOpen(false)}
+        verification={verification}
+        chain={attestationChain}
+        chainLoading={chainLoading}
+        verificationLoading={verificationLoading}
+        onRefresh={() => {
+          setAttestationChain(null);
+          void loadVerification();
         }}
       />
     </div>

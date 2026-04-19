@@ -234,3 +234,58 @@ export const verifyAttestationSignature = (
 export const isSigningConfigured = (): boolean => {
   return loadPrivateKeyPem() !== null && resolveActiveKeyId() !== null;
 };
+
+export type SignerStatus = {
+  configured: boolean;
+  activeKeyId: string | null;
+  algorithm: typeof SIGNING_ALGO;
+  registryPath: string;
+  knownKeyCount: number;
+  activeKeyAgeDays: number | null;
+  publicKeyFingerprint: string | null;
+};
+
+/**
+ * Operator-visible health snapshot of the signing subsystem. Deliberately
+ * does not leak any bytes from the private key — it's read by the UI
+ * signer-health chip and by operators curling /api/governance/signer/status
+ * during bring-up.
+ */
+export const describeSignerStatus = (): SignerStatus => {
+  const registryPath = resolveKeysFilePath();
+  const registry = loadPublicKeyRegistry();
+  const activeKeyId = resolveActiveKeyId();
+  const configured = isSigningConfigured();
+
+  const usableKeys = Object.values(registry.keys).filter(entry =>
+    isUsablePublicEntry(entry as PublicKeyRegistryEntry | Record<string, unknown>),
+  ) as PublicKeyRegistryEntry[];
+
+  let activeKeyAgeDays: number | null = null;
+  let publicKeyFingerprint: string | null = null;
+  if (activeKeyId) {
+    const entry = registry.keys[activeKeyId];
+    if (isUsablePublicEntry(entry)) {
+      publicKeyFingerprint = createHash('sha256').update(entry.publicKeyPem, 'utf8').digest('hex');
+      if (entry.validFrom) {
+        const parsed = new Date(entry.validFrom);
+        if (!Number.isNaN(parsed.getTime())) {
+          activeKeyAgeDays = Math.max(
+            0,
+            Math.round((Date.now() - parsed.getTime()) / (1000 * 60 * 60 * 24)),
+          );
+        }
+      }
+    }
+  }
+
+  return {
+    configured,
+    activeKeyId,
+    algorithm: SIGNING_ALGO,
+    registryPath,
+    knownKeyCount: usableKeys.length,
+    activeKeyAgeDays,
+    publicKeyFingerprint,
+  };
+};

@@ -13,7 +13,10 @@ import {
   Gauge,
   KeyRound,
   PlayCircle,
+  Scale,
+  Search,
   ShieldCheck,
+  ShieldOff,
   Sparkles,
   Workflow,
 } from 'lucide-react';
@@ -67,6 +70,10 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   studio: Bot,
   incidents: AlertTriangle,
   mrm: ShieldCheck,
+  'governance-controls': Scale,
+  'governance-exceptions': ShieldOff,
+  'governance-provenance': Search,
+  'governance-posture': Gauge,
 };
 
 const Dashboard = () => {

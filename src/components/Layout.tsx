@@ -11,6 +11,7 @@ import {
   ChevronDown,
   Database,
   FileText,
+  Gauge,
   KeyRound,
   LayoutDashboard,
   LogOut,
@@ -19,7 +20,9 @@ import {
   PanelLeftOpen,
   PlusCircle,
   Search,
+  Scale,
   ShieldCheck,
+  ShieldOff,
   Siren,
   Sparkles,
   Star,
@@ -70,6 +73,10 @@ const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
   'artifact-designer': FileText,
   tasks: Terminal,
   studio: Sparkles,
+  'governance-controls': Scale,
+  'governance-exceptions': ShieldOff,
+  'governance-provenance': Search,
+  'governance-posture': Gauge,
 };
 
 const routeTitles: Record<string, string> = {
@@ -86,6 +93,10 @@ const routeTitles: Record<string, string> = {
   '/workspace/databases': 'Workspace Databases',
   '/tool-access': 'Rule Engine',
   '/rule-engine': 'Rule Engine',
+  '/governance/controls': 'Governance Controls',
+  '/governance/exceptions': 'Governance Exceptions',
+  '/governance/provenance': 'Prove the Negative',
+  '/governance/posture': 'Posture Dashboard',
 };
 
 const SIDEBAR_STORAGE_KEY = 'singularity.sidebar.collapsed';

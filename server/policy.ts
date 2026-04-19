@@ -12,6 +12,7 @@ import {
   executionRuntimeRpc,
   isRemoteExecutionClient,
 } from './execution/runtimeClient';
+import { findActiveException } from './governance/exceptions';
 
 const createId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
@@ -29,6 +30,12 @@ const decisionFromRow = (row: Record<string, any>): PolicyDecision => ({
   reason: row.reason,
   requestedByAgentId: row.requested_by_agent_id || undefined,
   createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+  exceptionId: row.exception_id || undefined,
+  exceptionExpiresAt: row.exception_expires_at
+    ? (row.exception_expires_at instanceof Date
+        ? row.exception_expires_at.toISOString()
+        : String(row.exception_expires_at))
+    : undefined,
 });
 
 const HIGH_IMPACT_TOOLS = new Set<ToolAdapterId>([
@@ -55,9 +62,11 @@ export const createPolicyDecision = async (
         decision,
         reason,
         requested_by_agent_id,
-        created_at
+        created_at,
+        exception_id,
+        exception_expires_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       RETURNING *
     `,
     [
@@ -73,6 +82,11 @@ export const createPolicyDecision = async (
       decision.reason,
       decision.requestedByAgentId || null,
       decision.createdAt || new Date().toISOString(),
+      // Slice 3 — stamp the exception id + expiry when a decision was
+      // granted on account of an active governance exception. Legacy
+      // callers that don't set these will write NULLs and are unchanged.
+      decision.exceptionId || null,
+      decision.exceptionExpiresAt || null,
     ],
   );
 
@@ -180,6 +194,36 @@ export const evaluateToolPolicy = async ({
     reason = `${toolId} is treated as a high-impact action and requires approval.`;
   }
 
+  // Slice 3 — if the current decision would require approval, check for a
+  // matching active governance exception that waives it. Only
+  // REQUIRE_APPROVAL is convertible to ALLOW; DENY stays DENY because a
+  // hard deny is a compliance floor, not a reviewable verdict.
+  let exceptionId: string | undefined;
+  let exceptionExpiresAt: string | undefined;
+  if (decision === 'REQUIRE_APPROVAL') {
+    try {
+      const activeException = await findActiveException({
+        capabilityId: capability.id,
+        probe: { toolId },
+      });
+      if (activeException) {
+        decision = 'ALLOW';
+        exceptionId = activeException.exceptionId;
+        exceptionExpiresAt = activeException.expiresAt ?? undefined;
+        reason = `Policy satisfied by governance exception ${activeException.exceptionId} (control ${activeException.controlId}, expires ${activeException.expiresAt ?? 'unspecified'}).`;
+      }
+    } catch (error) {
+      // Fail-closed on exception lookup errors: a query failure must not
+      // silently let a REQUIRE_APPROVAL action slip through. We keep the
+      // original REQUIRE_APPROVAL verdict and log for operator visibility.
+      console.warn(
+        `[policy] governance exception lookup failed for ${capability.id}/${toolId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   return createPolicyDecision({
     capabilityId: capability.id,
     traceId,
@@ -190,6 +234,8 @@ export const evaluateToolPolicy = async ({
     targetId,
     decision,
     reason,
+    exceptionId,
+    exceptionExpiresAt,
   });
 };
 

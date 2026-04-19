@@ -1937,7 +1937,11 @@ export interface LearningUpdate {
     | 'PIPELINE_ERROR'
     | 'PREVIEW_REQUESTED'
     | 'DRIFT_FLAGGED'
-    | 'VERSION_REVERTED';
+    | 'VERSION_REVERTED'
+    // Slice 3 — the agent-learning timeline picks up governance-exception
+    // decisions so exception approvals / denials / revocations appear on the
+    // same audit thread as corrections and drift events.
+    | 'GOVERNANCE_EXCEPTION';
   relatedWorkItemId?: string;
   relatedRunId?: string;
 }
@@ -2537,6 +2541,14 @@ export interface PolicyDecision {
   reason: string;
   requestedByAgentId?: string;
   createdAt: string;
+  /**
+   * Slice 3 — when a matching APPROVED governance exception flipped a
+   * REQUIRE_APPROVAL decision to ALLOW, the decision row stamps the
+   * exception id + expiry. Present iff the decision was granted on
+   * exception. Audits reconstruct "why did this pass?" from this pair.
+   */
+  exceptionId?: string;
+  exceptionExpiresAt?: string;
 }
 
 export type FlightRecorderVerdict =
@@ -3372,6 +3384,327 @@ export interface AttestationChain {
   rootBundleId: string;
   workItemId: string;
   entries: EvidencePacketSummary[];
+}
+
+/**
+ * Slice 1 — verify response the UI renders in the Signed/Chain-intact chip
+ * + drawer. `signatureValid` and `digestMatches` can be true independently
+ * (an operator who mutates payload rows breaks digestMatches without
+ * touching the signature). `chainIntact` covers structural walk-back.
+ */
+export interface EvidencePacketVerification {
+  bundleId: string;
+  capabilityId: string;
+  workItemId: string;
+  signatureValid: boolean;
+  digestMatches: boolean;
+  chainIntact: boolean;
+  chainDepth: number;
+  chainRootBundleId: string;
+  signingKeyId: string | null;
+  signingAlgo: string | null;
+  attestationVersion: number;
+  reason?: string;
+}
+
+/**
+ * Slice 1 — operator health snapshot of the Signed Change Attestations
+ * subsystem. Returned verbatim by `/api/governance/signer/status`; the UI
+ * uses `configured` to decide whether to show a green "Signed" chip for
+ * newly-created packets vs. an amber "Unsigned" chip.
+ */
+export interface SignerStatus {
+  configured: boolean;
+  activeKeyId: string | null;
+  algorithm: 'ed25519';
+  registryPath: string;
+  knownKeyCount: number;
+  activeKeyAgeDays: number | null;
+  publicKeyFingerprint: string | null;
+}
+
+// -- Slice 2 — governance controls catalog -----------------------------------
+
+export type GovernanceControlFramework = 'NIST_CSF_2' | 'SOC2_TSC' | 'ISO27001_2022';
+export type GovernanceControlSeverity = 'STANDARD' | 'SEV_1';
+export type GovernanceControlStatus = 'ACTIVE' | 'RETIRED';
+export type GovernanceControlOwnerRole =
+  | 'SECURITY'
+  | 'COMPLIANCE'
+  | 'PLATFORM'
+  | 'EXECUTIVE';
+export type GovernanceBindingKind =
+  | 'POLICY_DECISION'
+  | 'APPROVAL_FLOW'
+  | 'SIGNING_REQUIRED'
+  | 'EVIDENCE_PACKET';
+
+export interface GovernanceControl {
+  controlId: string;
+  framework: GovernanceControlFramework;
+  controlCode: string;
+  controlFamily: string;
+  title: string;
+  description: string;
+  ownerRole: GovernanceControlOwnerRole | null;
+  severity: GovernanceControlSeverity;
+  status: GovernanceControlStatus;
+  seedVersion: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GovernanceControlBinding {
+  bindingId: string;
+  controlId: string;
+  policySelector: Record<string, unknown>;
+  bindingKind: GovernanceBindingKind;
+  capabilityScope: string | null;
+  seedVersion: string | null;
+  createdAt: string;
+  createdBy: string | null;
+}
+
+export interface GovernanceControlListItem extends GovernanceControl {
+  bindingCount: number;
+}
+
+export interface GovernanceControlWithBindings extends GovernanceControl {
+  bindings: GovernanceControlBinding[];
+}
+
+export interface GovernanceControlFrameworkSummary {
+  framework: GovernanceControlFramework;
+  total: number;
+  activeBindings: number;
+}
+
+export interface GovernanceControlsListResponse {
+  items: GovernanceControlListItem[];
+  summary: GovernanceControlFrameworkSummary[];
+}
+
+export interface GovernanceControlBindingInput {
+  policySelector: Record<string, unknown>;
+  bindingKind: GovernanceBindingKind;
+  capabilityScope?: string | null;
+}
+
+// Slice 3 — Governance exception lifecycle. An exception is a time-bound,
+// auditable waiver of a policy decision. Every transition writes an event.
+export type GovernanceExceptionStatus =
+  | 'REQUESTED'
+  | 'APPROVED'
+  | 'DENIED'
+  | 'EXPIRED'
+  | 'REVOKED';
+
+export type GovernanceExceptionEventType =
+  | 'REQUESTED'
+  | 'APPROVED'
+  | 'DENIED'
+  | 'EXPIRED'
+  | 'REVOKED'
+  | 'COMMENTED';
+
+export interface GovernanceException {
+  exceptionId: string;
+  capabilityId: string;
+  controlId: string;
+  requestedBy: string;
+  requestedAt: string;
+  reason: string;
+  scopeSelector: Record<string, unknown>;
+  status: GovernanceExceptionStatus;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  decisionComment: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  revokedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GovernanceExceptionEvent {
+  eventId: string;
+  exceptionId: string;
+  eventType: GovernanceExceptionEventType;
+  actorUserId: string | null;
+  details: Record<string, unknown>;
+  at: string;
+}
+
+export interface GovernanceExceptionWithEvents extends GovernanceException {
+  events: GovernanceExceptionEvent[];
+}
+
+export interface GovernanceExceptionRequestInput {
+  capabilityId: string;
+  controlId: string;
+  reason: string;
+  scopeSelector?: Record<string, unknown>;
+  expiresAt: string; // ISO — v1 rejects null (see plan "Risk: long-lived exception")
+}
+
+export interface GovernanceExceptionDecisionInput {
+  status: 'APPROVED' | 'DENIED';
+  comment?: string;
+  // If omitted and an exception is APPROVED, service inherits
+  // requested expiresAt — the decision cannot extend beyond the request.
+  expiresAt?: string;
+}
+
+export interface GovernanceExceptionListFilter {
+  capabilityId?: string;
+  controlId?: string;
+  status?: GovernanceExceptionStatus | GovernanceExceptionStatus[];
+  includeEvents?: boolean;
+}
+
+export interface GovernanceExceptionsListResponse {
+  items: GovernanceException[];
+  total: number;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Slice 4 — prove-the-negative provenance.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type ProvenanceActorKind = 'AI' | 'HUMAN' | 'ANY';
+
+export interface ProvenanceCoverageWindow {
+  coverageId: string;
+  capabilityId: string;
+  windowStart: string;
+  windowEnd: string;
+  source: string;
+  notes: string | null;
+}
+
+export interface ProvenanceCoverageResult {
+  windows: ProvenanceCoverageWindow[];
+  /**
+   * True when the requested [from, to] window is NOT fully covered by the
+   * union of known coverage windows. A "no touch" answer in the presence
+   * of a gap must never be reported as a silent false — the UI shows an
+   * amber "inconclusive" banner and lists the gap sub-windows.
+   */
+  hasGap: boolean;
+  gapWindows: Array<{ start: string; end: string }>;
+}
+
+export interface ProvenanceTouchMatch {
+  toolInvocationId: string;
+  capabilityId: string;
+  runId: string;
+  toolId: string;
+  actorKind: 'AI' | 'HUMAN';
+  touchedPaths: string[];
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface ProveNoTouchInput {
+  capabilityId: string;
+  pathGlob: string;
+  from: string; // ISO
+  to: string; // ISO
+  actorKind?: ProvenanceActorKind;
+}
+
+export interface ProveNoTouchResult {
+  touched: boolean;
+  matchingInvocations: ProvenanceTouchMatch[];
+  coverage: ProvenanceCoverageResult;
+  /** Human-legible headline for the UI card. */
+  summary: string;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Slice 5 — governance posture dashboard. Pure aggregate read over the
+// Slice 1-4 tables. See server/governance/posture.ts for the source
+// queries. The UI uses the same type via src/lib/api.ts.
+// ──────────────────────────────────────────────────────────────────────────
+
+export interface GovernanceSignerStatus {
+  configured: boolean;
+  activeKeyId: string | null;
+  algorithm: string;
+  registryPath: string;
+  knownKeyCount: number;
+  activeKeyAgeDays: number | null;
+  publicKeyFingerprint: string | null;
+}
+
+export interface PostureSignerHealth {
+  status: GovernanceSignerStatus;
+  recentPackets: {
+    windowDays: number;
+    total: number;
+    signed: number;
+    unsigned: number;
+    signedRatio: number;
+  };
+}
+
+export interface PostureControlCoverage {
+  totalControls: number;
+  boundControls: number;
+  unboundControls: number;
+  coverageRatio: number;
+  byFramework: Array<{
+    framework: string;
+    total: number;
+    bound: number;
+    coverageRatio: number;
+  }>;
+}
+
+export interface PostureExceptionsSummary {
+  enabled: boolean;
+  active: number;
+  expiringSoon: number;
+  expiringSoonHours: number;
+  recentDecisions: Array<{
+    exceptionId: string;
+    capabilityId: string;
+    controlId: string;
+    status: string;
+    decidedBy: string | null;
+    decidedAt: string | null;
+    expiresAt: string | null;
+  }>;
+}
+
+export interface PostureProvenanceSummary {
+  enabled: boolean;
+  capabilitiesWithCoverage: number;
+  coverageWindowCount: number;
+  earliestWindowStart: string | null;
+  latestWindowEnd: string | null;
+  unmappedToolSamples: Array<{ toolId: string; sampleCount: number }>;
+}
+
+export interface PostureRecentDenial {
+  decisionId: string;
+  capabilityId: string;
+  actionType: string;
+  decision: string;
+  reason: string;
+  createdAt: string;
+  controlId: string | null;
+  exceptionId: string | null;
+}
+
+export interface GovernancePostureSnapshot {
+  generatedAt: string;
+  signer: PostureSignerHealth;
+  controls: PostureControlCoverage;
+  exceptions: PostureExceptionsSummary;
+  provenance: PostureProvenanceSummary;
+  recentDenials: PostureRecentDenial[];
+  warnings: string[];
 }
 
 export type IncidentSeverity = 'SEV1' | 'SEV2' | 'SEV3' | 'SEV4';

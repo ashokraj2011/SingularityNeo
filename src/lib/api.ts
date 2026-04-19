@@ -77,7 +77,24 @@ import {
   ReadinessContract,
   TeamQueueSnapshot,
   AuditReportSnapshot,
+  AttestationChain,
   EvidencePacket,
+  EvidencePacketVerification,
+  SignerStatus,
+  GovernanceControlBinding,
+  GovernanceControlBindingInput,
+  GovernanceControlsListResponse,
+  GovernanceControlWithBindings,
+  GovernanceException,
+  GovernanceExceptionDecisionInput,
+  GovernanceExceptionRequestInput,
+  GovernanceExceptionWithEvents,
+  GovernanceExceptionsListResponse,
+  GovernanceExceptionStatus,
+  ProveNoTouchInput,
+  ProveNoTouchResult,
+  ProvenanceCoverageWindow,
+  GovernancePostureSnapshot,
   EvidencePacketSummary,
   ExecutorRegistryEntry,
   ExecutorRegistrySummary,
@@ -807,6 +824,164 @@ export const createEvidencePacketForWorkItem = async (
 
 export const fetchEvidencePacket = async (bundleId: string): Promise<EvidencePacket> =>
   requestJson<EvidencePacket>(`/api/evidence-packets/${encodeURIComponent(bundleId)}`);
+
+export const verifyEvidencePacket = async (
+  bundleId: string,
+): Promise<EvidencePacketVerification> =>
+  requestJson<EvidencePacketVerification>(
+    `/api/evidence-packets/${encodeURIComponent(bundleId)}/verify`,
+  );
+
+export const fetchAttestationChain = async (
+  bundleId: string,
+): Promise<AttestationChain> =>
+  requestJson<AttestationChain>(
+    `/api/attestations/${encodeURIComponent(bundleId)}/chain`,
+  );
+
+export const fetchSignerStatus = async (): Promise<SignerStatus> =>
+  requestJson<SignerStatus>('/api/governance/signer/status');
+
+// Slice 2 — governance controls catalog.
+export const listGovernanceControls = async (filter?: {
+  framework?: string;
+  severity?: string;
+  status?: string;
+  capabilityScope?: string;
+}): Promise<GovernanceControlsListResponse> => {
+  const search = new URLSearchParams();
+  if (filter?.framework) search.set('framework', filter.framework);
+  if (filter?.severity) search.set('severity', filter.severity);
+  if (filter?.status) search.set('status', filter.status);
+  if (filter?.capabilityScope) search.set('capabilityScope', filter.capabilityScope);
+  const query = search.toString();
+  return requestJson<GovernanceControlsListResponse>(
+    `/api/governance/controls${query ? `?${query}` : ''}`,
+  );
+};
+
+export const getGovernanceControl = async (
+  controlId: string,
+  capabilityScope?: string,
+): Promise<GovernanceControlWithBindings> => {
+  const search = new URLSearchParams();
+  if (capabilityScope) search.set('capabilityScope', capabilityScope);
+  const query = search.toString();
+  return requestJson<GovernanceControlWithBindings>(
+    `/api/governance/controls/${encodeURIComponent(controlId)}${query ? `?${query}` : ''}`,
+  );
+};
+
+export const createGovernanceControlBinding = async (
+  controlId: string,
+  input: GovernanceControlBindingInput,
+): Promise<GovernanceControlBinding> =>
+  requestJson<GovernanceControlBinding>(
+    `/api/governance/controls/${encodeURIComponent(controlId)}/bindings`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    },
+  );
+
+// Slice 3 — governance exception lifecycle wrappers.
+export const listGovernanceExceptions = async (filter?: {
+  capabilityId?: string;
+  controlId?: string;
+  status?: GovernanceExceptionStatus | GovernanceExceptionStatus[];
+}): Promise<GovernanceExceptionsListResponse> => {
+  const search = new URLSearchParams();
+  if (filter?.capabilityId) search.set('capabilityId', filter.capabilityId);
+  if (filter?.controlId) search.set('controlId', filter.controlId);
+  if (filter?.status) {
+    const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
+    for (const status of statuses) search.append('status', status);
+  }
+  const query = search.toString();
+  return requestJson<GovernanceExceptionsListResponse>(
+    `/api/governance/exceptions${query ? `?${query}` : ''}`,
+  );
+};
+
+export const getGovernanceException = async (
+  exceptionId: string,
+): Promise<GovernanceExceptionWithEvents> =>
+  requestJson<GovernanceExceptionWithEvents>(
+    `/api/governance/exceptions/${encodeURIComponent(exceptionId)}`,
+  );
+
+export const fetchActiveGovernanceException = async (
+  capabilityId: string,
+  toolId: string,
+): Promise<{ exception: GovernanceException | null }> => {
+  const search = new URLSearchParams({ capabilityId, toolId });
+  return requestJson<{ exception: GovernanceException | null }>(
+    `/api/governance/exceptions/active?${search.toString()}`,
+  );
+};
+
+export const requestGovernanceException = async (
+  input: GovernanceExceptionRequestInput,
+): Promise<GovernanceExceptionWithEvents> =>
+  requestJson<GovernanceExceptionWithEvents>(`/api/governance/exceptions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+
+export const decideGovernanceException = async (
+  exceptionId: string,
+  decision: GovernanceExceptionDecisionInput,
+): Promise<GovernanceExceptionWithEvents> =>
+  requestJson<GovernanceExceptionWithEvents>(
+    `/api/governance/exceptions/${encodeURIComponent(exceptionId)}/decide`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(decision),
+    },
+  );
+
+export const revokeGovernanceException = async (
+  exceptionId: string,
+  comment?: string,
+): Promise<GovernanceExceptionWithEvents> =>
+  requestJson<GovernanceExceptionWithEvents>(
+    `/api/governance/exceptions/${encodeURIComponent(exceptionId)}/revoke`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment }),
+    },
+  );
+
+// ──────────────────────────────────────────────────────────────────────────
+// Slice 4 — prove-the-negative provenance wrappers.
+// ──────────────────────────────────────────────────────────────────────────
+
+export const proveNoTouch = async (
+  input: ProveNoTouchInput,
+): Promise<ProveNoTouchResult> =>
+  requestJson<ProveNoTouchResult>('/api/governance/provenance/prove-no-touch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+
+export const listProvenanceCoverage = async (
+  capabilityId: string,
+): Promise<{ windows: ProvenanceCoverageWindow[] }> =>
+  requestJson<{ windows: ProvenanceCoverageWindow[] }>(
+    `/api/governance/provenance/coverage?capabilityId=${encodeURIComponent(capabilityId)}`,
+  );
+
+// ──────────────────────────────────────────────────────────────────────────
+// Slice 5 — governance posture snapshot.
+// ──────────────────────────────────────────────────────────────────────────
+
+export const fetchGovernancePosture = async (): Promise<GovernancePostureSnapshot> =>
+  requestJson<GovernancePostureSnapshot>('/api/governance/posture');
 
 export const listIncidents = async (params?: {
   capabilityId?: string;

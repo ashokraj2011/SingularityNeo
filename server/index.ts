@@ -2532,6 +2532,322 @@ app.post('/api/attestations/:bundleId/verify', async (request, response) => {
   }
 });
 
+// Governance Slice 1 — idempotent GET form of the attestation verify route,
+// namespaced under /api/evidence-packets for UI ergonomics. Same underlying
+// verification; adds chainDepth + chainRootBundleId to the response so the UI
+// drawer can display the walk-back summary without a follow-up call.
+app.get('/api/evidence-packets/:bundleId/verify', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    const packet = await getEvidencePacket(request.params.bundleId);
+    if (!packet) {
+      response.status(404).json({ error: 'Evidence packet was not found.' });
+      return;
+    }
+    await assertCapabilityPermission({
+      capabilityId: packet.capabilityId,
+      actor,
+      action: 'artifact.read',
+    });
+    const result = await verifyEvidencePacket(request.params.bundleId);
+    if (!result) {
+      response.status(404).json({ error: 'Evidence packet was not found.' });
+      return;
+    }
+    response.json(result);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// Governance Slice 1 — operator health view. Returns which signing key (if
+// any) is active, how many keys the registry knows about, and how old the
+// active key is. Never leaks the private key bytes; the fingerprint is a
+// sha256 over the PEM-encoded public half only.
+app.get('/api/governance/signer/status', async (_request, response) => {
+  try {
+    const { describeSignerStatus } = await import('./governance/signer');
+    response.json(describeSignerStatus());
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// Governance Slice 2 — controls catalog. READ endpoints require
+// `report.view.audit` because controls are audit-visible metadata; WRITE
+// (binding creation) requires `access.manage` because it changes how
+// enforced policies map to frameworks.
+app.get('/api/governance/controls', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+    const { listControls, getControlFrameworkSummary } = await import('./governance/controls');
+
+    const { framework, severity, status, capabilityScope } = request.query as Record<
+      string,
+      string | undefined
+    >;
+    const [items, summary] = await Promise.all([
+      listControls({
+        framework: framework as any,
+        severity: severity as any,
+        status: status as any,
+        capabilityScope: capabilityScope || undefined,
+      }),
+      getControlFrameworkSummary(),
+    ]);
+    response.json({ items, summary });
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/governance/controls/:controlId', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+    const { getControl } = await import('./governance/controls');
+    const capabilityScope = typeof request.query.capabilityScope === 'string'
+      ? request.query.capabilityScope
+      : undefined;
+    const control = await getControl(request.params.controlId, capabilityScope);
+    if (!control) {
+      response.status(404).json({ message: 'Control not found' });
+      return;
+    }
+    response.json(control);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/governance/controls/:controlId/bindings', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'access.manage' });
+    const { createBinding } = await import('./governance/controls');
+
+    const body = (request.body ?? {}) as {
+      policySelector?: Record<string, unknown>;
+      bindingKind?: string;
+      capabilityScope?: string | null;
+    };
+    const record = await createBinding({
+      controlId: request.params.controlId,
+      policySelector: body.policySelector ?? {},
+      bindingKind: (body.bindingKind ?? '') as any,
+      capabilityScope: body.capabilityScope ?? null,
+      createdBy: actor?.userId ?? actor?.displayName ?? null,
+    });
+    response.status(201).json(record);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// Governance Slice 3 — exception lifecycle. Listing is audit-level;
+// request / decide / revoke mutate policy outcomes, so they require
+// `access.manage`. An actor's userId stamps the exception record so the
+// audit events carry the decider identity.
+app.get('/api/governance/exceptions', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+    const { listExceptions } = await import('./governance/exceptions');
+    const { capabilityId, controlId, status } = request.query as Record<
+      string,
+      string | string[] | undefined
+    >;
+    const statuses = Array.isArray(status)
+      ? (status as string[])
+      : typeof status === 'string' && status.trim()
+        ? [status]
+        : undefined;
+    const result = await listExceptions({
+      capabilityId: typeof capabilityId === 'string' ? capabilityId : undefined,
+      controlId: typeof controlId === 'string' ? controlId : undefined,
+      status: statuses as any,
+    });
+    response.json(result);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/governance/exceptions/active', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+    const { findActiveException } = await import('./governance/exceptions');
+    const { capabilityId, toolId } = request.query as Record<string, string | undefined>;
+    if (!capabilityId || !toolId) {
+      response.status(400).json({ message: 'capabilityId and toolId are required' });
+      return;
+    }
+    const exception = await findActiveException({
+      capabilityId,
+      probe: { toolId },
+    });
+    response.json({ exception });
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/governance/exceptions/:exceptionId', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+    const { getException } = await import('./governance/exceptions');
+    const exception = await getException(request.params.exceptionId);
+    if (!exception) {
+      response.status(404).json({ message: 'Exception not found' });
+      return;
+    }
+    response.json(exception);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/governance/exceptions', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'access.manage' });
+    const { requestException } = await import('./governance/exceptions');
+    const body = (request.body ?? {}) as {
+      capabilityId?: string;
+      controlId?: string;
+      reason?: string;
+      scopeSelector?: Record<string, unknown>;
+      expiresAt?: string;
+    };
+    const requestedBy = actor?.userId ?? actor?.displayName ?? 'unknown';
+    const record = await requestException({
+      capabilityId: String(body.capabilityId ?? ''),
+      controlId: String(body.controlId ?? ''),
+      reason: String(body.reason ?? ''),
+      scopeSelector: body.scopeSelector ?? {},
+      expiresAt: String(body.expiresAt ?? ''),
+      requestedBy,
+    });
+    response.status(201).json(record);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/governance/exceptions/:exceptionId/decide', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'access.manage' });
+    const { decideException } = await import('./governance/exceptions');
+    const body = (request.body ?? {}) as {
+      status?: 'APPROVED' | 'DENIED';
+      comment?: string;
+      expiresAt?: string;
+    };
+    const record = await decideException({
+      exceptionId: request.params.exceptionId,
+      decision: {
+        status: (body.status ?? 'APPROVED') as 'APPROVED' | 'DENIED',
+        comment: body.comment,
+        expiresAt: body.expiresAt,
+      },
+      actorUserId: actor?.userId ?? actor?.displayName ?? 'unknown',
+    });
+    response.json(record);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/governance/exceptions/:exceptionId/revoke', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'access.manage' });
+    const { revokeException } = await import('./governance/exceptions');
+    const body = (request.body ?? {}) as { comment?: string };
+    const record = await revokeException({
+      exceptionId: request.params.exceptionId,
+      actorUserId: actor?.userId ?? actor?.displayName ?? 'unknown',
+      comment: body.comment,
+    });
+    response.json(record);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Slice 4 — prove-the-negative provenance. `/prove-no-touch` is a POST
+// because the body carries a structured question (path glob + window +
+// optional actor-kind filter); `/coverage` is a GET list. Both surfaces
+// require `report.view.audit` since they're audit-grade reads.
+// ──────────────────────────────────────────────────────────────────────────
+app.post('/api/governance/provenance/prove-no-touch', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+    const { proveNoTouch } = await import('./governance/provenance');
+    const body = (request.body ?? {}) as {
+      capabilityId?: string;
+      pathGlob?: string;
+      from?: string;
+      to?: string;
+      actorKind?: 'AI' | 'HUMAN' | 'ANY';
+    };
+    if (!body.capabilityId || !body.pathGlob || !body.from || !body.to) {
+      response.status(400).json({
+        message: 'capabilityId, pathGlob, from, and to are required',
+      });
+      return;
+    }
+    const result = await proveNoTouch({
+      capabilityId: body.capabilityId,
+      pathGlob: body.pathGlob,
+      from: body.from,
+      to: body.to,
+      actorKind: body.actorKind,
+    });
+    response.json(result);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/governance/provenance/coverage', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+    const capabilityId = String(request.query.capabilityId ?? '');
+    if (!capabilityId) {
+      response.status(400).json({ message: 'capabilityId is required' });
+      return;
+    }
+    const { listCoverageWindows } = await import('./governance/provenance');
+    const windows = await listCoverageWindows(capabilityId);
+    response.json({ windows });
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// Governance Slice 5 — posture dashboard aggregator. One call returns
+// the read-only snapshot the /governance/posture page renders. Never
+// writes and degrades gracefully: a missing subsystem table surfaces as
+// a warning string rather than a 500.
+app.get('/api/governance/posture', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+    const { getGovernancePostureSnapshot } = await import('./governance/posture');
+    response.json(await getGovernancePostureSnapshot());
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
 app.post(
   '/api/capabilities/:capabilityId/work-items/:workItemId/stage-control/continue',
   async (request, response) => {
