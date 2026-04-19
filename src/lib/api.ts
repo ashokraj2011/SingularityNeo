@@ -1,7 +1,10 @@
 import {
   ActorContext,
   AgentTask,
+  AgentLearningDriftState,
   AgentLearningProfileDetail,
+  AgentLearningProfileVersion,
+  AgentLearningVersionDiff,
   Artifact,
   ArtifactContentResponse,
   Capability,
@@ -93,6 +96,7 @@ import {
   ApprovalPolicy,
   ApprovalAssignment,
   AgentSessionScope,
+  WorkspaceDatabaseRuntimeInfo,
 } from '../types';
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from './desktop';
 
@@ -115,6 +119,9 @@ export interface RuntimeStatus {
   modelCatalogSource?: 'runtime' | 'fallback';
   runtimeAccessMode?: 'copilot-session' | 'headless-cli' | 'http-fallback' | 'unconfigured';
   httpFallbackEnabled?: boolean;
+  databaseRuntime?: WorkspaceDatabaseRuntimeInfo;
+  activeDatabaseProfileId?: string | null;
+  activeDatabaseProfileLabel?: string | null;
   executorId?: string;
   executorHeartbeatAt?: string;
   executorHeartbeatStatus?: 'FRESH' | 'STALE' | 'OFFLINE';
@@ -1739,6 +1746,13 @@ export const requestCapabilityWorkflowRunChanges = async (
     },
   );
 
+// The `fetchApprovalWorkspaceContext`, `refreshApprovalWorkspacePacket`, and
+// `sendBackApprovalForClarification` wrappers were removed when the
+// full-screen Approval Workspace page was retired in favor of the in-
+// orchestrator Human Approval Gate modal. The modal reads approval context
+// directly from already-hydrated work-item state, so no client-side fetch is
+// needed. The server-side routes remain available for external tooling.
+
 export const provideCapabilityWorkflowRunInput = async (
   capabilityId: string,
   runId: string,
@@ -2011,6 +2025,74 @@ export const submitAgentLearningCorrection = async (
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
+  );
+
+/**
+ * Slice A — list the immutable version history for an agent's learning
+ * profile. Newest-first; `current_version_id` on the profile identifies which
+ * entry is currently serving inference.
+ */
+export const fetchAgentLearningProfileVersions = async (
+  capabilityId: string,
+  agentId: string,
+  options: { limit?: number; offset?: number } = {},
+): Promise<{ versions: AgentLearningProfileVersion[] }> => {
+  const query = new URLSearchParams();
+  if (typeof options.limit === 'number') {
+    query.set('limit', String(options.limit));
+  }
+  if (typeof options.offset === 'number') {
+    query.set('offset', String(options.offset));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return requestJson<{ versions: AgentLearningProfileVersion[] }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning/versions${suffix}`,
+  );
+};
+
+/**
+ * Slice A — structured diff between two versions. `against` is the older
+ * baseline we're comparing `versionId` against.
+ */
+export const fetchAgentLearningVersionDiff = async (
+  capabilityId: string,
+  agentId: string,
+  versionId: string,
+  againstVersionId: string,
+): Promise<AgentLearningVersionDiff> =>
+  requestJson<AgentLearningVersionDiff>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning/versions/${encodeURIComponent(versionId)}/diff?against=${encodeURIComponent(againstVersionId)}`,
+  );
+
+/**
+ * Slice A — flip the live pointer to a prior version. Requires `agents.manage`
+ * and writes a VERSION_REVERTED audit event into the learning update log.
+ */
+export const activateAgentLearningProfileVersion = async (
+  capabilityId: string,
+  agentId: string,
+  versionId: string,
+  payload: { reason?: string } = {},
+): Promise<AgentLearningProfileDetail> =>
+  requestJson<AgentLearningProfileDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning/versions/${encodeURIComponent(versionId)}/activate`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+/**
+ * Slice C — current canary + drift state for the agent's learning profile.
+ * Used by the lens to surface the drift banner + revert CTA.
+ */
+export const fetchAgentLearningDriftState = async (
+  capabilityId: string,
+  agentId: string,
+): Promise<{ state: AgentLearningDriftState | null }> =>
+  requestJson<{ state: AgentLearningDriftState | null }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning/drift`,
   );
 
 export const listCapabilityEvalSuites = async (

@@ -9,6 +9,7 @@ Instead of treating delivery as scattered tools for planning, coding, and report
 SingularityNeo isn't just about running agents; it's about **Enterprise Safety and Observability**. We've built state-of-the-art governance right into the core loop:
 
 *   🛡️ **Dynamic Learning & Atomic Rollbacks**: Agents don't just act; they learn. When operators provide corrections, agents distill these into new guardrails. If a bad habit is learned, our **Agent State Versioning** lets you instantly roll back an agent's brain to a previous operational policy snapshot.
+*   🧪 **Gated, Versioned, Drift-Aware Learning Loop**: Every profile refresh is committed as an immutable version. Shape checks block empty-or-malformed distillations from going live, an async LLM-judge scores every new version against fixtures from real sessions, per-version canary counters feed a drift detector that surfaces regressions for operator-driven revert, and an advisory-lock + append-only audit path makes concurrent corrections race-safe. See [Self-Learning Loop](./docs/self-learning-loop.md).
 *   👻 **Shadow Mode Execution**: Need to test a high-stakes deployment without risking production? Toggle a capability into **Shadow Mode**. The execution layer intercepts destructive commands across the entire platform, simulating successful runs to let you validate agent reasoning in a 100% risk-free environment.
 *   📋 **Evidence-Based Execution**: Every run leaves behind a durable cryptographic-style evidence trail. Artifacts, handoffs, approvals, and wait states are comprehensively logged in the Flight Recorder, so you never have to ask "why did the agent do that?"
 *   🤝 **Strict Human-in-the-Loop Governance**: Agents can plan, design, implement, and review, but the platform ensures humans retain ultimate control over approvals, policy boundaries, and conflict resolution.
@@ -187,7 +188,8 @@ server/
   repository.ts      durable persistence and workspace materialization
   db.ts              schema setup and Postgres helpers
   execution/         runs, waits, worker, tools, orchestration
-  agentLearning/     learning profiles, jobs, and summaries
+  agentLearning/     learning profiles, jobs, summaries, quality gate,
+                     drift detector, versioning, race hardening
   ledger.ts          evidence aggregation and artifact access
   flightRecorder.ts  explainability and audit reconstruction
 ```
@@ -280,6 +282,7 @@ Recommended:
 
 ## Additional Docs
 
+- [Self-Learning Loop — versioning, quality gate, drift, race hardening](./docs/self-learning-loop.md)
 - [Competitive positioning and product gap assessment](./docs/research/competitive-positioning.md)
 - [Capability Mermaid diagrams](./docs/capability-mermaid-diagrams.md)
 - [Demo video script](./docs/demo-video-script.md)

@@ -315,6 +315,17 @@ CREATE TABLE IF NOT EXISTS capability_agent_learning_profiles (
       refreshed_at TIMESTAMPTZ,
       last_requested_at TIMESTAMPTZ,
       last_error TEXT,
+      current_version_id TEXT,
+      previous_version_id TEXT,
+      -- Slice C — per-version canary counters. Reset on every pointer flip;
+      -- feed the drift detector (negative-rate delta vs. prior version).
+      canary_started_at TIMESTAMPTZ,
+      canary_request_count INTEGER NOT NULL DEFAULT 0,
+      canary_negative_count INTEGER NOT NULL DEFAULT 0,
+      drift_flagged_at TIMESTAMPTZ,
+      drift_reason TEXT,
+      drift_regression_streak INTEGER NOT NULL DEFAULT 0,
+      drift_last_checked_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, agent_id),
@@ -322,6 +333,66 @@ CREATE TABLE IF NOT EXISTS capability_agent_learning_profiles (
         REFERENCES capability_agents(capability_id, id)
         ON DELETE CASCADE
     );
+
+-- Append-only history of every profile snapshot. The live profile row above
+-- carries a pointer (current_version_id) into this table; writes always go
+-- through this table first and then flip the pointer in the same transaction
+-- so a bad distillation can never destroy prior state.
+CREATE TABLE IF NOT EXISTS capability_agent_learning_profile_versions (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      version_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      version_no INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      highlights JSONB NOT NULL DEFAULT '[]'::jsonb,
+      context_block TEXT NOT NULL DEFAULT '',
+      source_document_ids TEXT[] NOT NULL DEFAULT '{}',
+      source_artifact_ids TEXT[] NOT NULL DEFAULT '{}',
+      source_count INTEGER NOT NULL DEFAULT 0,
+      context_block_tokens INTEGER,
+      judge_score NUMERIC,
+      judge_report JSONB,
+      shape_report JSONB,
+      created_by_update_id TEXT,
+      notes TEXT,
+      -- Slice C — when this version is replaced, its final canary counters
+      -- get frozen onto this row so drift detection has a stable baseline.
+      frozen_request_count INTEGER,
+      frozen_negative_count INTEGER,
+      frozen_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, version_id),
+      UNIQUE (capability_id, agent_id, version_no),
+      FOREIGN KEY (capability_id, agent_id)
+        REFERENCES capability_agents(capability_id, id)
+        ON DELETE CASCADE
+    );
+
+CREATE INDEX IF NOT EXISTS capability_agent_learning_profile_versions_created_idx
+  ON capability_agent_learning_profile_versions (capability_id, agent_id, created_at DESC);
+
+-- Slice B — evaluation fixtures seeded from recent successful sessions. The
+-- async LLM-judge replays these against new profile versions and writes the
+-- pass rate into capability_agent_learning_profile_versions.judge_score.
+CREATE TABLE IF NOT EXISTS capability_agent_eval_fixtures (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      fixture_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      source_session_id TEXT,
+      prompt TEXT NOT NULL,
+      reference_response TEXT,
+      expected_criteria JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ,
+      PRIMARY KEY (capability_id, fixture_id),
+      FOREIGN KEY (capability_id, agent_id)
+        REFERENCES capability_agents(capability_id, id)
+        ON DELETE CASCADE
+    );
+
+CREATE INDEX IF NOT EXISTS capability_agent_eval_fixtures_agent_idx
+  ON capability_agent_eval_fixtures (capability_id, agent_id);
 
 CREATE TABLE IF NOT EXISTS capability_agent_learning_jobs (
       capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,

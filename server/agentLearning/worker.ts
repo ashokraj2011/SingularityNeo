@@ -4,7 +4,7 @@ import {
   releaseAgentLearningJobLease,
   renewAgentLearningJobLease,
 } from './repository';
-import { processAgentLearningJob } from './service';
+import { processAgentLearningJob, recordPipelineError } from './service';
 
 const LEASE_MS = 30_000;
 const HEARTBEAT_MS = 10_000;
@@ -32,13 +32,24 @@ const schedulePoll = (delay = POLL_MS) => {
 };
 
 const processJobWithHeartbeat = async (job: Awaited<ReturnType<typeof claimRunnableLearningJobs>>[number]) => {
+  // Slice D — lease-renew + lease-release failures previously got silently
+  // swallowed. We keep the best-effort semantics (heartbeat hiccups must
+  // not crash the worker) but surface them via PIPELINE_ERROR so operators
+  // spot a stalled lease before it turns into a retry storm.
   const heartbeat = setInterval(() => {
     void renewAgentLearningJobLease({
       capabilityId: job.capabilityId,
       jobId: job.id,
       workerId,
       leaseMs: LEASE_MS,
-    }).catch(() => undefined);
+    }).catch(error =>
+      recordPipelineError({
+        capabilityId: job.capabilityId,
+        agentId: job.agentId,
+        stage: 'lease-renew',
+        error,
+      }),
+    );
   }, HEARTBEAT_MS);
 
   try {
@@ -48,7 +59,14 @@ const processJobWithHeartbeat = async (job: Awaited<ReturnType<typeof claimRunna
     await releaseAgentLearningJobLease({
       capabilityId: job.capabilityId,
       jobId: job.id,
-    }).catch(() => undefined);
+    }).catch(error =>
+      recordPipelineError({
+        capabilityId: job.capabilityId,
+        agentId: job.agentId,
+        stage: 'lease-release',
+        error,
+      }),
+    );
   }
 };
 
@@ -78,7 +96,16 @@ const tickWorker = async () => {
     }
 
     schedulePoll(100);
-  } catch {
+  } catch (error) {
+    // Slice D — the outer tick failure is load-bearing (if the query itself
+    // fails, logging via a metric is best effort). We log to stderr instead
+    // of recordPipelineError because there's no (capability, agent) scope
+    // available at this level.
+    console.error(
+      `[learning.worker] tick failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     schedulePoll(POLL_MS);
   }
 };

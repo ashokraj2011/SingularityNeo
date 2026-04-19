@@ -179,8 +179,16 @@ import {
 } from './workItemExplain';
 import { buildCapabilityInteractionFeedSnapshot } from './interactionFeed';
 import {
+  getApprovalWorkspaceContext,
+  refreshApprovalStructuredPacket,
+  sendBackApprovalForClarification,
+} from './approvalWorkspace';
+import {
   createEvidencePacketForWorkItem,
+  formatEvidencePacketForDisplay,
+  getAttestationChain,
   getEvidencePacket,
+  verifyEvidencePacket,
 } from './evidencePackets';
 import {
   GitHubProviderRateLimitError,
@@ -205,9 +213,13 @@ import {
   renderWorkItemFlightRecorderMarkdown,
 } from './flightRecorder';
 import {
+  activateAgentLearningProfileVersionWithAudit,
   applyAgentLearningCorrection,
   ensureAgentLearningBackfill,
+  getAgentLearningDriftState,
   getAgentLearningProfileDetail,
+  getAgentLearningProfileVersionDiff,
+  getAgentLearningProfileVersionHistory,
   queueCapabilityAgentLearningRefresh,
   queueSingleAgentLearningRefresh,
 } from './agentLearning/service';
@@ -2110,6 +2122,117 @@ app.post('/api/capabilities/:capabilityId/agents/:agentId/learning/corrections',
   }
 });
 
+// Slice A — append-only version history for an agent's learning profile.
+app.get(
+  '/api/capabilities/:capabilityId/agents/:agentId/learning/versions',
+  async (request, response) => {
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.read',
+      });
+      const limit = Number(request.query?.limit ?? 25);
+      const offset = Number(request.query?.offset ?? 0);
+      const versions = await getAgentLearningProfileVersionHistory(
+        request.params.capabilityId,
+        request.params.agentId,
+        {
+          limit: Number.isFinite(limit) ? limit : undefined,
+          offset: Number.isFinite(offset) ? offset : undefined,
+        },
+      );
+      response.json({ versions });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+// Slice A — structured diff between two versions. `against` is the older
+// baseline to compare `:versionId` against.
+app.get(
+  '/api/capabilities/:capabilityId/agents/:agentId/learning/versions/:versionId/diff',
+  async (request, response) => {
+    const against = String(request.query?.against || '').trim();
+    if (!against) {
+      response.status(400).json({
+        error: 'A `against` query parameter (baseline version id) is required.',
+      });
+      return;
+    }
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.read',
+      });
+      response.json(
+        await getAgentLearningProfileVersionDiff(
+          request.params.capabilityId,
+          request.params.agentId,
+          request.params.versionId,
+          against,
+        ),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+// Slice A — operator-initiated revert. Flips the live pointer to a prior
+// version and appends a VERSION_REVERTED audit event to the learning log.
+app.post(
+  '/api/capabilities/:capabilityId/agents/:agentId/learning/versions/:versionId/activate',
+  async (request, response) => {
+    try {
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'agents.manage',
+      });
+      await activateAgentLearningProfileVersionWithAudit({
+        capabilityId: request.params.capabilityId,
+        agentId: request.params.agentId,
+        versionId: request.params.versionId,
+        actor,
+        reason: String(request.body?.reason || '').trim() || undefined,
+      });
+      response.json(
+        await getAgentLearningProfileDetail(
+          request.params.capabilityId,
+          request.params.agentId,
+        ),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+// Slice C — current canary state + latest drift signals for the lens.
+app.get(
+  '/api/capabilities/:capabilityId/agents/:agentId/learning/drift',
+  async (request, response) => {
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.read',
+      });
+      const state = await getAgentLearningDriftState(
+        request.params.capabilityId,
+        request.params.agentId,
+      );
+      response.json({ state });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
 app.get('/api/capabilities/:capabilityId/evals/suites', async (request, response) => {
   try {
     await assertCapabilityPermission({
@@ -2351,7 +2474,59 @@ app.get('/api/evidence-packets/:bundleId', async (request, response) => {
       actor,
       action: 'artifact.read',
     });
-    response.json(packet);
+    response.json(formatEvidencePacketForDisplay(packet));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// Slice A — Signed Change Attestation chain: root-first ordered chain of
+// attestations sharing the same chain_root_bundle_id. The UI surface keeps
+// the "packet" vocabulary; the `/api/attestations/*` namespace is for
+// verifier tooling that wants to work with the chain directly.
+app.get('/api/attestations/:bundleId/chain', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    const chain = await getAttestationChain(request.params.bundleId);
+    if (!chain || chain.entries.length === 0) {
+      response.status(404).json({ error: 'Attestation was not found.' });
+      return;
+    }
+    // Permission check keyed off the leaf's capability — all entries in a
+    // chain belong to the same work item, which belongs to one capability.
+    await assertCapabilityPermission({
+      capabilityId: chain.entries[0].capabilityId,
+      actor,
+      action: 'artifact.read',
+    });
+    response.json(chain);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// Slice A — verify a single attestation: recomputes SHA256 digest, checks
+// Ed25519 signature (when signed), and walks prev_bundle_id backwards to
+// confirm chain integrity (no gaps, no cycles, root reached).
+app.post('/api/attestations/:bundleId/verify', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    const packet = await getEvidencePacket(request.params.bundleId);
+    if (!packet) {
+      response.status(404).json({ error: 'Attestation was not found.' });
+      return;
+    }
+    await assertCapabilityPermission({
+      capabilityId: packet.capabilityId,
+      actor,
+      action: 'artifact.read',
+    });
+    const result = await verifyEvidencePacket(request.params.bundleId);
+    if (!result) {
+      response.status(404).json({ error: 'Attestation was not found.' });
+      return;
+    }
+    response.json(result);
   } catch (error) {
     sendRepositoryError(response, error);
   }
@@ -4283,6 +4458,108 @@ app.post('/api/capabilities/:capabilityId/runs/:runId/request-changes', async (r
     sendRepositoryError(response, error);
   }
 });
+
+app.get(
+  '/api/capabilities/:capabilityId/runs/:runId/approvals/:waitId',
+  async (request, response) => {
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'workitem.read',
+      });
+      response.json(
+        await getApprovalWorkspaceContext({
+          capabilityId: request.params.capabilityId,
+          runId: request.params.runId,
+          waitId: request.params.waitId,
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/runs/:runId/approvals/:waitId/refresh-packet',
+  async (request, response) => {
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'artifact.read',
+      });
+      response.json(
+        await refreshApprovalStructuredPacket({
+          capabilityId: request.params.capabilityId,
+          runId: request.params.runId,
+          waitId: request.params.waitId,
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/runs/:runId/approvals/:waitId/send-back',
+  async (request, response) => {
+    try {
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'approval.decide',
+      });
+
+      const targetAgentId = String(request.body?.targetAgentId || '').trim();
+      const summary = String(request.body?.summary || '').trim();
+      const note = String(request.body?.note || '').trim() || undefined;
+      const clarificationQuestions = Array.isArray(request.body?.clarificationQuestions)
+        ? request.body.clarificationQuestions
+            .map((value: unknown) => String(value || '').trim())
+            .filter(Boolean)
+        : String(request.body?.clarificationQuestions || '')
+            .split(/\r?\n/)
+            .map(value => value.trim())
+            .filter(Boolean);
+
+      if (!targetAgentId) {
+        response.status(400).json({ error: 'Choose a target agent for the clarification loop.' });
+        return;
+      }
+      if (!summary) {
+        response
+          .status(400)
+          .json({ error: 'Add a disagreement summary before sending the approval back.' });
+        return;
+      }
+      if (clarificationQuestions.length === 0) {
+        response.status(400).json({
+          error: 'Add at least one clarification question or requested change.',
+        });
+        return;
+      }
+
+      response.json(
+        await sendBackApprovalForClarification({
+          capabilityId: request.params.capabilityId,
+          runId: request.params.runId,
+          waitId: request.params.waitId,
+          targetAgentId,
+          summary,
+          clarificationQuestions,
+          note,
+          actor,
+        }),
+      );
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
 
 app.post('/api/capabilities/:capabilityId/runs/:runId/provide-input', async (request, response) => {
   try {

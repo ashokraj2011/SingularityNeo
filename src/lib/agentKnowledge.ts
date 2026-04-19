@@ -219,6 +219,11 @@ export const buildAgentKnowledgeLens = ({
     }),
     deltas,
     contextBlock: agent.learningProfile.contextBlock || undefined,
+    // Slice D — surface pipeline failures + review-pending state so the
+    // lens can render the error chip without the caller opening the
+    // version-history disclosure.
+    lastError: agent.learningProfile.lastError || undefined,
+    profileStatus: agent.learningProfile.status,
   };
 };
 

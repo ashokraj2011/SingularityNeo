@@ -1,6 +1,9 @@
 import type {
   ActorContext,
+  AgentLearningProfile,
   AgentLearningProfileDetail,
+  AgentLearningProfileVersion,
+  AgentLearningStatus,
   AgentOperatingContract,
   Artifact,
   CapabilityAgent,
@@ -30,14 +33,45 @@ import {
 } from '../execution/repository';
 import {
   type AgentLearningJobRecord,
+  activateAgentLearningProfileVersion,
+  appendLearningUpdateRecord,
+  bootstrapAgentEvalFixturesFromMessages,
+  commitAgentLearningProfileVersion,
+  countAgentEvalFixtures,
+  getAgentLearningDriftContext,
   getAgentLearningProfile,
+  getAgentLearningProfileVersion,
+  incrementAgentLearningCanaryCounters,
+  listAgentEvalFixtures,
+  listAgentLearningProfileVersions,
   listAgentSessionSummaries,
   listAgentsNeedingLearning,
+  markAgentLearningDriftFlag,
+  markEvalFixturesUsed,
   queueAgentLearningJob,
   updateAgentLearningJob,
+  updateAgentLearningProfileVersionJudge,
   upsertAgentLearningProfile,
+  withAgentLearningLock,
   createOperatingPolicySnapshot,
 } from './repository';
+import { recordMetricSample } from '../telemetry';
+import {
+  estimateTokenCount,
+  isQualityGateEnabled,
+  runJudgeAgainstFixtures,
+  runProfileShapeChecks,
+  type JudgeReport,
+  type ShapeCheckReport,
+} from './qualityGate';
+import {
+  defaultDriftThresholds,
+  evaluateAgentLearningDrift,
+  isDriftDetectionEnabled,
+  isDriftDryRun,
+  type DriftThresholds,
+} from './driftDetector';
+import type { AgentLearningDriftState } from '../../src/types';
 
 const tokenize = (value: string) =>
   value
@@ -86,6 +120,142 @@ type ExperienceDistillationResult = {
 
 const createId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Slice D — failure observability. Every silent `.catch(() => undefined)`
+// in the pipeline gets replaced with `recordPipelineError(...)` so operators
+// see a chip on the lens instead of the work disappearing. These helpers
+// are module-private — callers pass the stage label and the error; nobody
+// outside needs to stitch together update rows or metric samples by hand.
+// ─────────────────────────────────────────────────────────────────────────
+
+const LEARNING_PIPELINE_STAGE_LABELS: Record<string, string> = {
+  'memory-refresh': 'memory-refresh',
+  'memory-refresh-reflection': 'memory-refresh-reflection',
+  'judge-evaluation': 'judge-evaluation',
+  'judge-persist': 'judge-persist',
+  'judge-fixture-bootstrap': 'judge-fixture-bootstrap',
+  'fixture-usage': 'fixture-usage',
+  'drift-evaluation': 'drift-evaluation',
+  'drift-audit-emit': 'drift-audit-emit',
+  'correction-canary-bump': 'correction-canary-bump',
+  'correction-lock': 'correction-lock',
+  'revert-audit-emit': 'revert-audit-emit',
+  'revert-memory-refresh': 'revert-memory-refresh',
+  'lease-renew': 'lease-renew',
+  'lease-release': 'lease-release',
+  'llm-parse': 'llm-parse',
+};
+
+const errorMessage = (error: unknown): string => {
+  if (error instanceof Error) return error.message || String(error);
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return 'Unknown error';
+  }
+};
+
+const errorCode = (error: unknown): string | undefined => {
+  if (error && typeof error === 'object' && 'code' in (error as Record<string, unknown>)) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string') return code;
+  }
+  return undefined;
+};
+
+export interface PipelineErrorContext {
+  capabilityId: string;
+  agentId?: string;
+  stage: string;
+  error: unknown;
+  workItemId?: string;
+  runId?: string;
+}
+
+/**
+ * Writes a `PIPELINE_ERROR` learning-update row + emits a
+ * `learning.pipeline_errors_count` metric sample. Never throws — we swallow
+ * its own failure with a console.error because losing an audit row must
+ * not break the caller. Stage labels are free-form but we expose a canonical
+ * set in LEARNING_PIPELINE_STAGE_LABELS for discoverability.
+ */
+export const recordPipelineError = async ({
+  capabilityId,
+  agentId,
+  stage,
+  error,
+  workItemId,
+  runId,
+}: PipelineErrorContext): Promise<void> => {
+  const message = errorMessage(error);
+  const code = errorCode(error);
+  const suffix = code ? ` [${code}]` : '';
+  const label = LEARNING_PIPELINE_STAGE_LABELS[stage] || stage;
+  const insight = `Pipeline error in ${label}: ${message}${suffix}`;
+  console.error(`[learning.pipeline] ${label} failed for ${capabilityId}/${agentId || '-'}: ${message}${suffix}`);
+  try {
+    if (agentId) {
+      await appendLearningUpdateRecord({
+        capabilityId,
+        agentId,
+        insight,
+        triggerType: 'PIPELINE_ERROR',
+        timestamp: new Date().toISOString(),
+        relatedWorkItemId: workItemId,
+        relatedRunId: runId,
+      });
+    }
+  } catch (auditError) {
+    // Audit row failure is logged but not propagated. We've already surfaced
+    // the original error via console.error above.
+    console.error(
+      `[learning.pipeline] Failed to persist PIPELINE_ERROR audit row for ${capabilityId}: ${errorMessage(auditError)}`,
+    );
+  }
+  try {
+    await recordMetricSample({
+      capabilityId,
+      scopeType: 'AGENT',
+      scopeId: agentId || '-',
+      metricName: 'learning.pipeline_errors_count',
+      metricValue: 1,
+      unit: 'count',
+      tags: { stage: label, code: code || null },
+    });
+  } catch {
+    // Metric emission is best-effort; the console.error above is the SLO
+    // backstop.
+  }
+};
+
+/**
+ * Emits the lock-wait latency metric. Kept separate so the advisory-lock
+ * helper in the repository can stay telemetry-agnostic. Success path still
+ * pings the metric so we can track p50/p99 under normal traffic, not just
+ * the rare contention case.
+ */
+const recordLearningLockWait = async (
+  capabilityId: string,
+  agentId: string,
+  lockWaitMs: number,
+  outcome: 'acquired' | 'timeout',
+): Promise<void> => {
+  try {
+    await recordMetricSample({
+      capabilityId,
+      scopeType: 'AGENT',
+      scopeId: agentId,
+      metricName: 'learning.lock_wait_ms',
+      metricValue: Math.max(0, lockWaitMs),
+      unit: 'ms',
+      tags: { outcome },
+    });
+  } catch {
+    // Best-effort.
+  }
+};
 
 const EXPERIENCE_DISTILLATION_PREFIX = 'experience-distillation';
 const INCIDENT_DERIVED_PREFIX = 'incident-derived';
@@ -989,38 +1159,132 @@ export const applyAgentLearningCorrection = async ({
     throw new Error('Add a learning correction before saving it.');
   }
 
-  const bundle = await getCapabilityBundle(capabilityId);
-  const agent = bundle.workspace.agents.find(current => current.id === agentId);
-  if (!agent) {
-    throw new Error(`Agent ${agentId} was not found in capability ${capabilityId}.`);
+  // Slice D — serialize concurrent corrections against the same (capability,
+  // agent) pair via a Postgres advisory transaction lock. The long-lived
+  // work (memory refresh + queue enqueue) runs AFTER the lock releases so a
+  // short critical section just covers the state writes that would
+  // otherwise race. On timeout we surface a PIPELINE_ERROR update + retry
+  // via the existing job queue.
+  let lockWaitMs = 0;
+  try {
+    const locked = await withAgentLearningLock(
+      { capabilityId, agentId, attempts: 3, delayMs: 50 },
+      async () => {
+        const bundle = await getCapabilityBundle(capabilityId);
+        const agent = bundle.workspace.agents.find(current => current.id === agentId);
+        if (!agent) {
+          throw new Error(`Agent ${agentId} was not found in capability ${capabilityId}.`);
+        }
+
+        const timestamp = new Date().toISOString();
+        const nextUpdate: LearningUpdate = {
+          id: createId('LEARN'),
+          capabilityId,
+          agentId,
+          sourceLogIds: [],
+          insight: `${actor.displayName} corrected ${agent.name}'s learning: ${trimmedCorrection}`,
+          timestamp,
+          triggerType: 'USER_CORRECTION',
+          relatedWorkItemId: workItemId,
+          relatedRunId: runId,
+        };
+
+        await updateCapabilityAgentRecord(capabilityId, agentId, {
+          learningNotes: mergeUniqueStrings(
+            [...(agent.learningNotes || []), `Operator correction: ${trimmedCorrection}`],
+            GENERATED_NOTE_LIMIT,
+          ),
+        });
+        // Slice D — write the USER_CORRECTION audit row via the append-only
+        // helper so we don't DELETE + bulk-INSERT every row in the capability
+        // on every correction (that's what the legacy replace path did and
+        // it was the race window that motivated this lock).
+        await appendLearningUpdateRecord({
+          capabilityId,
+          agentId,
+          id: nextUpdate.id,
+          insight: nextUpdate.insight,
+          triggerType: 'USER_CORRECTION',
+          timestamp,
+          relatedWorkItemId: workItemId,
+          relatedRunId: runId,
+        });
+
+        // Slice C — a correction is a strong negative signal for the
+        // currently live profile version. Bump both counters (request +
+        // negative) so the drift detector has a clean view of "bad outcomes
+        // per canary touch". Then run an opportunistic drift evaluation;
+        // heavy-traffic capabilities don't need to wait for a scheduled job
+        // to see drift.
+        try {
+          await incrementAgentLearningCanaryCounters({
+            capabilityId,
+            agentId,
+            requestDelta: 1,
+            negativeDelta: 1,
+          });
+        } catch (error) {
+          await recordPipelineError({
+            capabilityId,
+            agentId,
+            stage: 'correction-canary-bump',
+            error,
+            workItemId,
+            runId,
+          });
+        }
+
+        try {
+          await evaluateAndPersistAgentLearningDrift({ capabilityId, agentId });
+        } catch (error) {
+          await recordPipelineError({
+            capabilityId,
+            agentId,
+            stage: 'drift-evaluation',
+            error,
+            workItemId,
+            runId,
+          });
+        }
+      },
+    );
+    lockWaitMs = locked.lockWaitMs;
+    await recordLearningLockWait(capabilityId, agentId, lockWaitMs, 'acquired');
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === 'AGENT_LEARNING_LOCK_TIMEOUT') {
+      await recordLearningLockWait(capabilityId, agentId, 200, 'timeout');
+      await recordPipelineError({
+        capabilityId,
+        agentId,
+        stage: 'correction-lock',
+        error,
+        workItemId,
+        runId,
+      });
+      // Fall through to queue a job — the queue is idempotent by
+      // (capabilityId, agentId, requestReason) so a future tick will still
+      // apply this correction once contention clears.
+    } else {
+      throw error;
+    }
   }
 
-  const timestamp = new Date().toISOString();
-  const nextUpdate: LearningUpdate = {
-    id: createId('LEARN'),
-    capabilityId,
-    agentId,
-    sourceLogIds: [],
-    insight: `${actor.displayName} corrected ${agent.name}'s learning: ${trimmedCorrection}`,
-    timestamp,
-    triggerType: 'USER_CORRECTION',
-    relatedWorkItemId: workItemId,
-    relatedRunId: runId,
-  };
-
-  await updateCapabilityAgentRecord(capabilityId, agentId, {
-    learningNotes: mergeUniqueStrings(
-      [...(agent.learningNotes || []), `Operator correction: ${trimmedCorrection}`],
-      GENERATED_NOTE_LIMIT,
-    ),
-  });
-  const latestBundle = await getCapabilityBundle(capabilityId);
-
-  await replaceCapabilityWorkspaceContentRecord(capabilityId, {
-    learningUpdates: [...latestBundle.workspace.learningUpdates, nextUpdate],
-  });
-
-  await refreshCapabilityMemory(capabilityId).catch(() => undefined);
+  // Memory refresh + enqueue happen OUTSIDE the lock so long-running work
+  // doesn't hold up a concurrent writer. Any failure here surfaces as a
+  // PIPELINE_ERROR so the lens shows a warning instead of swallowing it.
+  try {
+    await refreshCapabilityMemory(capabilityId);
+  } catch (error) {
+    await recordPipelineError({
+      capabilityId,
+      agentId,
+      stage: 'memory-refresh',
+      error,
+      workItemId,
+      runId,
+    });
+  }
   await queueSingleAgentLearningRefresh(
     capabilityId,
     agentId,
@@ -1029,6 +1293,309 @@ export const applyAgentLearningCorrection = async ({
       runId,
     }),
   );
+};
+
+/**
+ * Slice C — evaluates drift against the previous version's frozen baseline
+ * and, when the evaluator flips the `flagged` state on or a regression
+ * streak crosses the configured consecutive-checks threshold, persists the
+ * new drift flag + writes a `DRIFT_FLAGGED` learning update so the UI can
+ * surface the banner.
+ *
+ * Kept idempotent: a second call while already flagged does not re-emit
+ * the learning update. Respects `LEARNING_DRIFT_ENABLED=false` (skip) and
+ * `LEARNING_DRIFT_DRY_RUN=true` (compute + telemetry only, no writes).
+ */
+export const evaluateAndPersistAgentLearningDrift = async ({
+  capabilityId,
+  agentId,
+  thresholds,
+  now,
+}: {
+  capabilityId: string;
+  agentId: string;
+  thresholds?: DriftThresholds;
+  now?: Date;
+}): Promise<AgentLearningDriftState | null> => {
+  if (!isDriftDetectionEnabled()) {
+    return null;
+  }
+  const evaluatedAt = now || new Date();
+  const context = await getAgentLearningDriftContext(capabilityId, agentId);
+  const { profile, previousVersion } = context;
+  const evaluation = evaluateAgentLearningDrift({
+    profile,
+    previousVersion,
+    thresholds: thresholds || defaultDriftThresholds(),
+    now: evaluatedAt,
+  });
+
+  if (isDriftDryRun()) {
+    // Observe-only mode: skip the DB write + learning-update emission.
+    return evaluation.state;
+  }
+
+  const decision = evaluation.decision;
+
+  // Track "was flagged" vs "is now flagged" transitions so we only emit
+  // a DRIFT_FLAGGED update on the state change — not every time the
+  // detector fires while the flag is still set.
+  const wasFlagged = Boolean(profile.driftFlaggedAt);
+  let nextFlaggedAt: string | null = profile.driftFlaggedAt || null;
+  let nextReason: string | null = profile.driftReason || null;
+  let nextStreak: number = Number(profile.driftRegressionStreak || 0);
+  let newlyFlagged = false;
+
+  if (decision.kind === 'REGRESSING') {
+    nextStreak = decision.newStreak;
+    if (decision.flagged) {
+      if (!wasFlagged) {
+        nextFlaggedAt = evaluatedAt.toISOString();
+        nextReason = decision.reason;
+        newlyFlagged = true;
+      } else {
+        // Already flagged — refresh the reason string so the banner
+        // carries the latest numbers but don't bump the flagged_at ts.
+        nextReason = decision.reason;
+      }
+    }
+  } else if (decision.kind === 'HEALTHY') {
+    // Reset streak; leave the flagged state alone (operator must revert).
+    nextStreak = 0;
+  } else {
+    // INSUFFICIENT_SIGNAL — touch lastCheckedAt but don't mutate state.
+    nextStreak = Number(profile.driftRegressionStreak || 0);
+  }
+
+  await markAgentLearningDriftFlag({
+    capabilityId,
+    agentId,
+    flaggedAt: nextFlaggedAt,
+    reason: nextReason,
+    regressionStreak: nextStreak,
+    lastCheckedAt: evaluatedAt.toISOString(),
+  });
+
+  if (newlyFlagged) {
+    try {
+      const bundle = await getCapabilityBundle(capabilityId);
+      const agent = bundle.workspace.agents.find(current => current.id === agentId);
+      const agentName = agent?.name || agentId;
+      // Slice D — append-only audit write. The old path did DELETE +
+      // bulk-INSERT every learning update which was the race window we
+      // were explicitly trying to eliminate.
+      await appendLearningUpdateRecord({
+        capabilityId,
+        agentId,
+        insight: `Drift detected on ${agentName}'s learning profile — ${decision.kind === 'REGRESSING' ? decision.reason : 'regression'}. Operator review required.`,
+        triggerType: 'DRIFT_FLAGGED',
+        timestamp: evaluatedAt.toISOString(),
+      });
+    } catch (error) {
+      await recordPipelineError({
+        capabilityId,
+        agentId,
+        stage: 'drift-audit-emit',
+        error,
+      });
+    }
+  }
+
+  return {
+    ...evaluation.state,
+    driftFlaggedAt: nextFlaggedAt || undefined,
+    driftReason: nextReason || undefined,
+    regressionStreak: nextStreak,
+    isFlagged: Boolean(nextFlaggedAt),
+  };
+};
+
+/**
+ * Slice C — lightweight getter for the UI banner + /learning/drift endpoint.
+ * Reads the live canary state + previous version baseline and returns the
+ * shape the client expects. Safe for hot-path polling.
+ */
+export const getAgentLearningDriftState = async (
+  capabilityId: string,
+  agentId: string,
+): Promise<AgentLearningDriftState> => {
+  const context = await getAgentLearningDriftContext(capabilityId, agentId);
+  const evaluation = evaluateAgentLearningDrift({
+    profile: context.profile,
+    previousVersion: context.previousVersion,
+    now: new Date(),
+  });
+  return evaluation.state;
+};
+
+
+/**
+ * Slice A — list the immutable version history for an agent's learning
+ * profile. Returned newest-first by version_no. The current pointer lives on
+ * the live profile row (see getAgentLearningProfileDetail).
+ */
+export const getAgentLearningProfileVersionHistory = async (
+  capabilityId: string,
+  agentId: string,
+  options: { limit?: number; offset?: number } = {},
+): Promise<AgentLearningProfileVersion[]> => {
+  const bundle = await getCapabilityBundle(capabilityId);
+  const agent = bundle.workspace.agents.find(current => current.id === agentId);
+  if (!agent) {
+    throw new Error(`Agent ${agentId} was not found in capability ${capabilityId}.`);
+  }
+  return listAgentLearningProfileVersions(capabilityId, agentId, options);
+};
+
+/**
+ * Slice A — pure diff helper. Kept intentionally simple (set-based highlight
+ * delta + token-length delta on the context block) so the UI can render a
+ * readable before/after without needing a full text-diff engine. Exported on
+ * its own so unit tests can exercise the diff logic without mocking the DB.
+ */
+export const computeAgentLearningProfileVersionDiff = (
+  fromVersion: AgentLearningProfileVersion,
+  toVersion: AgentLearningProfileVersion,
+) => {
+  const before = new Set(fromVersion.highlights);
+  const after = new Set(toVersion.highlights);
+  const highlightsAdded = toVersion.highlights.filter(item => !before.has(item));
+  const highlightsRemoved = fromVersion.highlights.filter(item => !after.has(item));
+
+  const beforeDocs = new Set(fromVersion.sourceDocumentIds);
+  const afterDocs = new Set(toVersion.sourceDocumentIds);
+  const sourceDocumentsAdded = toVersion.sourceDocumentIds.filter(id => !beforeDocs.has(id));
+  const sourceDocumentsRemoved = fromVersion.sourceDocumentIds.filter(id => !afterDocs.has(id));
+
+  // Token proxy: fall back to character length delta when neither side has a
+  // measured token count yet. This keeps the diff useful in Slice A before
+  // Slice B lands real tokenizer measurements.
+  const fromTokens =
+    typeof fromVersion.contextBlockTokens === 'number'
+      ? fromVersion.contextBlockTokens
+      : Math.ceil(fromVersion.contextBlock.length / 4);
+  const toTokens =
+    typeof toVersion.contextBlockTokens === 'number'
+      ? toVersion.contextBlockTokens
+      : Math.ceil(toVersion.contextBlock.length / 4);
+
+  return {
+    fromVersionId: fromVersion.versionId,
+    toVersionId: toVersion.versionId,
+    summaryBefore: fromVersion.summary,
+    summaryAfter: toVersion.summary,
+    highlightsAdded,
+    highlightsRemoved,
+    sourceDocumentsAdded,
+    sourceDocumentsRemoved,
+    contextBlockTokenDelta: toTokens - fromTokens,
+  };
+};
+
+/**
+ * Slice A — fetches two versions and delegates to
+ * computeAgentLearningProfileVersionDiff. The HTTP handler wires straight
+ * into this.
+ */
+export const getAgentLearningProfileVersionDiff = async (
+  capabilityId: string,
+  agentId: string,
+  versionId: string,
+  againstVersionId: string,
+) => {
+  const [toVersion, fromVersion] = await Promise.all([
+    getAgentLearningProfileVersion(capabilityId, agentId, versionId),
+    getAgentLearningProfileVersion(capabilityId, agentId, againstVersionId),
+  ]);
+  if (!toVersion) {
+    throw new Error(`Profile version ${versionId} was not found.`);
+  }
+  if (!fromVersion) {
+    throw new Error(`Profile version ${againstVersionId} was not found.`);
+  }
+
+  return computeAgentLearningProfileVersionDiff(fromVersion, toVersion);
+};
+
+/**
+ * Slice A — operator-initiated revert. Flips the live pointer to a prior
+ * version and appends a VERSION_REVERTED update to the append-only learning
+ * update log so the action is auditable from the existing learning history UI.
+ */
+export const activateAgentLearningProfileVersionWithAudit = async ({
+  capabilityId,
+  agentId,
+  versionId,
+  actor,
+  reason,
+}: {
+  capabilityId: string;
+  agentId: string;
+  versionId: string;
+  actor?: ActorContext;
+  reason?: string;
+}): Promise<{ profile: AgentLearningProfile; version: AgentLearningProfileVersion }> => {
+  const bundle = await getCapabilityBundle(capabilityId);
+  const agent = bundle.workspace.agents.find(current => current.id === agentId);
+  if (!agent) {
+    throw new Error(`Agent ${agentId} was not found in capability ${capabilityId}.`);
+  }
+
+  const result = await activateAgentLearningProfileVersion({
+    capabilityId,
+    agentId,
+    versionId,
+  });
+
+  const timestamp = new Date().toISOString();
+  const actorLabel = actor?.displayName || 'Operator';
+  const reasonSuffix = reason ? ` Reason: ${reason}` : '';
+  const update: LearningUpdate = {
+    id: createId('LEARN'),
+    capabilityId,
+    agentId,
+    sourceLogIds: [],
+    insight: `${actorLabel} reverted ${agent.name}'s learning profile to version ${result.version.versionNo}.${reasonSuffix}`,
+    timestamp,
+    triggerType: 'VERSION_REVERTED',
+  };
+
+  try {
+    // Slice D — append-only audit write. The revert itself already
+    // committed, so audit failure must not propagate, but operators DO
+    // need to see it via the PIPELINE_ERROR chip on the lens.
+    await appendLearningUpdateRecord({
+      capabilityId,
+      agentId,
+      id: update.id,
+      insight: update.insight,
+      triggerType: 'VERSION_REVERTED',
+      timestamp: update.timestamp,
+    });
+  } catch (error) {
+    await recordPipelineError({
+      capabilityId,
+      agentId,
+      stage: 'revert-audit-emit',
+      error,
+    });
+  }
+
+  try {
+    await refreshCapabilityMemory(capabilityId, {
+      requeueAgents: false,
+      requestReason: `agent-learning-revert:${agentId}`,
+    });
+  } catch (error) {
+    await recordPipelineError({
+      capabilityId,
+      agentId,
+      stage: 'revert-memory-refresh',
+      error,
+    });
+  }
+
+  return result;
 };
 
 export const getAgentLearningProfileDetail = async (
@@ -1068,6 +1635,105 @@ export const ensureAgentLearningBackfill = async () => {
     ),
   );
   return missing.length;
+};
+
+/**
+ * Slice B — async LLM-judge evaluation for a freshly committed profile
+ * version. Best-effort: bootstraps fixtures if none exist, scores the
+ * candidate, and writes judge_score + judge_report back onto the version
+ * row. Failures are swallowed (judge is advisory in v1; Slice D will add
+ * structured PIPELINE_ERROR logging around this).
+ */
+const scheduleJudgeEvaluation = async ({
+  capabilityId,
+  agentId,
+  versionId,
+  profile,
+  model,
+  providerKey,
+}: {
+  capabilityId: string;
+  agentId: string;
+  versionId: string;
+  profile: AgentLearningProfile;
+  model?: string;
+  providerKey?: string;
+}): Promise<JudgeReport | null> => {
+  try {
+    await bootstrapAgentEvalFixturesFromMessages({
+      capabilityId,
+      agentId,
+      targetCount: 10,
+    }).catch(error => {
+      void recordPipelineError({
+        capabilityId,
+        agentId,
+        stage: 'judge-fixture-bootstrap',
+        error,
+      });
+      return 0;
+    });
+
+    const fixtureCount = await countAgentEvalFixtures(capabilityId, agentId);
+    if (!fixtureCount) {
+      return null;
+    }
+
+    const fixtures = await listAgentEvalFixtures(capabilityId, agentId, { limit: 10 });
+    const report = await runJudgeAgainstFixtures({
+      profile,
+      fixtures: fixtures.map(f => ({
+        fixtureId: f.fixtureId,
+        prompt: f.prompt,
+        referenceResponse: f.referenceResponse,
+        expectedCriteria: f.expectedCriteria,
+      })),
+      requestModel: requestGitHubModel,
+      model,
+      providerKey,
+    });
+
+    try {
+      await updateAgentLearningProfileVersionJudge({
+        capabilityId,
+        agentId,
+        versionId,
+        judgeScore: report.score,
+        judgeReport: report,
+      });
+    } catch (error) {
+      await recordPipelineError({
+        capabilityId,
+        agentId,
+        stage: 'judge-persist',
+        error,
+      });
+    }
+
+    try {
+      await markEvalFixturesUsed(
+        capabilityId,
+        fixtures.map(f => f.fixtureId),
+      );
+    } catch (error) {
+      await recordPipelineError({
+        capabilityId,
+        agentId,
+        stage: 'fixture-usage',
+        error,
+      });
+    }
+
+    return report;
+  } catch (error) {
+    await recordPipelineError({
+      capabilityId,
+      agentId,
+      stage: 'judge-evaluation',
+      error,
+    });
+    return null;
+  }
 };
 
 export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
@@ -1114,19 +1780,61 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
     const ranked = await rankCorpusForAgent(capabilityId, agent, corpus, attachedSkills);
     const selected = ranked.slice(0, Math.min(12, ranked.length));
 
-    const summarized =
-      selected.length > 0
-        ? await summarizeAgentLearning({
-            agent,
-            selectedCorpus: selected,
-            skills: attachedSkills,
-          })
-        : {
-            summary: `${agent.name} does not have capability memory sources available yet.`,
-            highlights: ['No indexed capability artifacts or documents were available.'],
-            contextBlock:
-              'No indexed capability memory was available yet. Ask for updated capability artifacts or refresh learning after documents are added.',
-          };
+    // Slice D — LLM parse failure fallback. If `extractJsonObject` inside
+    // the summarizer throws (malformed JSON or missing fields), we capture
+    // the error, fall back to the PREVIOUS profile's summary + highlights,
+    // and pass a parse-failure flag into the shape-gate logic below so the
+    // candidate is committed as REVIEW_PENDING instead of dropped on the
+    // floor. This preserves the audit timeline AND guarantees we never
+    // write an empty-summary version even if the shape gate is disabled.
+    let llmParseError: { stage: string; message: string; code?: string } | null = null;
+
+    let summarized: {
+      summary: string;
+      highlights: string[];
+      contextBlock: string;
+    };
+    if (selected.length === 0) {
+      summarized = {
+        summary: `${agent.name} does not have capability memory sources available yet.`,
+        highlights: ['No indexed capability artifacts or documents were available.'],
+        contextBlock:
+          'No indexed capability memory was available yet. Ask for updated capability artifacts or refresh learning after documents are added.',
+      };
+    } else {
+      try {
+        const raw = await summarizeAgentLearning({
+          agent,
+          selectedCorpus: selected,
+          skills: attachedSkills,
+        });
+        summarized = {
+          summary: raw.summary || '',
+          highlights: raw.highlights || [],
+          contextBlock: raw.contextBlock || '',
+        };
+      } catch (error) {
+        llmParseError = {
+          stage: 'summarize',
+          message: errorMessage(error),
+          code: errorCode(error),
+        };
+        await recordPipelineError({
+          capabilityId,
+          agentId: agent.id,
+          stage: 'llm-parse',
+          error,
+        });
+        // Preserve the prior summary so the archived candidate row has
+        // something usable for operators to inspect, and the lens never
+        // shows a blank agent because of a single malformed LLM response.
+        summarized = {
+          summary: previousProfile.summary || '',
+          highlights: previousProfile.highlights || [],
+          contextBlock: previousProfile.contextBlock || '',
+        };
+      }
+    }
 
     let reflected: ExperienceDistillationResult | null = null;
     let reflectionContextBlock: string | undefined;
@@ -1139,27 +1847,53 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
         request: reflectionRequest,
       });
 
-      reflected = await summarizeExperienceDistillation({
-        agent,
-        skills: attachedSkills,
-        request: reflectionRequest,
-        tracePayload: reflectionContext.tracePayload,
-      });
+      try {
+        reflected = await summarizeExperienceDistillation({
+          agent,
+          skills: attachedSkills,
+          request: reflectionRequest,
+          tracePayload: reflectionContext.tracePayload,
+        });
+      } catch (error) {
+        llmParseError = llmParseError || {
+          stage: 'reflection',
+          message: errorMessage(error),
+          code: errorCode(error),
+        };
+        await recordPipelineError({
+          capabilityId,
+          agentId: agent.id,
+          stage: 'llm-parse',
+          error,
+        });
+        reflected = null;
+      }
 
-      await applyExperienceDistillation({
-        bundle,
-        agent,
-        request: reflectionRequest,
-        result: reflected,
-        generatedAt: new Date().toISOString(),
-        workItemTitle: reflectionContext.workItemTitle,
-        corrections: reflectionContext.corrections,
-      });
-      reflectionContextBlock = reflected.contextBlock;
-      await refreshCapabilityMemory(capabilityId, {
-        requeueAgents: false,
-        requestReason: `agent-learning-reflection:${agent.id}`,
-      }).catch(() => undefined);
+      if (reflected) {
+        await applyExperienceDistillation({
+          bundle,
+          agent,
+          request: reflectionRequest,
+          result: reflected,
+          generatedAt: new Date().toISOString(),
+          workItemTitle: reflectionContext.workItemTitle,
+          corrections: reflectionContext.corrections,
+        });
+        reflectionContextBlock = reflected.contextBlock;
+        try {
+          await refreshCapabilityMemory(capabilityId, {
+            requeueAgents: false,
+            requestReason: `agent-learning-reflection:${agent.id}`,
+          });
+        } catch (error) {
+          await recordPipelineError({
+            capabilityId,
+            agentId: agent.id,
+            stage: 'memory-refresh-reflection',
+            error,
+          });
+        }
+      }
     }
 
     const sourceDocumentIds = selected.map(item => item.document.id);
@@ -1173,28 +1907,111 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
         .filter(Boolean) as string[],
     );
 
-    await upsertAgentLearningProfile({
+    // Slice A: commit a new immutable profile version and atomically flip the
+    // live pointer to it. Prior versions remain in history, available via
+    // listAgentLearningProfileVersions / activateAgentLearningProfileVersion
+    // for operator-initiated revert. Transient state transitions (LEARNING /
+    // ERROR / STALE) still go through upsertAgentLearningProfile so we don't
+    // spam the history with error placeholders.
+    //
+    // Slice B: before the pointer flips, the candidate must pass synchronous
+    // shape checks. On blocking failure the candidate is still persisted in
+    // the version table with status=REVIEW_PENDING and the live pointer
+    // stays on the prior version — no silent empty-profile regression.
+    const distilledProfile: AgentLearningProfile = {
+      status: 'READY',
+      summary: reflected?.summary?.trim() || summarized.summary?.trim() || '',
+      highlights: mergeUniqueStrings(
+        [...(reflected?.lessons || []), ...((summarized.highlights || []).map(item => item.trim()))],
+        8,
+      ),
+      contextBlock:
+        mergeUniqueStrings(
+          [reflectionContextBlock, summarized.contextBlock?.trim()],
+          2,
+        ).join('\n\n') || '',
+      sourceDocumentIds,
+      sourceArtifactIds,
+      sourceCount: selected.length,
+      refreshedAt: new Date().toISOString(),
+      lastRequestedAt: job.requestedAt,
+    };
+
+    const qualityGateOn = isQualityGateEnabled();
+    const shapeReport: ShapeCheckReport | undefined = qualityGateOn
+      ? runProfileShapeChecks(distilledProfile)
+      : undefined;
+    const contextBlockTokens = estimateTokenCount(distilledProfile.contextBlock);
+
+    let finalizedProfile: AgentLearningProfile = distilledProfile;
+    let flipPointer = true;
+    let versionStatusOverride: AgentLearningStatus | undefined;
+
+    if (shapeReport && !shapeReport.passed) {
+      const failureSummary = shapeReport.blockingFailures
+        .map(failure => `${failure.code}: ${failure.message}`)
+        .join('; ');
+      finalizedProfile = {
+        ...distilledProfile,
+        // Keep the candidate body in the version row but hold the live
+        // pointer steady. The live profile row gets last_error populated
+        // so the lens can surface the pending state.
+        status: 'REVIEW_PENDING',
+        lastError: `Shape check failed — ${failureSummary}`,
+      };
+      flipPointer = false;
+      versionStatusOverride = 'REVIEW_PENDING';
+    }
+
+    // Slice D — LLM parse failure is load-bearing even if the shape gate
+    // is off: we don't want a partially-hallucinated profile serving
+    // inference. If the summarizer threw, we already substituted the prior
+    // summary/highlights above; here we promote the candidate to
+    // REVIEW_PENDING + hold the pointer so operators see the error chip on
+    // the lens and can retry via the refresh button.
+    if (llmParseError) {
+      finalizedProfile = {
+        ...finalizedProfile,
+        status: 'REVIEW_PENDING',
+        lastError: `LLM_PARSE_FAILED (${llmParseError.stage}): ${llmParseError.message}`,
+      };
+      flipPointer = false;
+      versionStatusOverride = 'REVIEW_PENDING';
+    }
+
+    const { version: committedVersion } = await commitAgentLearningProfileVersion({
       capabilityId,
       agentId: agent.id,
-      profile: {
-        status: 'READY',
-        summary: reflected?.summary?.trim() || summarized.summary?.trim() || '',
-        highlights: mergeUniqueStrings(
-          [...(reflected?.lessons || []), ...((summarized.highlights || []).map(item => item.trim()))],
-          8,
-        ),
-        contextBlock:
-          mergeUniqueStrings(
-            [reflectionContextBlock, summarized.contextBlock?.trim()],
-            2,
-          ).join('\n\n') || '',
-        sourceDocumentIds,
-        sourceArtifactIds,
-        sourceCount: selected.length,
-        refreshedAt: new Date().toISOString(),
-        lastRequestedAt: job.requestedAt,
-      },
+      profile: finalizedProfile,
+      notes: job.requestReason,
+      contextBlockTokens,
+      shapeReport,
+      flipPointer,
+      versionStatusOverride,
     });
+
+    // Slice B: kick off the async LLM-judge after the transaction closes.
+    // Judge results are advisory in v1 — we annotate the version row and
+    // (later, Slice C) feed drift detection, but we never auto-revert.
+    // Slice D: surface any judge failure as a PIPELINE_ERROR instead of
+    // swallowing it silently.
+    if (qualityGateOn && flipPointer) {
+      void scheduleJudgeEvaluation({
+        capabilityId,
+        agentId: agent.id,
+        versionId: committedVersion.versionId,
+        profile: finalizedProfile,
+        model: agent.model,
+        providerKey: agent.providerKey || agent.provider,
+      }).catch(error =>
+        recordPipelineError({
+          capabilityId,
+          agentId: agent.id,
+          stage: 'judge-evaluation',
+          error,
+        }),
+      );
+    }
 
     await updateAgentLearningJob({
       ...job,

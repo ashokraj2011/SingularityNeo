@@ -1472,6 +1472,52 @@ export const migrationStatements = [
     ALTER TABLE capability_evidence_packets
     ADD COLUMN IF NOT EXISTS touched_paths TEXT[] NOT NULL DEFAULT '{}'
   `,
+  // Signed Change Attestation chain — Slice A. Adds per-row chain linkage,
+  // Ed25519 signature envelope, and AI-assisted attribution so packets can be
+  // verified offline and audit queries can filter by AI involvement. Existing
+  // rows default to attestation_version=1, chain_root_bundle_id=bundle_id
+  // (backfilled below), is_ai_assisted=TRUE (all current rows are
+  // agent-produced), signature/signing_key_id NULL → treated as v1-unsigned.
+  `
+    ALTER TABLE capability_evidence_packets
+    ADD COLUMN IF NOT EXISTS attestation_version SMALLINT NOT NULL DEFAULT 1
+  `,
+  `
+    ALTER TABLE capability_evidence_packets
+    ADD COLUMN IF NOT EXISTS prev_bundle_id TEXT
+  `,
+  `
+    ALTER TABLE capability_evidence_packets
+    ADD COLUMN IF NOT EXISTS chain_root_bundle_id TEXT
+  `,
+  `
+    ALTER TABLE capability_evidence_packets
+    ADD COLUMN IF NOT EXISTS signature TEXT
+  `,
+  `
+    ALTER TABLE capability_evidence_packets
+    ADD COLUMN IF NOT EXISTS signing_key_id TEXT
+  `,
+  `
+    ALTER TABLE capability_evidence_packets
+    ADD COLUMN IF NOT EXISTS signing_algo TEXT
+  `,
+  `
+    ALTER TABLE capability_evidence_packets
+    ADD COLUMN IF NOT EXISTS is_ai_assisted BOOLEAN NOT NULL DEFAULT TRUE
+  `,
+  `
+    ALTER TABLE capability_evidence_packets
+    ADD COLUMN IF NOT EXISTS ai_attribution JSONB
+  `,
+  // Idempotent backfill for rows created before this slice landed — each row
+  // becomes its own chain root. Safe to re-run: WHERE chain_root_bundle_id IS
+  // NULL ensures no churn on subsequent boots.
+  `
+    UPDATE capability_evidence_packets
+    SET chain_root_bundle_id = bundle_id
+    WHERE chain_root_bundle_id IS NULL
+  `,
   `
     ALTER TABLE capability_tasks
     ADD COLUMN IF NOT EXISTS work_item_id TEXT
@@ -1981,6 +2027,24 @@ export const migrationStatements = [
     CREATE INDEX IF NOT EXISTS capability_evidence_packets_touched_paths_idx
     ON capability_evidence_packets USING GIN (touched_paths)
   `,
+  // Slice A — attestation chain indexes. chain_root_idx speeds up "show me the
+  // whole chain"; workitem_created_idx is the lookup path for the prev pointer
+  // when sealing a new packet; ai_paths_idx is tuned for prove-the-negative
+  // queries (restricts the GIN to rows where is_ai_assisted=TRUE so irrelevant
+  // entries never enter the index).
+  `
+    CREATE INDEX IF NOT EXISTS capability_evidence_packets_chain_root_idx
+    ON capability_evidence_packets (chain_root_bundle_id)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_evidence_packets_workitem_created_idx
+    ON capability_evidence_packets (work_item_id, created_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_evidence_packets_ai_paths_idx
+    ON capability_evidence_packets USING GIN (touched_paths)
+    WHERE is_ai_assisted = TRUE
+  `,
   `
     CREATE INDEX IF NOT EXISTS capability_incidents_capability_time_idx
     ON capability_incidents (capability_id, detected_at DESC)
@@ -2020,6 +2084,118 @@ export const migrationStatements = [
   `
     CREATE INDEX IF NOT EXISTS capability_incident_guardrail_promotions_capability_idx
     ON capability_incident_guardrail_promotions (capability_id, created_at DESC)
+  `,
+  // Slice A — append-only version history for agent learning profiles.
+  // Writes always go through this table first then flip the current_version_id
+  // pointer on capability_agent_learning_profiles in the same transaction,
+  // so a corrupt distillation can never erase prior state.
+  `
+    CREATE TABLE IF NOT EXISTS capability_agent_learning_profile_versions (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      version_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      version_no INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      highlights JSONB NOT NULL DEFAULT '[]'::jsonb,
+      context_block TEXT NOT NULL DEFAULT '',
+      source_document_ids TEXT[] NOT NULL DEFAULT '{}',
+      source_artifact_ids TEXT[] NOT NULL DEFAULT '{}',
+      source_count INTEGER NOT NULL DEFAULT 0,
+      context_block_tokens INTEGER,
+      judge_score NUMERIC,
+      judge_report JSONB,
+      shape_report JSONB,
+      created_by_update_id TEXT,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, version_id),
+      UNIQUE (capability_id, agent_id, version_no),
+      FOREIGN KEY (capability_id, agent_id)
+        REFERENCES capability_agents(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS current_version_id TEXT
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS previous_version_id TEXT
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_agent_learning_profile_versions_created_idx
+    ON capability_agent_learning_profile_versions (capability_id, agent_id, created_at DESC)
+  `,
+  // Slice B — evaluation fixtures for the LLM-judge quality gate. Rows are
+  // bootstrapped from recent successful sessions and refreshed weekly.
+  `
+    CREATE TABLE IF NOT EXISTS capability_agent_eval_fixtures (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      fixture_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      source_session_id TEXT,
+      prompt TEXT NOT NULL,
+      reference_response TEXT,
+      expected_criteria JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ,
+      PRIMARY KEY (capability_id, fixture_id),
+      FOREIGN KEY (capability_id, agent_id)
+        REFERENCES capability_agents(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_agent_eval_fixtures_agent_idx
+    ON capability_agent_eval_fixtures (capability_id, agent_id)
+  `,
+  // Slice C — canary + drift-detection columns on the live profile row.
+  // Counters reset on every version flip; `drift_flagged_at` + `drift_reason`
+  // remain until an operator either reverts or the next flip clears them.
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS canary_started_at TIMESTAMPTZ
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS canary_request_count INTEGER NOT NULL DEFAULT 0
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS canary_negative_count INTEGER NOT NULL DEFAULT 0
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS drift_flagged_at TIMESTAMPTZ
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS drift_reason TEXT
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS drift_regression_streak INTEGER NOT NULL DEFAULT 0
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS drift_last_checked_at TIMESTAMPTZ
+  `,
+  // Slice C — when a version is replaced, freeze its final canary counters
+  // onto the version row so the drift detector has a stable baseline to
+  // compare the new live canary against.
+  `
+    ALTER TABLE capability_agent_learning_profile_versions
+    ADD COLUMN IF NOT EXISTS frozen_request_count INTEGER
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profile_versions
+    ADD COLUMN IF NOT EXISTS frozen_negative_count INTEGER
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profile_versions
+    ADD COLUMN IF NOT EXISTS frozen_at TIMESTAMPTZ
   `,
 ];
 

@@ -24,6 +24,7 @@ import {
 import { enrichCapabilityAgentProfile } from '../src/lib/agentProfiles';
 import {
   findAgentSessionRecord,
+  incrementAgentLearningCanaryCounters,
   upsertAgentSessionRecord,
 } from './agentLearning/repository';
 import {
@@ -1841,6 +1842,14 @@ export const invokeScopedCapabilitySession = async ({
           fingerprint: managedSession.fingerprint,
           model: result.model,
           tokenDelta: result.usage.totalTokens,
+        }).catch(() => undefined);
+        // Slice C — every successful agent exchange bumps the canary
+        // request count so the drift detector has a denominator for the
+        // live version. Fire-and-forget; inference never blocks on this.
+        void incrementAgentLearningCanaryCounters({
+          capabilityId: capability.id,
+          agentId: agent.id,
+          requestDelta: 1,
         }).catch(() => undefined);
       }
 

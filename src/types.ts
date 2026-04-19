@@ -987,7 +987,10 @@ export type AgentLearningStatus =
   | 'LEARNING'
   | 'READY'
   | 'STALE'
-  | 'ERROR';
+  | 'ERROR'
+  // Slice B — candidate version failed shape checks (or its judge score is
+  // still being computed). Prior version keeps serving inference.
+  | 'REVIEW_PENDING';
 
 export type AgentSessionScope = 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
 
@@ -1002,6 +1005,86 @@ export interface AgentLearningProfile {
   refreshedAt?: string;
   lastRequestedAt?: string;
   lastError?: string;
+  currentVersionId?: string;
+  previousVersionId?: string;
+  // Slice C — canary + drift-detection state for the currently-live version.
+  // Reset on every pointer flip. Undefined on rows that predate the Slice C
+  // migration (treated as "no canary data yet").
+  canaryStartedAt?: string;
+  canaryRequestCount?: number;
+  canaryNegativeCount?: number;
+  driftFlaggedAt?: string;
+  driftReason?: string;
+  driftRegressionStreak?: number;
+  driftLastCheckedAt?: string;
+}
+
+/**
+ * Immutable snapshot of what the agent learned at a specific moment. Rows
+ * here are append-only; the live profile stores a pointer at
+ * `currentVersionId`. Slice A produces rows with `READY` status; Slice B/C
+ * will extend the shape with judge/shape reports and drift state.
+ */
+export interface AgentLearningProfileVersion {
+  versionId: string;
+  capabilityId: string;
+  agentId: string;
+  versionNo: number;
+  status: AgentLearningStatus;
+  summary: string;
+  highlights: string[];
+  contextBlock: string;
+  sourceDocumentIds: string[];
+  sourceArtifactIds: string[];
+  sourceCount: number;
+  contextBlockTokens?: number;
+  judgeScore?: number;
+  judgeReport?: unknown;
+  shapeReport?: unknown;
+  createdByUpdateId?: string;
+  notes?: string;
+  createdAt: string;
+  // Slice C — canary counters captured when this version was replaced by
+  // a successor. Only populated on outgoing (replaced) versions; the
+  // currently-live version's counters live on the profile row.
+  frozenRequestCount?: number;
+  frozenNegativeCount?: number;
+  frozenAt?: string;
+}
+
+export interface AgentLearningDriftState {
+  currentVersionId?: string;
+  previousVersionId?: string;
+  canaryStartedAt?: string;
+  canaryRequestCount: number;
+  canaryNegativeCount: number;
+  canaryNegativeRate: number;
+  baselineRequestCount?: number;
+  baselineNegativeCount?: number;
+  baselineNegativeRate?: number;
+  negativeRateDelta?: number;
+  regressionStreak: number;
+  driftFlaggedAt?: string;
+  driftReason?: string;
+  lastCheckedAt?: string;
+  /**
+   * Convenience flag for the UI — true when drift has been flagged AND
+   * not yet cleared (either by operator revert or the next successful
+   * flip).
+   */
+  isFlagged: boolean;
+}
+
+export interface AgentLearningVersionDiff {
+  fromVersionId: string;
+  toVersionId: string;
+  summaryBefore: string;
+  summaryAfter: string;
+  highlightsAdded: string[];
+  highlightsRemoved: string[];
+  sourceDocumentsAdded: string[];
+  sourceDocumentsRemoved: string[];
+  contextBlockTokenDelta?: number;
 }
 
 export interface AgentSessionSummary {
@@ -1130,6 +1213,19 @@ export interface AgentKnowledgeLens {
   provenance: KnowledgeSourceSummary[];
   deltas: LearningDelta[];
   contextBlock?: string;
+  /**
+   * Slice D — when the background pipeline fails (LLM parse error, memory
+   * refresh failure, etc.) the live profile row carries `lastError`. We
+   * expose it on the lens so the UI shows an error chip even before the
+   * operator expands the version-history disclosure.
+   */
+  lastError?: string;
+  /**
+   * Slice D — status of the live profile row. `REVIEW_PENDING` specifically
+   * means a candidate version was committed but the pointer was held steady;
+   * the UI surfaces this as "Previous version still serving".
+   */
+  profileStatus?: AgentLearningStatus;
 }
 
 export interface CapabilityAgent {
@@ -1834,7 +1930,14 @@ export interface LearningUpdate {
     | 'INCIDENT_DERIVED'
     | 'USER_CORRECTION'
     | 'MANUAL_REFRESH'
-    | 'SKILL_CHANGE';
+    | 'SKILL_CHANGE'
+    // Reserved for later slices of the self-learning robustness upgrade:
+    // Slice D (PIPELINE_ERROR), Slice E (PREVIEW_REQUESTED),
+    // Slice C (DRIFT_FLAGGED), Slice A (VERSION_REVERTED).
+    | 'PIPELINE_ERROR'
+    | 'PREVIEW_REQUESTED'
+    | 'DRIFT_FLAGGED'
+    | 'VERSION_REVERTED';
   relatedWorkItemId?: string;
   relatedRunId?: string;
 }
@@ -2117,6 +2220,7 @@ export type RunWaitPayload = {
   compiledStepContext?: CompiledStepContext;
   compiledWorkItemPlan?: CompiledWorkItemPlan;
   contrarianReview?: ContrarianConflictReview;
+  approvalWorkspace?: ApprovalWorkspaceState;
 } & Record<string, any>;
 
 export interface WorkflowRun {
@@ -2619,6 +2723,97 @@ export interface ReviewPacketArtifactSummary {
   downloadUrl: string;
 }
 
+export type ApprovalClarificationRequestStatus =
+  | 'PENDING_RESPONSE'
+  | 'RESPONDED'
+  | 'FAILED';
+
+export type ApprovalClarificationWorkspaceStatus =
+  | 'IDLE'
+  | 'WAITING_FOR_AGENT'
+  | 'RESPONDED'
+  | 'FAILED';
+
+export interface ApprovalClarificationRequest {
+  id: string;
+  capabilityId: string;
+  runId: string;
+  waitId: string;
+  targetAgentId: string;
+  targetAgentName?: string;
+  summary: string;
+  clarificationQuestions: string[];
+  note?: string;
+  requestedBy: string;
+  requestedByActorUserId?: string;
+  requestedAt: string;
+  status: ApprovalClarificationRequestStatus;
+  responseId?: string;
+}
+
+export interface ApprovalClarificationResponse {
+  id: string;
+  capabilityId: string;
+  runId: string;
+  waitId: string;
+  requestId: string;
+  agentId: string;
+  agentName?: string;
+  content: string;
+  createdAt: string;
+  artifactId?: string;
+  messageId?: string;
+  error?: string;
+}
+
+export interface ApprovalStructuredPacketExcerpt {
+  id: string;
+  title: string;
+  timestamp: string;
+  excerpt: string;
+}
+
+export interface ApprovalStructuredPacketDeterministicSummary {
+  approvalSummary: string;
+  keyEvents: string[];
+  keyClaims: string[];
+  evidenceHighlights: string[];
+  openQuestions: string[];
+  unresolvedConcerns: string[];
+  chatExcerpts: ApprovalStructuredPacketExcerpt[];
+}
+
+export interface ApprovalStructuredPacketAiSummary {
+  status: 'READY' | 'ERROR' | 'UNAVAILABLE';
+  generatedAt?: string;
+  model?: string;
+  summary?: string;
+  topRisks: string[];
+  missingEvidence: string[];
+  disagreements: string[];
+  suggestedClarifications: string[];
+  error?: string;
+}
+
+export interface ApprovalStructuredPacket {
+  waitId: string;
+  generatedAt: string;
+  sourceFingerprint: string;
+  artifactId?: string;
+  fileName?: string;
+  contentText: string;
+  deterministic: ApprovalStructuredPacketDeterministicSummary;
+  aiSummary: ApprovalStructuredPacketAiSummary;
+}
+
+export interface ApprovalWorkspaceState {
+  packet?: ApprovalStructuredPacket;
+  clarificationStatus?: ApprovalClarificationWorkspaceStatus;
+  clarificationRequests?: ApprovalClarificationRequest[];
+  clarificationResponses?: ApprovalClarificationResponse[];
+  activeClarificationRequestId?: string;
+}
+
 export interface StageControlContinueResponse {
   action:
     | 'APPROVED_WAIT'
@@ -2677,6 +2872,40 @@ export interface ApprovalDecision {
   actorTeamIds: string[];
   comment?: string;
   createdAt: string;
+}
+
+// `ApprovalWorkspaceContext` is retained because the server's
+// `server/approvalWorkspace.ts` still consumes it to shape the REST response
+// for `/api/.../approvals/:waitId` — external tooling and the legacy endpoint
+// contract continue to depend on that payload. The frontend Human Approval
+// Gate modal does not use this type (it reads `WorkItem.approvalWorkspace`
+// state directly).
+export interface ApprovalWorkspaceContext {
+  capabilityId: string;
+  capabilityName: string;
+  runId: string;
+  waitId: string;
+  workItem: WorkItem;
+  run: WorkflowRun;
+  runStep?: WorkflowRunStep;
+  approvalWait: RunWait;
+  interactionFeed: CapabilityInteractionFeed;
+  artifacts: Artifact[];
+  codeDiffArtifact?: Artifact;
+  selectedArtifactId?: string;
+  availableAgents: Array<{
+    id: string;
+    name: string;
+    role: string;
+  }>;
+  currentPhaseLabel: string;
+  currentStepName: string;
+  requestedByLabel: string;
+  requestedAt?: string;
+  structuredPacket?: ApprovalStructuredPacket;
+  clarificationRequests: ApprovalClarificationRequest[];
+  clarificationResponses: ApprovalClarificationResponse[];
+  clarificationStatus: ApprovalClarificationWorkspaceStatus;
 }
 
 export interface WorkItemClaim {
@@ -3061,7 +3290,35 @@ export interface CapabilityWorkspace {
   createdAt: string;
 }
 
-export interface EvidencePacketSummary {
+/**
+ * AI attribution captured on an attestation so auditors can answer
+ * "which agents / tools produced this change." Derived from the source
+ * workflow run at seal time; immutable thereafter.
+ */
+export interface AttestationAiAttribution {
+  assignedAgentId?: string;
+  stepAgentIds?: string[];
+  toolInvocationIds?: string[];
+}
+
+/**
+ * Chain + signature envelope for a Signed Change Attestation (Slice A).
+ * Fields are optional on the summary so legacy packets created before
+ * signing was wired up continue to round-trip as `attestationVersion: 1`
+ * with no signature.
+ */
+export interface AttestationChainEnvelope {
+  attestationVersion?: number;
+  prevBundleId?: string | null;
+  chainRootBundleId?: string | null;
+  signature?: string | null;
+  signingKeyId?: string | null;
+  signingAlgo?: string | null;
+  isAiAssisted?: boolean;
+  aiAttribution?: AttestationAiAttribution;
+}
+
+export interface EvidencePacketSummary extends AttestationChainEnvelope {
   bundleId: string;
   capabilityId: string;
   workItemId: string;
@@ -3091,6 +3348,30 @@ export interface EvidencePacket extends EvidencePacketSummary {
     evidence?: CompletedWorkOrderDetail;
   };
   incidentLinks?: IncidentPacketLink[];
+}
+
+/**
+ * Slice A verification payload returned by POST /api/attestations/:id/verify.
+ * signatureValid → Ed25519 check against the registered public key passed.
+ * digestMatches  → the stored digest_sha256 still matches the current payload.
+ * chainIntact    → every prev_bundle_id in the chain resolves to a persisted
+ *                   packet and the chain terminates at chain_root_bundle_id.
+ */
+export interface AttestationVerificationResult {
+  bundleId: string;
+  signatureValid: boolean;
+  digestMatches: boolean;
+  chainIntact: boolean;
+  reason?: string;
+}
+
+/**
+ * Ordered view of the attestation chain for a work item, root-first.
+ */
+export interface AttestationChain {
+  rootBundleId: string;
+  workItemId: string;
+  entries: EvidencePacketSummary[];
 }
 
 export type IncidentSeverity = 'SEV1' | 'SEV2' | 'SEV3' | 'SEV4';
