@@ -105,6 +105,8 @@ export type AdvancedToolId =
   | 'run-console'
   | 'evals'
   | 'skills'
+  | 'tools'
+  | 'policies'
   | 'artifact-designer'
   | 'tasks'
   | 'studio'
@@ -274,8 +276,30 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     path: '/skills',
     description: 'Manage reusable capability skills and specialist behaviors.',
     audience: 'BUILDERS',
-    exposureMode: 'ON_DEMAND',
-    contextTriggers: ['HAS_AGENT_ROSTER'],
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'tools',
+    label: 'Tools',
+    shortName: 'Tools',
+    path: '/tools',
+    description:
+      'Capability-wide inventory of tool adapters — where each tool is used, recent invocations, and the latest policy verdict per tool.',
+    audience: 'OPERATORS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'policies',
+    label: 'Policies',
+    shortName: 'Policies',
+    path: '/policies',
+    description:
+      'Runtime approval policies and governance control bindings scoped to this capability, with drill-through to the workflow steps they apply to.',
+    audience: 'OPERATORS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
   },
   {
     id: 'artifact-designer',
@@ -405,11 +429,14 @@ const hasDeploymentTargetSetup = (capability: Capability) => {
 
 const hasMinimalCapabilityContract = (capability: Capability) =>
   hasText(capability.description) &&
-  hasCapabilityOwner(capability) &&
-  hasText(capability.businessOutcome) &&
-  capability.successMetrics.some(metric => metric.trim()) &&
-  capability.requiredEvidenceKinds.some(kind => kind.trim()) &&
-  hasText(capability.definitionOfDone);
+  hasCapabilityOwner(capability);
+
+const hasBusinessOutcomeContext = (capability: Capability) =>
+  hasText(capability.businessOutcome) ||
+  capability.successMetrics.some(metric => metric.trim()) ||
+  capability.requiredEvidenceKinds.some(kind => kind.trim()) ||
+  hasText(capability.definitionOfDone) ||
+  hasText(capability.operatingPolicySummary);
 
 const roleSet = (workspaceRoles: WorkspaceRole[]) => new Set(workspaceRoles || []);
 
@@ -588,7 +615,7 @@ export const getRuntimeHealth = (
   if (!runtimeStatus) {
     return {
       label: 'Checking connection',
-      description: 'Loading Copilot runtime ownership and connection status.',
+      description: 'Loading execution runtime ownership and provider connection status.',
       tone: 'info',
       actionLabel: 'Open run console',
       path: '/run-console',
@@ -615,7 +642,7 @@ export const getRuntimeHealth = (
     return {
       label: 'Desktop-owned execution',
       description:
-        'Queued work can wait for a claimed desktop executor even when this browser session does not own the Copilot runtime.',
+        'Queued work can wait for a claimed desktop executor even when this browser session does not own the active runtime lane.',
       tone: 'info',
       actionLabel: 'Open work cockpit',
       path: '/orchestrator',
@@ -623,10 +650,10 @@ export const getRuntimeHealth = (
   }
 
   return {
-    label: runtimeStatus.lastRuntimeError ? 'Unavailable' : 'Needs Copilot setup',
+    label: runtimeStatus.lastRuntimeError ? 'Unavailable' : 'Needs runtime setup',
     description:
       runtimeStatus.lastRuntimeError ||
-      `Connect the ${runtimeStatus.runtimeOwner === 'DESKTOP' ? 'desktop' : 'runtime'} Copilot owner before starting agent work.`,
+      `Connect the ${runtimeStatus.runtimeOwner === 'DESKTOP' ? 'desktop' : 'runtime'} execution owner before starting governed agent work.`,
     tone: runtimeStatus.lastRuntimeError ? 'danger' : 'warning',
     actionLabel: 'Set up runtime',
     path: '/run-console',
@@ -697,7 +724,7 @@ const buildProofItems = (
         outcomeContract.successMetrics.length > 0,
       proofSignal: hasText(capability.businessOutcome)
         ? capability.businessOutcome!.trim()
-        : 'Add a business outcome, success metrics, and service boundary.',
+        : 'Optional: add a business outcome, success metrics, and service boundary.',
       actionLabel: 'Define business charter',
       path: '/capabilities/metadata',
     },
@@ -908,15 +935,21 @@ const buildReadinessItems = (
   return [
     {
       id: 'metadata',
-      label: 'Minimum capability contract',
-      description: 'Owner, outcome, success metric, evidence expectation, and definition of done are explicitly defined.',
-      status: hasMinimalCapabilityContract(capability) ? 'READY' : 'NEEDS_SETUP',
-      actionLabel: 'Complete contract',
+      label: 'Capability business context',
+      description: 'Owner and description anchor the capability. Outcome, evidence, and policy notes are optional context for business readers.',
+      status: hasMinimalCapabilityContract(capability)
+        ? hasBusinessOutcomeContext(capability)
+          ? 'READY'
+          : 'IN_PROGRESS'
+        : 'NEEDS_SETUP',
+      actionLabel: 'Open metadata',
       path: '/capabilities/metadata',
-      isBlocking: true,
+      isBlocking: !hasMinimalCapabilityContract(capability),
       blockingReason:
-        'Execution stays gated until the capability has an owner, business outcome, success metric, evidence requirement, and definition of done.',
-      nextRequiredAction: 'Finish the minimum capability contract before starting workflow execution.',
+        'Execution stays gated until the capability has an owner and a basic description.',
+      nextRequiredAction: hasMinimalCapabilityContract(capability)
+        ? 'Optionally add business outcome, success metrics, required evidence, or an operating policy summary.'
+        : 'Add a capability owner and a short description before starting workflow execution.',
     },
     {
       id: 'connectors',
@@ -939,7 +972,7 @@ const buildReadinessItems = (
       path: '/capabilities/metadata',
       isBlocking: true,
       blockingReason:
-        'Copilot-backed work must stay inside an approved local workspace before execution can start.',
+        'Runtime-backed work must stay inside an approved local workspace before execution can start.',
       nextRequiredAction: 'Approve at least one workspace path for this capability.',
     },
     {
@@ -1010,8 +1043,8 @@ const buildReadinessItems = (
     },
     {
       id: 'runtime',
-      label: 'Copilot runtime',
-      description: 'A runtime owner is connected for Copilot chat and workflow execution.',
+      label: 'Execution runtime',
+      description: 'A runtime owner is connected for governed chat and workflow execution.',
       status: hasExecutionPath(runtimeStatus)
         ? 'READY'
         : runtimeStatus
@@ -1021,7 +1054,7 @@ const buildReadinessItems = (
       path: '/run-console',
       isBlocking: runtimeStatus?.executionRuntimeOwner !== 'DESKTOP',
       blockingReason:
-        'Workflow execution cannot start until the Copilot runtime owner is connected.',
+        'Workflow execution cannot start until the active runtime owner is connected.',
       nextRequiredAction:
         runtimeStatus?.executionRuntimeOwner === 'DESKTOP'
           ? 'Claim a desktop executor so queued runs can start automatically.'

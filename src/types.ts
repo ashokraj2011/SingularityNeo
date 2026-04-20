@@ -67,6 +67,141 @@ export interface CapabilityRepository {
   status?: CapabilityRepositoryStatus;
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Copilot Guidance Pack
+//
+// Content pulled from well-known copilot / AI-assistant files in a
+// capability's Git repos (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules/*`,
+// `.github/copilot-instructions.md`, `docs/testing.md`, ...). Fed into the
+// agent's system prompt at session init and into the learning judge rubric
+// as the "house testing guidance" for that capability.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type CapabilityCopilotGuidanceCategory = 'guidance' | 'testing';
+
+export type CapabilityCopilotGuidanceFetchStatus =
+  | 'OK'
+  | 'NOT_FOUND'
+  | 'AUTH_MISSING'
+  | 'RATE_LIMITED'
+  | 'ERROR';
+
+export interface CapabilityCopilotGuidanceFile {
+  repositoryId: string;
+  repositoryLabel?: string;
+  filePath: string;
+  content: string;
+  sha: string;
+  category: CapabilityCopilotGuidanceCategory;
+  commitSha?: string;
+  fetchedAt: string;
+  sizeBytes: number;
+}
+
+export interface CapabilityCopilotGuidancePack {
+  capabilityId: string;
+  files: CapabilityCopilotGuidanceFile[];
+  lastFetchedAt?: string;
+  lastFetchStatus?: CapabilityCopilotGuidanceFetchStatus;
+  lastFetchMessage?: string;
+}
+
+export interface CapabilityChatDistillationRecord {
+  capabilityId: string;
+  agentId: string;
+  sessionId: string;
+  distilledAt: string;
+  messageCount: number;
+  correctionPreview: string;
+  learningUpdateId?: string;
+  blockedByShapeCheck?: boolean;
+  blockReason?: string;
+}
+
+/**
+ * Response shape from POST .../chat-sessions/:sessionId/distill. Mirrors
+ * the backend's `ChatDistillationResult` — surfaced here so the UI can
+ * render the outcome (APPLIED / NO_LEARNING / TOO_SHORT / …) without
+ * duplicating the union.
+ */
+export interface ChatDistillationResult {
+  status: 'APPLIED' | 'NO_LEARNING' | 'TOO_SHORT' | 'ALREADY_DISTILLED' | 'ERROR';
+  correctionPreview?: string;
+  messageCount: number;
+  message?: string;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Code understanding module (Phase A)
+//
+// A capability indexes every linked repository into a flat list of
+// symbols + a file-level reference graph. We use the TypeScript compiler
+// API for TS/JS (no new native deps). Symbols are whatever an engineer
+// would recognise as a named thing: classes, functions, interfaces,
+// type aliases, enums, top-level const/let/var, and class methods.
+//
+// The data is kept deliberately coarse — we're answering "does this
+// capability have a symbol called X and where is it" and "what does
+// file A import", not "what type does this expression have". The
+// heavy semantic stuff lives in downstream eval / code-gen passes that
+// re-open source on demand.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type CapabilityCodeSymbolKind =
+  | 'class'
+  | 'function'
+  | 'interface'
+  | 'type'
+  | 'enum'
+  | 'variable'
+  | 'method'
+  | 'property';
+
+export type CapabilityCodeIndexRunStatus =
+  | 'OK'
+  | 'PARTIAL'
+  | 'AUTH_MISSING'
+  | 'RATE_LIMITED'
+  | 'EMPTY'
+  | 'ERROR';
+
+export interface CapabilityCodeSymbol {
+  capabilityId: string;
+  repositoryId: string;
+  repositoryLabel?: string;
+  filePath: string;
+  symbolName: string;
+  kind: CapabilityCodeSymbolKind;
+  parentSymbol?: string;
+  startLine: number;
+  endLine: number;
+  signature: string;
+  isExported: boolean;
+  sha?: string;
+  indexedAt: string;
+}
+
+export interface CapabilityCodeIndexRepoSummary {
+  repositoryId: string;
+  repositoryLabel?: string;
+  filesIndexed: number;
+  symbolsIndexed: number;
+  referencesIndexed: number;
+  lastIndexedAt?: string;
+  lastStatus?: CapabilityCodeIndexRunStatus;
+  lastMessage?: string;
+}
+
+export interface CapabilityCodeIndexSnapshot {
+  capabilityId: string;
+  repositories: CapabilityCodeIndexRepoSummary[];
+  lastRunAt?: string;
+  lastRunStatus?: CapabilityCodeIndexRunStatus;
+  lastRunMessage?: string;
+  totalSymbols: number;
+  totalFiles: number;
+}
+
 export interface WorkItemPhaseStakeholder {
   role: string;
   name: string;
@@ -1342,6 +1477,10 @@ export interface Blueprint {
 export type ArtifactKind =
   | 'PHASE_OUTPUT'
   | 'CODE_DIFF'
+  // CODE_PATCH is a unified-diff artifact that is *applicable* — the
+  // agent produced it intending it to become a commit. Distinct from
+  // CODE_DIFF (which is a read-only snapshot for comparison).
+  | 'CODE_PATCH'
   | 'HANDOFF_PACKET'
   | 'DELEGATION_RESULT'
   | 'EVIDENCE_PACKET'
@@ -1423,7 +1562,135 @@ export interface Artifact {
 
 export type WorkItemPhase = WorkflowPhaseId;
 
-export type WorkflowStepType = 'DELIVERY' | 'GOVERNANCE_GATE' | 'HUMAN_APPROVAL';
+export type WorkflowStepType =
+  | 'DELIVERY'
+  | 'GOVERNANCE_GATE'
+  | 'HUMAN_APPROVAL'
+  // BUILD is a step whose contractual output is a CODE_PATCH artifact:
+  // the agent is expected to produce an applicable unified diff, which
+  // downstream Phase-C wiring can turn into a branch + commit + PR.
+  | 'BUILD';
+
+// ─────────────────────────────────────────────────────────────────────
+// Code patch payloads — the structured side of a CODE_PATCH artifact.
+//
+// The raw unified-diff body lives in `Artifact.contentText`; this
+// `CodePatchPayload` shape is persisted in `Artifact.contentJson` so
+// viewers don't have to re-parse the diff every render and server-side
+// validators/appliers can read stats without touching the string body.
+// ─────────────────────────────────────────────────────────────────────
+
+/** Per-file hunk stats extracted by the unified-diff parser. */
+export interface CodePatchFileStat {
+  /** New-side path (the `+++ b/...` side). Empty for pure deletions. */
+  path: string;
+  /** Old-side path (the `--- a/...` side). Empty for pure additions. */
+  oldPath?: string;
+  status: 'ADDED' | 'MODIFIED' | 'DELETED' | 'RENAMED';
+  additions: number;
+  deletions: number;
+  hunkCount: number;
+  /** True if this file's diff chunk is marked as binary — we don't apply those. */
+  isBinary?: boolean;
+}
+
+/** Structured metadata that accompanies a CODE_PATCH artifact. */
+export interface CodePatchPayload {
+  /** Target repo/branch the patch is meant to apply against. */
+  repositoryId?: string;
+  repositoryLabel?: string;
+  baseSha?: string;
+  targetBranch?: string;
+  /** Per-file rollup so the UI can render a summary without re-parsing. */
+  files: CodePatchFileStat[];
+  totalAdditions: number;
+  totalDeletions: number;
+  /** Result of running `validatePatch()` server-side at ingest time. */
+  validation?: {
+    ok: boolean;
+    errors: string[];
+    warnings: string[];
+  };
+  /** Optional human-readable summary for surfacing in approval rails. */
+  summary?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Agent-as-git-author (Phase C).
+//
+// Persistence shapes for the agent's long-lived branch session + any
+// PRs it opens from that branch. The workflow is:
+//   1. Operator (or automation) calls `startAgentBranchSession` for a
+//      work item — we create `wi/<workItemId>-<slug>` anchored at the
+//      repo's default branch.
+//   2. Agent emits CODE_PATCH artifacts (see `CodePatchPayload`); each
+//      one is appended as a commit via `commitPatchToBranch`.
+//   3. Operator clicks "Open PR" — we record the PR row and flip the
+//      session into REVIEWING state.
+// ─────────────────────────────────────────────────────────────────────
+
+export type AgentBranchSessionStatus = 'ACTIVE' | 'REVIEWING' | 'CLOSED' | 'FAILED';
+
+export interface AgentBranchSession {
+  id: string;
+  capabilityId: string;
+  workItemId: string;
+  repositoryId: string;
+  repositoryUrl: string;
+  baseBranch: string;
+  baseSha: string;
+  branchName: string;
+  /** Current tip of the session branch. Null until the first commit lands. */
+  headSha: string | null;
+  status: AgentBranchSessionStatus;
+  commitsCount: number;
+  lastCommitMessage: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AgentPullRequestState = 'OPEN' | 'MERGED' | 'CLOSED';
+
+export interface AgentPullRequest {
+  id: string;
+  sessionId: string;
+  capabilityId: string;
+  workItemId: string;
+  repositoryId: string;
+  prNumber: number;
+  prUrl: string;
+  htmlUrl: string;
+  state: AgentPullRequestState;
+  isDraft: boolean;
+  title: string;
+  body: string;
+  openedAt: string;
+  mergedAt: string | null;
+  closedAt: string | null;
+  lastSyncedAt: string;
+}
+
+/**
+ * Per-file result of applying a CODE_PATCH to a session branch —
+ * returned alongside the commit SHA so the UI can render "3 files
+ * committed, 1 skipped (binary)".
+ */
+export interface AgentBranchCommitFileStatus {
+  path: string;
+  status: 'CLEAN' | 'CREATED' | 'DELETED' | 'CONFLICT' | 'BINARY_SKIPPED' | 'MISSING_ORIGINAL';
+  applied: boolean;
+  reason?: string;
+}
+
+export interface AgentBranchCommitResult {
+  session: AgentBranchSession;
+  commitSha: string;
+  treeSha: string;
+  files: AgentBranchCommitFileStatus[];
+  filesCommittedCount: number;
+  filesSkippedCount: number;
+}
 
 export interface AgentBounty {
   id: string;

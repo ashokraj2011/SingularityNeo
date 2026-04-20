@@ -1040,17 +1040,25 @@ export default function CapabilitySetup() {
                   <div className="grid gap-5 md:grid-cols-2">
                     <label className="space-y-2 md:col-span-2">
                       <span className="form-kicker">Business outcome</span>
+                      <p className="text-xs leading-relaxed text-secondary">
+                        Optional. Describe the business result this capability should create.
+                        Example: &quot;Evaluate rules accurately before returning a decision.&quot;
+                      </p>
                       <textarea
                         value={draft.businessOutcome}
                         onChange={event =>
                           updateDraft({ businessOutcome: event.target.value })
                         }
-                        placeholder="Explain the business result this capability must reliably produce."
+                        placeholder="Optional. Example: Evaluate rules accurately before a quote or decision is returned."
                         className="field-textarea h-28"
                       />
                     </label>
                     <label className="space-y-2">
                       <span className="form-kicker">Success metrics</span>
+                      <p className="text-xs leading-relaxed text-secondary">
+                        Optional. One measurable outcome per line.
+                        Example: &quot;Rule evaluation accuracy above 99.5%.&quot;
+                      </p>
                       <textarea
                         value={listToText(draft.successMetrics)}
                         onChange={event =>
@@ -1058,12 +1066,17 @@ export default function CapabilitySetup() {
                             successMetrics: textToList(event.target.value),
                           })
                         }
-                        placeholder={'Cycle time reduced by 30%\nEvery completed work item produces evidence'}
+                        placeholder={
+                          'Optional. One metric per line.\nRule evaluation accuracy above 99.5%\nP95 response time under 300 ms'
+                        }
                         className="field-textarea h-32"
                       />
                     </label>
                     <label className="space-y-2">
                       <span className="form-kicker">Required evidence</span>
+                      <p className="text-xs leading-relaxed text-secondary">
+                        Optional. What proof should exist before someone trusts or releases the work.
+                      </p>
                       <textarea
                         value={listToText(draft.requiredEvidenceKinds)}
                         onChange={event =>
@@ -1071,29 +1084,37 @@ export default function CapabilitySetup() {
                             requiredEvidenceKinds: textToList(event.target.value),
                           })
                         }
-                        placeholder={'Requirements pack\nTest evidence\nRelease decision'}
+                        placeholder={
+                          'Optional. One item per line.\nRegression test report\nSample rule evaluation results\nApproval note'
+                        }
                         className="field-textarea h-32"
                       />
                     </label>
                     <label className="space-y-2">
                       <span className="form-kicker">Definition of done</span>
+                      <p className="text-xs leading-relaxed text-secondary">
+                        Optional. Describe what must be true before this capability counts work as complete.
+                      </p>
                       <textarea
                         value={draft.definitionOfDone}
                         onChange={event =>
                           updateDraft({ definitionOfDone: event.target.value })
                         }
-                        placeholder="Describe what must be true before this capability can call work done."
+                        placeholder="Optional. Example: Changes are implemented, validated, and supported by reviewable evidence."
                         className="field-textarea h-28"
                       />
                     </label>
                     <label className="space-y-2">
                       <span className="form-kicker">Operating policy summary</span>
+                      <p className="text-xs leading-relaxed text-secondary">
+                        Optional. Plain-language approvals, constraints, or guardrails for this capability.
+                      </p>
                       <textarea
                         value={draft.operatingPolicySummary}
                         onChange={event =>
                           updateDraft({ operatingPolicySummary: event.target.value })
                         }
-                        placeholder="Summarize approvals, workspace constraints, and release expectations."
+                        placeholder="Optional. Example: High-impact rule changes require review before release."
                         className="field-textarea h-28"
                       />
                     </label>

@@ -3831,6 +3831,39 @@ export const getCapabilityArtifact = async (
   return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
 };
 
+/**
+ * Return the most recent CODE_PATCH artifact attached to a work item,
+ * or the entire ordered history when `limit` is supplied.
+ *
+ * Used by the agent-git service to locate the diff body that should be
+ * committed next. We deliberately order by `created DESC` instead of
+ * relying on artifact-kind-specific metadata — `created` is always
+ * populated and the newest patch wins by default.
+ */
+export const listWorkItemCodePatchArtifacts = async ({
+  capabilityId,
+  workItemId,
+  limit = 10,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  limit?: number;
+}): Promise<Artifact[]> => {
+  const result = await query(
+    `
+      SELECT *
+      FROM capability_artifacts
+      WHERE capability_id = $1
+        AND work_item_id = $2
+        AND artifact_kind = 'CODE_PATCH'
+      ORDER BY created DESC
+      LIMIT $3
+    `,
+    [capabilityId, workItemId, Math.max(1, Math.min(limit, 100))],
+  );
+  return result.rows.map(artifactFromRow);
+};
+
 export const getCapabilityArtifactFileMeta = async (
   capabilityId: string,
   artifactId: string,
@@ -4426,17 +4459,26 @@ export const replaceCapabilityWorkspaceContentRecord = async (
       | 'activeChatAgentId'
     >
   >,
-): Promise<CapabilityWorkspace> =>
-  isRemoteExecutionClient()
-    ? executionRuntimeRpc<CapabilityWorkspace>('replaceCapabilityWorkspaceContentRecord', {
-        capabilityId,
-        updates,
-      })
-    :
-  transaction(async client => {
+): Promise<CapabilityWorkspace> => {
+  if (isRemoteExecutionClient()) {
+    return executionRuntimeRpc<CapabilityWorkspace>(
+      'replaceCapabilityWorkspaceContentRecord',
+      { capabilityId, updates },
+    );
+  }
+
+  // Capture which artifact ids existed *before* this write so we can
+  // detect newly-added CODE_PATCH artifacts after the transaction
+  // commits and fire the agent-git auto-commit side effect.
+  const preUpdateArtifactIds = new Set<string>();
+
+  const freshWorkspace = await transaction(async client => {
     const capability = await assertCapabilityEditableTx(client, capabilityId);
 
     const currentWorkspace = await getCapabilityWorkspaceTx(client, capability);
+    for (const artifact of currentWorkspace.artifacts) {
+      preUpdateArtifactIds.add(artifact.id);
+    }
 
     if (updates.workflows) {
       await replaceWorkflowsTx(client, capabilityId, updates.workflows, capability);
@@ -4467,3 +4509,56 @@ export const replaceCapabilityWorkspaceContentRecord = async (
 
     return getCapabilityWorkspaceTx(client, capability);
   });
+
+  // Post-commit side-effect: for every code-change artifact (CODE_PATCH or
+  // CODE_DIFF) that was *newly* persisted in this write and is scoped to a
+  // work item, fire a fire-and-forget auto-commit to the corresponding
+  // agent-git session. The session is lazy-created inside the helper when
+  // needed. The helper dispatches on kind (CODE_PATCH vs CODE_DIFF) and
+  // extracts the unified diff from the right field on each.
+  //
+  // Dynamic import breaks the static cycle between repository.ts and
+  // agentGit/* modules (agentGit/service imports from ../repository).
+  if (updates.artifacts) {
+    const newCommittableArtifacts = freshWorkspace.artifacts.filter(
+      artifact =>
+        (artifact.artifactKind === 'CODE_PATCH' ||
+          artifact.artifactKind === 'CODE_DIFF') &&
+        artifact.workItemId &&
+        !preUpdateArtifactIds.has(artifact.id),
+    );
+    if (newCommittableArtifacts.length > 0) {
+      void (async () => {
+        try {
+          const [{ autoCommitArtifact }, bundle] = await Promise.all([
+            import('./agentGit/autoWire'),
+            getCapabilityBundle(capabilityId),
+          ]);
+          const workItemsById = new Map(
+            bundle.workspace.workItems.map(item => [item.id, item]),
+          );
+          const repositories = bundle.capability.repositories || [];
+          await Promise.all(
+            newCommittableArtifacts.map(async artifact => {
+              const workItem = workItemsById.get(artifact.workItemId!);
+              if (!workItem) return;
+              await autoCommitArtifact({
+                capabilityId,
+                artifact,
+                workItem: { id: workItem.id, title: workItem.title },
+                repositories,
+              });
+            }),
+          );
+        } catch (error) {
+          console.error(
+            '[agentGit/autoWire] auto-commit dispatch failed',
+            error,
+          );
+        }
+      })();
+    }
+  }
+
+  return freshWorkspace;
+};

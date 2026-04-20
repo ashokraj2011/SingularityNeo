@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import {
   clearCapabilityMessageHistoryRecord,
+  distillAgentChatSession,
   fetchRuntimeStatus,
   refreshAgentLearningProfile,
   submitAgentLearningCorrection,
@@ -298,6 +299,7 @@ const Chat = () => {
   const [refreshingAgentId, setRefreshingAgentId] = useState('');
   const [learningCorrection, setLearningCorrection] = useState('');
   const [submittingLearningCorrection, setSubmittingLearningCorrection] = useState(false);
+  const [distillingChatSession, setDistillingChatSession] = useState(false);
   const [messageAnnotations, setMessageAnnotations] = useState<
     Record<string, ChatMessageAnnotation>
   >({});
@@ -471,6 +473,75 @@ const Chat = () => {
       showError('Learning correction failed', description);
     } finally {
       setSubmittingLearningCorrection(false);
+    }
+  };
+
+  /**
+   * "Teach this chat" — asks the server to distill the current chat
+   * session into a durable learning correction. The server walks the
+   * recent messages, extracts imperative rules the user expressed, and
+   * pipes them through the existing `applyAgentLearningCorrection`
+   * pipeline (same shape-check quality gate as a manual correction).
+   * Idempotent per (capability, agent, session).
+   */
+  const handleDistillChatSession = async () => {
+    if (!activeAgent || distillingChatSession) {
+      return;
+    }
+    const sessionId = generalChatSession?.sessionId;
+    if (!sessionId) {
+      warning(
+        'No session yet',
+        'Send or receive a message first so there is something to teach the agent from.',
+      );
+      return;
+    }
+
+    setDistillingChatSession(true);
+    try {
+      const result = await distillAgentChatSession(
+        activeCapability.id,
+        activeAgent.id,
+        sessionId,
+        { agentName: activeAgent.name },
+      );
+      if (result.status === 'APPLIED') {
+        await refreshCapabilityBundle(activeCapability.id);
+        success(
+          'Learning extracted from chat',
+          result.correctionPreview
+            ? `${activeAgent.name} will remember: ${result.correctionPreview.slice(0, 160)}${result.correctionPreview.length > 160 ? '…' : ''}`
+            : `${activeAgent.name} updated its learning profile from this chat.`,
+        );
+      } else if (result.status === 'NO_LEARNING') {
+        info(
+          'Nothing durable to teach',
+          'The model found no concrete corrections or preferences in this conversation.',
+        );
+      } else if (result.status === 'TOO_SHORT') {
+        info(
+          'Not enough yet',
+          result.message || 'This chat is too short to distill a durable correction.',
+        );
+      } else if (result.status === 'ALREADY_DISTILLED') {
+        info(
+          'Already taught',
+          'This chat session was already folded into the agent\'s learning profile.',
+        );
+      } else {
+        showError(
+          'Could not teach from this chat',
+          result.message || 'The distillation step failed. Please try again.',
+        );
+      }
+    } catch (nextError) {
+      const description =
+        nextError instanceof Error
+          ? nextError.message
+          : 'Unable to distill this chat right now.';
+      showError('Teach from chat failed', description);
+    } finally {
+      setDistillingChatSession(false);
     }
   };
 
@@ -1478,19 +1549,35 @@ const Chat = () => {
                   future guidance instead of repeating the mistake.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => void handleSubmitLearningCorrection()}
-                disabled={submittingLearningCorrection || !learningCorrection.trim()}
-                className="enterprise-button enterprise-button-primary"
-              >
-                {submittingLearningCorrection ? (
-                  <LoaderCircle size={14} className="animate-spin" />
-                ) : (
-                  <Sparkles size={14} />
-                )}
-                Save correction
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleDistillChatSession()}
+                  disabled={distillingChatSession || !generalChatSession?.sessionId}
+                  className="enterprise-button enterprise-button-secondary"
+                  title="Let the model extract durable corrections from this chat and fold them into the agent's learning profile."
+                >
+                  {distillingChatSession ? (
+                    <LoaderCircle size={14} className="animate-spin" />
+                  ) : (
+                    <Sparkles size={14} />
+                  )}
+                  Teach from this chat
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSubmitLearningCorrection()}
+                  disabled={submittingLearningCorrection || !learningCorrection.trim()}
+                  className="enterprise-button enterprise-button-primary"
+                >
+                  {submittingLearningCorrection ? (
+                    <LoaderCircle size={14} className="animate-spin" />
+                  ) : (
+                    <Sparkles size={14} />
+                  )}
+                  Save correction
+                </button>
+              </div>
             </div>
             <textarea
               value={learningCorrection}
@@ -1502,6 +1589,9 @@ const Chat = () => {
             <p className="mt-2 text-xs text-secondary">
               We store the raw correction immediately, then a reflection pass folds it into the
               agent&apos;s distilled learning, generated skill notes, and guardrails.
+              <span className="ml-1 text-slate-500">
+                Or use <span className="font-medium">Teach from this chat</span> to let the model distill durable rules from the current conversation automatically.
+              </span>
             </p>
           </div>
 

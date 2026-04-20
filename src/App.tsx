@@ -2,7 +2,6 @@ import { Suspense, lazy, type ReactNode } from 'react';
 import {
   BrowserRouter,
   HashRouter,
-  Navigate,
   Routes,
   Route,
   useLocation,
@@ -18,12 +17,15 @@ const Tasks = lazy(() => import('./pages/Tasks'));
 const Ledger = lazy(() => import('./pages/Ledger'));
 const Agents = lazy(() => import('./pages/Agents'));
 const SkillLibrary = lazy(() => import('./pages/SkillLibrary'));
+const ToolsLibrary = lazy(() => import('./pages/ToolsLibrary'));
+const PoliciesLibrary = lazy(() => import('./pages/PoliciesLibrary'));
 const Studio = lazy(() => import('./pages/Studio'));
 const Chat = lazy(() => import('./pages/Chat'));
 const Orchestrator = lazy(() => import('./pages/Orchestrator'));
 const Operations = lazy(() => import('./pages/Operations'));
 const Incidents = lazy(() => import('./pages/Incidents'));
 const ModelRiskMonitoring = lazy(() => import('./pages/ModelRiskMonitoring'));
+const ApprovalWorkspace = lazy(() => import('./pages/ApprovalWorkspace'));
 const ArtifactDesigner = lazy(() => import('./pages/ArtifactDesigner'));
 const CapabilitySetup = lazy(() => import('./pages/CapabilitySetup'));
 const CapabilityMetadata = lazy(() => import('./pages/CapabilityMetadata'));
@@ -90,16 +92,15 @@ export default function App() {
                   <Route path="/ledger" element={<Ledger />} />
                   <Route path="/team" element={<Agents />} />
                   <Route path="/skills" element={<SkillLibrary />} />
+                  <Route path="/tools" element={<ToolsLibrary />} />
+                  <Route path="/policies" element={<PoliciesLibrary />} />
                   <Route path="/studio" element={<Studio />} />
                   <Route path="/chat" element={<Chat />} />
                   <Route path="/orchestrator" element={<Orchestrator />} />
                   <Route path="/work" element={<Orchestrator />} />
-                  {/* Legacy approval-workspace URLs now redirect to the
-                      orchestrator, which surfaces the Human Approval Gate
-                      modal for any work item in an approval state. */}
                   <Route
                     path="/work/approvals/:capabilityId/:runId/:waitId"
-                    element={<Navigate to="/work" replace />}
+                    element={<ApprovalWorkspace />}
                   />
                   <Route path="/operations" element={<Operations />} />
                   <Route path="/incidents" element={<Incidents />} />

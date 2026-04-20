@@ -116,12 +116,15 @@ import { useOrchestratorRuntime } from '../hooks/orchestrator/useOrchestratorRun
 import { useOrchestratorSelection } from '../hooks/orchestrator/useOrchestratorSelection';
 import {
   type ArtifactWorkbenchFilter,
+  buildApprovalWorkspacePath,
   type DetailTab,
   formatRelativeTime,
   formatTimestamp,
+  getArtifactDocumentBody,
   getCurrentWorkflowStep,
   getPriorityTone,
   getSelectedRunWait,
+  matchesArtifactWorkbenchFilter,
   normalizeMarkdownishText,
   readSessionValue,
   STORAGE_KEYS,
@@ -534,63 +537,6 @@ const renderAgentArtifactExpectations = (
   ) : (
     <p className="mt-3 text-xs leading-relaxed text-secondary">{emptyLabel}</p>
   );
-
-const matchesArtifactWorkbenchFilter = (
-  artifact: Artifact,
-  filter: ArtifactWorkbenchFilter,
-) => {
-  if (filter === 'ALL') {
-    return true;
-  }
-
-  if (filter === 'INPUTS') {
-    return artifact.direction === 'INPUT' || artifact.artifactKind === 'INPUT_NOTE';
-  }
-
-  if (filter === 'OUTPUTS') {
-    return artifact.direction !== 'INPUT';
-  }
-
-  if (filter === 'DIFFS') {
-    return artifact.artifactKind === 'CODE_DIFF';
-  }
-
-  if (filter === 'APPROVALS') {
-    return (
-      artifact.artifactKind === 'APPROVAL_RECORD' ||
-      artifact.artifactKind === 'CONFLICT_RESOLUTION' ||
-      artifact.artifactKind === 'CONTRARIAN_REVIEW'
-    );
-  }
-
-  if (filter === 'HANDOFFS') {
-    return artifact.artifactKind === 'HANDOFF_PACKET';
-  }
-
-  return true;
-};
-
-const getArtifactDocumentBody = (artifact: Artifact | null): string => {
-  if (!artifact) {
-    return '';
-  }
-
-  if (artifact.contentFormat === 'JSON' && artifact.contentJson) {
-    try {
-      return JSON.stringify(artifact.contentJson, null, 2);
-    } catch {
-      return '[This JSON artifact could not be rendered safely in the approval preview.]';
-    }
-  }
-
-  const fallback =
-    artifact.contentText ??
-    artifact.summary ??
-    artifact.description ??
-    `${artifact.type} · ${artifact.version}`;
-
-  return typeof fallback === 'string' ? fallback : String(fallback);
-};
 
 const getLatestRunFailureReason = ({
   run,
@@ -1993,20 +1939,70 @@ const Orchestrator = () => {
     () => getArtifactDocumentBody(selectedApprovalArtifact),
     [selectedApprovalArtifact],
   );
-  // Consolidation: the full-screen "Approval Workspace" page has been retired
-  // in favor of the in-orchestrator "Human Approval Gate" modal so there is
-  // exactly one approval surface. Both entry points below simply select the
-  // work item with approval focus and open the gate modal. The parameter
-  // signatures are preserved so existing callers (and tests) keep working.
   const openApprovalWorkspaceForWorkItem = useCallback(
-    async (workItemId: string, _preferredRunId?: string) => {
+    async (workItemId: string, preferredRunId?: string) => {
+      const targetItem = workItems.find(item => item.id === workItemId) || null;
+      if (!targetItem) {
+        return;
+      }
+
       selectWorkItem(workItemId, {
         openControl: true,
         focus: 'APPROVAL',
       });
+
+      if (
+        selectedWorkItem?.id === workItemId &&
+        selectedOpenWait?.type === 'APPROVAL' &&
+        currentRun?.id
+      ) {
+        navigate(
+          buildApprovalWorkspacePath({
+            capabilityId: activeCapability.id,
+            runId: currentRun.id,
+            waitId: selectedOpenWait.id,
+          }),
+        );
+        return;
+      }
+
+      const runId = preferredRunId || targetItem.activeRunId || targetItem.lastRunId;
+      if (runId) {
+        try {
+          const detail = await fetchCapabilityWorkflowRun(activeCapability.id, runId);
+          const approvalWait =
+            [...detail.waits]
+              .reverse()
+              .find(wait => wait.type === 'APPROVAL' && wait.status === 'OPEN') ||
+            detail.waits.find(wait => wait.type === 'APPROVAL');
+
+          if (approvalWait) {
+            navigate(
+              buildApprovalWorkspacePath({
+                capabilityId: activeCapability.id,
+                runId,
+                waitId: approvalWait.id,
+              }),
+            );
+            return;
+          }
+        } catch {
+          // Fall back to the in-work modal when the approval route cannot be hydrated.
+        }
+      }
+
       openApprovalReviewModal();
     },
-    [openApprovalReviewModal, selectWorkItem],
+    [
+      activeCapability.id,
+      currentRun?.id,
+      navigate,
+      openApprovalReviewModal,
+      selectWorkItem,
+      selectedOpenWait,
+      selectedWorkItem?.id,
+      workItems,
+    ],
   );
   const handleOpenApprovalReview = useCallback(() => {
     if (!selectedWorkItem) {
@@ -2014,9 +2010,10 @@ const Orchestrator = () => {
     }
     setApprovalArtifactFilter('ALL');
     setSelectedApprovalArtifactId(null);
-    openApprovalReviewModal();
+    void openApprovalWorkspaceForWorkItem(selectedWorkItem.id, currentRun?.id);
   }, [
-    openApprovalReviewModal,
+    currentRun?.id,
+    openApprovalWorkspaceForWorkItem,
     selectedWorkItem,
     setApprovalArtifactFilter,
     setSelectedApprovalArtifactId,

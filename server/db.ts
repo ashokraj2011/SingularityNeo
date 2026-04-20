@@ -1360,6 +1360,197 @@ export const schemaStatements = [
         ON DELETE CASCADE
     )
   `,
+  // ────────────────────────────────────────────────────────────────────
+  // Copilot guidance pack — per-capability ingestion of repo-authored
+  // copilot/AI-assistant files (CLAUDE.md, AGENTS.md, .cursor/rules/*,
+  // .github/copilot-instructions.md, docs/testing.md, …). Read at agent
+  // session init to seed the system prompt and at learning-judge time as
+  // the house testing rubric. One row per (capability, repo, file_path);
+  // re-fetch is an UPSERT.
+  // ────────────────────────────────────────────────────────────────────
+  `
+    CREATE TABLE IF NOT EXISTS capability_copilot_guidance (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      repository_id TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'guidance',
+      content TEXT NOT NULL,
+      sha TEXT NOT NULL,
+      commit_sha TEXT,
+      size_bytes INTEGER NOT NULL DEFAULT 0,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, repository_id, file_path)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_copilot_guidance_fetches (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      status TEXT NOT NULL,
+      message TEXT,
+      files_ingested INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (capability_id, fetched_at)
+    )
+  `,
+  // ────────────────────────────────────────────────────────────────────
+  // Chat distillation ledger — one row per chat session that has been
+  // distilled into the agent's learning profile. Idempotency: re-distilling
+  // the same session is an UPSERT that refreshes the correction_preview +
+  // distilled_at; callers check existence before re-running.
+  // ────────────────────────────────────────────────────────────────────
+  `
+    CREATE TABLE IF NOT EXISTS capability_chat_distillations (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      distilled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      message_count INTEGER NOT NULL DEFAULT 0,
+      correction_preview TEXT NOT NULL DEFAULT '',
+      learning_update_id TEXT,
+      blocked_by_shape_check BOOLEAN NOT NULL DEFAULT FALSE,
+      block_reason TEXT,
+      PRIMARY KEY (capability_id, agent_id, session_id)
+    )
+  `,
+  // ────────────────────────────────────────────────────────────────────
+  // Code understanding module (Phase A).
+  //
+  // `capability_code_symbols` is a flat catalog of every named thing in
+  // every linked repo of the capability. Refresh is truncate-and-insert
+  // inside a transaction: we never partially-update a symbol row, so
+  // search queries always see a consistent snapshot.
+  //
+  // `capability_code_references` is a file-level graph: A imports B.
+  // Symbol-level call edges are intentionally out of scope for v1 —
+  // they require scope-aware resolution and the file-level edge is
+  // enough to drive "what will break if I change this file?"
+  //
+  // `capability_code_index_runs` is an audit log — one row per refresh
+  // attempt so we can surface last-status / last-message in the UI
+  // without reconstructing it from the symbols table.
+  // ────────────────────────────────────────────────────────────────────
+  `
+    CREATE TABLE IF NOT EXISTS capability_code_symbols (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      repository_id TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      symbol_name TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      parent_symbol TEXT,
+      start_line INTEGER NOT NULL,
+      end_line INTEGER NOT NULL,
+      signature TEXT NOT NULL DEFAULT '',
+      is_exported BOOLEAN NOT NULL DEFAULT FALSE,
+      sha TEXT,
+      indexed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, repository_id, file_path, parent_symbol, symbol_name, start_line)
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_capability_code_symbols_search
+      ON capability_code_symbols (capability_id, symbol_name)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_capability_code_symbols_file
+      ON capability_code_symbols (capability_id, repository_id, file_path)
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_code_references (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      repository_id TEXT NOT NULL,
+      from_file TEXT NOT NULL,
+      to_module TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, repository_id, from_file, to_module, kind)
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_capability_code_references_to
+      ON capability_code_references (capability_id, to_module)
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_code_index_runs (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ended_at TIMESTAMPTZ,
+      status TEXT NOT NULL,
+      repositories_indexed INTEGER NOT NULL DEFAULT 0,
+      files_indexed INTEGER NOT NULL DEFAULT 0,
+      symbols_indexed INTEGER NOT NULL DEFAULT 0,
+      references_indexed INTEGER NOT NULL DEFAULT 0,
+      message TEXT,
+      PRIMARY KEY (capability_id, started_at)
+    )
+  `,
+  // ────────────────────────────────────────────────────────────────────
+  // Agent-as-git-author (Phase C).
+  //
+  // `agent_branch_sessions` tracks one long-lived branch per work item
+  // that an agent is actively committing to. A work item can have at
+  // most one ACTIVE session per repository, but historical (CLOSED)
+  // sessions are retained for provenance.
+  //
+  // `agent_pull_requests` records every PR the agent opens from a
+  // session branch — we keep a history (`opened`, `merged`, `closed`)
+  // so the UI can show "PR #12 merged" alongside the session's latest
+  // commit, even after GitHub's webhook updates push the state.
+  // ────────────────────────────────────────────────────────────────────
+  `
+    CREATE TABLE IF NOT EXISTS agent_branch_sessions (
+      id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      work_item_id TEXT NOT NULL,
+      repository_id TEXT NOT NULL,
+      repository_url TEXT NOT NULL,
+      base_branch TEXT NOT NULL,
+      base_sha TEXT NOT NULL,
+      branch_name TEXT NOT NULL,
+      head_sha TEXT,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      commits_count INTEGER NOT NULL DEFAULT 0,
+      last_commit_message TEXT,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_agent_branch_sessions_work_item
+      ON agent_branch_sessions (capability_id, work_item_id, status)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_agent_branch_sessions_branch
+      ON agent_branch_sessions (capability_id, repository_id, branch_name)
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS agent_pull_requests (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES agent_branch_sessions(id) ON DELETE CASCADE,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      work_item_id TEXT NOT NULL,
+      repository_id TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      pr_url TEXT NOT NULL,
+      html_url TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'OPEN',
+      is_draft BOOLEAN NOT NULL DEFAULT TRUE,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      merged_at TIMESTAMPTZ,
+      closed_at TIMESTAMPTZ,
+      last_synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_agent_pull_requests_session
+      ON agent_pull_requests (session_id, state)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_agent_pull_requests_work_item
+      ON agent_pull_requests (capability_id, work_item_id, state)
+  `,
 ];
 
 export const migrationStatements = [

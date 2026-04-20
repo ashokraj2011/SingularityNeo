@@ -122,4 +122,30 @@ describe('buildLocalReadinessContract', () => {
       ]),
     );
   });
+
+  it('does not block execution when the business outcome contract is blank', () => {
+    const contract = buildLocalReadinessContract({
+      capability: capability({
+        businessOutcome: '',
+        successMetrics: [],
+        definitionOfDone: '',
+        requiredEvidenceKinds: [],
+        operatingPolicySummary: '',
+      }),
+      workspace: workspace(),
+      runtimeStatus: {
+        configured: true,
+        provider: 'GitHub Copilot SDK',
+        endpoint: 'http://127.0.0.1:4321',
+        tokenSource: 'headless-cli',
+        defaultModel: 'gpt-4.1',
+        availableModels: [],
+      },
+    });
+
+    expect(contract.gates.find(gate => gate.id === 'OUTCOME_CONTRACT_COMPLETE')?.satisfied).toBe(
+      true,
+    );
+    expect(contract.allReady).toBe(true);
+  });
 });

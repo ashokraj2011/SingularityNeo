@@ -380,6 +380,10 @@ export const captureCodeDiffReviewArtifact = async ({
         repoRoot: snapshot.repoRoot,
         touchedFiles: snapshot.touchedFiles,
         statusLines: snapshot.statusLines,
+        // Raw unified-diff text is also mirrored here so the agent-git
+        // auto-commit hook can read it structured without having to
+        // regex-parse the markdown body in contentText.
+        patchText: snapshot.patchText || '',
       })),
       touchedPaths: touchedPaths.map(value => normalizeDirectoryPath(value)).filter(Boolean),
     },

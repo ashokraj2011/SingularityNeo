@@ -1,5 +1,6 @@
 import type {
   ApprovalAssignment,
+  ApprovalDecision,
   Artifact,
   CapabilityStakeholder,
   CompiledArtifactChecklistItem,
@@ -78,6 +79,8 @@ export type WorkbenchQueueView =
 export type WorkbenchSelectionFocus = 'INPUT' | 'APPROVAL' | 'RESOLUTION';
 
 export type {
+  ApprovalAssignment,
+  ApprovalDecision,
   Artifact,
   CapabilityStakeholder,
   CompiledArtifactChecklistItem,
@@ -244,3 +247,71 @@ export const describeApprovalTarget = (
   }
   return assignment.targetId;
 };
+
+export const matchesArtifactWorkbenchFilter = (
+  artifact: Artifact,
+  filter: ArtifactWorkbenchFilter,
+) => {
+  if (filter === 'ALL') {
+    return true;
+  }
+
+  if (filter === 'INPUTS') {
+    return artifact.direction === 'INPUT' || artifact.artifactKind === 'INPUT_NOTE';
+  }
+
+  if (filter === 'OUTPUTS') {
+    return artifact.direction !== 'INPUT';
+  }
+
+  if (filter === 'DIFFS') {
+    return artifact.artifactKind === 'CODE_DIFF';
+  }
+
+  if (filter === 'APPROVALS') {
+    return (
+      artifact.artifactKind === 'APPROVAL_RECORD' ||
+      artifact.artifactKind === 'CONFLICT_RESOLUTION' ||
+      artifact.artifactKind === 'CONTRARIAN_REVIEW'
+    );
+  }
+
+  if (filter === 'HANDOFFS') {
+    return artifact.artifactKind === 'HANDOFF_PACKET';
+  }
+
+  return true;
+};
+
+export const getArtifactDocumentBody = (artifact: Artifact | null): string => {
+  if (!artifact) {
+    return '';
+  }
+
+  if (artifact.contentFormat === 'JSON' && artifact.contentJson) {
+    try {
+      return JSON.stringify(artifact.contentJson, null, 2);
+    } catch {
+      return '[This JSON artifact could not be rendered safely in the preview.]';
+    }
+  }
+
+  const fallback =
+    artifact.contentText ??
+    artifact.summary ??
+    artifact.description ??
+    `${artifact.type} · ${artifact.version}`;
+
+  return typeof fallback === 'string' ? fallback : String(fallback);
+};
+
+export const buildApprovalWorkspacePath = ({
+  capabilityId,
+  runId,
+  waitId,
+}: {
+  capabilityId: string;
+  runId: string;
+  waitId: string;
+}) =>
+  `/work/approvals/${encodeURIComponent(capabilityId)}/${encodeURIComponent(runId)}/${encodeURIComponent(waitId)}`;

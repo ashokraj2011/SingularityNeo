@@ -3771,6 +3771,23 @@ export const createWorkItemRecord = async ({
   });
   await refreshCapabilityMemory(capabilityId).catch(() => undefined);
 
+  // Auto-open a GitHub branch for this work item (fire-and-forget). Dynamic
+  // import avoids a static cycle between execution/service → agentGit/*
+  // modules, which themselves import from server/repository via agentGit.
+  // The helper silently no-ops when the capability has no repo or token.
+  void (async () => {
+    try {
+      const { autoStartSessionForWorkItem } = await import('../agentGit/autoWire');
+      await autoStartSessionForWorkItem({
+        capabilityId,
+        workItem: { id: nextWorkItem.id, title: nextWorkItem.title },
+        repositories: bundle.capability.repositories || [],
+      });
+    } catch (error) {
+      console.error('[agentGit/autoWire] autoStart dispatch failed', error);
+    }
+  })();
+
   return nextWorkItem;
 };
 

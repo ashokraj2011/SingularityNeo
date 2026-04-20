@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Clock,
+  ExternalLink,
   FileBadge,
   Gauge,
   KeyRound,
@@ -76,6 +80,16 @@ export default function GovernancePosture() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [expandedDenialIds, setExpandedDenialIds] = useState<Set<string>>(() => new Set());
+
+  const toggleDenial = useCallback((decisionId: string) => {
+    setExpandedDenialIds(prev => {
+      const next = new Set(prev);
+      if (next.has(decisionId)) next.delete(decisionId);
+      else next.add(decisionId);
+      return next;
+    });
+  }, []);
 
   const load = useCallback(async (mode: 'initial' | 'refresh' = 'initial') => {
     if (mode === 'initial') setLoading(true);
@@ -342,34 +356,107 @@ export default function GovernancePosture() {
                 />
               ) : (
                 <div className="max-h-[28rem] overflow-y-auto space-y-2 pr-1">
-                  {snapshot.recentDenials.map(row => (
-                    <div
-                      key={row.decisionId}
-                      className="rounded-xl border border-outline-variant/40 bg-surface-container-low p-3 text-xs"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                          <StatusBadge
-                            tone={row.decision === 'DENY' ? 'danger' : 'warning'}
-                          >
-                            {row.decision}
-                          </StatusBadge>
-                          <span className="font-medium text-on-surface">{row.actionType}</span>
-                          {row.controlId ? (
-                            <code className="text-secondary">{row.controlId}</code>
+                  {snapshot.recentDenials.map(row => {
+                    const isExpanded = expandedDenialIds.has(row.decisionId);
+                    return (
+                      <div
+                        key={row.decisionId}
+                        className="rounded-xl border border-outline-variant/40 bg-surface-container-low text-xs"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => toggleDenial(row.decisionId)}
+                          aria-expanded={isExpanded}
+                          className="flex w-full items-start gap-2 p-3 text-left hover:bg-surface-container"
+                        >
+                          {isExpanded ? (
+                            <ChevronDown size={14} className="mt-0.5 flex-shrink-0 text-secondary" />
                           ) : (
-                            <span className="text-secondary italic">unbound</span>
+                            <ChevronRight size={14} className="mt-0.5 flex-shrink-0 text-secondary" />
                           )}
-                          {row.exceptionId ? (
-                            <StatusBadge tone="info">via exception</StatusBadge>
-                          ) : null}
-                        </div>
-                        <span className="text-secondary">{formatDateTime(row.createdAt)}</span>
+                          <div className="flex-1 space-y-1">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <StatusBadge
+                                  tone={row.decision === 'DENY' ? 'danger' : 'warning'}
+                                >
+                                  {row.decision}
+                                </StatusBadge>
+                                <span className="font-medium text-on-surface">{row.actionType}</span>
+                                {row.controlId ? (
+                                  <code className="text-secondary">{row.controlId}</code>
+                                ) : (
+                                  <span className="text-secondary italic">unbound</span>
+                                )}
+                                {row.exceptionId ? (
+                                  <StatusBadge tone="info">via exception</StatusBadge>
+                                ) : null}
+                              </div>
+                              <span className="text-secondary">{formatDateTime(row.createdAt)}</span>
+                            </div>
+                            <p className="text-secondary">{row.reason}</p>
+                          </div>
+                        </button>
+                        {isExpanded ? (
+                          <div className="border-t border-outline-variant/30 bg-white p-3">
+                            <dl className="grid grid-cols-[max-content,1fr] gap-x-3 gap-y-1 text-secondary">
+                              <dt className="font-semibold uppercase tracking-[0.12em] text-outline">
+                                Decision
+                              </dt>
+                              <dd className="font-mono text-[11px]">{row.decisionId}</dd>
+                              <dt className="font-semibold uppercase tracking-[0.12em] text-outline">
+                                Capability
+                              </dt>
+                              <dd className="font-mono text-[11px]">{row.capabilityId}</dd>
+                              {row.controlId ? (
+                                <>
+                                  <dt className="font-semibold uppercase tracking-[0.12em] text-outline">
+                                    Control
+                                  </dt>
+                                  <dd className="font-mono text-[11px]">{row.controlId}</dd>
+                                </>
+                              ) : null}
+                              {row.exceptionId ? (
+                                <>
+                                  <dt className="font-semibold uppercase tracking-[0.12em] text-outline">
+                                    Exception
+                                  </dt>
+                                  <dd className="font-mono text-[11px]">{row.exceptionId}</dd>
+                                </>
+                              ) : null}
+                            </dl>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <Link
+                                to="/ledger"
+                                className="inline-flex items-center gap-1 rounded-full border border-outline-variant/60 bg-white px-2.5 py-1 text-[11px] font-semibold text-on-surface hover:bg-surface-container-low"
+                              >
+                                <ExternalLink size={11} />
+                                <span>Open in Ledger</span>
+                              </Link>
+                              {row.controlId ? (
+                                <Link
+                                  to="/governance/controls"
+                                  className="inline-flex items-center gap-1 rounded-full border border-outline-variant/60 bg-white px-2.5 py-1 text-[11px] font-semibold text-on-surface hover:bg-surface-container-low"
+                                >
+                                  <ExternalLink size={11} />
+                                  <span>View control</span>
+                                </Link>
+                              ) : null}
+                              {row.exceptionId ? (
+                                <Link
+                                  to="/governance/exceptions"
+                                  className="inline-flex items-center gap-1 rounded-full border border-outline-variant/60 bg-white px-2.5 py-1 text-[11px] font-semibold text-on-surface hover:bg-surface-container-low"
+                                >
+                                  <ExternalLink size={11} />
+                                  <span>View exception</span>
+                                </Link>
+                              ) : null}
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
-                      <p className="mt-1 text-secondary">{row.reason}</p>
-                      <p className="text-secondary/80">{row.capabilityId}</p>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </SectionCard>

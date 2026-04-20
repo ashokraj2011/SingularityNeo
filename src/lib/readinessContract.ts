@@ -9,10 +9,11 @@ export const hasCapabilityOwnerAssigned = (capability: Capability) =>
   capability.teamNames.length > 0;
 
 export const hasOutcomeContractComplete = (capability: Capability) =>
-  hasText(capability.businessOutcome) &&
-  hasText(capability.definitionOfDone) &&
-  capability.successMetrics.some(metric => hasText(metric)) &&
-  capability.requiredEvidenceKinds.some(kind => hasText(kind));
+  hasText(capability.businessOutcome) ||
+  hasText(capability.definitionOfDone) ||
+  capability.successMetrics.some(metric => hasText(metric)) ||
+  capability.requiredEvidenceKinds.some(kind => hasText(kind)) ||
+  hasText(capability.operatingPolicySummary);
 
 export const hasSourceContextConnected = (capability: Capability) =>
   capability.gitRepositories.length > 0 ||
@@ -81,15 +82,17 @@ export const buildReadinessContractFromSignals = ({
     createGate({
       id: 'OUTCOME_CONTRACT_COMPLETE',
       label: 'Outcome contract complete',
-      satisfied: hasOutcomeContractComplete(capability),
+      satisfied: true,
       summary:
-        'Business outcome, definition of done, at least one success metric, and one required evidence kind are all required.',
+        hasOutcomeContractComplete(capability)
+          ? 'Business outcome context is present and helps owners understand what this capability is for.'
+          : 'Business outcome, success metrics, evidence expectations, and definition of done are optional but helpful context for business owners.',
       blockingReason:
-        'Execution stays blocked until the outcome contract defines what good looks like and what evidence proves it.',
+        'This contract is now optional and does not block execution.',
       actionLabel: 'Complete contract',
       path: '/capabilities/metadata',
       nextRequiredAction:
-        'Fill in business outcome, definition of done, success metrics, and required evidence.',
+        'Optionally add business outcome, definition of done, success metrics, required evidence, or a short operating policy summary.',
     }),
     createGate({
       id: 'SOURCE_CONTEXT_CONNECTED',

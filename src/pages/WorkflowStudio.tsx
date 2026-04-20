@@ -93,6 +93,7 @@ import type {
   ApprovalMode,
   ApprovalPolicy,
   ApprovalRuleTarget,
+  Artifact,
   ToolAdapterId,
   WorkItemPhase,
   Workflow,
@@ -145,6 +146,63 @@ const TOOL_OPTIONS: ToolAdapterId[] = [
   'run_docs',
   'run_deploy',
 ];
+
+// ──────────────────────────────────────────────────────────────────────────
+// Artifact-reference nudge: if a step names an inputArtifactId/outputArtifactId
+// but the capability has no matching artifact *with a template defined*, we
+// surface a one-line link into /artifact-designer. This is how Artifact
+// Designer becomes discoverable at the moment builders actually need it,
+// without promoting it into the always-on sidebar.
+// ──────────────────────────────────────────────────────────────────────────
+
+type ArtifactReferenceStatus = 'empty' | 'missing' | 'untemplated' | 'ready';
+
+const evaluateArtifactReference = (
+  artifactId: string | undefined,
+  artifacts: Artifact[],
+): ArtifactReferenceStatus => {
+  const id = (artifactId || '').trim();
+  if (!id) return 'empty';
+  const match = artifacts.find(candidate => candidate.id === id);
+  if (!match) return 'missing';
+  const hasTemplate =
+    Boolean(match.template?.trim()) ||
+    (Array.isArray(match.templateSections) && match.templateSections.length > 0);
+  return hasTemplate ? 'ready' : 'untemplated';
+};
+
+const ArtifactTemplateNudge = ({
+  artifactId,
+  status,
+  onOpenDesigner,
+}: {
+  artifactId: string | undefined;
+  status: ArtifactReferenceStatus;
+  onOpenDesigner: (id: string) => void;
+}) => {
+  if (status === 'empty' || status === 'ready') return null;
+  const trimmedId = (artifactId || '').trim();
+  const label =
+    status === 'missing'
+      ? `No artifact named ${trimmedId} exists yet — define its template so this step has a contract.`
+      : `Artifact ${trimmedId} exists but has no template sections — add them so handoffs are structured.`;
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenDesigner(trimmedId)}
+      className="mt-1 inline-flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-left text-[0.6875rem] font-semibold leading-relaxed text-amber-900 transition-colors hover:bg-amber-100"
+    >
+      <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+      <span className="flex-1 normal-case tracking-normal">
+        {label}
+        <span className="ml-1 inline-flex items-center gap-1 text-amber-900 underline decoration-amber-400 underline-offset-2">
+          Open Artifact Designer
+          <ArrowRight size={11} />
+        </span>
+      </span>
+    </button>
+  );
+};
 
 const NODE_TYPE_TONE: Record<WorkflowNodeType, string> = {
   START: 'bg-slate-100 text-slate-700 border-slate-200',
@@ -3132,40 +3190,68 @@ export default function WorkflowStudio({
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
-          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
-            <span>Primary Input Reference</span>
-            <input
-              value={nodeDraft.inputArtifactId || ''}
-              onChange={event =>
-                setNodeDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        inputArtifactId: event.target.value || undefined,
-                      }
-                    : current,
+          <div className="space-y-2">
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Primary Input Reference</span>
+              <input
+                value={nodeDraft.inputArtifactId || ''}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          inputArtifactId: event.target.value || undefined,
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input"
+              />
+            </label>
+            <ArtifactTemplateNudge
+              artifactId={nodeDraft.inputArtifactId}
+              status={evaluateArtifactReference(
+                nodeDraft.inputArtifactId,
+                workspace.artifacts,
+              )}
+              onOpenDesigner={id =>
+                navigate(
+                  `/artifact-designer${id ? `?artifactId=${encodeURIComponent(id)}` : ''}`,
                 )
               }
-              className="enterprise-input"
             />
-          </label>
-          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
-            <span>Primary Output Reference</span>
-            <input
-              value={nodeDraft.outputArtifactId || ''}
-              onChange={event =>
-                setNodeDraft(current =>
-                  current
-                    ? {
-                        ...current,
-                        outputArtifactId: event.target.value || undefined,
-                      }
-                    : current,
+          </div>
+          <div className="space-y-2">
+            <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+              <span>Primary Output Reference</span>
+              <input
+                value={nodeDraft.outputArtifactId || ''}
+                onChange={event =>
+                  setNodeDraft(current =>
+                    current
+                      ? {
+                          ...current,
+                          outputArtifactId: event.target.value || undefined,
+                        }
+                      : current,
+                  )
+                }
+                className="enterprise-input"
+              />
+            </label>
+            <ArtifactTemplateNudge
+              artifactId={nodeDraft.outputArtifactId}
+              status={evaluateArtifactReference(
+                nodeDraft.outputArtifactId,
+                workspace.artifacts,
+              )}
+              onOpenDesigner={id =>
+                navigate(
+                  `/artifact-designer${id ? `?artifactId=${encodeURIComponent(id)}` : ''}`,
                 )
               }
-              className="enterprise-input"
             />
-          </label>
+          </div>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">

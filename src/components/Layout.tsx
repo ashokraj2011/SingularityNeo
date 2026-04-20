@@ -31,6 +31,7 @@ import {
   Users,
   Wallet,
   Workflow,
+  Wrench,
   X,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -70,6 +71,8 @@ const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
   'run-console': Activity,
   evals: BarChart3,
   skills: BookOpen,
+  tools: Wrench,
+  policies: Scale,
   'artifact-designer': FileText,
   tasks: Terminal,
   studio: Sparkles,
@@ -93,6 +96,8 @@ const routeTitles: Record<string, string> = {
   '/workspace/databases': 'Workspace Databases',
   '/tool-access': 'Rule Engine',
   '/rule-engine': 'Rule Engine',
+  '/tools': 'Tools',
+  '/policies': 'Policies',
   '/governance/controls': 'Governance Controls',
   '/governance/exceptions': 'Governance Exceptions',
   '/governance/provenance': 'Prove the Negative',
@@ -773,7 +778,11 @@ const TopBar = ({
     () => navItems.find(item => item.path === location.pathname) || null,
     [location.pathname, navItems],
   );
-  const pageTitle = activeNavItem?.name || routeTitles[location.pathname] || 'Console';
+  const pageTitle =
+    activeNavItem?.name ||
+    (location.pathname.startsWith('/work/approvals/') ? 'Approval Workspace' : undefined) ||
+    routeTitles[location.pathname] ||
+    'Console';
 
   return (
     <header className="shell-topbar">

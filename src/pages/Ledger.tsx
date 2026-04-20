@@ -20,6 +20,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import ArtifactPreview from '../components/ArtifactPreview';
 import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
+import { ToolInvocationPolicyBadge } from '../components/ToolInvocationPolicyBadge';
 import { useCapability } from '../context/CapabilityContext';
 import { EnterpriseTone, getStatusTone } from '../lib/enterprise';
 import { compactMarkdownPreview } from '../lib/markdown';
@@ -49,6 +50,7 @@ import type {
   CapabilityFlightRecorderSnapshot,
   CompletedWorkOrderDetail,
   CompletedWorkOrderSummary,
+  FlightRecorderPolicySummary,
   FlightRecorderVerdict,
   HumanInteractionRecord,
   LedgerArtifactRecord,
@@ -769,6 +771,18 @@ const Ledger = () => {
   const selectedEvidence = selectedWorkItemId
     ? evidenceByWorkItemId[selectedWorkItemId]
     : undefined;
+
+  // Policy decisions for the currently selected work item, sourced from the
+  // flight recorder snapshot if that tab has been visited. The Completed Work
+  // Orders view uses these to render inline policy verdicts next to each
+  // tool invocation — CompletedWorkOrderDetail itself does not carry them.
+  const policyDecisionsForSelectedWorkItem = useMemo<FlightRecorderPolicySummary[]>(() => {
+    if (!flightRecorder || !selectedWorkItemId) return [];
+    const workItemRecorder = flightRecorder.workItems.find(
+      item => item.workItem.id === selectedWorkItemId,
+    );
+    return workItemRecorder?.policyDecisions ?? [];
+  }, [flightRecorder, selectedWorkItemId]);
 
   const stats = useMemo(
     () => ({
@@ -2328,9 +2342,15 @@ const Ledger = () => {
                                           key={tool.id}
                                           className="rounded-2xl border border-outline-variant/10 px-3 py-3"
                                         >
-                                          <p className="text-sm font-semibold text-on-surface">
-                                            {tool.toolId}
-                                          </p>
+                                          <div className="flex flex-wrap items-start justify-between gap-2">
+                                            <p className="text-sm font-semibold text-on-surface">
+                                              {tool.toolId}
+                                            </p>
+                                            <ToolInvocationPolicyBadge
+                                              toolInvocationId={tool.id}
+                                              policyDecisions={policyDecisionsForSelectedWorkItem}
+                                            />
+                                          </div>
                                           <p className="mt-1 text-xs text-secondary">
                                             {tool.resultSummary || 'Tool invocation recorded.'}
                                           </p>

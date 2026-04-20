@@ -14,6 +14,7 @@ import {
   User,
   Workflow as WorkflowIcon,
 } from 'lucide-react';
+import AgentGitSessionCard from './AgentGitSessionCard';
 import AgentKnowledgeLensPanel from '../AgentKnowledgeLensPanel';
 import CapabilityBriefingPanel from '../CapabilityBriefingPanel';
 import ErrorBoundary from '../ErrorBoundary';
@@ -739,6 +740,18 @@ export const OrchestratorOperatePanel = ({
               </button>
             </div>
           </div>
+        </div>
+
+        <div className="mt-4">
+          <AgentGitSessionCard
+            capabilityId={selectedWorkItem.capabilityId}
+            workItem={{
+              id: selectedWorkItem.id,
+              title: selectedWorkItem.title,
+              capabilityId: selectedWorkItem.capabilityId,
+            }}
+            hasRepository={Boolean(selectedExecutionRepository)}
+          />
         </div>
 
         <div className="mt-4 grid gap-3 sm:grid-cols-[1.1fr_0.9fr]">

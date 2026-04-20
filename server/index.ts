@@ -231,6 +231,21 @@ import {
   startAgentLearningWorker,
   wakeAgentLearningWorker,
 } from './agentLearning/worker';
+import { distillAgentChatSession } from './agentLearning/chatDistillation';
+import {
+  readCapabilityCopilotGuidance,
+  refreshCapabilityCopilotGuidance,
+} from './repoGuidance';
+import { refreshCapabilityCodeIndex } from './codeIndex/ingest';
+import { readCodeIndexSnapshot, searchCodeSymbols } from './codeIndex/query';
+import { buildCodePatchPayload } from './patch/validate';
+import {
+  closeAgentBranchSession,
+  commitPatchArtifactToSession,
+  getWorkItemAgentGitSnapshot,
+  openSessionPullRequest,
+  startAgentBranchSession,
+} from './agentGit/service';
 import { evaluateBranchPolicy, listPolicyDecisions } from './policy';
 import { subscribeToRunEvents } from './eventBus';
 import { getEvalRunDetail, listEvalRuns, listEvalSuites, runEvalSuite } from './evals';
@@ -2122,6 +2137,42 @@ app.post('/api/capabilities/:capabilityId/agents/:agentId/learning/corrections',
   }
 });
 
+// Chat-driven learning. Reads the last N messages of the given chat session
+// between the caller and this agent, asks the model to distill durable
+// corrections/preferences, and pipes the result through
+// applyAgentLearningCorrection — same shape-check gate as a manual
+// correction. Idempotent: pass force=true to re-distill a session.
+app.post(
+  '/api/capabilities/:capabilityId/agents/:agentId/chat-sessions/:sessionId/distill',
+  async (request, response) => {
+    try {
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'capability.edit',
+      });
+      const agentName = String(request.body?.agentName || '').trim() || 'Agent';
+      const result = await distillAgentChatSession({
+        capabilityId: request.params.capabilityId,
+        agentId: request.params.agentId,
+        agentName,
+        sessionId: request.params.sessionId,
+        actor,
+        workItemId: String(request.body?.workItemId || '').trim() || undefined,
+        runId: String(request.body?.runId || '').trim() || undefined,
+        force: Boolean(request.body?.force),
+      });
+      if (result.status === 'APPLIED') {
+        wakeAgentLearningWorker();
+      }
+      response.json(result);
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
 // Slice A — append-only version history for an agent's learning profile.
 app.get(
   '/api/capabilities/:capabilityId/agents/:agentId/learning/versions',
@@ -3571,6 +3622,356 @@ app.patch('/api/capabilities/:capabilityId/repositories', async (request, respon
     sendRepositoryError(response, error);
   }
 });
+
+// Copilot guidance pack — read the last-fetched CLAUDE.md/AGENTS.md/.cursor/rules
+// bundle for the capability. This is the same content that gets injected into
+// scoped agent system prompts; surface it so operators can see what their
+// agents are reading.
+app.get('/api/capabilities/:capabilityId/copilot-guidance', async (request, response) => {
+  try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
+    response.json(await readCapabilityCopilotGuidance(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// Trigger a fresh fetch from GitHub for every linked repository. Writes the
+// latest blobs into `capability_copilot_guidance` and appends an audit row.
+app.post('/api/capabilities/:capabilityId/copilot-guidance/refresh', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'capability.edit',
+    });
+    void actor; // reserved for future per-actor audit row
+    const pack = await refreshCapabilityCopilotGuidance(request.params.capabilityId);
+    response.json(pack);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────
+// Code index (Phase A). Per-capability symbol catalog + file-level
+// reference graph parsed from every linked GitHub repo. The GET is a
+// cheap snapshot; refresh hits GitHub and is rate-limited by the
+// caller's token.
+// ────────────────────────────────────────────────────────────────────
+app.get('/api/capabilities/:capabilityId/code-index', async (request, response) => {
+  try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
+    response.json(await readCodeIndexSnapshot(request.params.capabilityId));
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.post('/api/capabilities/:capabilityId/code-index/refresh', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'capability.edit',
+    });
+    void actor;
+    const snapshot = await refreshCapabilityCodeIndex(request.params.capabilityId);
+    response.json(snapshot);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/capabilities/:capabilityId/code-index/symbols', async (request, response) => {
+  try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
+    const q = String(request.query?.q || '').trim();
+    const limitRaw = Number.parseInt(String(request.query?.limit || ''), 10);
+    const limit = Number.isFinite(limitRaw) ? limitRaw : undefined;
+    const kindRaw = String(request.query?.kind || '').trim();
+    const kind = kindRaw ? (kindRaw as any) : undefined;
+    if (!q) {
+      response.json([]);
+      return;
+    }
+    response.json(
+      await searchCodeSymbols(request.params.capabilityId, q, { limit, kind }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────
+// Code patch validation (Phase B).
+// Stateless: does not persist. The client posts a unified-diff body
+// (plus optional targeting metadata) and gets back a fully-populated
+// CodePatchPayload so the PatchDiffViewer can render stats/errors
+// before an artifact is created. Phase C uses this to gate PR opens.
+// ────────────────────────────────────────────────────────────────────
+app.post('/api/capabilities/:capabilityId/patches/validate', async (request, response) => {
+  try {
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor: parseActorContext(request, 'Workspace Operator'),
+      action: 'capability.read',
+    });
+    const body = (request.body || {}) as {
+      raw?: string;
+      repositoryId?: string;
+      repositoryLabel?: string;
+      baseSha?: string;
+      targetBranch?: string;
+      summary?: string;
+    };
+    const payload = buildCodePatchPayload(String(body.raw || ''), {
+      repositoryId: body.repositoryId,
+      repositoryLabel: body.repositoryLabel,
+      baseSha: body.baseSha,
+      targetBranch: body.targetBranch,
+      summary: body.summary,
+    });
+    response.json(payload);
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase C — Agent-as-git-author endpoints.
+//
+// These endpoints wrap the agentGit service. All auth is scoped to the
+// parent capability:
+//   - read: list sessions / PRs for a work item
+//   - edit: start a session, commit a patch, open a PR, close a session
+// The service translates its structured errors (AUTH_MISSING, CONFLICT,
+// NOT_FOUND, etc.) into HTTP-style status codes via `mapAgentGitStatus`.
+// ──────────────────────────────────────────────────────────────────────────
+
+const mapAgentGitStatus = (
+  status:
+    | 'NO_REPOSITORY'
+    | 'REPO_URL_INVALID'
+    | 'AUTH_MISSING'
+    | 'RATE_LIMITED'
+    | 'NOT_FOUND'
+    | 'VALIDATION'
+    | 'CONFLICT'
+    | 'NETWORK'
+    | 'ERROR',
+): number => {
+  switch (status) {
+    case 'AUTH_MISSING':
+      return 401;
+    case 'RATE_LIMITED':
+      return 429;
+    case 'NOT_FOUND':
+      return 404;
+    case 'CONFLICT':
+      return 409;
+    case 'VALIDATION':
+    case 'NO_REPOSITORY':
+    case 'REPO_URL_INVALID':
+      return 400;
+    case 'NETWORK':
+      return 502;
+    case 'ERROR':
+    default:
+      return 500;
+  }
+};
+
+app.get(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/agent-git',
+  async (request, response) => {
+    try {
+      const capabilityId = request.params.capabilityId;
+      const workItemId = request.params.workItemId;
+      await assertCapabilityPermission({
+        capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.read',
+      });
+      const snapshot = await getWorkItemAgentGitSnapshot({
+        capabilityId,
+        workItemId,
+      });
+      response.json(snapshot);
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/work-items/:workItemId/agent-git/start-session',
+  async (request, response) => {
+    try {
+      const capabilityId = request.params.capabilityId;
+      const workItemId = request.params.workItemId;
+      await assertCapabilityPermission({
+        capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.edit',
+      });
+      const body = (request.body || {}) as { repositoryId?: string };
+
+      const bundle = await getCapabilityBundle(capabilityId);
+      const workItem = bundle.workspace.workItems.find(
+        item => item.id === workItemId,
+      );
+      if (!workItem) {
+        response.status(404).json({
+          error: `Work item ${workItemId} was not found on capability ${capabilityId}.`,
+        });
+        return;
+      }
+
+      const result = await startAgentBranchSession({
+        capabilityId,
+        workItem: { id: workItem.id, title: workItem.title },
+        repositories: bundle.capability.repositories || [],
+        repositoryId: body.repositoryId,
+      });
+      if (result.ok === false) {
+        response.status(mapAgentGitStatus(result.status)).json({
+          error: result.message,
+          status: result.status,
+        });
+        return;
+      }
+      response.json({
+        session: result.session,
+        reused: result.reused,
+      });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/agent-git/sessions/:sessionId/commit-patch',
+  async (request, response) => {
+    try {
+      const capabilityId = request.params.capabilityId;
+      const sessionId = request.params.sessionId;
+      await assertCapabilityPermission({
+        capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.edit',
+      });
+      const body = (request.body || {}) as {
+        artifactId?: string;
+        message?: string;
+        authorName?: string;
+        authorEmail?: string;
+      };
+      const result = await commitPatchArtifactToSession({
+        capabilityId,
+        sessionId,
+        artifactId: body.artifactId,
+        message: body.message,
+        authorName: body.authorName,
+        authorEmail: body.authorEmail,
+      });
+      if (result.ok === false) {
+        response.status(mapAgentGitStatus(result.status)).json({
+          error: result.message,
+          status: result.status,
+        });
+        return;
+      }
+      response.json(result.result);
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/agent-git/sessions/:sessionId/open-pr',
+  async (request, response) => {
+    try {
+      const capabilityId = request.params.capabilityId;
+      const sessionId = request.params.sessionId;
+      await assertCapabilityPermission({
+        capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.edit',
+      });
+      const body = (request.body || {}) as {
+        title?: string;
+        body?: string;
+        draft?: boolean;
+      };
+      const result = await openSessionPullRequest({
+        capabilityId,
+        sessionId,
+        title: body.title,
+        body: body.body,
+        draft: body.draft,
+      });
+      if (result.ok === false) {
+        response.status(mapAgentGitStatus(result.status)).json({
+          error: result.message,
+          status: result.status,
+        });
+        return;
+      }
+      response.json({
+        session: result.session,
+        pullRequest: result.pullRequest,
+      });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
+
+app.post(
+  '/api/capabilities/:capabilityId/agent-git/sessions/:sessionId/close',
+  async (request, response) => {
+    try {
+      const capabilityId = request.params.capabilityId;
+      const sessionId = request.params.sessionId;
+      await assertCapabilityPermission({
+        capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.edit',
+      });
+      const result = await closeAgentBranchSession({
+        capabilityId,
+        sessionId,
+      });
+      if (result.ok === false) {
+        response.status(mapAgentGitStatus(result.status)).json({
+          error: result.message,
+          status: result.status,
+        });
+        return;
+      }
+      response.json({ session: result.session });
+    } catch (error) {
+      sendRepositoryError(response, error);
+    }
+  },
+);
 
   app.get('/api/capabilities/:capabilityId/policy-history', async (request, response) => {
     try {

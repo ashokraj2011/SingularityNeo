@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import MarkdownContent from './MarkdownContent';
+import PatchDiffViewer from './PatchDiffViewer';
+import type { ArtifactKind, CodePatchPayload } from '../types';
 
 type ArtifactPreviewProps = {
   content?: string;
@@ -8,6 +10,13 @@ type ArtifactPreviewProps = {
   emptyLabel?: string;
   maxChars?: number;
   maxLines?: number;
+  /**
+   * When the artifact's kind is known, hand it in so the preview can
+   * pick a specialised renderer (e.g. CODE_PATCH → PatchDiffViewer).
+   * Omit for legacy call-sites — the generic TEXT/MARKDOWN/JSON path
+   * still works.
+   */
+  artifactKind?: ArtifactKind;
 };
 
 export const MarkdownArtifactPreview = ({
@@ -106,10 +115,27 @@ const ArtifactPreview = ({
   emptyLabel = 'This artifact does not have previewable content yet.',
   maxChars = 24_000,
   maxLines = 500,
+  artifactKind,
 }: ArtifactPreviewProps) => {
   const normalizedContent = String(content || '');
   const [isExpanded, setIsExpanded] = useState(false);
   const [renderJson, setRenderJson] = useState(false);
+
+  // CODE_PATCH gets a structured viewer — the unified-diff body lives
+  // in `content`, the optional rollup stats live in `jsonValue` (from
+  // Artifact.contentJson). We short-circuit before the generic
+  // truncation path because PatchDiffViewer handles its own layout.
+  if (artifactKind === 'CODE_PATCH') {
+    const payload = (jsonValue && typeof jsonValue === 'object' && !Array.isArray(jsonValue)
+      ? (jsonValue as CodePatchPayload)
+      : undefined);
+    return (
+      <PatchDiffViewer
+        content={normalizedContent}
+        payload={payload}
+      />
+    );
+  }
 
   const shouldTreatAsJson = format === 'JSON' && jsonValue !== undefined;
   const resolvedContent = useMemo(() => {

@@ -1616,7 +1616,7 @@ export const claimNextRunnableRunForExecutor = async ({
           SELECT capability_id, id
           FROM capability_workflow_runs
           WHERE capability_id = ANY($1::text[])
-            AND status = 'QUEUED'
+            AND status IN ('QUEUED', 'RUNNING')
             AND (
               assigned_executor_id IS NULL
               OR assigned_executor_id = $2
@@ -1631,7 +1631,7 @@ export const claimNextRunnableRunForExecutor = async ({
         )
         UPDATE capability_workflow_runs runs
         SET
-          status = 'RUNNING',
+          status = CASE WHEN runs.status = 'QUEUED' THEN 'RUNNING' ELSE runs.status END,
           queue_reason = NULL,
           assigned_executor_id = $2,
           lease_owner = $3,

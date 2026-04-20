@@ -13,9 +13,18 @@ import {
   CapabilityAlmExportPayload,
   CapabilityArchitectureSnapshot,
   CapabilityChatMessage,
+  CapabilityCodeIndexSnapshot,
+  CapabilityCodeSymbol,
+  CapabilityCodeSymbolKind,
+  CapabilityCopilotGuidancePack,
+  CodePatchPayload,
+  AgentBranchSession,
+  AgentBranchCommitResult,
+  AgentPullRequest,
   CapabilityRepository,
   CapabilityPublishedSnapshot,
   CapabilityDeploymentTarget,
+  ChatDistillationResult,
   CapabilityAccessSnapshot,
   CapabilityExecutionCommandTemplate,
   CapabilityFlightRecorderSnapshot,
@@ -77,6 +86,8 @@ import {
   ReadinessContract,
   TeamQueueSnapshot,
   AuditReportSnapshot,
+  ApprovalWorkspaceContext,
+  ApprovalStructuredPacket,
   AttestationChain,
   EvidencePacket,
   EvidencePacketVerification,
@@ -631,6 +642,220 @@ export const updateCapabilityRepositories = async (
       method: 'PATCH',
       headers: jsonHeaders,
       body: JSON.stringify({ repositories }),
+    },
+  );
+
+/**
+ * Read the last-fetched copilot guidance pack for a capability (the
+ * CLAUDE.md / AGENTS.md / .cursor/rules bundle that gets injected into
+ * scoped agent system prompts). Pure read — does not hit GitHub.
+ */
+export const fetchCapabilityCopilotGuidance = async (
+  capabilityId: string,
+): Promise<CapabilityCopilotGuidancePack> =>
+  requestJson<CapabilityCopilotGuidancePack>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/copilot-guidance`,
+  );
+
+/**
+ * Trigger a fresh fetch from GitHub for every linked repository. The
+ * server walks the well-known path list, persists the latest blobs, and
+ * returns the refreshed pack.
+ */
+export const refreshCapabilityCopilotGuidance = async (
+  capabilityId: string,
+): Promise<CapabilityCopilotGuidancePack> =>
+  requestJson<CapabilityCopilotGuidancePack>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/copilot-guidance/refresh`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+/**
+ * Distill the current chat session into a durable learning correction for
+ * the agent. Idempotent per (capability, agent, session); pass force=true
+ * to re-distill a session that was already processed.
+ */
+export const distillAgentChatSession = async (
+  capabilityId: string,
+  agentId: string,
+  sessionId: string,
+  payload: {
+    agentName?: string;
+    workItemId?: string;
+    runId?: string;
+    force?: boolean;
+  } = {},
+): Promise<ChatDistillationResult> =>
+  requestJson<ChatDistillationResult>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/chat-sessions/${encodeURIComponent(sessionId)}/distill`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+/**
+ * Read the structured summary of the parsed code index for a capability —
+ * per-repo symbol / file / reference counts plus the latest audit row.
+ * Cheap: no GitHub traffic, no AST work. Used to drive the metadata card.
+ */
+export const fetchCapabilityCodeIndex = async (
+  capabilityId: string,
+): Promise<CapabilityCodeIndexSnapshot> =>
+  requestJson<CapabilityCodeIndexSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/code-index`,
+  );
+
+/**
+ * Kick off a fresh walk of every linked repository: tree + blob fetch
+ * against GitHub, AST extract, transactional replace in Postgres. Returns
+ * the same snapshot shape as the read endpoint. Heavy — gate behind an
+ * explicit user action.
+ */
+export const refreshCapabilityCodeIndex = async (
+  capabilityId: string,
+): Promise<CapabilityCodeIndexSnapshot> =>
+  requestJson<CapabilityCodeIndexSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/code-index/refresh`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+/**
+ * Prefix-then-contains match against indexed symbol names, scoped to the
+ * capability. Empty `query` short-circuits to `[]` server-side so callers
+ * can hook this straight to a debounced input without extra guards.
+ */
+export const searchCapabilityCodeSymbols = async (
+  capabilityId: string,
+  query: string,
+  options: { limit?: number; kind?: CapabilityCodeSymbolKind } = {},
+): Promise<CapabilityCodeSymbol[]> => {
+  const params = new URLSearchParams();
+  const trimmed = (query || '').trim();
+  if (!trimmed) return [];
+  params.set('q', trimmed);
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.kind) params.set('kind', options.kind);
+  return requestJson<CapabilityCodeSymbol[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/code-index/symbols?${params.toString()}`,
+  );
+};
+
+/**
+ * Validate a unified-diff body and return the structured
+ * `CodePatchPayload` (file stats, additions/deletions, validation
+ * errors). Server-side is stateless — this is the same call the
+ * BUILD-step runtime uses before persisting a CODE_PATCH artifact,
+ * so the UI "preview before commit" and runtime validation stay in
+ * lockstep.
+ */
+export const validateCapabilityPatch = async (
+  capabilityId: string,
+  payload: {
+    raw: string;
+    repositoryId?: string;
+    repositoryLabel?: string;
+    baseSha?: string;
+    targetBranch?: string;
+    summary?: string;
+  },
+): Promise<CodePatchPayload> =>
+  requestJson<CodePatchPayload>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/patches/validate`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+/**
+ * Agent-as-git-author client wrappers (Phase C).
+ *
+ * These talk to the endpoints in `server/index.ts` registered after the
+ * patches/validate route. They all operate on a capability + work item
+ * scope and return typed shapes from `src/types.ts`.
+ */
+
+export interface WorkItemAgentGitSnapshot {
+  sessions: AgentBranchSession[];
+  pullRequests: AgentPullRequest[];
+}
+
+export const fetchWorkItemAgentGitSnapshot = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<WorkItemAgentGitSnapshot> =>
+  requestJson<WorkItemAgentGitSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/agent-git`,
+  );
+
+export const startAgentBranchSession = async (
+  capabilityId: string,
+  workItemId: string,
+  payload: { repositoryId?: string } = {},
+): Promise<{ session: AgentBranchSession; reused: boolean }> =>
+  requestJson<{ session: AgentBranchSession; reused: boolean }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/agent-git/start-session`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const commitAgentSessionPatch = async (
+  capabilityId: string,
+  sessionId: string,
+  payload: {
+    artifactId?: string;
+    message?: string;
+    authorName?: string;
+    authorEmail?: string;
+  } = {},
+): Promise<AgentBranchCommitResult> =>
+  requestJson<AgentBranchCommitResult>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agent-git/sessions/${encodeURIComponent(sessionId)}/commit-patch`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const openAgentSessionPullRequest = async (
+  capabilityId: string,
+  sessionId: string,
+  payload: { title?: string; body?: string; draft?: boolean } = {},
+): Promise<{ session: AgentBranchSession; pullRequest: AgentPullRequest }> =>
+  requestJson<{ session: AgentBranchSession; pullRequest: AgentPullRequest }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agent-git/sessions/${encodeURIComponent(sessionId)}/open-pr`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const closeAgentSession = async (
+  capabilityId: string,
+  sessionId: string,
+): Promise<{ session: AgentBranchSession }> =>
+  requestJson<{ session: AgentBranchSession }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agent-git/sessions/${encodeURIComponent(sessionId)}/close`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
     },
   );
 
@@ -1921,12 +2146,48 @@ export const requestCapabilityWorkflowRunChanges = async (
     },
   );
 
-// The `fetchApprovalWorkspaceContext`, `refreshApprovalWorkspacePacket`, and
-// `sendBackApprovalForClarification` wrappers were removed when the
-// full-screen Approval Workspace page was retired in favor of the in-
-// orchestrator Human Approval Gate modal. The modal reads approval context
-// directly from already-hydrated work-item state, so no client-side fetch is
-// needed. The server-side routes remain available for external tooling.
+export const fetchApprovalWorkspaceContext = async (
+  capabilityId: string,
+  runId: string,
+  waitId: string,
+): Promise<ApprovalWorkspaceContext> =>
+  requestJson<ApprovalWorkspaceContext>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(waitId)}`,
+  );
+
+export const refreshApprovalWorkspacePacket = async (
+  capabilityId: string,
+  runId: string,
+  waitId: string,
+): Promise<ApprovalStructuredPacket> =>
+  requestJson<ApprovalStructuredPacket>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(waitId)}/refresh-packet`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    },
+  );
+
+export const sendBackApprovalForClarification = async (
+  capabilityId: string,
+  runId: string,
+  waitId: string,
+  payload: {
+    targetAgentId: string;
+    summary: string;
+    clarificationQuestions: string[];
+    note?: string;
+  },
+): Promise<ApprovalWorkspaceContext> =>
+  requestJson<ApprovalWorkspaceContext>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(waitId)}/send-back`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
 
 export const provideCapabilityWorkflowRunInput = async (
   capabilityId: string,

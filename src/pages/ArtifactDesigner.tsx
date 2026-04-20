@@ -31,6 +31,7 @@ import {
   Lock,
   History
 } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
@@ -307,11 +308,19 @@ const ArtifactDesigner = () => {
   } = useCapability();
   const { success } = useToast();
   const workspace = getCapabilityWorkspace(activeCapability.id);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedArtifactId = searchParams.get('artifactId') || '';
   const [selectedArtifactId, setSelectedArtifactId] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const [activeTab, setActiveTab] = useState<'definition' | 'sections' | 'governance'>('definition');
   const [isCreatingNew, setIsCreatingNew] = useState(false);
+  // When the Workflow Designer deep-links in with ?artifactId=ART-XYZ and no
+  // matching artifact exists yet, we stash the requested id here. It's used
+  // as the explicit id at save time (handleSaveTemplate), so the artifact the
+  // builder creates here round-trips to the step that referenced it — instead
+  // of getting a random fresh id.
+  const [pendingArtifactId, setPendingArtifactId] = useState<string>('');
   const [isSelecting, startTransition] = useTransition();
 
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -369,6 +378,39 @@ const ArtifactDesigner = () => {
 
     setArtifactDraft(buildArtifactDraft(selectedArtifact, workspace.agents[0]?.id || ''));
   }, [isCreatingNew, selectedArtifact, workspace.agents]);
+
+  // Honor ?artifactId=<id> deep-links from the Workflow Designer nudge:
+  //   1. If an artifact with this id exists, auto-select it.
+  //   2. Otherwise, open the create-new form with that id stashed as the
+  //      pending id and prefill the name field so the builder can immediately
+  //      flesh out the template.
+  // The search param is consumed (cleared) once honored so re-navigations
+  // don't fight with user selections.
+  useEffect(() => {
+    const requested = requestedArtifactId.trim();
+    if (!requested) return;
+    const matched = allArtifacts.find(artifact => artifact.id === requested);
+    if (matched) {
+      setIsCreatingNew(false);
+      setSelectedArtifactId(matched.id);
+      setPendingArtifactId('');
+    } else {
+      setIsCreatingNew(true);
+      setSelectedArtifactId('');
+      setPendingArtifactId(requested);
+      setArtifactDraft(current => ({
+        ...current,
+        name: current.name || requested,
+      }));
+      setActiveTab('definition');
+    }
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous);
+      next.delete('artifactId');
+      return next;
+    }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedArtifactId, allArtifacts]);
 
   const handleCreateTemplate = () => {
     setIsCreatingNew(true);
@@ -480,7 +522,9 @@ const ArtifactDesigner = () => {
       const producerAgent =
         workspace.agents.find(agent => agent.id === artifactDraft.connectedAgentId) || workspace.agents[0];
       const nextArtifact: Artifact = {
-      id: isCreatingNew ? createArtifactId() : selectedArtifact?.id || createArtifactId(),
+      id: isCreatingNew
+        ? (pendingArtifactId.trim() || createArtifactId())
+        : selectedArtifact?.id || createArtifactId(),
       name: artifactDraft.name.trim(),
       capabilityId: activeCapability.id,
       type: artifactDraft.type.trim(),
@@ -564,6 +608,7 @@ const ArtifactDesigner = () => {
         artifacts: nextArtifacts,
       });
       setIsCreatingNew(false);
+      setPendingArtifactId('');
       setSelectedArtifactId(nextArtifact.id);
       success(
         isCreatingNew ? 'Artifact created' : 'Artifact updated',
@@ -692,10 +737,15 @@ const ArtifactDesigner = () => {
                 >
                   <div className="flex items-center gap-2">
                     <Plus size={14} className="text-primary" />
-                    <span className="text-xs font-bold text-primary">Artifact Draft</span>
+                    <span className="text-xs font-bold text-primary">
+                      Artifact Draft
+                      {pendingArtifactId ? ` · ${pendingArtifactId}` : ''}
+                    </span>
                   </div>
                   <p className="mt-1 pl-6 text-[0.625rem] text-secondary">
-                    Curating a durable artifact from workflow or agent output.
+                    {pendingArtifactId
+                      ? `A workflow step references ${pendingArtifactId}. Fill in the template below — it will save under this id so the reference round-trips.`
+                      : 'Curating a durable artifact from workflow or agent output.'}
                   </p>
                 </button>
               </div>

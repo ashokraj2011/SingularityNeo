@@ -262,6 +262,7 @@ const clamp01 = (value: number) => {
 const buildJudgePrompt = (
   profile: AgentLearningProfile,
   fixture: EvalFixture,
+  testingGuidance?: string | null,
 ): Array<{ role: 'system' | 'user'; content: string }> => {
   const criteriaBlock =
     fixture.expectedCriteria && fixture.expectedCriteria.length > 0
@@ -269,6 +270,13 @@ const buildJudgePrompt = (
       : '- Stays on role\n- Uses the profile knowledge faithfully\n- Does not contradict prior cited memory';
   const reference = fixture.referenceResponse?.trim()
     ? `Previous successful response for this prompt:\n"""\n${fixture.referenceResponse.trim()}\n"""\n`
+    : '';
+  // Copilot-guidance testing files (docs/testing.md, TESTING.md, …)
+  // ingested from the capability's linked repos. Included as an additional
+  // rubric section when present so the judge factors in the team's own
+  // testing rules.
+  const houseRules = testingGuidance?.trim()
+    ? `Team-authored testing rules (from repo docs):\n"""\n${testingGuidance.trim()}\n"""\nA profile that contradicts these rules should score lower.\n`
     : '';
   return [
     {
@@ -283,6 +291,7 @@ const buildJudgePrompt = (
         `Profile highlights:\n${(profile.highlights || []).map(h => `- ${h}`).join('\n') || '(none)'}`,
         `Evaluation prompt:\n"""\n${fixture.prompt}\n"""`,
         reference,
+        houseRules,
         `Criteria to check:\n${criteriaBlock}`,
         'Score 0..1 where 1 means the profile would clearly satisfy every criterion and 0 means it would clearly fail. Be strict.',
       ]
@@ -308,6 +317,7 @@ export const runJudgeAgainstFixtures = async ({
   threshold = DEFAULT_JUDGE_PASS_THRESHOLD,
   perFixtureTimeoutMs = 15_000,
   maxFixtures = 10,
+  testingGuidance,
 }: {
   profile: AgentLearningProfile;
   fixtures: EvalFixture[];
@@ -317,6 +327,8 @@ export const runJudgeAgainstFixtures = async ({
   threshold?: number;
   perFixtureTimeoutMs?: number;
   maxFixtures?: number;
+  /** House rules from repo-ingested `docs/testing.md` / TESTING.md etc. */
+  testingGuidance?: string | null;
 }): Promise<JudgeReport> => {
   const limited = fixtures.slice(0, maxFixtures);
   if (limited.length === 0) {
@@ -337,7 +349,7 @@ export const runJudgeAgainstFixtures = async ({
       const response = await requestModel({
         model,
         providerKey,
-        messages: buildJudgePrompt(profile, fixture),
+        messages: buildJudgePrompt(profile, fixture, testingGuidance),
         timeoutMs: perFixtureTimeoutMs,
       });
       const parsed = extractJudgeJson(response.content || '');

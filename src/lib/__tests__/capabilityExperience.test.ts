@@ -195,9 +195,10 @@ describe('capability experience model', () => {
     expect(experience.nextAction.path).toContain('/?selected=WI-1');
   });
 
-  it('treats missing contract and workspace basics as blocking delivery gates', () => {
+  it('treats missing owner/description and workspace basics as blocking delivery gates', () => {
     const experience = buildCapabilityExperience({
       capability: capability({
+        description: '',
         ownerTeam: '',
         businessOutcome: '',
         successMetrics: [],
@@ -227,6 +228,29 @@ describe('capability experience model', () => {
     expect(experience.canStartDelivery).toBe(false);
     expect(experience.blockingReadinessItems.map(item => item.id)).toContain('metadata');
     expect(experience.goldenPathProgress.steps[0]?.status).toBe('CURRENT');
+  });
+
+  it('does not block delivery when only the optional business outcome contract fields are blank', () => {
+    const experience = buildCapabilityExperience({
+      capability: capability({
+        businessOutcome: '',
+        successMetrics: [],
+        definitionOfDone: '',
+        requiredEvidenceKinds: [],
+        operatingPolicySummary: '',
+      }),
+      workspace: workspace(),
+      runtimeStatus: {
+        configured: true,
+        provider: 'GitHub Copilot SDK',
+        endpoint: 'http://127.0.0.1:4321',
+        tokenSource: 'headless-cli',
+        defaultModel: 'gpt-4.1',
+        availableModels: [],
+      },
+    });
+
+    expect(experience.blockingReadinessItems.map(item => item.id)).not.toContain('metadata');
   });
 
   it('surfaces desktop-owned runtime health when the desktop runtime is connected', () => {

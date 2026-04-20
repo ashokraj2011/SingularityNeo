@@ -32,8 +32,12 @@ import {
   fetchCapabilityAlmExport,
   clearRuntimeCredentials,
   detectCapabilityWorkspaceProfile,
+  fetchCapabilityCodeIndex,
+  fetchCapabilityCopilotGuidance,
   fetchRuntimeStatus,
   publishCapabilityContract,
+  refreshCapabilityCodeIndex,
+  refreshCapabilityCopilotGuidance,
   updateRuntimeCredentials,
   type RuntimeStatus,
 } from '../lib/api';
@@ -53,8 +57,10 @@ import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowG
 import {
   Capability,
   CapabilityAlmReference,
+  CapabilityCodeIndexSnapshot,
   CapabilityCollectionKind,
   CapabilityContractDraft,
+  CapabilityCopilotGuidancePack,
   CapabilityDependency,
   CapabilityMetadataEntry,
   CapabilityPhaseOwnershipRule,
@@ -519,6 +525,15 @@ export default function CapabilityMetadata() {
     useState(false);
   const [isRefreshingWorkspaceDetection, setIsRefreshingWorkspaceDetection] =
     useState(false);
+  const [copilotGuidance, setCopilotGuidance] =
+    useState<CapabilityCopilotGuidancePack | null>(null);
+  const [copilotGuidanceLoading, setCopilotGuidanceLoading] = useState(false);
+  const [copilotGuidanceRefreshing, setCopilotGuidanceRefreshing] = useState(false);
+  const [copilotGuidanceError, setCopilotGuidanceError] = useState('');
+  const [codeIndex, setCodeIndex] = useState<CapabilityCodeIndexSnapshot | null>(null);
+  const [codeIndexLoading, setCodeIndexLoading] = useState(false);
+  const [codeIndexRefreshing, setCodeIndexRefreshing] = useState(false);
+  const [codeIndexError, setCodeIndexError] = useState('');
   const capabilityLifecycle = useMemo(
     () => normalizeCapabilityLifecycle(activeCapability.lifecycle),
     [activeCapability.lifecycle],
@@ -627,6 +642,175 @@ export default function CapabilityMetadata() {
       isMounted = false;
     };
   }, []);
+
+  // Copilot guidance pack — surfaced so operators can see exactly what
+  // CLAUDE.md / AGENTS.md / .cursor/rules content each agent reads on
+  // session init. We only load the cached snapshot; the refresh button
+  // below is what hits GitHub.
+  useEffect(() => {
+    if (!activeCapability.id) {
+      setCopilotGuidance(null);
+      return undefined;
+    }
+    let isMounted = true;
+    setCopilotGuidanceLoading(true);
+    setCopilotGuidanceError('');
+    fetchCapabilityCopilotGuidance(activeCapability.id)
+      .then(pack => {
+        if (!isMounted) return;
+        setCopilotGuidance(pack);
+      })
+      .catch(error => {
+        if (!isMounted) return;
+        setCopilotGuidanceError(
+          error instanceof Error
+            ? error.message
+            : 'Unable to load copilot guidance pack.',
+        );
+      })
+      .finally(() => {
+        if (!isMounted) return;
+        setCopilotGuidanceLoading(false);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [activeCapability.id]);
+
+  const handleRefreshCopilotGuidance = async () => {
+    if (!activeCapability.id || copilotGuidanceRefreshing) {
+      return;
+    }
+    setCopilotGuidanceRefreshing(true);
+    setCopilotGuidanceError('');
+    try {
+      const pack = await refreshCapabilityCopilotGuidance(activeCapability.id);
+      setCopilotGuidance(pack);
+      const fileCount = pack.files.length;
+      if (pack.lastFetchStatus === 'OK') {
+        success(
+          'Copilot guidance refreshed',
+          fileCount
+            ? `Ingested ${fileCount} file${fileCount === 1 ? '' : 's'} from linked repositories.`
+            : 'No guidance files were found in the linked repositories.',
+        );
+      } else if (pack.lastFetchStatus === 'AUTH_MISSING') {
+        showError(
+          'GitHub authentication missing',
+          pack.lastFetchMessage ||
+            'Set GITHUB_TOKEN on the runtime so we can fetch private repo guidance.',
+        );
+      } else if (pack.lastFetchStatus === 'RATE_LIMITED') {
+        showError(
+          'GitHub rate-limited',
+          pack.lastFetchMessage || 'Try again in a few minutes.',
+        );
+      } else if (pack.lastFetchStatus === 'NOT_FOUND') {
+        success(
+          'Nothing to ingest',
+          'No CLAUDE.md / AGENTS.md / .cursor/rules files were found in the linked repositories.',
+        );
+      } else {
+        showError(
+          'Copilot guidance refresh failed',
+          pack.lastFetchMessage || 'The fetch returned an error. See server logs for details.',
+        );
+      }
+    } catch (error) {
+      const description =
+        error instanceof Error ? error.message : 'Unable to refresh copilot guidance.';
+      setCopilotGuidanceError(description);
+      showError('Copilot guidance refresh failed', description);
+    } finally {
+      setCopilotGuidanceRefreshing(false);
+    }
+  };
+
+  // Code index snapshot — per-repo symbol / file / reference counts. Load
+  // the cached snapshot on mount; the refresh button walks each linked
+  // repo's Git tree and re-parses every source file.
+  useEffect(() => {
+    if (!activeCapability.id) {
+      setCodeIndex(null);
+      return undefined;
+    }
+    let isMounted = true;
+    setCodeIndexLoading(true);
+    setCodeIndexError('');
+    fetchCapabilityCodeIndex(activeCapability.id)
+      .then(snapshot => {
+        if (!isMounted) return;
+        setCodeIndex(snapshot);
+      })
+      .catch(error => {
+        if (!isMounted) return;
+        setCodeIndexError(
+          error instanceof Error ? error.message : 'Unable to load code index snapshot.',
+        );
+      })
+      .finally(() => {
+        if (!isMounted) return;
+        setCodeIndexLoading(false);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [activeCapability.id]);
+
+  const handleRefreshCodeIndex = async () => {
+    if (!activeCapability.id || codeIndexRefreshing) {
+      return;
+    }
+    setCodeIndexRefreshing(true);
+    setCodeIndexError('');
+    try {
+      const snapshot = await refreshCapabilityCodeIndex(activeCapability.id);
+      setCodeIndex(snapshot);
+      const repoCount = snapshot.repositories.length;
+      if (snapshot.lastRunStatus === 'OK') {
+        success(
+          'Code index refreshed',
+          repoCount
+            ? `Parsed ${snapshot.totalSymbols.toLocaleString()} symbols across ${snapshot.totalFiles.toLocaleString()} files in ${repoCount} repositor${repoCount === 1 ? 'y' : 'ies'}.`
+            : 'No source files were found to index.',
+        );
+      } else if (snapshot.lastRunStatus === 'AUTH_MISSING') {
+        showError(
+          'GitHub authentication missing',
+          snapshot.lastRunMessage ||
+            'Set GITHUB_TOKEN on the runtime so we can fetch private repo trees.',
+        );
+      } else if (snapshot.lastRunStatus === 'RATE_LIMITED') {
+        showError(
+          'GitHub rate-limited',
+          snapshot.lastRunMessage || 'Try again in a few minutes.',
+        );
+      } else if (snapshot.lastRunStatus === 'EMPTY') {
+        success(
+          'Nothing to index',
+          'No parseable source files were found in the linked repositories.',
+        );
+      } else if (snapshot.lastRunStatus === 'PARTIAL') {
+        success(
+          'Code index partially refreshed',
+          snapshot.lastRunMessage ||
+            'Some repositories failed. Check the per-repo counts below for details.',
+        );
+      } else {
+        showError(
+          'Code index refresh failed',
+          snapshot.lastRunMessage || 'The run returned an error. See server logs for details.',
+        );
+      }
+    } catch (error) {
+      const description =
+        error instanceof Error ? error.message : 'Unable to refresh code index.';
+      setCodeIndexError(description);
+      showError('Code index refresh failed', description);
+    } finally {
+      setCodeIndexRefreshing(false);
+    }
+  };
 
   const canSave = Boolean(form.name.trim() && form.description.trim());
 
@@ -1872,9 +2056,12 @@ export default function CapabilityMetadata() {
                   <ArrowRight size={24} />
                 </div>
                 <div>
-                  <h2 className="text-xl font-extrabold text-primary">
-                    Business outcome contract
-                  </h2>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-xl font-extrabold text-primary">
+                      Business outcome contract
+                    </h2>
+                    <StatusBadge tone="neutral">Optional</StatusBadge>
+                  </div>
                   <p className="text-sm text-secondary">
                     These fields make the capability legible to a business owner before any
                     runtime or workflow detail shows up.
@@ -1886,10 +2073,14 @@ export default function CapabilityMetadata() {
                 <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
                   Business outcome
                 </span>
+                <p className="text-xs leading-relaxed text-secondary">
+                  What business result this capability should create.
+                  Example: &quot;Evaluate pricing and eligibility rules accurately before policy issuance.&quot;
+                </p>
                 <textarea
                   value={form.businessOutcome}
                   onChange={event => setField('businessOutcome', event.target.value)}
-                  placeholder="Describe the business outcome this capability must create."
+                  placeholder="Optional. Example: Evaluate rules accurately before a quote or decision is returned."
                   className="field-textarea h-28"
                 />
               </label>
@@ -1898,10 +2089,16 @@ export default function CapabilityMetadata() {
                 <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
                   Success metrics
                 </span>
+                <p className="text-xs leading-relaxed text-secondary">
+                  Measurable signs that the capability is working well.
+                  Example: &quot;Rule evaluation accuracy stays above 99.5%.&quot;
+                </p>
                 <textarea
                   value={form.successMetrics}
                   onChange={event => setField('successMetrics', event.target.value)}
-                  placeholder={'Cycle time reduced by 30%\nRelease evidence is available for every completed work item'}
+                  placeholder={
+                    'Optional. One metric per line.\nRule evaluation accuracy above 99.5%\nP95 response time under 300 ms'
+                  }
                   className="field-textarea h-32"
                 />
               </label>
@@ -1910,12 +2107,18 @@ export default function CapabilityMetadata() {
                 <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
                   Required evidence
                 </span>
+                <p className="text-xs leading-relaxed text-secondary">
+                  Proof a reviewer would expect before trusting or releasing work.
+                  Example: &quot;Regression test report&quot; or &quot;Sample input/output validation.&quot;
+                </p>
                 <textarea
                   value={form.requiredEvidenceKinds}
                   onChange={event =>
                     setField('requiredEvidenceKinds', event.target.value)
                   }
-                  placeholder={'Requirements pack\nTest evidence\nRelease decision'}
+                  placeholder={
+                    'Optional. One item per line.\nRegression test report\nSample rule evaluation results\nApproval note'
+                  }
                   className="field-textarea h-32"
                 />
               </label>
@@ -1924,10 +2127,14 @@ export default function CapabilityMetadata() {
                 <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
                   Definition of done
                 </span>
+                <p className="text-xs leading-relaxed text-secondary">
+                  What must be true before a work item is really complete.
+                  Example: &quot;Code merged, tests passing, and rule outcomes verified on representative cases.&quot;
+                </p>
                 <textarea
                   value={form.definitionOfDone}
                   onChange={event => setField('definitionOfDone', event.target.value)}
-                  placeholder="Describe what must be true before this capability counts work as done."
+                  placeholder="Optional. Example: Changes are implemented, validated, and supported by reviewable evidence."
                   className="field-textarea h-28"
                 />
               </label>
@@ -1936,12 +2143,16 @@ export default function CapabilityMetadata() {
                 <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
                   Operating policy summary
                 </span>
+                <p className="text-xs leading-relaxed text-secondary">
+                  Plain-language rules for approvals, constraints, or safety expectations.
+                  Example: &quot;Production-affecting rule changes require approval before release.&quot;
+                </p>
                 <textarea
                   value={form.operatingPolicySummary}
                   onChange={event =>
                     setField('operatingPolicySummary', event.target.value)
                   }
-                  placeholder="Summarize approvals, constraints, and evidence expectations in plain language."
+                  placeholder="Optional. Example: Rule changes stay inside approved workspaces and high-impact updates require review."
                   className="field-textarea h-28"
                 />
               </label>
@@ -2297,6 +2508,215 @@ export default function CapabilityMetadata() {
                   className="field-textarea h-32"
                 />
               </label>
+
+              {/*
+               * Copilot guidance pack — the CLAUDE.md / AGENTS.md /
+               * .cursor/rules / .github/copilot-instructions.md blobs we
+               * pull from each linked repo and inject into agent system
+               * prompts on session init. Testing-category files (docs/
+               * testing.md, TESTING.md) also thread into the learning
+               * judge rubric so shape-checks grade against team-authored
+               * rules.
+               */}
+              <div className="md:col-span-3 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-primary">
+                      Copilot guidance pack
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      CLAUDE.md, AGENTS.md, <code>.github/copilot-instructions.md</code>, and
+                      <code> .cursor/rules</code> from the linked repositories above. Every agent
+                      in this capability reads this bundle on session init; testing docs also
+                      feed the learning-quality judge.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleRefreshCopilotGuidance()}
+                    disabled={copilotGuidanceRefreshing || !activeCapability.id}
+                    className="enterprise-button enterprise-button-secondary"
+                    title="Re-fetch guidance files from GitHub for every linked repository."
+                  >
+                    {copilotGuidanceRefreshing ? 'Refreshing…' : 'Refresh from GitHub'}
+                  </button>
+                </div>
+
+                {copilotGuidanceError ? (
+                  <p className="mt-3 text-xs font-medium text-rose-600">
+                    {copilotGuidanceError}
+                  </p>
+                ) : null}
+
+                {copilotGuidance?.lastFetchedAt ? (
+                  <p className="mt-3 text-[0.6875rem] uppercase tracking-[0.2em] text-outline">
+                    Last fetched{' '}
+                    <span className="font-semibold text-secondary normal-case tracking-normal">
+                      {new Date(copilotGuidance.lastFetchedAt).toLocaleString()}
+                    </span>
+                    {copilotGuidance.lastFetchStatus
+                      ? ` · ${copilotGuidance.lastFetchStatus}`
+                      : ''}
+                  </p>
+                ) : null}
+
+                <div className="mt-3">
+                  {copilotGuidanceLoading && !copilotGuidance ? (
+                    <p className="text-xs text-secondary">Loading…</p>
+                  ) : copilotGuidance && copilotGuidance.files.length ? (
+                    <ul className="divide-y divide-slate-100 rounded-2xl border border-slate-100 bg-slate-50/60">
+                      {copilotGuidance.files.map(file => (
+                        <li
+                          key={`${file.repositoryId}:${file.filePath}`}
+                          className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate font-mono text-[0.75rem] text-slate-800">
+                              {file.filePath}
+                            </p>
+                            <p className="truncate text-[0.6875rem] text-secondary">
+                              {file.repositoryLabel || file.repositoryId}
+                              {' · '}
+                              {file.category}
+                              {file.sha ? ` · ${file.sha.slice(0, 7)}` : ''}
+                            </p>
+                          </div>
+                          <div className="text-right text-[0.6875rem] text-secondary">
+                            <p>{(file.sizeBytes / 1024).toFixed(1)} KB</p>
+                            {file.fetchedAt ? (
+                              <p>{new Date(file.fetchedAt).toLocaleDateString()}</p>
+                            ) : null}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-xs text-secondary">
+                      No guidance files ingested yet. Click <span className="font-medium">Refresh from GitHub</span>
+                      {' '}to pull the well-known files (CLAUDE.md, AGENTS.md, .cursor/rules, …) from
+                      each linked repository.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/*
+               * Code understanding index — per-repo symbol counts parsed
+               * from each linked repository's source files. This is the
+               * "code-app layer" surface: what the platform has
+               * structurally learned about the shape of every repo this
+               * capability owns. The refresh action fans out to GitHub,
+               * walks every tree, and parses TS/JS files via the
+               * TypeScript compiler API. Search against the resulting
+               * index lives in Agent SDK tool calls (server/codeIndex).
+               */}
+              <div className="md:col-span-3 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-primary">
+                      Code understanding index
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-secondary">
+                      AST-parsed symbol + reference graph for every source file in the
+                      linked repositories. Agents use this to answer &ldquo;where does
+                      capability X define Y?&rdquo; without shipping the whole repo.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleRefreshCodeIndex()}
+                    disabled={codeIndexRefreshing || !activeCapability.id}
+                    className="enterprise-button enterprise-button-secondary"
+                    title="Walk every linked repository's tree, fetch TS/JS blobs, and re-parse symbols."
+                  >
+                    {codeIndexRefreshing ? 'Indexing…' : 'Refresh from GitHub'}
+                  </button>
+                </div>
+
+                {codeIndexError ? (
+                  <p className="mt-3 text-xs font-medium text-rose-600">
+                    {codeIndexError}
+                  </p>
+                ) : null}
+
+                {codeIndex?.lastRunAt ? (
+                  <p className="mt-3 text-[0.6875rem] uppercase tracking-[0.2em] text-outline">
+                    Last run{' '}
+                    <span className="font-semibold text-secondary normal-case tracking-normal">
+                      {new Date(codeIndex.lastRunAt).toLocaleString()}
+                    </span>
+                    {codeIndex.lastRunStatus ? ` · ${codeIndex.lastRunStatus}` : ''}
+                    {codeIndex.totalSymbols ? (
+                      <>
+                        {' · '}
+                        <span className="font-semibold text-secondary normal-case tracking-normal">
+                          {codeIndex.totalSymbols.toLocaleString()} symbols
+                        </span>
+                        {' across '}
+                        <span className="font-semibold text-secondary normal-case tracking-normal">
+                          {codeIndex.totalFiles.toLocaleString()} files
+                        </span>
+                      </>
+                    ) : null}
+                  </p>
+                ) : null}
+
+                <div className="mt-3">
+                  {codeIndexLoading && !codeIndex ? (
+                    <p className="text-xs text-secondary">Loading…</p>
+                  ) : codeIndex && codeIndex.repositories.length ? (
+                    <ul className="divide-y divide-slate-100 rounded-2xl border border-slate-100 bg-slate-50/60">
+                      {codeIndex.repositories.map(repo => (
+                        <li
+                          key={repo.repositoryId}
+                          className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate font-mono text-[0.75rem] text-slate-800">
+                              {repo.repositoryLabel || repo.repositoryId}
+                            </p>
+                            <p className="truncate text-[0.6875rem] text-secondary">
+                              {repo.filesIndexed.toLocaleString()} file
+                              {repo.filesIndexed === 1 ? '' : 's'}
+                              {' · '}
+                              {repo.symbolsIndexed.toLocaleString()} symbol
+                              {repo.symbolsIndexed === 1 ? '' : 's'}
+                              {' · '}
+                              {repo.referencesIndexed.toLocaleString()} ref
+                              {repo.referencesIndexed === 1 ? '' : 's'}
+                            </p>
+                          </div>
+                          <div className="text-right text-[0.6875rem] text-secondary">
+                            {repo.filesIndexed > 0 ? (
+                              <p>
+                                {(
+                                  repo.symbolsIndexed / Math.max(repo.filesIndexed, 1)
+                                ).toFixed(1)}{' '}
+                                sym/file
+                              </p>
+                            ) : (
+                              <p className="italic text-outline">not indexed</p>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-xs text-secondary">
+                      Code index is empty. Click{' '}
+                      <span className="font-medium">Refresh from GitHub</span> to walk
+                      each linked repository and parse its source files. TypeScript /
+                      JavaScript, Java, and Python sources are indexed in this phase.
+                    </p>
+                  )}
+                </div>
+
+                {codeIndex?.lastRunMessage ? (
+                  <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-[0.6875rem] text-secondary">
+                    {codeIndex.lastRunMessage}
+                  </p>
+                ) : null}
+              </div>
 
               <label className="space-y-2">
                 <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
@@ -2903,8 +3323,8 @@ export default function CapabilityMetadata() {
 
         <aside className="space-y-4 xl:sticky xl:top-28 xl:self-start">
           <SectionCard
-            title="GitHub runtime identity"
-            description="See how the backend is reaching Copilot, which GitHub identity is visible, and whether the app is using headless CLI or token-based access."
+            title="Execution runtime"
+            description="See which provider lane the control plane is using, which identity is visible, and whether the backend is using CLI, desktop session, or token-based access."
             tone="brand"
           >
             <div className="space-y-4">
@@ -2916,6 +3336,7 @@ export default function CapabilityMetadata() {
                   {runtimeAccessLabel}
                 </StatusBadge>
                 <StatusBadge tone="info">{runtimeTokenSourceLabel}</StatusBadge>
+                <StatusBadge tone="brand">{runtimeStatus?.provider || 'Unknown provider'}</StatusBadge>
               </div>
 
               <div className="rounded-2xl bg-surface-container-low p-4">
@@ -2925,7 +3346,9 @@ export default function CapabilityMetadata() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                      Active GitHub identity
+                      {runtimeStatus?.providerKey === 'github-copilot'
+                        ? 'Active GitHub identity'
+                        : 'Resolved provider identity'}
                     </p>
                     <p className="mt-2 text-sm font-bold text-on-surface">
                       {runtimeStatus?.githubIdentity?.login
@@ -2955,13 +3378,21 @@ export default function CapabilityMetadata() {
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="rounded-2xl bg-surface-container-low p-4">
                   <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                    Primary provider
+                  </p>
+                  <p className="mt-2 text-sm font-bold text-on-surface">
+                    {runtimeStatus?.provider || 'Not resolved'}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-surface-container-low p-4">
+                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
                     Default model
                   </p>
                   <p className="mt-2 text-sm font-bold text-on-surface">
                     {runtimeStatus?.defaultModel || 'Not resolved'}
                   </p>
                 </div>
-                <div className="rounded-2xl bg-surface-container-low p-4">
+                <div className="rounded-2xl bg-surface-container-low p-4 sm:col-span-2">
                   <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
                     Model catalog
                   </p>
@@ -2969,6 +3400,17 @@ export default function CapabilityMetadata() {
                     {runtimeStatus?.modelCatalogSource === 'runtime'
                       ? 'Live runtime catalog'
                       : 'Fallback catalog'}
+                  </p>
+                  <p className="mt-2 text-xs leading-relaxed text-secondary">
+                    {(runtimeStatus?.availableProviders || []).length > 0
+                      ? `${runtimeStatus.availableProviders
+                          .map(provider =>
+                            provider.configured
+                              ? `${provider.label} ready`
+                              : `${provider.label} available`,
+                          )
+                          .join(' • ')}`
+                      : 'Provider abstraction is enabled through the runtime lane, even when only one provider is configured in this environment.'}
                   </p>
                 </div>
               </div>
@@ -2988,7 +3430,7 @@ export default function CapabilityMetadata() {
                   type="password"
                   value={runtimeTokenInput}
                   onChange={event => setRuntimeTokenInput(event.target.value)}
-                  placeholder="Paste a GitHub token for the backend runtime"
+                  placeholder="Paste a provider token for the backend runtime"
                   className="field-input"
                 />
                 <p className="text-xs text-secondary">

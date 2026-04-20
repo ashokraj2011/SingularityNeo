@@ -19,6 +19,7 @@ import ArtifactPreview from '../components/ArtifactPreview';
 import IncidentLinkBadge from '../components/IncidentLinkBadge';
 import InteractionTimeline from '../components/InteractionTimeline';
 import LinkIncidentDialog from '../components/LinkIncidentDialog';
+import { ToolInvocationPolicyBadge } from '../components/ToolInvocationPolicyBadge';
 import {
   EmptyState,
   PageHeader,
@@ -573,6 +574,14 @@ const EvidencePacketPage = () => {
     () => packet?.payload.explain?.policyDecisions.slice(0, 4) || [],
     [packet],
   );
+  const allPolicyDecisions = useMemo(
+    () => packet?.payload.explain?.policyDecisions || [],
+    [packet],
+  );
+  const recentToolInvocations = useMemo(
+    () => (packet?.payload.runDetail?.toolInvocations || []).slice(0, 4),
+    [packet],
+  );
 
   const briefingDigestSections = useMemo(() => {
     if (!packet) {
@@ -1097,9 +1106,50 @@ const EvidencePacketPage = () => {
                         <p className="text-sm font-semibold text-on-surface">
                           {decision.actionType}
                         </p>
+                        {decision.toolInvocationId ? (
+                          <code
+                            className="rounded bg-white px-1.5 py-0.5 text-[10px] font-mono text-secondary"
+                            title={`Tool invocation ${decision.toolInvocationId}`}
+                          >
+                            tool:{decision.toolInvocationId.slice(0, 8)}
+                          </code>
+                        ) : null}
                       </div>
                       <p className="mt-2 text-xs leading-relaxed text-secondary">
                         {decision.reason}
+                      </p>
+                      {decision.targetId ? (
+                        <p className="mt-1 text-[11px] text-secondary/80">
+                          <span className="font-semibold uppercase tracking-[0.12em] text-outline">
+                            Target:{' '}
+                          </span>
+                          <code className="font-mono">{decision.targetId}</code>
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {recentToolInvocations.length > 0 ? (
+              <div className="rounded-2xl border border-outline-variant/40 bg-white px-4 py-4">
+                <p className="workspace-meta-label">Tool invocations</p>
+                <div className="mt-3 space-y-3">
+                  {recentToolInvocations.map(tool => (
+                    <div
+                      key={tool.id}
+                      className="rounded-2xl border border-outline-variant/25 bg-surface-container-low px-4 py-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-semibold text-on-surface">{tool.toolId}</p>
+                        <ToolInvocationPolicyBadge
+                          toolInvocationId={tool.id}
+                          policyDecisions={allPolicyDecisions}
+                        />
+                      </div>
+                      <p className="mt-1 text-xs leading-relaxed text-secondary">
+                        {tool.resultSummary || 'Tool invocation recorded.'}
                       </p>
                     </div>
                   ))}

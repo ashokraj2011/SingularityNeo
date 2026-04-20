@@ -16,6 +16,7 @@ import type {
 } from '../types';
 import { getCapabilityBoardPhaseIds } from './capabilityLifecycle';
 import { compileStepOwnership } from './capabilityOwnership';
+import { BUILD_STEP_OUTPUT_LABEL, isBuildStep } from './buildStepContract';
 
 type CompileStepContextArgs = {
   capability: Capability;
@@ -272,7 +273,20 @@ const buildArtifactChecklist = ({
     description: step.artifactContract?.notes,
   }));
 
-  const expectedOutputs = (step.artifactContract?.expectedOutputs || []).map((label, index) => ({
+  // For BUILD steps we inject the canonical CODE_PATCH contract label
+  // if the step author didn't spell it out. Keeps the "expected outputs"
+  // panel consistent regardless of whether the template or the user
+  // authored the step.
+  const authorExpectedOutputs = step.artifactContract?.expectedOutputs || [];
+  const expectedOutputLabels = isBuildStep(step)
+    ? authorExpectedOutputs.some(
+        label => label.trim() === BUILD_STEP_OUTPUT_LABEL,
+      )
+      ? authorExpectedOutputs
+      : [...authorExpectedOutputs, BUILD_STEP_OUTPUT_LABEL]
+    : authorExpectedOutputs;
+
+  const expectedOutputs = expectedOutputLabels.map((label, index) => ({
     id: `output-${index}-${label}`,
     label,
     direction: 'OUTPUT' as const,
@@ -326,13 +340,21 @@ export const compileStepContext = ({
   const missingInputs = compiledInputs.filter(
     field => field.required && field.status === 'MISSING',
   );
+  const expectedOutputsForChecklist = isBuildStep(step)
+    ? (step.artifactContract?.expectedOutputs || []).some(
+        label => label.trim() === BUILD_STEP_OUTPUT_LABEL,
+      )
+      ? step.artifactContract?.expectedOutputs || []
+      : [
+          ...(step.artifactContract?.expectedOutputs || []),
+          BUILD_STEP_OUTPUT_LABEL,
+        ]
+    : step.artifactContract?.expectedOutputs || [];
   const completionChecklist = Array.from(
     new Set([
       ...(step.exitCriteria || []),
       ...(step.completionGates || []),
-      ...(step.artifactContract?.expectedOutputs || []).map(
-        output => `Produce ${output}`,
-      ),
+      ...expectedOutputsForChecklist.map(output => `Produce ${output}`),
     ]),
   );
   const memoryBoundary = Array.from(

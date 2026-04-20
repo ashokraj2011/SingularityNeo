@@ -525,8 +525,24 @@ export const ExplainWorkItemDrawer = ({
                                 <span className="text-xs font-semibold uppercase tracking-[0.14em] text-outline">
                                   {policy.actionType}
                                 </span>
+                                {policy.toolInvocationId ? (
+                                  <code
+                                    className="truncate rounded bg-surface-container-low px-1.5 py-0.5 text-[10px] font-mono text-secondary"
+                                    title={`Tool invocation ${policy.toolInvocationId}`}
+                                  >
+                                    tool:{policy.toolInvocationId.slice(0, 8)}
+                                  </code>
+                                ) : null}
                               </div>
                               <p className="mt-2 text-sm text-secondary">{policy.reason}</p>
+                              {policy.targetId ? (
+                                <p className="mt-1 text-xs text-secondary/80">
+                                  <span className="font-semibold uppercase tracking-[0.12em] text-outline">
+                                    Target:{' '}
+                                  </span>
+                                  <code className="font-mono">{policy.targetId}</code>
+                                </p>
+                              ) : null}
                             </div>
                           ))
                         ) : (

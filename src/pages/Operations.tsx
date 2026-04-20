@@ -208,7 +208,7 @@ const Operations = () => {
                   ? 'The previous desktop disconnected. Queued runs are waiting for reclaim.'
                   : workspace.executionQueueReason === 'EXECUTOR_RELEASED'
                   ? 'Execution was released intentionally. Runs remain queued until another desktop claims the capability.'
-                  : 'Desktop execution ownership controls who can actually run Copilot-backed workflow execution.'}
+                  : 'Desktop execution ownership controls who can actually run runtime-backed workflow execution.'}
               </p>
             </div>
             <div className="rounded-2xl border border-outline-variant/40 bg-white px-4 py-4">

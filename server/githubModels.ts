@@ -34,6 +34,7 @@ import {
   isHttpFallbackAllowed,
 } from './runtimePolicy';
 import { getCapabilityWorkspaceRoots } from './workspacePaths';
+import { loadGuidanceSystemPromptBlock } from './repoGuidance';
 import {
   isLocalOpenAIConfigured,
   listLocalOpenAIModels,
@@ -1410,6 +1411,7 @@ const getChatSessionFingerprint = ({
   agent,
   developerPrompt,
   learningContextBlock,
+  copilotGuidanceBlock,
   workingDirectory,
   scope,
   scopeId,
@@ -1418,6 +1420,7 @@ const getChatSessionFingerprint = ({
   agent: Partial<CapabilityAgent>;
   developerPrompt?: string;
   learningContextBlock?: string;
+  copilotGuidanceBlock?: string;
   workingDirectory: string;
   scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
   scopeId?: string;
@@ -1432,6 +1435,7 @@ const getChatSessionFingerprint = ({
       buildCapabilitySystemPrompt({ capability, agent }),
       developerPrompt || '',
       learningContextBlock || '',
+      copilotGuidanceBlock || '',
       workingDirectory,
     ].join('\n---\n'),
   );
@@ -1441,6 +1445,7 @@ const buildScopedSystemPrompt = ({
   agent,
   developerPrompt,
   learningContextBlock,
+  copilotGuidanceBlock,
   scope,
   scopeId,
 }: {
@@ -1448,6 +1453,7 @@ const buildScopedSystemPrompt = ({
   agent: Partial<CapabilityAgent>;
   developerPrompt?: string;
   learningContextBlock?: string;
+  copilotGuidanceBlock?: string;
   scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
   scopeId?: string;
 }) =>
@@ -1457,6 +1463,13 @@ const buildScopedSystemPrompt = ({
     buildCapabilitySystemPrompt({ capability, agent }),
     learningContextBlock
       ? `Agent learning profile context:\n${learningContextBlock}`
+      : null,
+    // Copilot guidance ingested from the capability's linked repositories
+    // (CLAUDE.md, AGENTS.md, .cursor/rules, .github/copilot-instructions.md,
+    // etc.). Treat these as authoritative house style / authoring rules for
+    // this capability — cite them by filename when you apply one.
+    copilotGuidanceBlock
+      ? `Repository copilot guidance (house rules authored by the team):\n${copilotGuidanceBlock}`
       : null,
     scopeId
       ? `Active session scope: ${scope}${scope === 'GENERAL_CHAT' ? '' : ` / ${scopeId}`}`
@@ -1510,6 +1523,7 @@ const getManagedScopedSession = async ({
   agent,
   developerPrompt,
   learningContextBlock,
+  copilotGuidanceBlock,
   scope,
   scopeId,
   resetSession = false,
@@ -1518,6 +1532,7 @@ const getManagedScopedSession = async ({
   agent: Partial<CapabilityAgent>;
   developerPrompt?: string;
   learningContextBlock?: string;
+  copilotGuidanceBlock?: string;
   scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
   scopeId?: string;
   resetSession?: boolean;
@@ -1529,6 +1544,7 @@ const getManagedScopedSession = async ({
     agent,
     developerPrompt,
     learningContextBlock,
+    copilotGuidanceBlock,
     workingDirectory,
     scope,
     scopeId,
@@ -1624,6 +1640,7 @@ const getManagedScopedSession = async ({
     agent,
     developerPrompt,
     learningContextBlock,
+    copilotGuidanceBlock,
     scope,
     scopeId,
   });
@@ -1733,6 +1750,14 @@ export const invokeScopedCapabilitySession = async ({
   resetSession?: boolean;
 }) => {
   const learningContextBlock = agent.learningProfile?.contextBlock?.trim() || '';
+  // Load cached copilot guidance (CLAUDE.md / AGENTS.md / .cursor/rules /
+  // .github/copilot-instructions.md / CONTRIBUTING.md) for this capability.
+  // No network I/O here — the refresh happens on its own endpoint; we read
+  // what's cached so session init stays fast. Failures are swallowed so a
+  // corrupted guidance row can never block inference.
+  const copilotGuidanceBlock = capability.id
+    ? await loadGuidanceSystemPromptBlock(capability.id).catch(() => null)
+    : null;
   const effectivePrompt = prependRetrievedMemory(
     initialPrompt && resetSession ? initialPrompt : prompt,
     memoryPrompt,
@@ -1758,6 +1783,7 @@ export const invokeScopedCapabilitySession = async ({
         agent,
         developerPrompt,
         learningContextBlock,
+        copilotGuidanceBlock: copilotGuidanceBlock || undefined,
         scope,
         scopeId,
         resetSession,
@@ -1771,6 +1797,7 @@ export const invokeScopedCapabilitySession = async ({
                 agent,
                 developerPrompt,
                 learningContextBlock,
+                copilotGuidanceBlock: copilotGuidanceBlock || undefined,
                 scope,
                 scopeId,
               });
@@ -1899,6 +1926,7 @@ export const invokeScopedCapabilitySession = async ({
         agent,
         developerPrompt,
         learningContextBlock,
+        copilotGuidanceBlock: copilotGuidanceBlock || undefined,
         scope,
         scopeId,
       }),

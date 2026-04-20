@@ -19,6 +19,7 @@ import {
   ShieldOff,
   Sparkles,
   Workflow,
+  Wrench,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
@@ -34,6 +35,7 @@ import { hasPermission } from '../lib/accessControl';
 import { getStatusTone } from '../lib/enterprise';
 import {
   fetchCapabilityHealthSnapshot,
+  fetchCapabilityConnectorContext,
   fetchCollectionRollupSnapshot,
   fetchOperationsDashboardSnapshot,
   fetchRuntimeStatus,
@@ -50,9 +52,21 @@ import {
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
 import type {
   CapabilityHealthSnapshot,
+  CapabilityConnectorContext,
   CollectionRollupSnapshot,
   OperationsDashboardSnapshot,
 } from '../types';
+
+const getConnectorTone = (status?: CapabilityConnectorContext['github']['status']) => {
+  switch (status) {
+    case 'READY':
+      return 'success' as const;
+    case 'ERROR':
+      return 'danger' as const;
+    default:
+      return 'warning' as const;
+  }
+};
 
 const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   architecture: Building2,
@@ -65,6 +79,8 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   'run-console': Gauge,
   evals: ClipboardCheck,
   skills: Sparkles,
+  tools: Wrench,
+  policies: Scale,
   'artifact-designer': FileText,
   tasks: PlayCircle,
   studio: Bot,
@@ -96,6 +112,7 @@ const Dashboard = () => {
   const [healthSnapshot, setHealthSnapshot] = useState<CapabilityHealthSnapshot | null>(null);
   const [collectionSnapshot, setCollectionSnapshot] =
     useState<CollectionRollupSnapshot | null>(null);
+  const [connectorContext, setConnectorContext] = useState<CapabilityConnectorContext | null>(null);
   const [reportError, setReportError] = useState('');
   const [explainWorkItemId, setExplainWorkItemId] = useState('');
 
@@ -140,15 +157,17 @@ const Dashboard = () => {
         }
         return null;
       }),
+      fetchCapabilityConnectorContext(activeCapability.id).catch(() => null),
       activeCapability.capabilityKind === 'COLLECTION'
         ? fetchCollectionRollupSnapshot(activeCapability.id).catch(() => null)
         : Promise.resolve(null),
-    ]).then(([operations, health, collection]) => {
+    ]).then(([operations, health, connectors, collection]) => {
       if (!isMounted) {
         return;
       }
       setOperationsSnapshot(operations);
       setHealthSnapshot(health);
+      setConnectorContext(connectors);
       setCollectionSnapshot(collection);
     });
 
@@ -234,7 +253,7 @@ const Dashboard = () => {
         description={
           activeCapability.businessOutcome ||
           activeCapability.description ||
-          'Summary, trust, and health for the capability. Daily operating work now starts in Work.'
+          'Summary, governed delivery trust, and control-plane health for the capability. Daily operating work now starts in Work.'
         }
         actions={
           <>
@@ -270,7 +289,7 @@ const Dashboard = () => {
             </p>
           </div>
           <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
-            <p className="form-kicker">Agent connection</p>
+            <p className="form-kicker">Runtime posture</p>
             <div className="mt-2 flex items-center gap-2">
               <StatusBadge tone={experience.runtimeHealth.tone}>
                 {experience.runtimeHealth.label}
@@ -587,6 +606,155 @@ const Dashboard = () => {
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <SectionCard
+          title="Execution Control Plane"
+          description="Make the runtime lane legible as an enterprise control surface, not just a hidden coding dependency."
+          icon={Database}
+          action={
+            <button
+              type="button"
+              onClick={() => navigate('/run-console')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              Open run console
+            </button>
+          }
+        >
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+              <p className="form-kicker">Primary provider</p>
+              <p className="mt-2 text-lg font-bold text-on-surface">
+                {runtimeStatus?.provider || 'Unknown'}
+              </p>
+              <p className="mt-2 text-xs leading-relaxed text-secondary">
+                {runtimeStatus?.availableProviders?.length
+                  ? `${runtimeStatus.availableProviders.filter(provider => provider.configured).length} configured lane(s) · ${runtimeStatus.availableProviders.length} available`
+                  : 'Runtime provider abstraction is present even if this environment only exposes one configured lane today.'}
+              </p>
+            </div>
+            <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+              <p className="form-kicker">Runtime access</p>
+              <p className="mt-2 text-lg font-bold text-on-surface">
+                {runtimeStatus?.runtimeAccessMode || 'Unknown'}
+              </p>
+              <p className="mt-2 text-xs leading-relaxed text-secondary">
+                {runtimeStatus?.modelCatalogSource === 'runtime'
+                  ? 'Live model catalog is coming from the connected runtime.'
+                  : 'The app is falling back to a static model catalog in this session.'}
+              </p>
+            </div>
+            <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+              <p className="form-kicker">Execution owner</p>
+              <p className="mt-2 text-lg font-bold text-on-surface">{executionOwnerLabel}</p>
+              <p className="mt-2 text-xs leading-relaxed text-secondary">
+                {executionDispatchLabel} · {runtimeStatus?.defaultModel || 'No default model resolved'}
+              </p>
+            </div>
+            <div className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4">
+              <p className="form-kicker">Provider posture</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {(runtimeStatus?.availableProviders || []).length > 0 ? (
+                  runtimeStatus?.availableProviders?.map(provider => (
+                    <StatusBadge
+                      key={provider.key}
+                      tone={provider.configured ? 'success' : 'neutral'}
+                    >
+                      {provider.label}
+                    </StatusBadge>
+                  ))
+                ) : (
+                  <StatusBadge tone="neutral">Single runtime lane</StatusBadge>
+                )}
+              </div>
+              <p className="mt-2 text-xs leading-relaxed text-secondary">
+                This is the layer that should stay visibly independent from any one coding agent or vendor.
+              </p>
+            </div>
+          </div>
+        </SectionCard>
+
+        <SectionCard
+          title="Operational Integrations"
+          description="GitHub, Jira, and Confluence should read like live operating surfaces, not just setup fields."
+          icon={FolderGit2}
+          action={
+            <button
+              type="button"
+              onClick={() => navigate('/capabilities/metadata')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              Open metadata
+            </button>
+          }
+        >
+          <div className="grid gap-3">
+            {[
+              {
+                key: 'github',
+                label: 'GitHub',
+                status: connectorContext?.github.status,
+                helper: connectorContext?.github.message,
+                count:
+                  (connectorContext?.github.repositories.length || 0) +
+                  (connectorContext?.github.pullRequests.length || 0) +
+                  (connectorContext?.github.issues.length || 0),
+              },
+              {
+                key: 'jira',
+                label: 'Jira',
+                status: connectorContext?.jira.status,
+                helper: connectorContext?.jira.message,
+                count: connectorContext?.jira.issues.length || 0,
+              },
+              {
+                key: 'confluence',
+                label: 'Confluence',
+                status: connectorContext?.confluence.status,
+                helper: connectorContext?.confluence.message,
+                count: connectorContext?.confluence.pages.length || 0,
+              },
+            ].map(item => (
+              <div
+                key={item.key}
+                className="rounded-2xl border border-outline-variant/50 bg-white px-4 py-4"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="form-kicker">{item.label}</p>
+                    <p className="mt-2 text-lg font-bold text-on-surface">
+                      {item.count} live context item{item.count === 1 ? '' : 's'}
+                    </p>
+                    <p className="mt-2 text-xs leading-relaxed text-secondary">
+                      {item.helper || 'Integration status has not been loaded yet.'}
+                    </p>
+                  </div>
+                  <StatusBadge tone={getConnectorTone(item.status)}>
+                    {item.status ? formatEnumLabel(item.status) : 'Loading'}
+                  </StatusBadge>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => navigate('/incidents')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              Open incidents
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/mrm')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              Open MRM
+            </button>
+          </div>
+        </SectionCard>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <SectionCard
           title="Delivery"
           description="Business-facing work currently moving through the capability."
           icon={PlayCircle}
@@ -716,7 +884,7 @@ const Dashboard = () => {
             <p className="form-kicker">Business outcome</p>
             <p className="mt-3 text-sm leading-7 text-on-surface">
               {experience.outcomeContract.businessOutcome ||
-                'Add a business outcome so owners know what this capability is meant to achieve.'}
+                'Optional: add a business outcome so owners know what this capability is meant to achieve.'}
             </p>
           </div>
           <div className="rounded-3xl border border-outline-variant/40 bg-white px-5 py-5">

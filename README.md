@@ -1,8 +1,8 @@
 # SingularityNeo 🚀
 
-SingularityNeo is an **Enterprise AI Operating System** that transforms how teams deliver software. It is a capability-centered delivery workspace that combines autonomous agent orchestration, workflow enforcement, verifiable evidence, and unprecedented governance control into one local-first operating console.
+SingularityNeo is a **capability delivery operating system** for governed, explainable, AI-assisted software delivery. It combines autonomous agent orchestration, workflow enforcement, verifiable evidence, and enterprise governance control into one local-first operating console.
 
-Instead of treating delivery as scattered tools for planning, coding, and reporting, SingularityNeo unifies them under a single **Capability**. It’s not just an orchestrator; it's a governed, auditable, and resilient foundation for human-AI collaboration.
+Instead of treating delivery as scattered tools for planning, coding, approvals, incidents, and reporting, SingularityNeo unifies them under a single **Capability**. It is not trying to out-editor the best coding copilots; it is the governed, auditable, and resilient operating layer that makes their output usable inside an enterprise delivery system.
 
 ## Why SingularityNeo is Awesome
 
@@ -46,6 +46,45 @@ The product is strongest when a team wants to:
 - `Evidence` provides artifacts, completed work, approvals, and flight recorder history.
 - `Designer` defines workflows, lifecycle lanes, and operating rules.
 - `Governance` (admins) collects four audit-grade surfaces: `Posture` (one-screen compliance view), `Controls` (framework catalog), `Exceptions` (time-bound deviation lifecycle), and `Provenance` (prove-the-negative queries). See [Governance](./docs/governance.md).
+
+## Operator Roles & Audiences
+
+SingularityNeo ships a formal role model so the same workspace shows the
+right surfaces to the right people. Evaluators can pick a persona from the
+`/login` picker ([`src/pages/Login.tsx`](./src/pages/Login.tsx)); production
+workspaces assign these roles via the admin user list.
+
+### Workspace roles
+
+Source of truth: `WorkspaceRole` in [`src/types.ts`](./src/types.ts).
+
+| Role | What it's for |
+| ---- | ------------- |
+| `WORKSPACE_ADMIN` | Full control plane — runtime config, connector secrets, user management, every governance surface. |
+| `PORTFOLIO_OWNER` | Owns outcomes across many capabilities. Sees every workspace, approves policy exceptions, reads posture dashboards. |
+| `TEAM_LEAD` | Owns a subset of capabilities. Approves team deploys, reviews evidence, manages team membership. |
+| `INCIDENT_COMMANDER` | On-call overrides — can revoke active exceptions, trigger rollback runs, and read flight recorder live. |
+| `OPERATOR` | Day-to-day work execution — runs workflows, approves routine actions, chats with capability agents. |
+| `AUDITOR` | Read-only across evidence, controls, exceptions, and provenance. Cannot execute tools or approve actions. |
+| `VIEWER` | Read-only business view — capabilities, work items, dashboards. No governance surfaces. |
+
+### Sidebar audiences
+
+Each advanced tool is tagged with an `AdvancedToolAudience`. The sidebar
+filters tools based on a role → audience match in
+`matchesAdvancedToolAudience` ([`src/lib/capabilityExperience.ts`](./src/lib/capabilityExperience.ts)).
+
+| Audience | Who sees it | Example tools |
+| -------- | ----------- | ------------- |
+| `ALL` | Everyone | Chat, Work Items |
+| `OPERATORS` | Anyone except `VIEWER` | Workflows, Approvals inbox |
+| `BUILDERS` | Anyone except `VIEWER` and `AUDITOR` | Agent studio, Schema designer |
+| `ADMINS` | `WORKSPACE_ADMIN` / `PORTFOLIO_OWNER` / `TEAM_LEAD` | Posture Dashboard, Controls Catalog, Exception Console |
+| `ARCHITECTS` | Same roles as `ADMINS` | Dependency graph, Published snapshots |
+
+If a role does not match any listed audience for a tool, that tool is
+hidden rather than shown-and-disabled — so an `AUDITOR` never sees the
+Agent Studio entry at all, and a `VIEWER` never sees approvals.
 
 ## Core Product Ideas
 
@@ -158,6 +197,47 @@ npm run test:unit    # frontend-focused tests
 npm run test:backend # backend-focused tests
 npm run test:e2e     # Playwright browser tests
 ```
+
+## Desktop Client
+
+SingularityNeo ships an Electron desktop client alongside the browser app.
+The Express **control plane** runs on a server; the Electron shell and its
+**desktop worker** run on the operator's laptop and talk to the server over
+`SINGULARITY_CONTROL_PLANE_URL`. Governance, workflow execution, and
+Postgres stay server-side — the desktop adds a native chat surface and a
+local runtime lane.
+
+### Laptop env vars
+
+```bash
+SINGULARITY_CONTROL_PLANE_URL="https://neo.internal.example"   # required
+COPILOT_CLI_URL="http://127.0.0.1:4321"                        # OR
+GITHUB_MODELS_TOKEN="github_pat_..."                           # runtime choice
+```
+
+Postgres credentials (`PGHOST`/`PGPORT`/…/`PGPASSWORD`) stay on the server
+only — the desktop never connects to the database directly.
+
+### Commands
+
+Defined in [`package.json`](./package.json).
+
+| Command | Behaviour |
+| ------- | --------- |
+| `npm run desktop:start` | Foreground launch — server + Electron shell in one terminal. |
+| `npm run desktop:up` | Background launch. Writes PID to `.singularity/desktop-dev.pid`, logs to `.singularity/desktop-dev.log`. |
+| `npm run desktop:down` | Stops the backgrounded desktop using the PID file. |
+| `npm run desktop:dev` | Dev-mode Electron shell against a live-reloading Vite bundle. |
+| `npm run desktop:build` | Produces a distributable Electron binary. |
+
+### Important caveat
+
+Chat is **desktop-owned** — messages don't round-trip through the Express
+control plane, so a chat transcript only exists on the operator's laptop
+unless they explicitly save it as evidence. Workflow execution is still
+**server-owned** and audit-logged through the normal governance pipeline.
+Full topology, TLS, multi-machine deployment, and troubleshooting are in
+[Desktop + Control Plane Deployment](./docs/desktop-control-plane-deployment.md).
 
 ## Architecture
 
@@ -365,6 +445,7 @@ Full reference: [docs/governance.md](./docs/governance.md).
 ## Additional Docs
 
 - [Governance & Compliance — signer, controls catalog, exceptions, provenance, posture](./docs/governance.md)
+- [Desktop + Control Plane Deployment — split topology, env vars, multi-machine setup](./docs/desktop-control-plane-deployment.md)
 - [Self-Learning Loop — versioning, quality gate, drift, race hardening](./docs/self-learning-loop.md)
 - [Competitive positioning and product gap assessment](./docs/research/competitive-positioning.md)
 - [Capability Mermaid diagrams](./docs/capability-mermaid-diagrams.md)
