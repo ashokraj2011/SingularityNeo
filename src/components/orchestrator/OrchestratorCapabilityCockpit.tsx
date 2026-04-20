@@ -2,6 +2,7 @@ import React from 'react';
 import { AlertCircle, ArrowRight, Bot, MessageSquareText, Square } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { StatusBadge } from '../EnterpriseUI';
+import type { ExecutionDispatchState } from '../../types';
 
 type DeliveryBlockingItem = {
   label: string;
@@ -35,7 +36,7 @@ type Props = {
   selectedAgentQualitySummary: string;
   executionOwnerLabel: string;
   executionDispatchLabel: string;
-  executionDispatchState: 'ASSIGNED' | 'STALE_EXECUTOR' | 'UNASSIGNED';
+  executionDispatchState: ExecutionDispatchState;
   executionQueueReason?: string | null;
   currentDesktopOwnsExecution: boolean;
   canClaimExecution: boolean;

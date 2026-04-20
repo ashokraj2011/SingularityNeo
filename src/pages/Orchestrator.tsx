@@ -2463,6 +2463,22 @@ const Orchestrator = () => {
     selectedOpenWait,
   ]);
 
+  const handleStageChatScroll = useCallback(
+    (event: React.UIEvent<HTMLDivElement>) => {
+      const target = event.currentTarget;
+      if (stageChatScrollFrameRef.current) {
+        window.cancelAnimationFrame(stageChatScrollFrameRef.current);
+      }
+      stageChatScrollFrameRef.current = window.requestAnimationFrame(() => {
+        const distanceFromBottom =
+          target.scrollHeight - target.scrollTop - target.clientHeight;
+        stageChatStickToBottomRef.current = distanceFromBottom < 48;
+        stageChatScrollFrameRef.current = 0;
+      });
+    },
+    [],
+  );
+
   useEffect(() => {
     const thread = stageChatThreadRef.current;
     if (!thread) {
@@ -4339,6 +4355,143 @@ const Orchestrator = () => {
     }
   };
 
+  const approvalReviewModalNode =
+    isApprovalReviewOpen && selectedWorkItem && approvalReviewWait?.type === 'APPROVAL' ? (
+      <OrchestratorApprovalReviewModal
+        workItemTitle={selectedWorkItem.title}
+        approvalWait={approvalReviewWait}
+        isHydrated={isApprovalReviewHydrated}
+        onClose={() => {
+          setIsApprovalReviewOpen(false);
+          setIsApprovalReviewHydrated(false);
+          if (selectedOpenWait?.type !== 'APPROVAL') {
+            setApprovalReviewWaitSnapshot(null);
+          }
+        }}
+        currentPhaseLabel={getPhaseMeta(selectedWorkItem.phase).label}
+        currentStepName={selectedCurrentStep?.name || 'Awaiting orchestration'}
+        currentRunId={currentRun?.id || selectedWorkItem.activeRunId || 'Not attached'}
+        requestedByLabel={
+          agentsById.get(selectedAttentionRequestedBy || '')?.name ||
+          selectedAttentionRequestedBy ||
+          'System'
+        }
+        requestedAt={selectedAttentionTimestamp}
+        totalDocuments={selectedWorkItemArtifacts.length}
+        hasCodeDiffApproval={selectedHasCodeDiffApproval}
+        approvalAssignments={approvalAssignments}
+        approvalDecisionByAssignmentId={approvalDecisionByAssignmentId}
+        unassignedApprovalDecisions={unassignedApprovalDecisions}
+        workspaceUsersById={workspaceUsersById}
+        workspaceTeamsById={workspaceTeamsById}
+        interactionFeed={selectedInteractionFeed}
+        onOpenArtifactFromTimeline={handleOpenArtifactFromTimeline}
+        onOpenRunFromTimeline={runId => void handleOpenRunFromTimeline(runId)}
+        onOpenTaskFromTimeline={handleOpenTaskFromTimeline}
+        filteredApprovalArtifacts={filteredApprovalArtifacts}
+        approvalArtifactFilter={approvalArtifactFilter}
+        onApprovalArtifactFilterChange={setApprovalArtifactFilter}
+        selectedApprovalArtifact={selectedApprovalArtifact}
+        selectedApprovalArtifactDocument={selectedApprovalArtifactDocument}
+        onSelectApprovalArtifact={setSelectedApprovalArtifactId}
+        resolutionNote={resolutionNote}
+        onResolutionNoteChange={setResolutionNote}
+        resolutionPlaceholder={resolutionPlaceholder}
+        requestChangesIsAvailable={requestChangesIsAvailable}
+        canRequestChanges={canRequestChanges}
+        canResolveSelectedWait={canResolveSelectedWait}
+        busyAction={busyAction}
+        onRequestChanges={() => void handleRequestChanges()}
+        onResolveWait={() => void handleResolveWait()}
+        actionButtonLabel={actionButtonLabel}
+        onOpenDiffReview={() => setIsDiffReviewOpen(true)}
+        resetKey={`${selectedWorkItem.id}:${approvalReviewWait.id}:${selectedApprovalArtifact?.id || 'none'}`}
+      />
+    ) : null;
+
+  const diffReviewModalNode =
+    isDiffReviewOpen && selectedHasCodeDiffApproval ? (
+      <OrchestratorDiffReviewModal
+        selectedCodeDiffArtifact={selectedCodeDiffArtifact}
+        selectedCodeDiffDocument={selectedCodeDiffDocument}
+        summary={
+          selectedCodeDiffArtifact?.summary || selectedOpenWait?.payload?.codeDiffSummary || ''
+        }
+        repositoryCount={selectedCodeDiffRepositoryCount}
+        touchedFileCount={selectedCodeDiffTouchedFileCount || 'Tracked in diff'}
+        onClose={() => setIsDiffReviewOpen(false)}
+      />
+    ) : null;
+
+  const quickActionDialogsNode = (
+    <OrchestratorQuickActionDialogs
+      phaseMoveRequest={phaseMoveRequest}
+      phaseMoveItem={phaseMoveItem}
+      phaseMoveNote={phaseMoveNote}
+      setPhaseMoveNote={setPhaseMoveNote}
+      closePhaseMove={() => {
+        setPhaseMoveRequest(null);
+        setPhaseMoveNote('');
+      }}
+      handleConfirmPhaseMove={handleConfirmPhaseMove}
+      selectedWorkItem={selectedWorkItem}
+      isArchiveWorkItemOpen={isArchiveWorkItemOpen}
+      archiveWorkItemNote={archiveWorkItemNote}
+      setArchiveWorkItemNote={setArchiveWorkItemNote}
+      closeArchive={() => setIsArchiveWorkItemOpen(false)}
+      handleArchiveWorkItem={handleArchiveWorkItem}
+      isRestoreWorkItemOpen={isRestoreWorkItemOpen}
+      restoreWorkItemNote={restoreWorkItemNote}
+      setRestoreWorkItemNote={setRestoreWorkItemNote}
+      closeRestore={() => setIsRestoreWorkItemOpen(false)}
+      handleRestoreWorkItem={handleRestoreWorkItem}
+      isCancelWorkItemOpen={isCancelWorkItemOpen}
+      cancelWorkItemNote={cancelWorkItemNote}
+      setCancelWorkItemNote={setCancelWorkItemNote}
+      closeCancel={() => setIsCancelWorkItemOpen(false)}
+      handleCancelWorkItem={handleCancelWorkItem}
+      actionError={actionError}
+      busyAction={busyAction}
+      canControlWorkItems={canControlWorkItems}
+      currentActorDisplayName={currentActorContext.displayName}
+      getPhaseMeta={getPhaseMeta}
+    />
+  );
+
+  const stageControlOverlayNode =
+    selectedWorkItem ? (
+      <ErrorBoundary
+        resetKey={`${selectedWorkItem.id}:${selectedAgent?.id || 'none'}:${selectedCurrentStep?.id || 'stage'}:${isStageControlOpen ? 'open' : 'closed'}`}
+        title="Stage control could not render"
+        description="The takeover window hit an unexpected UI problem. The workbench is still available, and you can reopen stage control or use Full Chat while we keep the route alive."
+      >
+        <StageControlModal
+          isOpen={isStageControlOpen}
+          capability={activeCapability}
+          workItem={selectedWorkItem}
+          agent={selectedAgent}
+          currentRun={currentRun}
+          currentStep={selectedCurrentStep}
+          openWait={selectedOpenWait}
+          compiledStepContext={selectedCompiledStepContext}
+          failureReason={selectedFailureReason || undefined}
+          runtimeReady={runtimeReady}
+          runtimeError={runtimeError}
+          onClose={() => setIsStageControlOpen(false)}
+          onRefresh={handleStageControlRefresh}
+        />
+      </ErrorBoundary>
+    ) : null;
+
+  const explainDrawerOverlayNode = (
+    <ExplainWorkItemDrawer
+      capability={activeCapability}
+      workItem={selectedWorkItem}
+      isOpen={isExplainOpen}
+      onClose={() => setIsExplainOpen(false)}
+    />
+  );
+
   if (view === 'list') {
     const attentionById = new Map(attentionItems.map(entry => [entry.item.id, entry]));
     const remainingItems = filteredWorkItems
@@ -4509,143 +4662,6 @@ const Orchestrator = () => {
       window.addEventListener('pointerup', handlePointerUp);
       window.addEventListener('pointercancel', handlePointerCancel);
     };
-
-    const approvalReviewModalNode =
-      isApprovalReviewOpen && selectedWorkItem && approvalReviewWait?.type === 'APPROVAL' ? (
-        <OrchestratorApprovalReviewModal
-          workItemTitle={selectedWorkItem.title}
-          approvalWait={approvalReviewWait}
-          isHydrated={isApprovalReviewHydrated}
-          onClose={() => {
-            setIsApprovalReviewOpen(false);
-            setIsApprovalReviewHydrated(false);
-            if (selectedOpenWait?.type !== 'APPROVAL') {
-              setApprovalReviewWaitSnapshot(null);
-            }
-          }}
-          currentPhaseLabel={getPhaseMeta(selectedWorkItem.phase).label}
-          currentStepName={selectedCurrentStep?.name || 'Awaiting orchestration'}
-          currentRunId={currentRun?.id || selectedWorkItem.activeRunId || 'Not attached'}
-          requestedByLabel={
-            agentsById.get(selectedAttentionRequestedBy || '')?.name ||
-            selectedAttentionRequestedBy ||
-            'System'
-          }
-          requestedAt={selectedAttentionTimestamp}
-          totalDocuments={selectedWorkItemArtifacts.length}
-          hasCodeDiffApproval={selectedHasCodeDiffApproval}
-          approvalAssignments={approvalAssignments}
-          approvalDecisionByAssignmentId={approvalDecisionByAssignmentId}
-          unassignedApprovalDecisions={unassignedApprovalDecisions}
-          workspaceUsersById={workspaceUsersById}
-          workspaceTeamsById={workspaceTeamsById}
-          interactionFeed={selectedInteractionFeed}
-          onOpenArtifactFromTimeline={handleOpenArtifactFromTimeline}
-          onOpenRunFromTimeline={runId => void handleOpenRunFromTimeline(runId)}
-          onOpenTaskFromTimeline={handleOpenTaskFromTimeline}
-          filteredApprovalArtifacts={filteredApprovalArtifacts}
-          approvalArtifactFilter={approvalArtifactFilter}
-          onApprovalArtifactFilterChange={setApprovalArtifactFilter}
-          selectedApprovalArtifact={selectedApprovalArtifact}
-          selectedApprovalArtifactDocument={selectedApprovalArtifactDocument}
-          onSelectApprovalArtifact={setSelectedApprovalArtifactId}
-          resolutionNote={resolutionNote}
-          onResolutionNoteChange={setResolutionNote}
-          resolutionPlaceholder={resolutionPlaceholder}
-          requestChangesIsAvailable={requestChangesIsAvailable}
-          canRequestChanges={canRequestChanges}
-          canResolveSelectedWait={canResolveSelectedWait}
-          busyAction={busyAction}
-          onRequestChanges={() => void handleRequestChanges()}
-          onResolveWait={() => void handleResolveWait()}
-          actionButtonLabel={actionButtonLabel}
-          onOpenDiffReview={() => setIsDiffReviewOpen(true)}
-          resetKey={`${selectedWorkItem.id}:${approvalReviewWait.id}:${selectedApprovalArtifact?.id || 'none'}`}
-        />
-      ) : null;
-
-    const diffReviewModalNode =
-      isDiffReviewOpen && selectedHasCodeDiffApproval ? (
-        <OrchestratorDiffReviewModal
-          selectedCodeDiffArtifact={selectedCodeDiffArtifact}
-          selectedCodeDiffDocument={selectedCodeDiffDocument}
-          summary={
-            selectedCodeDiffArtifact?.summary || selectedOpenWait?.payload?.codeDiffSummary || ''
-          }
-          repositoryCount={selectedCodeDiffRepositoryCount}
-          touchedFileCount={selectedCodeDiffTouchedFileCount || 'Tracked in diff'}
-          onClose={() => setIsDiffReviewOpen(false)}
-        />
-      ) : null;
-
-    const quickActionDialogsNode = (
-      <OrchestratorQuickActionDialogs
-        phaseMoveRequest={phaseMoveRequest}
-        phaseMoveItem={phaseMoveItem}
-        phaseMoveNote={phaseMoveNote}
-        setPhaseMoveNote={setPhaseMoveNote}
-        closePhaseMove={() => {
-          setPhaseMoveRequest(null);
-          setPhaseMoveNote('');
-        }}
-        handleConfirmPhaseMove={handleConfirmPhaseMove}
-        selectedWorkItem={selectedWorkItem}
-        isArchiveWorkItemOpen={isArchiveWorkItemOpen}
-        archiveWorkItemNote={archiveWorkItemNote}
-        setArchiveWorkItemNote={setArchiveWorkItemNote}
-        closeArchive={() => setIsArchiveWorkItemOpen(false)}
-        handleArchiveWorkItem={handleArchiveWorkItem}
-        isRestoreWorkItemOpen={isRestoreWorkItemOpen}
-        restoreWorkItemNote={restoreWorkItemNote}
-        setRestoreWorkItemNote={setRestoreWorkItemNote}
-        closeRestore={() => setIsRestoreWorkItemOpen(false)}
-        handleRestoreWorkItem={handleRestoreWorkItem}
-        isCancelWorkItemOpen={isCancelWorkItemOpen}
-        cancelWorkItemNote={cancelWorkItemNote}
-        setCancelWorkItemNote={setCancelWorkItemNote}
-        closeCancel={() => setIsCancelWorkItemOpen(false)}
-        handleCancelWorkItem={handleCancelWorkItem}
-        actionError={actionError}
-        busyAction={busyAction}
-        canControlWorkItems={canControlWorkItems}
-        currentActorDisplayName={currentActorContext.displayName}
-        getPhaseMeta={getPhaseMeta}
-      />
-    );
-
-    const stageControlOverlayNode =
-      selectedWorkItem ? (
-        <ErrorBoundary
-          resetKey={`${selectedWorkItem.id}:${selectedAgent?.id || 'none'}:${selectedCurrentStep?.id || 'stage'}:${isStageControlOpen ? 'open' : 'closed'}`}
-          title="Stage control could not render"
-          description="The takeover window hit an unexpected UI problem. The workbench is still available, and you can reopen stage control or use Full Chat while we keep the route alive."
-        >
-          <StageControlModal
-            isOpen={isStageControlOpen}
-            capability={activeCapability}
-            workItem={selectedWorkItem}
-            agent={selectedAgent}
-            currentRun={currentRun}
-            currentStep={selectedCurrentStep}
-            openWait={selectedOpenWait}
-            compiledStepContext={selectedCompiledStepContext}
-            failureReason={selectedFailureReason || undefined}
-            runtimeReady={runtimeReady}
-            runtimeError={runtimeError}
-            onClose={() => setIsStageControlOpen(false)}
-            onRefresh={handleStageControlRefresh}
-          />
-        </ErrorBoundary>
-      ) : null;
-
-    const explainDrawerOverlayNode = (
-      <ExplainWorkItemDrawer
-        capability={activeCapability}
-        workItem={selectedWorkItem}
-        isOpen={isExplainOpen}
-        onClose={() => setIsExplainOpen(false)}
-      />
-    );
 
     return (
       <OrchestratorListMode
@@ -5382,7 +5398,7 @@ const Orchestrator = () => {
                   attemptsProps={{
                     currentRun,
                     selectedOpenWait,
-                    previousRunSummary,
+                    previousRunSummary: previousRunSummary?.id || null,
                     attemptComparisonLines,
                     selectedWorkflow,
                     selectedRunSteps,
