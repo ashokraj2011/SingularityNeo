@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   Capability,
   CapabilityAgent,
@@ -32,7 +33,12 @@ import {
   releaseWorkspaceWriteLock,
   WorkspaceLockConflictError,
 } from '../workspaceLock';
-import { findSymbolRangeInFile } from '../codeIndex/query';
+import {
+  findSymbolRangeInFile,
+  findFileDependents,
+  findFileDependencies,
+  listTopExportsInFile,
+} from '../codeIndex/query';
 
 const execFileAsync = promisify(execFile);
 
@@ -336,6 +342,13 @@ export const classifyToolExecutionError = ({
     };
   }
 
+  if (/^workspace_write refused on existing file\b/i.test(normalized)) {
+    return {
+      recoverable: true,
+      feedback: `Diff-Enforcement Policy blocked this write. ${normalized} Switch to workspace_apply_patch or workspace_replace_block for the next attempt.`,
+    };
+  }
+
   if (new RegExp(`^${toolId}\\s+requires\\b`, 'i').test(normalized)) {
     return {
       recoverable: true,
@@ -569,9 +582,9 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_read: {
     id: 'workspace_read',
     description:
-      'Read a text file. Prefer passing `symbol` (an exact function/class name from the code index) to get JUST that symbol body plus ~10 lines of context instead of the whole file — this saves 80-95% of input tokens. Only omit `symbol` when you truly need the full file.',
+      'Read a text file. Prefer passing `symbol` (an exact function/class name from the code index) to get JUST that symbol body plus ~10 lines of context instead of the whole file — this saves 80-95% of input tokens. Pass `includeCallers` (0-3) and/or `includeCallees` (0-3) to additionally surface neighbor-file paths + their top exported signatures so cross-method invariants stay in scope for refactors. Only omit `symbol` when you truly need the full file.',
     usageExample:
-      '{"path":"src/auth/token.ts","symbol":"validateToken"} (semantic hunk) OR {"path":"README.md"} (whole file fallback)',
+      '{"path":"src/auth/token.ts","symbol":"validateToken","includeCallers":2} (semantic hunk + 2 dependents) OR {"path":"README.md"} (whole file fallback)',
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
       const workspacePath = resolveWorkspacePath(capability, workItem, args.workspacePath);
@@ -586,8 +599,51 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         0,
         Math.min(Number(args.symbolContextLines ?? 10), 50),
       );
+      const includeCallers = Math.max(0, Math.min(Number(args.includeCallers ?? 0), 3));
+      const includeCallees = Math.max(0, Math.min(Number(args.includeCallees ?? 0), 3));
       const content = await fs.readFile(targetPath, 'utf8');
       const relativePath = path.relative(workspacePath, targetPath);
+
+      // Retrieval Bundle (Phase 2 / Lever 6): when the agent asks for
+      // a symbol with callers/callees, surface neighbor-file paths + up
+      // to 3 of their top exported signatures each. We return paths and
+      // signatures — NOT contents — so the agent can choose whether to
+      // read them. Hard-capped at 6 neighbors total; the budgeter
+      // handles further eviction upstream.
+      const buildNeighborNote = async (): Promise<string> => {
+        if (!capability.id || (includeCallers === 0 && includeCallees === 0)) {
+          return '';
+        }
+        const [dependents, dependencies] = await Promise.all([
+          includeCallers > 0
+            ? findFileDependents(capability.id, requestedPath, includeCallers).catch(() => [])
+            : Promise.resolve([]),
+          includeCallees > 0
+            ? findFileDependencies(capability.id, requestedPath, includeCallees).catch(() => [])
+            : Promise.resolve([]),
+        ]);
+        const allNeighbors = [
+          ...dependents.map(n => ({ ...n, role: 'caller' as const })),
+          ...dependencies.map(n => ({ ...n, role: 'callee' as const })),
+        ].slice(0, 6);
+        if (allNeighbors.length === 0) return '';
+
+        const sections: string[] = [];
+        for (const neighbor of allNeighbors) {
+          const exports = await listTopExportsInFile(
+            capability.id,
+            neighbor.filePath,
+            3,
+          ).catch(() => []);
+          const sigLines = exports
+            .map(e => `    - ${e.isExported ? 'export ' : ''}${e.kind} ${e.symbolName}  (lines ${e.startLine}-${e.endLine})`)
+            .join('\n');
+          sections.push(
+            `  [${neighbor.role}] ${neighbor.filePath}${neighbor.moduleSpecifier ? ` (via "${neighbor.moduleSpecifier}")` : ''}${sigLines ? `\n${sigLines}` : ''}`,
+          );
+        }
+        return `\n\n=== Related neighbors (file-level references) ===\n${sections.join('\n')}\n(Call workspace_read with these paths + a symbol to pull specific hunks.)`;
+      };
 
       // Semantic-hunk path: caller asked for a specific symbol. Look up
       // start/end lines from the code index, slice just that region.
@@ -607,10 +663,12 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
           const numbered = hunkLines
             .map((line, idx) => `${String(sliceStart + idx + 1).padStart(5, ' ')}  ${line}`)
             .join('\n');
+          const neighborNote = await buildNeighborNote();
+          const preview = previewText(numbered + neighborNote, maxBytes);
           return {
-            summary: `Read ${relativePath} :: ${requestedSymbol} (${range.kind}, lines ${sliceStart + 1}-${sliceEnd}).`,
+            summary: `Read ${relativePath} :: ${requestedSymbol} (${range.kind}, lines ${sliceStart + 1}-${sliceEnd})${neighborNote ? ' + neighbors' : ''}.`,
             workingDirectory: workspacePath,
-            stdoutPreview: previewText(numbered, maxBytes),
+            stdoutPreview: preview,
             details: {
               path: targetPath,
               symbol: requestedSymbol,
@@ -620,35 +678,44 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               sliceStartLine: sliceStart + 1,
               sliceEndLine: sliceEnd,
               contextLines,
+              includeCallers,
+              includeCallees,
+              hasNeighbors: neighborNote.length > 0,
               mode: 'semantic-hunk',
-              truncated: numbered.length > maxBytes,
+              truncated: preview.length > maxBytes,
             },
           };
         }
         // Symbol requested but not found — fall through to whole-file read
         // with a note so the agent knows to broaden or re-index.
+        const neighborNote = await buildNeighborNote();
         return {
-          summary: `Symbol "${requestedSymbol}" not found in code index for ${relativePath}. Returning whole file.`,
+          summary: `Symbol "${requestedSymbol}" not found in code index for ${relativePath}. Returning whole file${neighborNote ? ' + neighbors' : ''}.`,
           workingDirectory: workspacePath,
-          stdoutPreview: previewText(content, maxBytes),
+          stdoutPreview: previewText(content + neighborNote, maxBytes),
           details: {
             path: targetPath,
             symbol: requestedSymbol,
             mode: 'whole-file-fallback',
             symbolLookupMissed: true,
+            hasNeighbors: neighborNote.length > 0,
             truncated: content.length > maxBytes,
           },
         };
       }
 
-      // Whole-file fallback (no symbol provided).
+      // Whole-file fallback (no symbol provided). Still honor neighbor
+      // requests if the agent asked for them — useful for "read README
+      // and tell me which files import it."
+      const neighborNote = await buildNeighborNote();
       return {
-        summary: `Read ${relativePath}.`,
+        summary: `Read ${relativePath}${neighborNote ? ' + neighbors' : ''}.`,
         workingDirectory: workspacePath,
-        stdoutPreview: previewText(content, maxBytes),
+        stdoutPreview: previewText(content + neighborNote, maxBytes),
         details: {
           path: targetPath,
           mode: 'whole-file',
+          hasNeighbors: neighborNote.length > 0,
           truncated: content.length > maxBytes,
         },
       };
@@ -744,7 +811,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_write: {
     id: 'workspace_write',
     description:
-      'Create a NEW file at `path` with `content`. For edits to EXISTING files, use `workspace_apply_patch` (preferred) or `workspace_replace_block` instead — they are dramatically cheaper in output tokens and surface cleaner diffs to reviewers. Only use `workspace_write` when creating a file from scratch.',
+      'Create a NEW file at `path` with `content`. For edits to EXISTING files, use `workspace_apply_patch` (preferred) or `workspace_replace_block` instead — they are dramatically cheaper in output tokens and surface cleaner diffs to reviewers. Repeated `workspace_write` on an existing file will be REJECTED after the first attempt; use patch tools.',
     usageExample: '{"path":"src/main/java/App.java","content":"..."}',
     retryable: false,
     execute: async ({ capability, workItem }, args) => {
@@ -754,16 +821,53 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         getRequiredStringArg(args, 'path', 'workspace_write'),
       );
       const content = String(args.content || '');
+
+      // Diff-Enforcement Policy (Phase 2 / Lever 9). If the file already
+      // exists, this is an edit-via-write. After 1 such attempt we
+      // reject further attempts on the same file with a recoverable
+      // error so the agent re-enters the tool loop and picks a patch
+      // tool. Exception: if the agent already failed to apply patches
+      // to this path ≥ 2 times, we let the write through as a last
+      // resort — assumes the edit legitimately can't be expressed as a
+      // diff.
+      const ctx = currentToolInvocationContext();
+      let fileExisted = false;
+      try {
+        await fs.stat(targetPath);
+        fileExisted = true;
+      } catch {
+        fileExisted = false;
+      }
+      let diffWarning: string | null = null;
+      if (fileExisted) {
+        const prior = getWriteAttempts(ctx.runStepId, targetPath);
+        const patchFailures = getPatchFailures(ctx.runStepId, targetPath);
+        if (prior >= 1 && patchFailures < 2) {
+          throw new DiffEnforcementError(
+            `workspace_write refused on existing file "${path.relative(workspacePath, targetPath)}" (attempt ${prior + 1}). Use workspace_apply_patch or workspace_replace_block — they are cheaper and produce reviewable diffs. If the edit truly cannot be expressed as a patch, retry workspace_write after two patch attempts fail.`,
+          );
+        }
+        bumpWriteAttempts(ctx.runStepId, targetPath);
+        diffWarning =
+          patchFailures >= 2
+            ? `Allowed workspace_write on existing file after ${patchFailures} patch failure${patchFailures === 1 ? '' : 's'} — fallback path.`
+            : `NOTE: workspace_write on existing file. Prefer workspace_apply_patch / workspace_replace_block for subsequent edits.`;
+      }
+
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, content, 'utf8');
 
       return {
-        summary: `Wrote ${path.relative(workspacePath, targetPath)}.`,
+        summary: diffWarning
+          ? `Wrote ${path.relative(workspacePath, targetPath)} (${diffWarning})`
+          : `Wrote ${path.relative(workspacePath, targetPath)}.`,
         workingDirectory: workspacePath,
         details: {
           path: targetPath,
           touchedPaths: [targetPath],
           bytesWritten: Buffer.byteLength(content, 'utf8'),
+          fileExisted,
+          diffPolicyWarning: diffWarning,
         },
       };
     },
@@ -788,10 +892,15 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       const current = await fs.readFile(targetPath, 'utf8');
       const matchCount = current.split(find).length - 1;
 
+      // Record patch failures so the Diff-Enforcement Policy knows
+      // when to relax and allow workspace_write as a fallback.
+      const replaceCtx = currentToolInvocationContext();
       if (matchCount === 0) {
+        recordPatchFailure(replaceCtx.runStepId, targetPath);
         throw new Error(`Could not find the requested block in ${targetPath}.`);
       }
       if (matchCount !== expectedMatches) {
+        recordPatchFailure(replaceCtx.runStepId, targetPath);
         throw new Error(
           `Expected ${expectedMatches} block match(es) in ${targetPath}, but found ${matchCount}.`,
         );
@@ -844,6 +953,12 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       });
 
       if (result.exitCode !== 0) {
+        // Record the failure per touched path so the Diff-Enforcement
+        // Policy eventually allows workspace_write as a last resort.
+        const patchCtx = currentToolInvocationContext();
+        for (const touched of touchedPaths) {
+          recordPatchFailure(patchCtx.runStepId, touched);
+        }
         throw new Error(
           `Unable to apply patch in ${workspacePath}: ${previewText(result.stderr || result.stdout)}`,
         );
@@ -1097,6 +1212,99 @@ const WRITE_LOCK_TOOLS = new Set<ToolAdapterId>([
   'workspace_apply_patch',
 ]);
 
+/**
+ * Diff-Enforcement Policy (Phase 2 / Lever 9).
+ *
+ * We track per-(runStep, path) counters so the policy state is scoped
+ * to the current execution tick. Keys age out after 30 minutes — long
+ * enough to survive a slow run, short enough not to leak memory.
+ *
+ * Rules:
+ *   - 1st `workspace_write` attempt on an existing file: allowed, but
+ *     the summary carries a warning nudging the agent toward patches.
+ *   - 2nd attempt on the same file: REJECTED with a recoverable error
+ *     so the agent re-enters the tool loop and picks a patch tool.
+ *   - 3rd+ attempt: allowed as an escape hatch — assumed the agent
+ *     couldn't make a patch stick after two genuine attempts.
+ *   - `workspace_apply_patch` / `workspace_replace_block` failures
+ *     increment a separate "patch failures" counter that relaxes the
+ *     block on the next write attempt (belt-and-suspenders).
+ */
+interface EditPolicyEntry {
+  writeAttemptsOnExisting: number;
+  patchFailuresByPath: Map<string, number>;
+  lastTouched: number;
+}
+const editPolicyTrackers = new Map<string, EditPolicyEntry>();
+const EDIT_POLICY_TTL_MS = 30 * 60 * 1000;
+
+const pruneEditPolicy = () => {
+  const now = Date.now();
+  for (const [key, entry] of editPolicyTrackers) {
+    if (now - entry.lastTouched > EDIT_POLICY_TTL_MS) {
+      editPolicyTrackers.delete(key);
+    }
+  }
+};
+
+const getEditPolicyEntry = (runStepId: string | undefined, path: string): EditPolicyEntry | null => {
+  if (!runStepId) return null;
+  pruneEditPolicy();
+  const key = `${runStepId}:${path}`;
+  let entry = editPolicyTrackers.get(key);
+  if (!entry) {
+    entry = {
+      writeAttemptsOnExisting: 0,
+      patchFailuresByPath: new Map(),
+      lastTouched: Date.now(),
+    };
+    editPolicyTrackers.set(key, entry);
+  }
+  entry.lastTouched = Date.now();
+  return entry;
+};
+
+const recordPatchFailure = (runStepId: string | undefined, path: string) => {
+  const entry = getEditPolicyEntry(runStepId, path);
+  if (!entry) return;
+  entry.patchFailuresByPath.set(path, (entry.patchFailuresByPath.get(path) || 0) + 1);
+};
+
+const getWriteAttempts = (runStepId: string | undefined, path: string): number => {
+  if (!runStepId) return 0;
+  return editPolicyTrackers.get(`${runStepId}:${path}`)?.writeAttemptsOnExisting ?? 0;
+};
+
+const bumpWriteAttempts = (runStepId: string | undefined, path: string) => {
+  const entry = getEditPolicyEntry(runStepId, path);
+  if (entry) entry.writeAttemptsOnExisting += 1;
+};
+
+const getPatchFailures = (runStepId: string | undefined, path: string): number => {
+  if (!runStepId) return 0;
+  return editPolicyTrackers.get(`${runStepId}:${path}`)?.patchFailuresByPath.get(path) ?? 0;
+};
+
+export class DiffEnforcementError extends Error {
+  readonly recoverable = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'DiffEnforcementError';
+  }
+}
+
+// Async-local context so adapters can read the current runStepId without
+// a signature change on every adapter. Populated in executeTool before
+// the adapter runs.
+interface ToolInvocationContext {
+  runStepId?: string;
+  runId?: string;
+  stepName?: string;
+}
+const toolInvocationContextStorage = new AsyncLocalStorage<ToolInvocationContext>();
+const currentToolInvocationContext = (): ToolInvocationContext =>
+  toolInvocationContextStorage.getStore() || {};
+
 export const executeTool = async ({
   capability,
   agent,
@@ -1147,9 +1355,16 @@ export const executeTool = async ({
   }
 
   try {
-    const result = await adapter.execute(
-      { capability, agent, workItem, requireApprovedDeployment },
-      args,
+    // Run inside an AsyncLocalStorage frame so downstream adapters can
+    // consult `currentToolInvocationContext()` for the runStepId (used
+    // by the Diff Enforcement Policy without a signature change).
+    const result = await toolInvocationContextStorage.run(
+      { runStepId, runId, stepName },
+      () =>
+        adapter.execute(
+          { capability, agent, workItem, requireApprovedDeployment },
+          args,
+        ),
     );
 
     return {

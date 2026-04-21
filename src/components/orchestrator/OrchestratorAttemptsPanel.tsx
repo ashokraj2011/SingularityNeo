@@ -1,4 +1,6 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
+import { ScrollText } from 'lucide-react';
 import { formatEnumLabel, getStatusTone } from '../../lib/enterprise';
 import { AdvancedDisclosure } from '../WorkspaceUI';
 import {
@@ -12,7 +14,14 @@ import {
 import type { CapabilityAgent } from '../../types';
 import { StatusBadge } from '../EnterpriseUI';
 
+const PASSPORT_ELIGIBLE: ReadonlySet<string> = new Set([
+  'WAITING_APPROVAL',
+  'COMPLETED',
+  'FAILED',
+]);
+
 type Props = {
+  capabilityId: string;
   currentRun: WorkflowRun | null;
   selectedOpenWait: RunWait | null;
   previousRunSummary: string | null;
@@ -30,6 +39,7 @@ type Props = {
 };
 
 export const OrchestratorAttemptsPanel = ({
+  capabilityId,
   currentRun,
   selectedOpenWait,
   previousRunSummary,
@@ -66,6 +76,21 @@ export const OrchestratorAttemptsPanel = ({
         </p>
       </div>
     </div>
+
+    {currentRun && PASSPORT_ELIGIBLE.has(currentRun.status) ? (
+      <Link
+        to={`/passport/${capabilityId}/${currentRun.id}`}
+        className="flex w-full items-center justify-between rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+      >
+        <span className="flex items-center gap-2">
+          <ScrollText size={15} />
+          Release Passport
+        </span>
+        <span className="font-mono text-xs font-normal text-emerald-500">
+          {currentRun.status === 'WAITING_APPROVAL' ? 'Awaiting approval' : currentRun.status === 'COMPLETED' ? 'Ready' : 'Review required'}
+        </span>
+      </Link>
+    ) : null}
 
     <div className="workspace-meta-card">
       <div className="flex flex-wrap items-start justify-between gap-3">

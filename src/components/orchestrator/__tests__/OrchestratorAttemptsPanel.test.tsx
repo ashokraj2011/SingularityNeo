@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 import { OrchestratorAttemptsPanel } from '../OrchestratorAttemptsPanel';
 import type { CapabilityAgent, RunEvent, Workflow, WorkflowRun, WorkflowRunDetail } from '../../../types';
 
@@ -83,7 +84,9 @@ describe('OrchestratorAttemptsPanel', () => {
     const user = userEvent.setup();
 
     render(
+      <MemoryRouter>
       <OrchestratorAttemptsPanel
+        capabilityId="cap-1"
         currentRun={currentRun}
         selectedOpenWait={null}
         previousRunSummary="The previous attempt stopped before tests."
@@ -106,7 +109,8 @@ describe('OrchestratorAttemptsPanel', () => {
         agentsById={agentsById}
         getRunEventTone={() => 'info'}
         getRunEventLabel={() => 'Info'}
-      />,
+      />
+      </MemoryRouter>,
     );
 
     expect(screen.getByText('Comparison ready')).toBeInTheDocument();

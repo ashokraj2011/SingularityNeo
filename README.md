@@ -18,6 +18,10 @@ SingularityNeo isn't just about running agents; it's about **Enterprise Safety a
 *   👻 **Shadow Mode Execution**: Need to test a high-stakes deployment without risking production? Toggle a capability into **Shadow Mode**. The execution layer intercepts destructive commands across the entire platform, simulating successful runs to let you validate agent reasoning in a 100% risk-free environment.
 *   📋 **Evidence-Based Execution**: Every run leaves behind a durable cryptographic-style evidence trail. Artifacts, handoffs, approvals, and wait states are comprehensively logged in the Flight Recorder, so you never have to ask "why did the agent do that?"
 *   🤝 **Strict Human-in-the-Loop Governance**: Agents can plan, design, implement, and review, but the platform ensures humans retain ultimate control over approvals, policy boundaries, and conflict resolution.
+*   💡 **9-Lever Token Optimization**: A principled context-budgeting layer keeps every main-model call lean. Phase-sliced guidance, semantic-hunk reads, tool-loop history rollup, diff-first prompting, per-phase token budgets with priority-based eviction, caller/callee retrieval bundles, diff-enforcement policy, structured rollup summaries, and per-call Prompt Receipts — all active by default, all tunable per capability. See [Token Optimization](./docs/token-optimization.md).
+*   🛂 **Release Passport**: A structured governance gate that aggregates run evidence, approval chains, risk signals, and open findings into a single release-readiness document. Passport approvals are linked to the run, signed, and stored alongside the evidence packet.
+*   💥 **Blast Radius Analysis**: Before a proposed file change is deployed, Shadow Execution maps which capabilities and files would break. Dependents are classified `CRITICAL`, `WARNING`, or `SAFE` so teams can assess risk before a single line ships.
+*   🔦 **Sentinel Mode**: Zero-prompt autonomous security remediation. Sentinel intercepts CVE alerts, maps the vulnerability to the affected workspace, patches it in isolation, signs the change, and delivers a Release Passport for 1-click human approval — no manual triage loop required.
 
 ## What SingularityNeo Is
 
@@ -46,6 +50,17 @@ The product is strongest when a team wants to:
 - `Evidence` provides artifacts, completed work, approvals, and flight recorder history.
 - `Designer` defines workflows, lifecycle lanes, and operating rules.
 - `Governance` (admins) collects four audit-grade surfaces: `Posture` (one-screen compliance view), `Controls` (framework catalog), `Exceptions` (time-bound deviation lifecycle), and `Provenance` (prove-the-negative queries). See [Governance](./docs/governance.md).
+
+### Advanced specialist tools
+
+The sidebar organises specialist tools into four labelled groups visible to users with matching roles:
+
+| Group | Tools | Who sees it |
+| ----- | ----- | ----------- |
+| **Governance** | Posture Dashboard, Controls Catalog, Exceptions, Provenance, Work Item Report | Admins / Portfolio owners |
+| **Security** | Sentinel Mode, Blast Radius | Operators, Architects |
+| **Operations** | Ops Console, Incidents, MRM, Run Console, Memory, Evals | Operators |
+| **Platform** | Architecture, Access, Skills, Tools, Tool Access, Policies, Artifact Designer, Agent Studio, Tasks, Databases | Builders / Admins |
 
 ## Operator Roles & Audiences
 
@@ -153,7 +168,7 @@ PGPASSWORD=""
 PGADMIN_DATABASE="postgres"
 ```
 
-You do not need to pre-create every object manually. Singulairy can bootstrap the target database from `Database Setup` at `/workspace/databases`.
+You do not need to pre-create every object manually. Singularity can bootstrap the target database from `Database Setup` at `/workspace/databases`.
 
 ### Start The App
 
@@ -273,11 +288,26 @@ server/
   index.ts           API bootstrap and route registration
   repository.ts      durable persistence and workspace materialization
   db.ts              schema setup and Postgres helpers
-  execution/         runs, waits, worker, tools, orchestration
+  execution/
+    service.ts       orchestration engine, requestStepDecision
+    tools.ts         tool adapters (workspace_read/write/patch + diff enforcement)
+    historyRollup.ts Lever 3 — tool-loop history compression
+    contextBudget.ts Lever 5 — per-phase token budget + priority eviction
+    tokenEstimate.ts char-based token estimator (provider-aware)
+    worker.ts        run worker + scheduling
+    repository.ts    run/step/wait/event persistence
+    codeDiff.ts      code diff review artifact capture
   agentLearning/     learning profiles, jobs, summaries, quality gate,
                      drift detector, versioning, race hardening
+  codeIndex/
+    query.ts         symbol lookup, findFileDependents, findFileDependencies
+    ingest.ts        code-index population
   governance/        signer, controls catalog, exceptions, provenance
                      extractor, posture aggregator
+  routes/
+    blastRadius.ts   Blast Radius shadow-execution analysis
+    sentinel.ts      Sentinel Mode webhook trigger + autonomous run
+  githubModels.ts    provider bridge, invokeBudgetModelSummary (Lever 3/8)
   ledger.ts          evidence aggregation and artifact access
   flightRecorder.ts  explainability and audit reconstruction
 ```
@@ -308,6 +338,33 @@ server/
 - review skills, tools, and learning
 - adjust models or role setup
 - understand who should help at each stage
+
+### Release Passport
+
+`/release-passport` is the release governance gate. A Release Passport is a structured document that aggregates run evidence, approval chains, risk signals, open findings, test coverage, and a go/no-go recommendation for every run that reaches the release phase. Key features:
+- auto-populated from run artifacts and approval records
+- each approval is role-scoped (e.g. `TECH_LEAD`, `QA_OWNER`, `COMPLIANCE`)
+- passport status (`PENDING` / `APPROVED` / `REJECTED`) is stored and linked to the run
+- the signed passport is part of the evidence chain — auditors can verify the release decision was formally approved
+
+### Blast Radius
+
+`/blast-radius` performs a dependency impact analysis before a change is shipped. A Shadow Execution dry-run maps which capabilities and workspace files would break if a proposed file change were deployed. Results are classified:
+- **CRITICAL** — direct runtime dependency
+- **WARNING** — indirect or soft dependency
+- **SAFE** — no detected path to the changed file
+
+Useful as a pre-merge gate and for compliance teams who need to prove a change was risk-assessed before deployment.
+
+### Sentinel Mode
+
+`/sentinel` is the autonomous security remediation surface. When a CVE alert arrives (via webhook), Sentinel:
+1. Receives the alert at `POST /api/sentinel/trigger`
+2. Identifies the affected workspace and vulnerability context
+3. Spawns an execution run that patches, tests, and signs the fix
+4. Delivers a Release Passport for human 1-click approval before anything ships
+
+The trigger endpoint accepts an optional `capabilityId` to scope the remediation. Sentinel is integrated into the existing run + evidence + governance pipeline — every automated fix produces an auditable trail identical to a human-initiated run.
 
 ## Troubleshooting
 
@@ -367,6 +424,54 @@ The e2e suite uses the configured Postgres database. If you do not isolate it, t
 Recommended:
 - use a dedicated database for e2e
 - or clean up test capabilities after the run
+
+## Token Optimization
+
+SingularityNeo ships a nine-lever token-optimization program that keeps every main-model LLM call as small as possible without losing execution quality. All levers are active by default and can be tuned per capability via `executionConfig`.
+
+### Lever overview
+
+| # | Name | What it does |
+|---|------|-------------|
+| 1 | **Phase-sliced guidance** | `buildGuidanceBlockFromPack()` filters repo guidance to only the categories relevant to the current lifecycle phase. An 8-phase build uses only ~⅛ of the guidance corpus per call. |
+| 2 | **Semantic-hunk reads** | `workspace_read` accepts a `symbol` name and returns only that function/class body plus ~10 lines of context instead of the whole file (80–95 % token saving). Pass `includeCallers` / `includeCallees` (0–3 each) to also pull in caller/callee signatures for cross-method refactors. |
+| 3 | **Tool-loop history rollup** | After ≥ 10 tool turns, the oldest prefix is summarised by the cheapest model on the capability's provider. Only the summary + last 6 raw turns reach the expensive main model. Tunable via `executionConfig.historyRollup`. |
+| 4 | **Diff-first prompting** | Tool descriptions for `workspace_write`, `workspace_apply_patch`, and `workspace_replace_block` steer agents toward diffs instead of full-file rewrites. |
+| 5 | **Context Budgeter** | Every prompt is assembled as typed `BudgetFragment[]` with per-source priorities. When the total would exceed the per-phase token ceiling, the lowest-priority sources are evicted first. SYSTEM_CORE and TOOL_DESCRIPTIONS are never evicted. |
+| 6 | **Retrieval Bundle** | `workspace_read` with `includeCallers` / `includeCallees` surfaces dependent-file paths and their top exported signatures in a single call, so cross-method invariants stay in scope without chaining extra reads. |
+| 7 | **Prompt Receipts** | After every main-model call a `PROMPT_RECEIPT` run event is emitted listing which fragments were included, which were evicted, and the estimated token count. Operators can answer "why did the model decide X" by inspecting the receipt. |
+| 8 | **Structured Rollup** | `invokeBudgetModelSummary` returns a JSON state note (`currentGoal`, `lastSuccessfulAction`, `currentBlocker`, `filesInPlay`, `pendingDecision`, `evidenceGenerated`) instead of prose — machine-consumable and more precise. |
+| 9 | **Diff Enforcement** | `workspace_write` on an existing file is blocked on the second attempt with a recoverable error pointing to `workspace_apply_patch`. The block lifts after two patch failures so agents are never permanently stuck. |
+
+### Per-phase token budgets
+
+| Phase | Max input tokens | Reserved output |
+|-------|-----------------|-----------------|
+| Build / Development / Construction | 64 k | 16 k |
+| Plan / Design / Elaboration | 48 k | 8 k |
+| Analysis / Discover / Inception | 32 k | 4 k |
+| QA / Validate / Test / Delivery | 32 k | 4 k |
+| Governance / Review / Audit | 24 k | 2 k |
+| Release / Deploy / Ship | 16 k | 2 k |
+| Unknown / default | 64 k | 16 k |
+
+### Capability-level tuning knob
+
+```json
+{
+  "executionConfig": {
+    "historyRollup": {
+      "enabled": true,
+      "keepLastN": 6,
+      "threshold": 10
+    }
+  }
+}
+```
+
+Set `enabled: false` to bypass the rollup for a debugging session without redeploying.
+
+Full engineering reference: [docs/token-optimization.md](./docs/token-optimization.md).
 
 ## Compliance Posture
 
@@ -444,6 +549,7 @@ Full reference: [docs/governance.md](./docs/governance.md).
 
 ## Additional Docs
 
+- [Token Optimization — 9-lever program, per-phase budgets, tuning guide](./docs/token-optimization.md)
 - [Governance & Compliance — signer, controls catalog, exceptions, provenance, posture](./docs/governance.md)
 - [Desktop + Control Plane Deployment — split topology, env vars, multi-machine setup](./docs/desktop-control-plane-deployment.md)
 - [Self-Learning Loop — versioning, quality gate, drift, race hardening](./docs/self-learning-loop.md)

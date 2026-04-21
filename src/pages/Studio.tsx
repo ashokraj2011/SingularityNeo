@@ -21,6 +21,7 @@ import {
   initializeCapabilityWorkItemExecutionContext,
 } from '../lib/api';
 import { Skill } from '../types';
+import { PageHeader, SectionCard } from '../components/EnterpriseUI';
 
 const formatCurrency = (value: number) => `$${value.toFixed(4)}`;
 
@@ -98,66 +99,41 @@ const Studio = () => {
   };
 
   return (
-    <div className="flex flex-col gap-8">
-      <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <div className="mb-1 flex items-center gap-2">
-            <span className="rounded bg-primary/10 px-2 py-0.5 text-[0.625rem] font-bold uppercase tracking-widest text-primary">
-              Agent Studio
-            </span>
-            <span className="text-[0.625rem] font-bold uppercase tracking-widest text-slate-400">
-              {activeCapability.id}
-            </span>
-          </div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-on-surface">
-            Capability Runtime, Skills, and Code Workspaces
-          </h1>
-          <p className="text-sm font-medium text-secondary">
-            Review skills, model choices, token budgets, usage, and the local
-            directories that this capability can use for branch-based code work.
-          </p>
-        </div>
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Agent Studio"
+        context={activeCapability.id}
+        title="Capability Runtime, Skills & Code Workspaces"
+        description="Review skills, model choices, token budgets, usage, and the local directories that this capability can use for branch-based code work."
+        actions={
+          <>
+            <button
+              onClick={() => navigate('/skills')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              <BookOpen size={16} />
+              Skill Library
+            </button>
+            <button
+              onClick={() => navigate('/team')}
+              className="enterprise-button bg-primary text-on-primary hover:bg-primary/90"
+            >
+              <Settings2 size={16} />
+              Open Agents
+            </button>
+          </>
+        }
+      />
 
-        <div className="flex flex-col gap-3 sm:flex-row">
-          <button
-            onClick={() => navigate('/skills')}
-            className="inline-flex items-center gap-2 rounded-2xl border border-primary/10 bg-white px-5 py-3 text-sm font-bold text-primary shadow-sm transition-all hover:bg-primary/5"
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        <div className="space-y-6 lg:col-span-7">
+          <SectionCard
+            title="Capability Skill Library"
+            description="Reusable agent skills currently visible in this capability."
+            icon={Sparkles}
+            action={<span className="text-xs font-bold text-primary">{capabilitySkills.length} Skills</span>}
           >
-            <BookOpen size={18} />
-            Open Skill Library
-          </button>
-          <button
-            onClick={() => navigate('/team')}
-            className="inline-flex items-center gap-2 rounded-2xl bg-primary px-5 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
-          >
-            <Settings2 size={18} />
-            Open Agents
-          </button>
-        </div>
-      </header>
-
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-12">
-        <div className="space-y-8 lg:col-span-7">
-          <section className="overflow-hidden rounded-3xl border border-outline-variant/15 bg-white shadow-sm">
-            <div className="flex items-center justify-between border-b border-outline-variant/10 bg-primary/5 p-6">
-              <div className="flex items-center gap-3">
-                <div className="rounded-xl bg-primary p-2 text-white">
-                  <Sparkles size={20} />
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-primary">
-                    Capability Skill Library
-                  </h3>
-                  <p className="text-[0.625rem] font-bold uppercase tracking-widest text-slate-400">
-                    Reusable agent skills currently visible in this capability
-                  </p>
-                </div>
-              </div>
-              <span className="rounded-full bg-primary/10 px-3 py-1 text-xs font-bold uppercase text-primary">
-                {capabilitySkills.length} Skills
-              </span>
-            </div>
-            <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               {capabilitySkills.map(skill => (
                 <div
                   key={skill.id}
@@ -186,21 +162,13 @@ const Studio = () => {
                 </div>
               ))}
             </div>
-          </section>
+          </SectionCard>
 
-          <section className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
-            <div className="mb-6 flex items-center gap-3">
-              <div className="rounded-xl bg-primary/10 p-2 text-primary">
-                <Cpu size={20} />
-              </div>
-              <div>
-                <h3 className="text-lg font-bold text-primary">Copilot Model Pool</h3>
-                <p className="text-[0.6875rem] text-secondary">
-                  Available model choices for agents running on GitHub Copilot
-                  API.
-                </p>
-              </div>
-            </div>
+          <SectionCard
+            title="Copilot Model Pool"
+            description="Available model choices for agents running on GitHub Copilot API."
+            icon={Cpu}
+          >
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               {COPILOT_MODEL_OPTIONS.map(model => (
                 <div
@@ -217,31 +185,22 @@ const Studio = () => {
                 </div>
               ))}
             </div>
-          </section>
+          </SectionCard>
 
-          <section className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="rounded-xl bg-primary/10 p-2 text-primary">
-                  <FolderCode size={20} />
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-primary">Shared Work Item Branches</h3>
-                  <p className="text-[0.6875rem] text-secondary">
-                    Work items now own shared repo and branch context. Initialize
-                    the execution context here, then open Work to collaborate on
-                    the same branch with different stakeholders.
-                  </p>
-                </div>
-              </div>
+          <SectionCard
+            title="Shared Work Item Branches"
+            description="Work items own shared repo and branch context. Initialize the execution context here, then open Work to collaborate on the same branch."
+            icon={FolderCode}
+            action={
               <button
                 onClick={() => void refreshCapabilityBundle(activeCapability.id)}
-                className="inline-flex items-center gap-2 rounded-2xl border border-outline-variant/15 bg-white px-4 py-2.5 text-xs font-bold uppercase tracking-[0.18em] text-secondary transition-all hover:bg-surface-container-low"
+                className="enterprise-button enterprise-button-secondary"
               >
                 <RefreshCw size={14} />
                 Refresh
               </button>
-            </div>
+            }
+          >
 
             {codeWorkspaceError && (
               <div className="mb-4 flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -383,26 +342,16 @@ const Studio = () => {
                 )})}
               </div>
             )}
-          </section>
+          </SectionCard>
         </div>
 
         <div className="space-y-6 lg:col-span-5">
-          <section className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="rounded-xl bg-primary/10 p-2 text-primary">
-                <BarChart3 size={20} />
-              </div>
-              <div>
-                <h3 className="text-lg font-bold text-primary">
-                  Agent Runtime Stack
-                </h3>
-                <p className="text-[0.6875rem] text-secondary">
-                  Usage, cost, and output visibility across the capability team.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-6 space-y-4">
+          <SectionCard
+            title="Agent Runtime Stack"
+            description="Usage, cost, and output visibility across the capability team."
+            icon={BarChart3}
+          >
+            <div className="space-y-4">
               {workspace.agents.map(agent => (
                 <div
                   key={agent.id}
@@ -467,30 +416,22 @@ const Studio = () => {
                 </div>
               ))}
             </div>
-          </section>
+          </SectionCard>
 
-          <section className="rounded-3xl bg-primary p-6 text-white shadow-xl shadow-primary/20">
-            <div className="flex items-center gap-2">
-              <BookOpen size={18} />
-              <p className="text-sm font-bold">
-                Capability-owned agent and code configuration
-              </p>
-            </div>
-            <p className="mt-3 text-sm leading-relaxed text-primary-fixed-dim">
-              Capabilities now carry workflow scope, leadership contacts, Git
-              repos, local directories, and agent runtime settings together, so
-              the workspace can stay anchored to the same delivery context.
-            </p>
+          <SectionCard
+            title="Capability-owned configuration"
+            description="Capabilities carry workflow scope, contacts, repos, local directories, and agent runtime settings together — the workspace stays anchored to the same delivery context."
+            icon={BookOpen}
+            tone="brand"
+          >
             <button
               onClick={() => navigate('/team')}
-              className="mt-5 flex w-full items-center justify-between rounded-2xl bg-white/10 px-4 py-3 text-left transition-all hover:bg-white/15"
+              className="enterprise-button w-full justify-between bg-primary text-on-primary hover:bg-primary/90"
             >
-              <span className="text-sm font-bold">
-                Open Agents
-              </span>
+              <span>Open Agents</span>
               <ArrowRight size={16} />
             </button>
-          </section>
+          </SectionCard>
         </div>
       </div>
     </div>

@@ -16,6 +16,13 @@ import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import { normalizeLearningUpdate, normalizeSkill } from '../lib/agentRuntime';
 import { LearningUpdate, Skill } from '../types';
+import {
+  EmptyState,
+  PageHeader,
+  SectionCard,
+  StatTile,
+  StatusBadge,
+} from '../components/EnterpriseUI';
 
 const createSkillId = (name: string) =>
   `SKL-${name
@@ -171,85 +178,48 @@ export default function SkillLibrary() {
   };
 
   return (
-    <div className="space-y-8">
-      <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="max-w-3xl">
-          <div className="mb-1 flex items-center gap-2">
-            <span className="rounded bg-primary/10 px-2 py-0.5 text-[0.625rem] font-bold uppercase tracking-widest text-primary">
-              Skill Library
-            </span>
-            <span className="text-[0.625rem] font-bold uppercase tracking-widest text-slate-400">
-              {activeCapability.id}
-            </span>
-          </div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-on-surface">
-            {activeCapability.name} Skill Library
-          </h1>
-          <p className="text-sm font-medium text-secondary">
-            Curate the reusable skills that belong to this capability, import shared
-            skills when needed, and promote learning updates into the library so
-            agents can keep getting smarter inside the same context boundary.
-          </p>
-        </div>
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Skill Library"
+        context={activeCapability.id}
+        title={`${activeCapability.name} Skill Library`}
+        description="Curate reusable skills for this capability, import from the shared catalog, and promote learning updates so agents keep improving inside the same context boundary."
+        actions={
+          <>
+            <button
+              onClick={() => navigate('/team')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              <Cpu size={16} />
+              Manage Agents
+            </button>
+            <button
+              onClick={() => navigate('/tasks')}
+              className="enterprise-button bg-primary text-on-primary hover:bg-primary/90"
+            >
+              <ArrowRight size={16} />
+              View Execution Learning
+            </button>
+          </>
+        }
+      />
 
-        <div className="flex flex-col gap-3 sm:flex-row">
-          <button
-            onClick={() => navigate('/team')}
-            className="inline-flex items-center gap-2 rounded-2xl border border-primary/10 bg-white px-4 py-3 text-sm font-bold text-primary shadow-sm transition-all hover:bg-primary/5"
-          >
-            <Cpu size={16} />
-            Manage Agents
-          </button>
-          <button
-            onClick={() => navigate('/tasks')}
-            className="inline-flex items-center gap-2 rounded-2xl bg-primary px-4 py-3 text-sm font-bold text-white shadow-lg shadow-primary/20 transition-all hover:brightness-110"
-          >
-            <ArrowRight size={16} />
-            View Execution Learning
-          </button>
-        </div>
-      </header>
-
-      <div className="grid gap-4 md:grid-cols-4">
-        {[
-          { label: 'Capability Skills', value: capabilitySkills.length },
-          { label: 'Shared Catalog', value: sharedCatalog.length },
-          { label: 'Agent Attachments', value: totalSkillAttachments },
-          { label: 'Learning Suggestions', value: learningSuggestions.length },
-        ].map(item => (
-          <div
-            key={item.label}
-            className="rounded-3xl border border-outline-variant/15 bg-white p-5 shadow-sm"
-          >
-            <p className="text-2xl font-extrabold text-primary">{item.value}</p>
-            <p className="mt-1 text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-secondary">
-              {item.label}
-            </p>
-          </div>
-        ))}
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <StatTile label="Capability Skills"    value={capabilitySkills.length}    icon={BookOpen}  tone="brand"    />
+        <StatTile label="Shared Catalog"       value={sharedCatalog.length}       icon={Sparkles}  tone="info"     />
+        <StatTile label="Agent Attachments"    value={totalSkillAttachments}      icon={Cpu}       tone="neutral"  />
+        <StatTile label="Learning Suggestions" value={learningSuggestions.length} icon={Brain}     tone="success"  />
       </div>
 
       <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_420px]">
         <div className="space-y-8">
-          <section className="overflow-hidden rounded-3xl border border-outline-variant/15 bg-white shadow-sm">
-            <div className="flex items-center justify-between border-b border-outline-variant/10 bg-primary/5 p-6">
-              <div className="flex items-center gap-3">
-                <div className="rounded-xl bg-primary p-2 text-white">
-                  <BookOpen size={18} />
-                </div>
-                <div>
-                  <h2 className="text-lg font-bold text-primary">Capability Skill Library</h2>
-                  <p className="text-[0.6875rem] text-secondary">
-                    Skills explicitly curated for {activeCapability.name}.
-                  </p>
-                </div>
-              </div>
-              <span className="rounded-full bg-white px-3 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-primary">
-                {capabilitySkills.length} skills
-              </span>
-            </div>
-
-            <div className="grid gap-4 p-6 md:grid-cols-2">
+          <SectionCard
+            title="Capability Skill Library"
+            description={`Skills explicitly curated for ${activeCapability.name}.`}
+            icon={BookOpen}
+            action={<StatusBadge tone="brand">{capabilitySkills.length} skills</StatusBadge>}
+          >
+            <div className="grid gap-4 md:grid-cols-2">
               {skillCoverage.map(({ skill, attachedAgents }) => (
                 <article
                   key={skill.id}
@@ -321,22 +291,14 @@ export default function SkillLibrary() {
                 </div>
               )}
             </div>
-          </section>
+          </SectionCard>
 
-          <section className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="rounded-xl bg-tertiary/10 p-2 text-tertiary">
-                <Brain size={18} />
-              </div>
-              <div>
-                <h2 className="text-lg font-bold text-primary">Learning-Derived Skills</h2>
-                <p className="text-[0.6875rem] text-secondary">
-                  Convert execution learning into reusable skills for the capability team.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-5 space-y-4">
+          <SectionCard
+            title="Learning-Derived Skills"
+            description="Convert execution learning into reusable skills for the capability team."
+            icon={Brain}
+          >
+            <div className="space-y-4">
               {learningSuggestions.map(({ update, skill }) => (
                 <div
                   key={update.id}
@@ -364,29 +326,22 @@ export default function SkillLibrary() {
               ))}
 
               {learningSuggestions.length === 0 && (
-                <div className="rounded-3xl bg-surface-container-low p-6 text-sm text-secondary">
-                  No unapplied learning-derived skill suggestions are waiting right now.
-                </div>
+                <EmptyState
+                  title="No suggestions yet"
+                  description="No unapplied learning-derived skill suggestions are waiting right now."
+                />
               )}
             </div>
-          </section>
+          </SectionCard>
         </div>
 
         <div className="space-y-8">
-          <section className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="rounded-xl bg-primary/10 p-2 text-primary">
-                <Plus size={18} />
-              </div>
-              <div>
-                <h2 className="text-lg font-bold text-primary">Create Custom Skill</h2>
-                <p className="text-[0.6875rem] text-secondary">
-                  Add a capability-specific skill that only belongs to this workspace.
-                </p>
-              </div>
-            </div>
-
-            <form onSubmit={handleCreateSkill} className="mt-5 space-y-4">
+          <SectionCard
+            title="Create Custom Skill"
+            description="Add a capability-specific skill that only belongs to this workspace."
+            icon={Plus}
+          >
+            <form onSubmit={handleCreateSkill} className="space-y-4">
               <label className="space-y-2">
                 <span className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
                   Skill Name
@@ -475,28 +430,20 @@ export default function SkillLibrary() {
               <button
                 type="submit"
                 disabled={!canCreate}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-3 text-sm font-bold text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+                className="enterprise-button w-full justify-center bg-primary text-on-primary hover:bg-primary/90 disabled:opacity-40"
               >
                 <Plus size={16} />
                 Add to Capability Skill Library
               </button>
             </form>
-          </section>
+          </SectionCard>
 
-          <section className="rounded-3xl border border-outline-variant/15 bg-white p-6 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="rounded-xl bg-primary/10 p-2 text-primary">
-                <Sparkles size={18} />
-              </div>
-              <div>
-                <h2 className="text-lg font-bold text-primary">Shared Skill Catalog</h2>
-                <p className="text-[0.6875rem] text-secondary">
-                  Import reusable shared skills into this capability when they fit.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-5 space-y-4">
+          <SectionCard
+            title="Shared Skill Catalog"
+            description="Import reusable shared skills into this capability when they fit."
+            icon={Sparkles}
+          >
+            <div className="space-y-4">
               {sharedCatalog.map(skill => (
                 <div
                   key={skill.id}
@@ -530,12 +477,14 @@ export default function SkillLibrary() {
               ))}
 
               {sharedCatalog.length === 0 && (
-                <div className="rounded-3xl bg-surface-container-low p-6 text-sm text-secondary">
-                  Every shared skill is already available inside this capability library.
-                </div>
+                <EmptyState
+                  title="All shared skills imported"
+                  description="Every shared skill is already available inside this capability library."
+                  icon={CheckCircle2}
+                />
               )}
             </div>
-          </section>
+          </SectionCard>
         </div>
       </div>
     </div>

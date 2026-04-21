@@ -2783,3 +2783,139 @@ export const continueCapabilityWorkItemStageControl = async (
       body: JSON.stringify(payload),
     },
   );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Release Passport
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ReleasePassportApproval {
+  role: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'REQUEST_CHANGES';
+  resolvedBy?: string;
+  resolvedAt?: string;
+}
+
+export interface ReleasePassportData {
+  documentId: string;
+  recommendation: 'APPROVE' | 'HOLD' | 'REJECT';
+  recommendationReason: string;
+  workItem: {
+    id: string;
+    title: string;
+    description: string;
+    phase: string;
+    taskType: string;
+    status: string;
+  };
+  runId: string;
+  codeImpact: {
+    additions: number;
+    deletions: number;
+    filesChanged: number;
+    primarySymbols: string[];
+    targetRepository?: string;
+  };
+  evidence: Array<{
+    label: string;
+    kind: 'ANALYSIS' | 'COMMIT' | 'SIGNATURE' | 'TEST' | 'ARTIFACT';
+    status: 'VERIFIED' | 'PENDING' | 'MISSING';
+    ref?: string;
+  }>;
+  governance: {
+    sensitivePaths: 'UNTOUCHED' | 'MODIFIED';
+    policyExceptions: number;
+    executionRole: string;
+    memoryDrift: 'ALIGNED' | 'DRIFTED' | 'UNKNOWN';
+  };
+  approvals: ReleasePassportApproval[];
+  generatedAt: string;
+}
+
+export const fetchReleasePassport = async (
+  capabilityId: string,
+  runId: string,
+): Promise<ReleasePassportData> =>
+  requestJson<ReleasePassportData>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/passport`,
+  );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Blast Radius
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type BlastImpactLevel = 'CRITICAL' | 'WARNING' | 'SAFE';
+
+export interface BlastNode {
+  id: string;
+  label: string;
+  filePath: string;
+  capabilityId: string;
+  capabilityName?: string;
+  impactLevel: BlastImpactLevel;
+  reason: string;
+  couplingKind: 'DIRECT_IMPORT' | 'INDIRECT' | 'TYPE_ONLY';
+}
+
+export interface BlastRadiusResult {
+  targetFile: string;
+  targetCapabilityId: string;
+  targetExports: string[];
+  totalDependents: number;
+  criticalCount: number;
+  warningCount: number;
+  safeCount: number;
+  nodes: BlastNode[];
+  analyzedAt: string;
+}
+
+export const fetchBlastRadius = async (
+  capabilityId: string,
+  filePath: string,
+): Promise<BlastRadiusResult> =>
+  requestJson<BlastRadiusResult>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/blast-radius?filePath=${encodeURIComponent(filePath)}`,
+  );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sentinel Mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type SentinelAlertSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+
+export interface SentinelAlertPayload {
+  cveId: string;
+  description: string;
+  severity: SentinelAlertSeverity;
+  affectedFile?: string;
+  source?: 'sonarqube' | 'snyk' | 'github-security' | 'manual';
+  capabilityId?: string;
+  workflowId?: string;
+}
+
+export interface SentinelMissionStatus {
+  missionId: string;
+  workItemId: string;
+  capabilityId: string;
+  cveId: string;
+  severity: SentinelAlertSeverity;
+  description: string;
+  status: string;
+  createdAt: string;
+  runId?: string;
+}
+
+export const triggerSentinelAlert = async (
+  payload: SentinelAlertPayload,
+): Promise<SentinelMissionStatus> =>
+  requestJson<SentinelMissionStatus>('/api/sentinel/alert', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(payload),
+  });
+
+export const fetchSentinelMissions = async (
+  capabilityId?: string,
+): Promise<SentinelMissionStatus[]> =>
+  requestJson<SentinelMissionStatus[]>(
+    `/api/sentinel/missions${capabilityId ? `?capabilityId=${encodeURIComponent(capabilityId)}` : ''}`,
+  );

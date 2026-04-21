@@ -232,3 +232,188 @@ export const findSymbolRangeInFile = async (
     kind: String(row.kind || ''),
   };
 };
+
+interface NeighborRow {
+  from_file: string;
+  kind: string;
+  to_module: string;
+}
+
+export interface FileNeighbor {
+  filePath: string;
+  refKind: string;
+  /** Module specifier for dependencies; empty for dependents. */
+  moduleSpecifier?: string;
+}
+
+/**
+ * Find files that import (or otherwise reference) the given file — i.e.
+ * the "callers" in a file-level dependency graph. Because
+ * `capability_code_references.to_module` stores the raw import specifier
+ * (`"./token"`, `"express"`, `"com.foo.Bar"`) and not a resolved file
+ * path, we match by the target's filename stem as a suffix. This is
+ * fuzzy — a specifier like `./token` in `src/auth/index.ts` will
+ * correctly resolve to `src/auth/token.ts`, but a specifier like `token`
+ * could match the wrong repo file. Good enough as a retrieval hint.
+ *
+ * Used by the Retrieval Bundle (Phase 2 / Lever 6): when the agent asks
+ * to read a symbol with `includeCallers > 0`, we surface the top N files
+ * that depend on the target file so cross-method invariants stay in
+ * scope without forcing the agent to guess.
+ */
+export const findFileDependents = async (
+  capabilityId: string,
+  filePath: string,
+  limit = 3,
+): Promise<FileNeighbor[]> => {
+  const trimmed = (filePath || '').trim();
+  if (!trimmed) return [];
+  // Derive the filename stem — "src/auth/token.ts" → "token". We match on
+  // `to_module LIKE '%<stem>%'` which catches both relative and module
+  // imports. LIMIT is small by design (max 6 per plan).
+  const base = trimmed.split('/').pop() || trimmed;
+  const stem = base.replace(/\.(ts|tsx|js|jsx|mjs|cjs|py|java)$/i, '');
+  if (!stem) return [];
+
+  const cap = Math.min(Math.max(limit, 1), 6);
+  const result = await query(
+    `
+      SELECT DISTINCT from_file, kind, to_module
+      FROM capability_code_references
+      WHERE capability_id = $1
+        AND to_module LIKE $2
+        AND from_file <> $3
+        AND from_file NOT LIKE $4
+      ORDER BY from_file ASC
+      LIMIT $5
+    `,
+    [capabilityId, `%${stem}%`, trimmed, `%/${trimmed}`, cap],
+  );
+
+  return ((result.rows as NeighborRow[]) || []).map(row => ({
+    filePath: row.from_file,
+    refKind: row.kind || 'IMPORTS',
+    moduleSpecifier: row.to_module,
+  }));
+};
+
+/**
+ * Find files referenced *by* the given file — i.e. the "callees" in a
+ * file-level dependency graph. The raw `to_module` values are import
+ * specifiers (e.g. "./utils", "express", "com.foo.Bar"). We attempt to
+ * resolve each back to a real indexed file via a suffix match on
+ * `capability_code_symbols.file_path`; specifiers that don't resolve
+ * (external libraries, stdlib) are dropped.
+ */
+export const findFileDependencies = async (
+  capabilityId: string,
+  filePath: string,
+  limit = 3,
+): Promise<FileNeighbor[]> => {
+  const trimmed = (filePath || '').trim();
+  if (!trimmed) return [];
+  const cap = Math.min(Math.max(limit, 1), 6);
+
+  // Pull the specifiers this file imports.
+  const refs = await query(
+    `
+      SELECT DISTINCT to_module, kind
+      FROM capability_code_references
+      WHERE capability_id = $1
+        AND (from_file = $2 OR from_file LIKE $3)
+      ORDER BY to_module ASC
+      LIMIT $4
+    `,
+    [capabilityId, trimmed, `%/${trimmed}`, cap * 3],
+  );
+
+  const specifiers = (refs.rows as Array<{ to_module: string; kind: string }>) || [];
+  if (specifiers.length === 0) return [];
+
+  // Resolve each specifier by matching its last path segment to an
+  // indexed file_path suffix. Stdlib / 3rd-party imports won't resolve
+  // and are dropped silently.
+  const resolved: FileNeighbor[] = [];
+  for (const ref of specifiers) {
+    if (resolved.length >= cap) break;
+    const spec = (ref.to_module || '').trim();
+    if (!spec) continue;
+    const segment = spec.split(/[\\/.]/).filter(Boolean).pop();
+    if (!segment) continue;
+    const match = await query(
+      `
+        SELECT DISTINCT file_path
+        FROM capability_code_symbols
+        WHERE capability_id = $1
+          AND (
+            file_path LIKE $2
+            OR file_path LIKE $3
+          )
+        ORDER BY LENGTH(file_path) ASC
+        LIMIT 1
+      `,
+      [capabilityId, `%/${segment}.%`, `%/${segment}/index.%`],
+    );
+    const hit = match.rows[0] as { file_path?: string } | undefined;
+    if (hit?.file_path && !resolved.some(r => r.filePath === hit.file_path)) {
+      resolved.push({
+        filePath: hit.file_path,
+        refKind: ref.kind || 'IMPORTS',
+        moduleSpecifier: spec,
+      });
+    }
+  }
+  return resolved;
+};
+
+export interface FileExportSummary {
+  symbolName: string;
+  kind: string;
+  signature: string;
+  startLine: number;
+  endLine: number;
+  isExported: boolean;
+}
+
+/**
+ * Summarize the top exported symbols in a file as compact signature
+ * lines. Used by the Retrieval Bundle to describe neighbor files
+ * without pulling their full content — the agent sees *what* each
+ * neighbor offers and can decide whether to read it.
+ */
+export const listTopExportsInFile = async (
+  capabilityId: string,
+  filePath: string,
+  limit = 3,
+): Promise<FileExportSummary[]> => {
+  const trimmed = (filePath || '').trim();
+  if (!trimmed) return [];
+  const cap = Math.min(Math.max(limit, 1), 8);
+  const result = await query(
+    `
+      SELECT symbol_name, kind, signature, start_line, end_line, is_exported
+      FROM capability_code_symbols
+      WHERE capability_id = $1
+        AND (file_path = $2 OR file_path LIKE $3)
+      ORDER BY is_exported DESC, start_line ASC
+      LIMIT $4
+    `,
+    [capabilityId, trimmed, `%/${trimmed}`, cap],
+  );
+
+  return ((result.rows as Array<{
+    symbol_name: string;
+    kind: string;
+    signature: string;
+    start_line: number;
+    end_line: number;
+    is_exported: boolean;
+  }>) || []).map(row => ({
+    symbolName: row.symbol_name,
+    kind: String(row.kind || ''),
+    signature: String(row.signature || ''),
+    startLine: Number(row.start_line) || 1,
+    endLine: Number(row.end_line) || 1,
+    isExported: Boolean(row.is_exported),
+  }));
+};

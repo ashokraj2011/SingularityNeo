@@ -103,6 +103,9 @@ import { registerRuntimeChatRoutes } from './routes/runtimeChat';
 import { registerAgentGitRoutes } from './routes/agentGit';
 import { registerWorkItemRoutes } from './routes/workItems';
 import { registerWorkflowRunRoutes } from './routes/workflowRuns';
+import { registerPassportRoutes } from './routes/passport';
+import { registerBlastRadiusRoutes } from './routes/blastRadius';
+import { registerSentinelRoutes } from './routes/sentinel';
 import { registerWorkspaceAccessRoutes } from './routes/workspaceAccess';
 import { isDesktopExecutionRuntime } from './executionOwnership';
 import { bindRequestActorContext, parseActorContext } from './requestActor';
@@ -914,6 +917,9 @@ registerCodeWorkspaceRoutes(app, {
 registerRuntimeRoutes(app);
 registerExecutionRuntimeRoutes(app);
 registerIncidentRoutes(app, { parseActorContext });
+registerPassportRoutes(app);
+registerBlastRadiusRoutes(app);
+registerSentinelRoutes(app, { parseActor });
 registerRuntimeChatRoutes(app, {
   ZERO_RUNTIME_USAGE,
   GitHubProviderRateLimitError,

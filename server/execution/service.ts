@@ -75,10 +75,18 @@ import {
   normalizeWorkItemPhaseStakeholders,
 } from '../../src/lib/workItemStakeholders';
 import { invokeScopedCapabilitySession } from '../githubModels';
+import { resolveAgentProviderKey } from '../providerRegistry';
 import {
   rollupToolHistory,
   type RollupCacheEntry,
 } from './historyRollup';
+import {
+  buildBudgetedPrompt,
+  resolvePhaseBudget,
+  type BudgetFragment,
+  type ContextSource,
+} from './contextBudget';
+import { estimateTokens, normalizeProviderForEstimate } from './tokenEstimate';
 import {
   queueExperienceDistillationRefresh,
   queueSingleAgentLearningRefresh,
@@ -1795,6 +1803,15 @@ const requestStepDecision = async ({
   const rollupConfig = capability.executionConfig?.historyRollup;
   const rollupEnabled = rollupConfig?.enabled !== false;
   let effectiveToolHistory = toolHistory;
+  // Event-driven rollup trigger (Phase 2 / Lever 8): force a rollup
+  // when state has materially shifted since the last turn — a recoverable
+  // tool error, a phase change, or a wait/approval just resolved.
+  // These are moments the main model benefits from a fresh condensed
+  // snapshot rather than replaying noise.
+  const lastTurnContent = toolHistory[toolHistory.length - 1]?.content ?? '';
+  const forceRollup =
+    /recoverable|write[_ ]control lock|lock held|policy[_ ]denied/i.test(lastTurnContent) ||
+    (runStep.metadata as Record<string, unknown> | undefined)?.phaseTransitioned === true;
   if (rollupEnabled && toolHistory.length > 0) {
     try {
       const { rolled, nextCache } = await rollupToolHistory({
@@ -1804,6 +1821,7 @@ const requestStepDecision = async ({
         cache: rollupCacheRef?.current ?? null,
         keepLastN: rollupConfig?.keepLastN,
         rollupThreshold: rollupConfig?.threshold,
+        forceRollup,
       });
       effectiveToolHistory = rolled.compressed;
       if (rollupCacheRef) rollupCacheRef.current = nextCache;
@@ -1906,6 +1924,135 @@ const requestStepDecision = async ({
     }),
   );
 
+  // Context Budgeter (Phase 2 / Lever 5): assemble the prompt as
+  // typed fragments with priorities + token estimates so we can evict
+  // the lowest-priority sources if a call would exceed the phase budget.
+  // Happy path (call fits under the budget) is identical to the old
+  // flat .join('\n\n'): fragments emit in input order, nothing evicted.
+  const providerForEstimate = normalizeProviderForEstimate(
+    resolveAgentProviderKey(agent),
+  );
+  const tok = (text: string, kind: 'prose' | 'code' | 'json' = 'prose') =>
+    estimateTokens(text, { provider: providerForEstimate, kind });
+
+  const historyText = effectiveToolHistory.length
+    ? `Prior tool loop transcript:\n${effectiveToolHistory
+        .map(item => `${item.role.toUpperCase()}: ${item.content}`)
+        .join('\n\n')}`
+    : '';
+  const historySource: ContextSource = rollupCacheRef?.current?.summary
+    ? 'HISTORY_ROLLUP'
+    : 'RAW_TAIL_TURNS';
+
+  const systemCoreText = [
+    'Treat the compiled step contract as authoritative. Stay inside the execution boundary, use the required inputs and artifact checklist as the operating contract, and never invent orchestration outside this single step.',
+    'Use prior-step hand-offs, retrieved memory, and resolved human inputs as authoritative downstream context. Do not ask for information that is already present in those sections. If you truly need more input, explain exactly what new gap remains and why the existing context is insufficient.',
+    'If explicit operator guidance says to skip build, test, or docs execution for this attempt because the command template is unavailable or intentionally waived, do not keep retrying that tool. Complete the step with a clear note about the skipped validation, or pause for input only if the operator instruction is genuinely ambiguous.',
+    'Return JSON with one of these shapes:',
+    '1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"README.md"}}}',
+    '2. {"action":"complete","reasoning":"...","summary":"..."}',
+    '3. {"action":"pause_for_input","reasoning":"...","wait":{"type":"INPUT","message":"..."}}',
+    '4. {"action":"pause_for_approval","reasoning":"...","wait":{"type":"APPROVAL","message":"..."}}',
+    '5. {"action":"pause_for_conflict","reasoning":"...","wait":{"type":"CONFLICT_RESOLUTION","message":"..."}}',
+    '6. {"action":"fail","reasoning":"...","summary":"..."}',
+    'Only choose tool ids from the allowed list. If no tools are allowed, either complete, pause, or fail.',
+    'Use pause_for_conflict when competing requirements, unsafe assumptions, policy disagreement, or contradictory evidence need an explicit operator decision before continuation.',
+    `Story title: ${workItem.title}`,
+    `Story request: ${workItem.description}`,
+    'Decide the next execution action for this workflow step.',
+  ].join('\n\n');
+
+  const briefingText = [
+    `Capability briefing:\n${capabilityBriefingPrompt}`,
+    `Agent knowledge lens:\n${agentKnowledgePrompt}`,
+    `Current workflow: ${workflow.name}`,
+    `Current step: ${step.name}`,
+    `Current phase: ${workItem.phase}`,
+    `Current step attempt: ${runStep.attemptCount}`,
+  ].join('\n\n');
+
+  const stepContractJson = JSON.stringify(compiledStepContext, null, 2);
+  const stepContractText = [
+    `Step contract:\n${stepContractJson}`,
+    `Step objective: ${compiledStepContext.objective}`,
+    `Step guidance: ${compiledStepContext.description || 'None'}`,
+    `Execution notes: ${compiledStepContext.executionNotes || 'None'}`,
+    `Workflow hand-off context from prior completed steps:\n${compiledStepContext.handoffContext || 'None'}`,
+    `Resolved human input/conflict context for this step:\n${compiledStepContext.resolvedWaitContext || 'None'}`,
+  ].join('\n\n');
+
+  const memoryHitsText = `Attached work item input files:\n${workItemInputArtifactPrompt}`;
+
+  const toolDescriptionsText = [
+    `Allowed tools:\n${toolDescriptions}`,
+    `Workspace policy:\n${workspaceGuidance}`,
+  ].join('\n\n');
+
+  const planSummaryText = `Execution plan summary: ${compiledWorkItemPlan.planSummary}`;
+  const operatorGuidanceText = `Explicit operator guidance and override context:\n${
+    operatorGuidanceContext || 'None'
+  }`;
+
+  const fragments: BudgetFragment[] = [
+    {
+      source: 'SYSTEM_CORE',
+      text: systemCoreText,
+      estimatedTokens: tok(systemCoreText, 'prose'),
+    },
+    {
+      source: 'TOOL_DESCRIPTIONS',
+      text: toolDescriptionsText,
+      estimatedTokens: tok(toolDescriptionsText, 'prose'),
+    },
+    {
+      source: 'STEP_CONTRACT',
+      text: stepContractText,
+      estimatedTokens: tok(stepContractText, 'json'),
+      meta: { stepName: step.name, attempt: runStep.attemptCount },
+    },
+    {
+      source: 'WORK_ITEM_BRIEFING',
+      text: briefingText,
+      estimatedTokens: tok(briefingText, 'prose'),
+      meta: { workflow: workflow.name, phase: workItem.phase },
+    },
+    {
+      source: 'OPERATOR_GUIDANCE',
+      text: operatorGuidanceText,
+      estimatedTokens: tok(operatorGuidanceText, 'prose'),
+    },
+    {
+      source: 'PLAN_SUMMARY',
+      text: planSummaryText,
+      estimatedTokens: tok(planSummaryText, 'prose'),
+    },
+    {
+      source: 'MEMORY_HITS',
+      text: memoryHitsText,
+      estimatedTokens: tok(memoryHitsText, 'prose'),
+    },
+    ...(historyText
+      ? [
+          {
+            source: historySource,
+            text: historyText,
+            estimatedTokens: tok(historyText, 'prose'),
+            meta: {
+              turnCount: effectiveToolHistory.length,
+              rolledUp: historySource === 'HISTORY_ROLLUP',
+            },
+          } as BudgetFragment,
+        ]
+      : []),
+  ];
+
+  const phaseBudget = resolvePhaseBudget(step.phase || workItem.phase);
+  const budgeted = buildBudgetedPrompt({
+    fragments,
+    maxInputTokens: phaseBudget.maxInputTokens,
+    reservedOutputTokens: phaseBudget.reservedOutputTokens,
+  });
+
   const response = await invokeScopedCapabilitySession({
     capability,
     agent,
@@ -1915,48 +2062,43 @@ const requestStepDecision = async ({
     developerPrompt:
       'You are an execution engine inside a capability workflow. Return JSON only with no markdown.',
     memoryPrompt: memoryContext.prompt || undefined,
-    prompt: [
-      `Capability briefing:\n${capabilityBriefingPrompt}`,
-      `Agent knowledge lens:\n${agentKnowledgePrompt}`,
-      `Execution plan summary: ${compiledWorkItemPlan.planSummary}`,
-      `Current workflow: ${workflow.name}`,
-      `Current step: ${step.name}`,
-      `Current phase: ${workItem.phase}`,
-      `Current step attempt: ${runStep.attemptCount}`,
-      `Step contract:\n${JSON.stringify(compiledStepContext, null, 2)}`,
-      `Step objective: ${compiledStepContext.objective}`,
-      `Step guidance: ${compiledStepContext.description || 'None'}`,
-      `Execution notes: ${compiledStepContext.executionNotes || 'None'}`,
-      `Attached work item input files:\n${workItemInputArtifactPrompt}`,
-      `Workflow hand-off context from prior completed steps:\n${compiledStepContext.handoffContext || 'None'}`,
-      `Resolved human input/conflict context for this step:\n${compiledStepContext.resolvedWaitContext || 'None'}`,
-      `Explicit operator guidance and override context:\n${operatorGuidanceContext || 'None'}`,
-      `Allowed tools:\n${toolDescriptions}`,
-      `Workspace policy:\n${workspaceGuidance}`,
-      effectiveToolHistory.length
-        ? `Prior tool loop transcript:\n${effectiveToolHistory
-            .map(item => `${item.role.toUpperCase()}: ${item.content}`)
-            .join('\n\n')}`
-        : null,
-      'Treat the compiled step contract as authoritative. Stay inside the execution boundary, use the required inputs and artifact checklist as the operating contract, and never invent orchestration outside this single step.',
-      'Use prior-step hand-offs, retrieved memory, and resolved human inputs as authoritative downstream context. Do not ask for information that is already present in those sections. If you truly need more input, explain exactly what new gap remains and why the existing context is insufficient.',
-      'If explicit operator guidance says to skip build, test, or docs execution for this attempt because the command template is unavailable or intentionally waived, do not keep retrying that tool. Complete the step with a clear note about the skipped validation, or pause for input only if the operator instruction is genuinely ambiguous.',
-      'Return JSON with one of these shapes:',
-      '1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"README.md"}}}',
-      '2. {"action":"complete","reasoning":"...","summary":"..."}',
-      '3. {"action":"pause_for_input","reasoning":"...","wait":{"type":"INPUT","message":"..."}}',
-      '4. {"action":"pause_for_approval","reasoning":"...","wait":{"type":"APPROVAL","message":"..."}}',
-      '5. {"action":"pause_for_conflict","reasoning":"...","wait":{"type":"CONFLICT_RESOLUTION","message":"..."}}',
-      '6. {"action":"fail","reasoning":"...","summary":"..."}',
-      'Only choose tool ids from the allowed list. If no tools are allowed, either complete, pause, or fail.',
-      'Use pause_for_conflict when competing requirements, unsafe assumptions, policy disagreement, or contradictory evidence need an explicit operator decision before continuation.',
-      `Story title: ${workItem.title}`,
-      `Story request: ${workItem.description}`,
-      'Decide the next execution action for this workflow step.',
-    ]
-      .filter(Boolean)
-      .join('\n\n'),
+    prompt: budgeted.assembled,
   });
+
+  // Emit a Prompt Receipt (Phase 2 / Lever 7): per-call record of which
+  // context fragments the main model actually saw. On-brand for the
+  // evidence/flight-recorder story — operators can answer "why did the
+  // model decide X" with "because it saw these N fragments."
+  if (runId) {
+    try {
+      await emitRunProgressEvent({
+        capabilityId: capability.id,
+        runId,
+        workItemId: workItem.id,
+        runStepId: runStep.id,
+        traceId,
+        spanId,
+        type: 'PROMPT_RECEIPT',
+        message:
+          budgeted.receipt.evicted.length > 0
+            ? `Prompt fit under ${phaseBudget.maxInputTokens}-token budget after evicting ${budgeted.receipt.evicted.length} fragment${budgeted.receipt.evicted.length === 1 ? '' : 's'}.`
+            : `Prompt assembled: ${budgeted.receipt.totalEstimatedTokens} / ${phaseBudget.maxInputTokens} estimated tokens across ${budgeted.receipt.included.length} fragments.`,
+        details: {
+          stage: 'PROMPT_RECEIPT',
+          included: budgeted.receipt.included,
+          evicted: budgeted.receipt.evicted,
+          totalEstimatedTokens: budgeted.receipt.totalEstimatedTokens,
+          maxInputTokens: budgeted.receipt.maxInputTokens,
+          reservedOutputTokens: budgeted.receipt.reservedOutputTokens,
+          phase: step.phase || workItem.phase,
+          model: response.model || null,
+          actualUsage: response.usage || null,
+        },
+      });
+    } catch (error) {
+      console.warn('[requestStepDecision] failed to emit PROMPT_RECEIPT event', error);
+    }
+  }
 
   try {
     const parsed = extractJsonObject(response.content) as Record<string, any>;

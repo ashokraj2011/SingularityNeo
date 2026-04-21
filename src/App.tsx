@@ -43,6 +43,9 @@ const GovernanceExceptionsPage = lazy(() => import('./pages/GovernanceExceptions
 const GovernanceProvenancePage = lazy(() => import('./pages/GovernanceProvenance'));
 const GovernancePosturePage = lazy(() => import('./pages/GovernancePosture'));
 const WorkItemReport = lazy(() => import('./pages/WorkItemReport'));
+const ReleasePassport = lazy(() => import('./pages/ReleasePassport'));
+const BlastRadius = lazy(() => import('./pages/BlastRadius'));
+const Sentinel = lazy(() => import('./pages/Sentinel'));
 
 const RouteLoader = () => (
   <div className="section-card ambient-shadow min-h-[calc(100vh-12rem)] p-8">
@@ -125,6 +128,12 @@ export default function App() {
                   <Route path="/evals" element={<EvalCenter />} />
                   <Route path="/reports/work-items" element={<WorkItemReport />} />
                   <Route path="/e/:bundleId" element={<EvidencePacketPage />} />
+                  <Route
+                    path="/passport/:capabilityId/:runId"
+                    element={<ReleasePassport />}
+                  />
+                  <Route path="/blast-radius" element={<BlastRadius />} />
+                  <Route path="/sentinel" element={<Sentinel />} />
                   <Route path="*" element={<Orchestrator />} />
                 </Routes>
               </Suspense>

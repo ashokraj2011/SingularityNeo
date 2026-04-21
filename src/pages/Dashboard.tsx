@@ -13,7 +13,9 @@ import {
   Gauge,
   KeyRound,
   PlayCircle,
+  Radiation,
   Scale,
+  ScanEye,
   Search,
   ShieldCheck,
   ShieldOff,
@@ -91,6 +93,8 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   'governance-provenance': Search,
   'governance-posture': Gauge,
   'work-item-report': ClipboardCheck,
+  sentinel: Radiation,
+  'blast-radius': ScanEye,
 };
 
 const Dashboard = () => {

@@ -5396,6 +5396,7 @@ const Orchestrator = () => {
                     onOpenWorkflowDesigner: () => navigate('/designer'),
                   }}
                   attemptsProps={{
+                    capabilityId: activeCapability.id,
                     currentRun,
                     selectedOpenWait,
                     previousRunSummary: previousRunSummary?.id || null,
@@ -5411,6 +5412,7 @@ const Orchestrator = () => {
                     getRunEventTone,
                     getRunEventLabel,
                   }}
+                  receiptsProps={{ selectedRunEvents }}
                 />
               )}
             </OrchestratorWorkbenchCanvas>

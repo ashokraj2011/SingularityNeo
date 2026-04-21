@@ -2031,16 +2031,25 @@ export const invokeBudgetModelSummary = async ({
     .map(turn => `${turn.role.toUpperCase()}: ${turn.content}`)
     .join('\n\n');
 
+  // Structured output (Phase 2 / Lever 8): request a JSON state note
+  // rather than prose. The main model parses this naturally and can
+  // reason about specific fields ("we're blocked on X, pending approval
+  // on Y") instead of fuzzy-matching a 3-sentence paragraph.
   const systemPrompt =
-    'You compress an agent tool-loop transcript into a short state note. ' +
-    'Output 3 to 4 sentences maximum. Preserve: the file or symbol under edit, ' +
-    'the most recent failure or success, and the immediate next intent. ' +
-    'Do not emit tool JSON, code fences, or bullet lists.';
+    'You compress an agent tool-loop transcript into a compact JSON state note. ' +
+    'Output ONLY a single JSON object with these keys (all strings unless noted): ' +
+    '{"currentGoal": "...", "lastSuccessfulAction": "...", "currentBlocker": "..." | null, ' +
+    '"filesInPlay": ["src/...", "..."], "pendingDecision": "..." | null, ' +
+    '"evidenceGenerated": ["artifact:...", "..."]}. ' +
+    'Keep every string under 200 chars. Use [] for empty arrays, null for empty scalars. ' +
+    'Do not emit markdown fences, prose explanations, or tool JSON outside this object.';
 
   const userPrompt = [
-    priorSummary ? `PRIOR SUMMARY (extend, do not repeat):\n${priorSummary}` : null,
+    priorSummary
+      ? `PRIOR STATE NOTE (extend and correct, do not repeat verbatim):\n${priorSummary}`
+      : null,
     `NEW TURNS TO FOLD IN:\n${transcript}`,
-    'Write the updated state note now.',
+    'Emit the updated JSON state note now. Return ONLY the JSON object.',
   ]
     .filter(Boolean)
     .join('\n\n');

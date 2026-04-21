@@ -15,6 +15,7 @@ describe('OrchestratorWorkbenchDetailTabs', () => {
         operatePanel={<div>Operate panel</div>}
         artifactsPanel={<div>Artifacts panel</div>}
         attemptsPanel={<div>Attempts panel</div>}
+        receiptsPanel={<div>Receipts panel</div>}
       />,
     );
 
@@ -26,5 +27,8 @@ describe('OrchestratorWorkbenchDetailTabs', () => {
 
     await user.click(screen.getByRole('button', { name: 'Attempts' }));
     expect(onDetailTabChange).toHaveBeenCalledWith('attempts');
+
+    await user.click(screen.getByRole('button', { name: 'Receipts' }));
+    expect(onDetailTabChange).toHaveBeenCalledWith('receipts');
   });
 });

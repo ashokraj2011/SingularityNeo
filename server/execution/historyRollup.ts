@@ -64,12 +64,22 @@ export const rollupToolHistory = async (args: {
   cache?: RollupCacheEntry | null;
   keepLastN?: number;
   rollupThreshold?: number;
+  /**
+   * Phase 2 / Lever 8: event-driven override. When the caller detects
+   * a phase transition, recoverable tool error, or approval/wait event,
+   * it can set this to force a rollup even if we're still below the
+   * turn-count threshold. Useful because the state has materially
+   * changed and the summary should reflect that before the main model
+   * resumes.
+   */
+  forceRollup?: boolean;
 }): Promise<{ rolled: RolledHistory; nextCache: RollupCacheEntry | null }> => {
   const keepLastN = Math.max(1, args.keepLastN ?? DEFAULT_KEEP_LAST_N);
   const threshold = Math.max(keepLastN + 1, args.rollupThreshold ?? DEFAULT_THRESHOLD);
   const history = args.toolHistory;
+  const forceRollup = Boolean(args.forceRollup) && history.length > keepLastN;
 
-  if (history.length <= threshold) {
+  if (!forceRollup && history.length <= threshold) {
     return {
       rolled: {
         compressed: history,

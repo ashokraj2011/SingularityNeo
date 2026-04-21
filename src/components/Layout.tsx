@@ -22,8 +22,11 @@ import {
   PlusCircle,
   Search,
   Scale,
+  ShieldAlert,
   ShieldCheck,
   ShieldOff,
+  Radiation,
+  ScanEye,
   Siren,
   Sparkles,
   Star,
@@ -85,6 +88,45 @@ const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
   'governance-provenance': Search,
   'governance-posture': Gauge,
   'work-item-report': BarChart3,
+  sentinel: Radiation,
+  'blast-radius': ScanEye,
+};
+
+// ─── Sidebar group definitions ───────────────────────────────────────────────
+
+const TOOL_GROUP_DEFS = [
+  { id: 'governance' as const, label: 'Governance',  icon: Scale,       color: 'text-violet-600' },
+  { id: 'security'   as const, label: 'Security',    icon: ShieldAlert,  color: 'text-rose-600'   },
+  { id: 'operations' as const, label: 'Operations',  icon: Activity,    color: 'text-sky-600'    },
+  { id: 'platform'   as const, label: 'Platform',    icon: Building2,   color: 'text-slate-500'  },
+];
+
+type ToolGroup = typeof TOOL_GROUP_DEFS[number]['id'];
+
+const PATH_TO_GROUP: Record<string, ToolGroup> = {
+  '/governance/controls':   'governance',
+  '/governance/exceptions': 'governance',
+  '/governance/provenance': 'governance',
+  '/governance/posture':    'governance',
+  '/reports/work-items':    'governance',
+  '/sentinel':              'security',
+  '/blast-radius':          'security',
+  '/operations':            'operations',
+  '/incidents':             'operations',
+  '/mrm':                   'operations',
+  '/run-console':           'operations',
+  '/memory':                'operations',
+  '/evals':                 'operations',
+  '/architecture':          'platform',
+  '/access':                'platform',
+  '/skills':                'platform',
+  '/tools':                 'platform',
+  '/tool-access':           'platform',
+  '/policies':              'platform',
+  '/artifact-designer':     'platform',
+  '/studio':                'platform',
+  '/tasks':                 'platform',
+  '/workspace/databases':   'platform',
 };
 
 const routeTitles: Record<string, string> = {
@@ -108,6 +150,8 @@ const routeTitles: Record<string, string> = {
   '/governance/provenance': 'Prove the Negative',
   '/governance/posture': 'Posture Dashboard',
   '/reports/work-items': 'Work Item Report',
+  '/sentinel': 'Sentinel Mode',
+  '/blast-radius': 'Blast Radius',
 };
 
 const SIDEBAR_STORAGE_KEY = 'singularity.sidebar.collapsed';
@@ -283,7 +327,7 @@ const Sidebar = ({
           {!isCollapsed ? (
             <div>
               <h2 className="text-base font-bold tracking-tight text-on-surface">
-                Singulairy
+                Singularity
               </h2>
               <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-secondary">
                 Engineering Cockpit
@@ -582,37 +626,12 @@ const Sidebar = ({
           {!isCollapsed ? <span>On Board Capability</span> : null}
         </button>
 
-        {!isCollapsed ? (
-          <div className="grid grid-cols-3 gap-2">
-            <button
-              type="button"
-              onClick={() => navigate('/capabilities/metadata')}
-              className="enterprise-button enterprise-button-secondary px-2 py-2 text-[0.7rem]"
-            >
-              Existing
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate('/workspace/databases')}
-              className="enterprise-button enterprise-button-secondary px-2 py-2 text-[0.7rem]"
-            >
-              Databases
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate('/rule-engine')}
-              className="enterprise-button enterprise-button-secondary px-2 py-2 text-[0.7rem]"
-            >
-              Rules
-            </button>
-          </div>
-        ) : null}
       </div>
 
       <nav className="mt-5 flex flex-col gap-1.5">
         {!isCollapsed ? (
           <p className="px-4 pb-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-            Daily cockpit
+            Main
           </p>
         ) : null}
         {primaryNavItems.map(item => (
@@ -642,7 +661,7 @@ const Sidebar = ({
       <nav className="mt-4 flex flex-col gap-1.5">
         {!isCollapsed ? (
           <p className="px-4 pb-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-            Companion views
+            Workspace
           </p>
         ) : null}
         {companionNavItems.map(item => (
@@ -681,7 +700,7 @@ const Sidebar = ({
           title="Advanced tools"
           aria-expanded={isAdvancedNavOpen}
         >
-          <Sparkles size={17} className="shrink-0 transition-transform group-hover:scale-105" />
+          <Sparkles size={18} className="shrink-0 transition-transform group-hover:scale-105" />
           {!isCollapsed ? (
             <>
               <span>Specialist tools</span>
@@ -697,34 +716,55 @@ const Sidebar = ({
         </button>
 
         {isAdvancedNavOpen ? (
-          <nav className="mt-2 flex flex-col gap-1.5">
-            {advancedNavItems.map(item => (
-              <NavLink
-                key={item.path}
-                to={item.path}
-                title={item.name}
-                className={({ isActive }) =>
-                  cn(
-                    'group flex items-center rounded-xl text-sm font-semibold transition-all',
-                    isCollapsed ? 'justify-center gap-0 px-2 py-3' : 'gap-3 px-4 py-2.5',
-                    isActive
-                      ? 'border border-primary/15 bg-primary/10 text-primary shadow-[0_8px_20px_rgba(0,132,61,0.08)]'
-                      : 'text-secondary hover:bg-surface-container-low hover:text-on-surface',
-                  )
-                }
-              >
-                <item.icon
-                  size={17}
-                  className="shrink-0 transition-transform group-hover:scale-105"
-                />
-                {!isCollapsed ? <span>{item.name}</span> : null}
-              </NavLink>
-            ))}
-            {!advancedNavItems.length && !isCollapsed ? (
+          <nav className="mt-2 flex flex-col gap-0.5">
+            {advancedNavItems.length === 0 && !isCollapsed ? (
               <div className="rounded-xl border border-outline-variant/40 bg-surface-container-low px-4 py-3 text-xs leading-relaxed text-secondary">
                 Specialist tools will appear here when the current role or capability context needs them.
               </div>
-            ) : null}
+            ) : (
+              TOOL_GROUP_DEFS.map(group => {
+                const items = advancedNavItems.filter(
+                  item => PATH_TO_GROUP[item.path] === group.id,
+                );
+                if (!items.length) return null;
+                return (
+                  <div key={group.id} className="mb-1">
+                    {!isCollapsed ? (
+                      <div className="flex items-center gap-1.5 px-3 pb-0.5 pt-2.5">
+                        <group.icon size={11} className={cn('shrink-0', group.color)} />
+                        <p className={cn('text-[0.58rem] font-bold uppercase tracking-[0.16em]', group.color)}>
+                          {group.label}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="mx-auto my-1.5 h-px w-6 bg-outline-variant/40" />
+                    )}
+                    {items.map(item => (
+                      <NavLink
+                        key={item.path}
+                        to={item.path}
+                        title={item.name}
+                        className={({ isActive }) =>
+                          cn(
+                            'group flex items-center rounded-xl text-sm font-semibold transition-all',
+                            isCollapsed ? 'justify-center gap-0 px-2 py-3' : 'gap-3 px-4 py-3',
+                            isActive
+                              ? 'border border-primary/15 bg-primary/10 text-primary shadow-[0_8px_20px_rgba(0,132,61,0.08)]'
+                              : 'text-secondary hover:bg-surface-container-low hover:text-on-surface',
+                          )
+                        }
+                      >
+                        <item.icon
+                          size={18}
+                          className="shrink-0 transition-transform group-hover:scale-105"
+                        />
+                        {!isCollapsed ? <span>{item.name}</span> : null}
+                      </NavLink>
+                    ))}
+                  </div>
+                );
+              })
+            )}
           </nav>
         ) : null}
 
@@ -740,7 +780,7 @@ const Sidebar = ({
             aria-label="Logout"
           >
             <LogOut
-              size={17}
+              size={18}
               className="shrink-0 transition-transform group-hover:scale-105"
             />
             {!isCollapsed ? <span>Logout</span> : null}
@@ -1063,7 +1103,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
         key: `route:${item.path}`,
         label: item.name,
         description: `Cockpit route • ${item.path}`,
-        section: 'Daily cockpit',
+        section: 'Main',
         type: 'route' as const,
         onSelect: () => navigate(item.path),
       }));
@@ -1139,7 +1179,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
       {
         key: 'help:singularity-overview',
         label: 'Help menu',
-        description: 'Understand how Singulairy works, what each workspace does, and where to go next.',
+        description: 'Understand how Singularity works, what each workspace does, and where to go next.',
         section: 'Guides',
         type: 'guide' as const,
         onSelect: () => setIsHelpMenuOpen(true),

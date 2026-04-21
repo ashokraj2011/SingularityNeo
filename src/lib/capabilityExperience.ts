@@ -114,7 +114,9 @@ export type AdvancedToolId =
   | 'governance-exceptions'
   | 'governance-provenance'
   | 'governance-posture'
-  | 'work-item-report';
+  | 'work-item-report'
+  | 'sentinel'
+  | 'blast-radius';
 
 export type AdvancedToolAudience =
   | 'ALL'
@@ -384,6 +386,28 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     description:
       'Per-work-item breakdown of AI cost, token usage, elapsed time, human interaction count, and agent autonomy percentage.',
     audience: 'OPERATORS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'sentinel',
+    label: 'Sentinel Mode',
+    shortName: 'Sentinel',
+    path: '/sentinel',
+    description:
+      'Zero-prompt autonomous security remediation. Sentinel intercepts CVE alerts, maps the vulnerability, patches it, signs it, and delivers a Release Passport for 1-click approval.',
+    audience: 'OPERATORS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'blast-radius',
+    label: 'Blast Radius',
+    shortName: 'Blast Radius',
+    path: '/blast-radius',
+    description:
+      'Shadow execution dry-run that maps which capabilities and files would break if a proposed file change were deployed. Classifies dependents as CRITICAL, WARNING, or SAFE.',
+    audience: 'ARCHITECTS',
     exposureMode: 'ALWAYS',
     contextTriggers: [],
   },

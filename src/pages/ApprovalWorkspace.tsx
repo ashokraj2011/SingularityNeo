@@ -9,10 +9,11 @@ import {
   LoaderCircle,
   MessageSquareText,
   RefreshCw,
+  ScrollText,
   Send,
   ShieldCheck,
 } from 'lucide-react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import ArtifactPreview from '../components/ArtifactPreview';
 import InteractionTimeline from '../components/InteractionTimeline';
 import {
@@ -467,6 +468,13 @@ const ApprovalWorkspace = () => {
               )}
               Refresh packet
             </button>
+            <Link
+              to={`/passport/${capabilityId}/${runId}`}
+              className="enterprise-button inline-flex items-center gap-2 border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+            >
+              <ScrollText size={16} />
+              Release Passport
+            </Link>
           </div>
         }
       >

@@ -8,6 +8,7 @@ type Props = {
   operatePanel: React.ReactNode;
   artifactsPanel: React.ReactNode;
   attemptsPanel: React.ReactNode;
+  receiptsPanel: React.ReactNode;
 };
 
 export const OrchestratorWorkbenchDetailTabs = ({
@@ -16,6 +17,7 @@ export const OrchestratorWorkbenchDetailTabs = ({
   operatePanel,
   artifactsPanel,
   attemptsPanel,
+  receiptsPanel,
 }: Props) => (
   <>
     <div className="orchestrator-detail-tabs">
@@ -23,6 +25,7 @@ export const OrchestratorWorkbenchDetailTabs = ({
         ['operate', 'Operate'],
         ['artifacts', 'Artifacts'],
         ['attempts', 'Attempts'],
+        ['receipts', 'Receipts'],
       ] as const).map(([id, label]) => (
         <button
           key={id}
@@ -39,6 +42,7 @@ export const OrchestratorWorkbenchDetailTabs = ({
       {detailTab === 'operate' ? operatePanel : null}
       {detailTab === 'artifacts' ? artifactsPanel : null}
       {detailTab === 'attempts' ? attemptsPanel : null}
+      {detailTab === 'receipts' ? receiptsPanel : null}
     </div>
   </>
 );

@@ -46,6 +46,9 @@ import {
   DrawerShell,
   EmptyState,
   ModalShell,
+  PageHeader,
+  SectionCard,
+  StatTile,
   StatusBadge,
 } from '../components/EnterpriseUI';
 import { AdvancedDisclosure } from '../components/WorkspaceUI';
@@ -2131,69 +2134,63 @@ export default function Agents() {
 
   return (
     <div className="space-y-5">
-      <section className="team-command-bar">
-        <div className="flex min-w-0 flex-1 items-center gap-4">
-          <div className="team-command-icon">
-            <Users size={20} />
-          </div>
-          <div className="min-w-0">
-            <p className="form-kicker">Capability Agents</p>
-            <h1 className="truncate text-2xl font-extrabold tracking-tight text-primary">
-              {activeCapability.name}
-            </h1>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <StatusBadge tone="brand">{workspace.agents.length} collaborators</StatusBadge>
-              <StatusBadge tone="success">{learningReadyCount} ready</StatusBadge>
-              <StatusBadge tone={needsAttentionCount > 0 ? 'warning' : 'neutral'}>
-                {needsAttentionCount} need attention
-              </StatusBadge>
-              <StatusBadge tone="neutral">{totalSessionCount} sessions</StatusBadge>
-            </div>
-          </div>
-        </div>
-
-        <label className="relative min-w-0 flex-1 lg:max-w-md">
-          <Search
-            size={16}
-            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-outline"
-          />
-          <input
-            value={searchQuery}
-            onChange={event => setSearchQuery(event.target.value)}
-            placeholder="Search agents"
-            className="enterprise-input pl-10"
-          />
-        </label>
-
+      <PageHeader
+        eyebrow="Capability Agents"
+        context={activeCapability.id}
+        title={activeCapability.name}
+        description="Manage, configure, and monitor every agent in this capability team. Select an agent to review their purpose, readiness, and session history."
+        actions={
+          <>
+            <label className="relative min-w-0 flex-1 lg:max-w-xs">
+              <Search
+                size={16}
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-outline"
+              />
+              <input
+                value={searchQuery}
+                onChange={event => setSearchQuery(event.target.value)}
+                placeholder="Search agents"
+                className="enterprise-input pl-10"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => navigate('/chat')}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              <MessageSquare size={16} />
+              Chat
+            </button>
+            <button
+              type="button"
+              onClick={openBulkModelModal}
+              disabled={bootStatus !== 'ready' || workspace.agents.length === 0}
+              className="enterprise-button enterprise-button-secondary"
+            >
+              <Bot size={16} />
+              Change all models
+            </button>
+            <button
+              type="button"
+              onClick={openCreateModal}
+              disabled={bootStatus !== 'ready'}
+              className="enterprise-button enterprise-button-primary"
+            >
+              <Plus size={16} />
+              Create agent
+            </button>
+          </>
+        }
+      >
         <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => navigate('/chat')}
-            className="enterprise-button enterprise-button-secondary"
-          >
-            <MessageSquare size={16} />
-            Chat
-          </button>
-          <button
-            type="button"
-            onClick={openBulkModelModal}
-            disabled={bootStatus !== 'ready' || workspace.agents.length === 0}
-            className="enterprise-button enterprise-button-secondary"
-          >
-            <Bot size={16} />
-            Change all models
-          </button>
-          <button
-            type="button"
-            onClick={openCreateModal}
-            disabled={bootStatus !== 'ready'}
-            className="enterprise-button enterprise-button-primary"
-          >
-            <Plus size={16} />
-            Create agent
-          </button>
+          <StatusBadge tone="brand">{workspace.agents.length} collaborators</StatusBadge>
+          <StatusBadge tone="success">{learningReadyCount} ready</StatusBadge>
+          <StatusBadge tone={needsAttentionCount > 0 ? 'warning' : 'neutral'}>
+            {needsAttentionCount} need attention
+          </StatusBadge>
+          <StatusBadge tone="neutral">{totalSessionCount} sessions</StatusBadge>
         </div>
-      </section>
+      </PageHeader>
 
       {bootStatus !== 'ready' ? (
         <div className="workspace-inline-alert workspace-inline-alert-warning">
@@ -2217,23 +2214,25 @@ export default function Agents() {
         </div>
       ) : null}
 
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <StatTile label="Collaborators"   value={workspace.agents.length} icon={Users}    tone="brand"   />
+        <StatTile label="Custom agents"   value={customAgentCount}        icon={Bot}      tone="info"    />
+        <StatTile label="Ready to learn"  value={learningReadyCount}      icon={CheckCircle2} tone="success" />
+        <StatTile label="Total sessions"  value={totalSessionCount}       icon={MessageSquare} tone="neutral" />
+      </div>
+
       <div className="grid gap-5 xl:grid-cols-[minmax(320px,420px)_minmax(0,1fr)]">
         <section className="space-y-4">
-          <div className="team-roster-panel">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="workspace-section-title">Collaborators</p>
-                <p className="workspace-section-copy">
-                  Owner is pinned first. Select anyone to review purpose, readiness, and sessions.
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <StatusBadge tone="brand">{customAgentCount} custom</StatusBadge>
-                <StatusBadge tone="neutral">
-                  {activeChatAgent?.name || 'No chat agent'} active
-                </StatusBadge>
-              </div>
-            </div>
+          <SectionCard
+            title="Collaborators"
+            description="Owner is pinned first. Select anyone to review purpose, readiness, and sessions."
+            icon={Users}
+            action={
+              <StatusBadge tone="neutral">
+                {activeChatAgent?.name || 'No chat agent'} active
+              </StatusBadge>
+            }
+          >
 
             <div className="mt-4 space-y-2">
               {ownerAgent ? (
@@ -2255,7 +2254,7 @@ export default function Agents() {
                 </div>
               )}
             </div>
-          </div>
+          </SectionCard>
         </section>
 
         <DrawerShell className="flex min-h-[48rem] flex-col overflow-hidden p-0">
