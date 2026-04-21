@@ -24,6 +24,7 @@ import {
   WorkflowEdgeConditionType,
   WorkflowNode,
   WorkflowRun,
+  WorkflowRunQueueReason,
   WorkflowRunBranchState,
   WorkflowRunDetail,
   WorkflowRunStep,
@@ -647,6 +648,7 @@ const canActorApproveWait = ({
 
 export const __executionServiceTestUtils = {
   canActorApproveWait,
+  buildQueuedRunForExternalAdvance,
 };
 
 const buildApprovalAssignmentsForWait = ({
@@ -2208,6 +2210,34 @@ const resolveGraphTransition = async ({
     nextStep,
   };
 };
+
+function buildQueuedRunForExternalAdvance({
+  run,
+  queuedDispatch,
+}: {
+  run: WorkflowRun;
+  queuedDispatch: {
+    assignedExecutorId?: string;
+    queueReason?: WorkflowRunQueueReason;
+  };
+}): WorkflowRun {
+  return {
+    ...run,
+    // Wait resolution happens outside the worker step loop, so once an
+    // approval advances the graph we must hand the next step back to the
+    // executor dispatcher. Leaving the run in RUNNING here strands the
+    // workflow on the next step with no active worker holding the lease.
+    status: 'QUEUED',
+    queueReason: queuedDispatch.queueReason,
+    assignedExecutorId: queuedDispatch.assignedExecutorId,
+    pauseReason: undefined,
+    currentWaitId: undefined,
+    terminalOutcome: undefined,
+    leaseOwner: undefined,
+    leaseExpiresAt: undefined,
+    completedAt: undefined,
+  };
+}
 
 const buildWorkflowHandoffContext = ({
   detail,
@@ -4161,7 +4191,19 @@ const resolveRunWaitAndQueue = async ({
       summary: approvalCompletionSummary,
     });
     nextWorkflowStep = transition.nextStep;
-    nextRun = transition.nextRun;
+    if (transition.nextStep) {
+      const queuedDispatch = await resolveQueuedRunDispatch({ capabilityId });
+      nextRun = (
+        await updateWorkflowRunControl(
+          buildQueuedRunForExternalAdvance({
+            run: transition.nextRun,
+            queuedDispatch,
+          }),
+        )
+      ).run;
+    } else {
+      nextRun = transition.nextRun;
+    }
   } else {
     const queuedDispatch = await resolveQueuedRunDispatch({ capabilityId });
     nextRunStep = await updateWorkflowRunStep({
