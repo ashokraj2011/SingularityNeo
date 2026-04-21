@@ -88,28 +88,49 @@ export interface CreateSessionInput {
  * the same (capability, work item, repository) we return the existing
  * row instead of inserting — the caller typically wants a stable
  * session and the branch on GitHub is idempotent anyway.
+ *
+ * Race safety: the `idx_agent_branch_sessions_open_unique` partial
+ * unique index (capability_id, work_item_id, repository_id) WHERE
+ * status IN ('ACTIVE','REVIEWING','FAILED') enforces "at most one open
+ * session per triple" at the DB level. Two concurrent callers — which
+ * happen in practice when a work item is created AND its initial
+ * CODE_DIFF artifacts land in the same request — can both see the
+ * empty SELECT result, but only one INSERT wins. The loser falls into
+ * the `ON CONFLICT DO NOTHING` path (empty RETURNING) and we re-SELECT
+ * to pick up the winner's row.
  */
 export const createOrReuseAgentBranchSessionTx = async (
   client: PoolClient,
   input: CreateSessionInput,
 ): Promise<{ session: AgentBranchSession; reused: boolean }> => {
-  const existing = await client.query(
-    `
-      SELECT *
-      FROM agent_branch_sessions
-      WHERE capability_id = $1
-        AND work_item_id = $2
-        AND repository_id = $3
-        AND status IN ('ACTIVE', 'REVIEWING', 'FAILED')
-      ORDER BY updated_at DESC
-      LIMIT 1
-    `,
-    [input.capabilityId, input.workItemId, input.repositoryId],
-  );
-  if (existing.rows.length) {
-    return { session: sessionFromRow(existing.rows[0]), reused: true };
+  const selectExisting = async () => {
+    const existing = await client.query(
+      `
+        SELECT *
+        FROM agent_branch_sessions
+        WHERE capability_id = $1
+          AND work_item_id = $2
+          AND repository_id = $3
+          AND status IN ('ACTIVE', 'REVIEWING', 'FAILED')
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `,
+      [input.capabilityId, input.workItemId, input.repositoryId],
+    );
+    return existing.rows[0] || null;
+  };
+
+  // Fast path: if a session already exists we reuse it without
+  // bothering to INSERT. This is the common case once a work item has
+  // its first session.
+  const existingRow = await selectExisting();
+  if (existingRow) {
+    return { session: sessionFromRow(existingRow), reused: true };
   }
 
+  // Race-safe insert: the partial unique index guarantees at most one
+  // open row per triple. If a concurrent writer wins, DO NOTHING and
+  // re-SELECT the winner so the caller still gets a stable session.
   const id = createId('AGIT');
   const inserted = await client.query(
     `
@@ -127,6 +148,9 @@ export const createOrReuseAgentBranchSessionTx = async (
         commits_count
       )
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,'ACTIVE',0)
+      ON CONFLICT (capability_id, work_item_id, repository_id)
+        WHERE status IN ('ACTIVE', 'REVIEWING', 'FAILED')
+        DO NOTHING
       RETURNING *
     `,
     [
@@ -140,7 +164,22 @@ export const createOrReuseAgentBranchSessionTx = async (
       input.branchName,
     ],
   );
-  return { session: sessionFromRow(inserted.rows[0]), reused: false };
+  if (inserted.rows.length) {
+    return { session: sessionFromRow(inserted.rows[0]), reused: false };
+  }
+
+  // We lost the race. The winning row is already committed from the
+  // concurrent transaction's perspective; re-select to pick it up.
+  const winner = await selectExisting();
+  if (!winner) {
+    // Extremely unlikely — the conflict fired but the winner vanished.
+    // Surface the oddity so ops can investigate rather than silently
+    // inserting a duplicate.
+    throw new Error(
+      `agent_branch_sessions: INSERT hit ON CONFLICT but winning row could not be read back (capability=${input.capabilityId}, workItem=${input.workItemId}, repo=${input.repositoryId})`,
+    );
+  }
+  return { session: sessionFromRow(winner), reused: true };
 };
 
 export const createOrReuseAgentBranchSession = async (
@@ -240,6 +279,125 @@ export const updateAgentBranchSession = async (
   input: UpdateSessionInput,
 ): Promise<AgentBranchSession | null> =>
   transaction(async client => updateAgentBranchSessionTx(client, input));
+
+// ─────────────────────────────────────────────────────────────────────────
+// Per-commit audit trail (agent_branch_commits)
+//
+// The session row tracks aggregates (`commits_count`, `last_commit_message`);
+// this table records every individual commit so operators can answer
+// "which commit SHA came from which artifact?". `artifactId` is nullable
+// to accommodate operator-initiated raw commits that have no artifact.
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface AgentBranchCommitRecord {
+  id: string;
+  sessionId: string;
+  capabilityId: string;
+  workItemId: string;
+  commitSha: string;
+  artifactId: string | null;
+  artifactKind: string | null;
+  message: string;
+  filesCommittedCount: number;
+  filesSkippedCount: number;
+  createdAt: string;
+}
+
+const branchCommitFromRow = (row: Record<string, any>): AgentBranchCommitRecord => ({
+  id: String(row.id),
+  sessionId: String(row.session_id),
+  capabilityId: String(row.capability_id),
+  workItemId: String(row.work_item_id),
+  commitSha: String(row.commit_sha),
+  artifactId: row.artifact_id == null ? null : String(row.artifact_id),
+  artifactKind: row.artifact_kind == null ? null : String(row.artifact_kind),
+  message: String(row.message || ''),
+  filesCommittedCount: Number(row.files_committed_count || 0),
+  filesSkippedCount: Number(row.files_skipped_count || 0),
+  createdAt: asIso(row.created_at),
+});
+
+export interface InsertAgentBranchCommitInput {
+  sessionId: string;
+  capabilityId: string;
+  workItemId: string;
+  commitSha: string;
+  artifactId?: string | null;
+  artifactKind?: string | null;
+  message: string;
+  filesCommittedCount: number;
+  filesSkippedCount: number;
+}
+
+export const insertAgentBranchCommit = async (
+  input: InsertAgentBranchCommitInput,
+): Promise<AgentBranchCommitRecord> =>
+  transaction(async client => {
+    const id = createId('ABC');
+    const result = await client.query(
+      `
+        INSERT INTO agent_branch_commits (
+          id,
+          session_id,
+          capability_id,
+          work_item_id,
+          commit_sha,
+          artifact_id,
+          artifact_kind,
+          message,
+          files_committed_count,
+          files_skipped_count
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        RETURNING *
+      `,
+      [
+        id,
+        input.sessionId,
+        input.capabilityId,
+        input.workItemId,
+        input.commitSha,
+        input.artifactId ?? null,
+        input.artifactKind ?? null,
+        input.message,
+        input.filesCommittedCount,
+        input.filesSkippedCount,
+      ],
+    );
+    return branchCommitFromRow(result.rows[0]);
+  });
+
+export const listAgentBranchCommitsForSession = async (
+  sessionId: string,
+): Promise<AgentBranchCommitRecord[]> =>
+  transaction(async client => {
+    const result = await client.query(
+      `
+        SELECT *
+        FROM agent_branch_commits
+        WHERE session_id = $1
+        ORDER BY created_at DESC
+      `,
+      [sessionId],
+    );
+    return result.rows.map(branchCommitFromRow);
+  });
+
+export const listAgentBranchCommitsForArtifact = async (
+  artifactId: string,
+): Promise<AgentBranchCommitRecord[]> =>
+  transaction(async client => {
+    const result = await client.query(
+      `
+        SELECT *
+        FROM agent_branch_commits
+        WHERE artifact_id = $1
+        ORDER BY created_at DESC
+      `,
+      [artifactId],
+    );
+    return result.rows.map(branchCommitFromRow);
+  });
 
 // ─────────────────────────────────────────────────────────────────────────
 // Pull-request CRUD

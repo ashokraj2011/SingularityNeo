@@ -324,6 +324,8 @@ export const autoCommitArtifact = async (
         sessionId,
         patchText,
         message,
+        artifactId: input.artifact.id,
+        artifactKind: input.artifact.artifactKind,
       });
     }
 

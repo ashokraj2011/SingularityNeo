@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import ArtifactDiffViewer from './ArtifactDiffViewer';
 import MarkdownContent from './MarkdownContent';
 import PatchDiffViewer from './PatchDiffViewer';
 import type { ArtifactKind, CodePatchPayload } from '../types';
@@ -135,6 +136,27 @@ const ArtifactPreview = ({
         payload={payload}
       />
     );
+  }
+
+  // CODE_DIFF artifacts carry markdown in `contentText` and mirror the
+  // raw unified-diff body at `contentJson.repositories[].patchText`.
+  // See server/execution/codeDiff.ts — that's why we read it here.
+  // Fall through to the generic markdown renderer when the structured
+  // payload is missing (legacy artifacts without the mirror field).
+  if (artifactKind === 'CODE_DIFF') {
+    const repos =
+      jsonValue && typeof jsonValue === 'object' && !Array.isArray(jsonValue)
+        ? ((jsonValue as { repositories?: Array<{ patchText?: string }> }).repositories ?? [])
+        : [];
+    const patchText = repos
+      .map(repo => String(repo?.patchText || '').trim())
+      .filter(Boolean)
+      .join('\n\n');
+    if (patchText) {
+      return <ArtifactDiffViewer patchText={patchText} />;
+    }
+    // Missing patchText mirror → fall through to the markdown body so
+    // reviewers still see SOMETHING rather than a blank pane.
   }
 
   const shouldTreatAsJson = format === 'JSON' && jsonValue !== undefined;

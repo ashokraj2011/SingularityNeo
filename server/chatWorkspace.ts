@@ -5,6 +5,7 @@ import {
 import type {
   Capability,
   CapabilityAgent,
+  CapabilityCodeSymbolKind,
   CapabilityWorkspace,
   CompiledArtifactChecklistItem,
   CompiledRequiredInputField,
@@ -18,6 +19,7 @@ import {
   applyAgentLearningCorrection,
   getAgentLearningProfileDetail,
 } from './agentLearning/service';
+import { searchCodeSymbols } from './codeIndex/query';
 import { getWorkflowRunDetail } from './execution/repository';
 import {
   approveWorkflowRun,
@@ -50,7 +52,8 @@ type ChatWorkspaceActionType =
   | 'RESTART'
   | 'CANCEL'
   | 'CORRECT_LEARNING'
-  | 'SHOW_LEARNING';
+  | 'SHOW_LEARNING'
+  | 'FIND_SYMBOL';
 
 type ParsedChatWorkspaceAction = {
   type: ChatWorkspaceActionType;
@@ -59,6 +62,10 @@ type ParsedChatWorkspaceAction = {
   targetPhase?: WorkItemPhase;
   note?: string;
   targetAgentName?: string;
+  /** Symbol-name query for FIND_SYMBOL. Freeform — passed to `searchCodeSymbols` verbatim. */
+  symbolQuery?: string;
+  /** Optional kind filter the user explicitly asked for ("find class Foo"). */
+  symbolKind?: CapabilityCodeSymbolKind;
 };
 
 export type ChatWorkspaceActionResult = {
@@ -745,10 +752,104 @@ const resolvePhaseFromMessage = (
   return undefined;
 };
 
+// Parse "find <symbol>", "where is <symbol>", "locate <symbol>", "search
+// code for <symbol>", or the slash shortcut "/find <symbol>". Optional
+// kind hint in the form "find function parseFoo" / "find class Foo".
+// Returns null when no trigger matches — callers treat null as "not a
+// symbol-lookup intent" and continue down the normal parser.
+const SYMBOL_KIND_ALIASES: Record<string, CapabilityCodeSymbolKind> = {
+  class: 'class',
+  classes: 'class',
+  function: 'function',
+  functions: 'function',
+  func: 'function',
+  method: 'method',
+  methods: 'method',
+  interface: 'interface',
+  interfaces: 'interface',
+  type: 'type',
+  types: 'type',
+  enum: 'enum',
+  enums: 'enum',
+  variable: 'variable',
+  variables: 'variable',
+  property: 'property',
+  properties: 'property',
+};
+
+// Words that follow the trigger but aren't the symbol itself. Stripping
+// them means "where is the function parseFoo" parses as query="parseFoo"
+// + kind="function" rather than query="the function parseFoo".
+const SYMBOL_QUERY_STOPWORDS = new Set([
+  'the',
+  'a',
+  'an',
+  'symbol',
+  'code',
+  'for',
+  'in',
+  'this',
+  'codebase',
+  'repo',
+  'repository',
+  'called',
+  'named',
+  'definition',
+  'defined',
+]);
+
+const parseFindSymbolAction = (message: string): ParsedChatWorkspaceAction | null => {
+  const trimmed = message.trim();
+  if (!trimmed) return null;
+
+  // Trigger regex. Capture everything after the trigger; we'll tokenise
+  // and pull out the kind hint + actual query below.
+  const trigger = trimmed.match(
+    /^(?:\/find|find|where\s+(?:is|are)|locate|search\s+(?:the\s+)?code\s+for)\s+(.+)$/i,
+  );
+  if (!trigger) return null;
+
+  // Tokenise, preserving original casing for the symbol candidate. We
+  // look at each token left-to-right: stopwords get dropped, a kind
+  // alias sets `kind` once, everything else concatenates into the
+  // query. `searchCodeSymbols` already does case-insensitive matching
+  // so capitalisation is informational only.
+  const rawTokens = trigger[1].replace(/[?!.]+$/, '').split(/\s+/).filter(Boolean);
+  const queryTokens: string[] = [];
+  let kind: CapabilityCodeSymbolKind | undefined;
+  for (const token of rawTokens) {
+    const lower = token.toLowerCase();
+    if (SYMBOL_QUERY_STOPWORDS.has(lower)) continue;
+    if (!kind && SYMBOL_KIND_ALIASES[lower]) {
+      kind = SYMBOL_KIND_ALIASES[lower];
+      continue;
+    }
+    // Strip surrounding punctuation that commonly appears in prose:
+    // backticks around code spans, angle brackets, quotes.
+    const cleaned = token.replace(/^[`'"<(\[{]+|[`'">)\]},.:;!?]+$/g, '');
+    if (cleaned) queryTokens.push(cleaned);
+  }
+
+  const symbolQuery = queryTokens.join(' ').trim();
+  if (!symbolQuery) return null;
+
+  return {
+    type: 'FIND_SYMBOL',
+    symbolQuery,
+    symbolKind: kind,
+  };
+};
+
 const parseWorkspaceAction = (
   bundle: CapabilityBundle,
   message: string,
 ): ParsedChatWorkspaceAction | null => {
+  // Symbol lookups first — phrases like "find parseFoo" would otherwise
+  // fall through to the STATUS/START heuristics below. The FIND trigger
+  // is explicit enough that short-circuiting is safe.
+  const findAction = parseFindSymbolAction(message);
+  if (findAction) return findAction;
+
   const normalized = normalizeText(message);
   const note = extractNote(message);
   const workItemId = extractId(message, 'WI');
@@ -943,6 +1044,82 @@ const buildCapabilityMetadataSummary = (bundle: CapabilityBundle) => {
     .join('\n');
 };
 
+// ─────────────────────────────────────────────────────────────────────
+// FIND_SYMBOL response builder
+//
+// Formatting goals:
+//   - Operator-legible at a glance — file path + line range + kind chip.
+//   - Copy-paste friendly — the `path:line` format is what editors jump
+//     to when you click / cmd-click a terminal match.
+//   - Bounded — cap at 12 results so chat stays skimmable. If more
+//     exist, hint at the overflow without enumerating.
+//   - Graceful empty — three distinct empty states, each actionable:
+//     no query, no index rows (user hasn't rebuilt), or zero matches.
+// ─────────────────────────────────────────────────────────────────────
+
+const MAX_FIND_SYMBOL_RESULTS = 12;
+
+export const buildFindSymbolResponse = async (
+  capabilityId: string,
+  symbolQuery: string,
+  kind?: CapabilityCodeSymbolKind,
+): Promise<string> => {
+  const trimmed = symbolQuery.trim();
+  if (!trimmed) {
+    return [
+      'Tell me what to look up. For example:',
+      '',
+      '- `find parseUnifiedDiff`',
+      '- `find class PaymentController`',
+      '- `where is the function buildBranchName`',
+    ].join('\n');
+  }
+
+  // Pull one extra row so we can detect the overflow case without a
+  // second query.
+  const results = await searchCodeSymbols(capabilityId, trimmed, {
+    limit: MAX_FIND_SYMBOL_RESULTS + 1,
+    kind,
+  });
+
+  if (results.length === 0) {
+    return [
+      `No code symbols match \`${trimmed}\`${kind ? ` (kind: ${kind})` : ''}.`,
+      '',
+      'Possible reasons:',
+      '- The code index for this capability has not been built yet — open **Capability Metadata → Rebuild index**.',
+      '- The name differs from the source (try a prefix like `parse` instead of `parseUnifiedDiff`).',
+      '- The file lives in a language we do not index yet (currently: TypeScript, JavaScript, Python, Java).',
+    ].join('\n');
+  }
+
+  const truncated = results.length > MAX_FIND_SYMBOL_RESULTS;
+  const shown = truncated ? results.slice(0, MAX_FIND_SYMBOL_RESULTS) : results;
+
+  const rows = shown.map(symbol => {
+    const parent = symbol.parentSymbol ? `${symbol.parentSymbol}.` : '';
+    const displayName = `${parent}${symbol.symbolName}`;
+    const kindChip = `\`${symbol.kind}\``;
+    const exportChip = symbol.isExported ? ' · **exported**' : '';
+    const repo = symbol.repositoryLabel ? ` · ${symbol.repositoryLabel}` : '';
+    // `path:line` format matches terminal jump syntax — clickable in
+    // most IDE terminals and easy to eyeball.
+    const location = `${symbol.filePath}:${symbol.startLine}${symbol.endLine !== symbol.startLine ? `-${symbol.endLine}` : ''}`;
+    const signature = symbol.signature
+      ? `\n  \`${summarizeSingleLine(symbol.signature, 140)}\``
+      : '';
+    return `- **${displayName}** · ${kindChip}${exportChip}${repo}\n  ${location}${signature}`;
+  });
+
+  const heading = `Found ${results.length === 1 ? '1 symbol' : `${shown.length}${truncated ? '+' : ''} symbols`} matching \`${trimmed}\`${kind ? ` (kind: ${kind})` : ''}:`;
+
+  const overflowHint = truncated
+    ? `\n\n_Showing the top ${MAX_FIND_SYMBOL_RESULTS}. Narrow the query — e.g. add a kind hint like \`find function ${trimmed}\` — to see more._`
+    : '';
+
+  return `${heading}\n\n${rows.join('\n')}${overflowHint}`;
+};
+
 export const buildLiveWorkspaceBriefing = (bundle: CapabilityBundle) => {
   const workSummary = buildOverallStatusSummary(bundle);
   const highlightedItems = getAttentionWorkItems(bundle)
@@ -1104,6 +1281,17 @@ export const maybeHandleCapabilityChatAction = async ({
         '',
         `This has been added to ${matchedAgent.name}'s learning notes as an authoritative operator correction. A learning refresh has been queued — the agent will re-distill its experience incorporating this correction.`,
       ].join('\n'),
+    };
+  }
+
+  if (action.type === 'FIND_SYMBOL') {
+    return {
+      handled: true,
+      content: await buildFindSymbolResponse(
+        bundle.capability.id,
+        action.symbolQuery || '',
+        action.symbolKind,
+      ),
     };
   }
 

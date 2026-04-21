@@ -32,7 +32,7 @@ import {
   getTrustLevelTone,
 } from '../lib/capabilityExperience';
 import { hasPermission } from '../lib/accessControl';
-import { getStatusTone } from '../lib/enterprise';
+import { formatEnumLabel, getStatusTone } from '../lib/enterprise';
 import {
   fetchCapabilityHealthSnapshot,
   fetchCapabilityConnectorContext,

@@ -2542,6 +2542,62 @@ export const migrationStatements = [
     CREATE INDEX IF NOT EXISTS gpc_capability_window_idx
     ON governance_provenance_coverage (capability_id, window_start, window_end)
   `,
+  // ────────────────────────────────────────────────────────────────────
+  // Agent-as-git-author — race-safety hardening.
+  //
+  // A partial unique index guarantees **at most one open session** per
+  // (capability, work item, repository). Historical CLOSED rows are
+  // retained outside the predicate, so provenance is untouched. Pair
+  // this with `INSERT ... ON CONFLICT DO NOTHING RETURNING *` in
+  // `createOrReuseAgentBranchSessionTx` to make the insert-after-select
+  // path survive a concurrent producer.
+  //
+  // Safe to add to existing DBs: the prior SELECT-first code path made
+  // duplicate rows extremely unlikely, and `CREATE UNIQUE INDEX
+  // IF NOT EXISTS` errors loudly (not silently) if the invariant is
+  // already broken — which is the behavior we want.
+  `
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_branch_sessions_open_unique
+      ON agent_branch_sessions (capability_id, work_item_id, repository_id)
+      WHERE status IN ('ACTIVE', 'REVIEWING', 'FAILED')
+  `,
+  // ────────────────────────────────────────────────────────────────────
+  // Agent-as-git-author — per-commit audit trail.
+  //
+  // `agent_branch_commits` answers "which artifact produced which
+  // commit SHA?". The session row tracks aggregates (`commits_count`,
+  // `last_commit_message`); this table keeps the forensic detail.
+  // `artifact_id` is nullable because operator-initiated commits via
+  // `commitRawPatchToSession` don't always originate from an artifact.
+  // ────────────────────────────────────────────────────────────────────
+  `
+    CREATE TABLE IF NOT EXISTS agent_branch_commits (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES agent_branch_sessions(id) ON DELETE CASCADE,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      work_item_id TEXT NOT NULL,
+      commit_sha TEXT NOT NULL,
+      artifact_id TEXT,
+      artifact_kind TEXT,
+      message TEXT NOT NULL DEFAULT '',
+      files_committed_count INTEGER NOT NULL DEFAULT 0,
+      files_skipped_count INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_agent_branch_commits_session
+      ON agent_branch_commits (session_id, created_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_agent_branch_commits_artifact
+      ON agent_branch_commits (artifact_id)
+      WHERE artifact_id IS NOT NULL
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_agent_branch_commits_work_item
+      ON agent_branch_commits (capability_id, work_item_id, created_at DESC)
+  `,
 ];
 
 const detectOptionalPlatformExtensions = async (client: PoolClient) => {

@@ -30,6 +30,7 @@ import {
 import {
   createOrReuseAgentBranchSession,
   getAgentBranchSessionById,
+  insertAgentBranchCommit,
   insertAgentPullRequest,
   listAgentBranchSessionsForWorkItem,
   listAgentPullRequestsForSession,
@@ -51,19 +52,44 @@ import type { ParsedRepo } from './session';
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
 
-const slugify = (value: string): string =>
+const slugify = (value: string, maxLen = 40): string =>
   value
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 40) || 'work-item';
+    .slice(0, maxLen) || 'work-item';
 
-const buildBranchName = (workItem: Pick<WorkItem, 'id' | 'title'>): string => {
-  const slug = slugify(workItem.title || workItem.id);
-  // Lowercase id for readability; keep short so the whole ref fits
-  // comfortably into PR titles + git reflog lines.
-  return `agent/wi-${workItem.id.toLowerCase()}-${slug}`;
+/**
+ * Git-ref-safe slug for a capability id. Capability ids are usually
+ * already url-safe, but we pass them through `slugify` to be defensive
+ * and clip to a short prefix — the capability segment is only there to
+ * disambiguate across capabilities that share a repo, so 24 chars of
+ * entropy is plenty.
+ */
+const slugifyCapabilityId = (capabilityId: string): string =>
+  slugify(capabilityId, 24);
+
+/**
+ * Construct the session branch name.
+ *
+ * Branch layout: `agent/cap-<capSlug>/wi-<wiId>-<titleSlug>`
+ *
+ * The `cap-<capSlug>` segment prevents cross-capability branch collision
+ * when two capabilities point at the same GitHub repo AND have work
+ * items with colliding (id, titleSlug) pairs. Without it, both would
+ * target the same remote ref and interleave each other's commits.
+ * Slashes inside a ref are valid git syntax (namespaced refs).
+ */
+const buildBranchName = (
+  capabilityId: string,
+  workItem: Pick<WorkItem, 'id' | 'title'>,
+): string => {
+  const capSlug = slugifyCapabilityId(capabilityId);
+  const titleSlug = slugify(workItem.title || workItem.id);
+  // Lowercase id for readability; keep each segment short so the whole
+  // ref fits comfortably into PR titles + git reflog lines.
+  return `agent/cap-${capSlug}/wi-${workItem.id.toLowerCase()}-${titleSlug}`;
 };
 
 const pickPrimaryRepository = (
@@ -155,7 +181,7 @@ export const startAgentBranchSession = async (
   const tip = await getBranchTip(parsedRepo, baseBranchName, headers);
   if (tip.ok === false) return failure(tip.status, tip.message);
 
-  const branchName = buildBranchName(input.workItem);
+  const branchName = buildBranchName(input.capabilityId, input.workItem);
   const ensured = await ensureBranch(parsedRepo, branchName, tip.sha, headers);
   if (ensured.ok === false) return failure(ensured.status, ensured.message);
 
@@ -267,6 +293,8 @@ export const commitPatchArtifactToSession = async (
     message: input.message || defaultMessage,
     authorName: input.authorName,
     authorEmail: input.authorEmail,
+    artifactId: artifact.id,
+    artifactKind: artifact.artifactKind || 'CODE_PATCH',
   });
 };
 
@@ -289,6 +317,14 @@ export interface CommitRawPatchInput {
   message: string;
   authorName?: string;
   authorEmail?: string;
+  /**
+   * Originating artifact, when this commit was driven by one. Written
+   * verbatim into `agent_branch_commits` so operators can answer
+   * "which commit came from which artifact?" without log-grepping.
+   * Optional because operator-initiated raw commits don't have one.
+   */
+  artifactId?: string | null;
+  artifactKind?: string | null;
 }
 
 export const commitRawPatchToSession = async (
@@ -363,6 +399,28 @@ export const commitRawPatchToSession = async (
   const files = buildFileStatuses(commit.apply.perFile);
   const filesCommittedCount = files.filter(f => f.applied).length;
   const filesSkippedCount = files.length - filesCommittedCount;
+
+  // Audit row: one per commit, even if the session aggregates are lost
+  // later. Best-effort — a write failure here must not mask the commit
+  // success, because the commit has already landed on GitHub.
+  try {
+    await insertAgentBranchCommit({
+      sessionId: session.id,
+      capabilityId: session.capabilityId,
+      workItemId: session.workItemId,
+      commitSha: commit.commitSha,
+      artifactId: input.artifactId ?? null,
+      artifactKind: input.artifactKind ?? null,
+      message: input.message,
+      filesCommittedCount,
+      filesSkippedCount,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(
+      `[agentGit] failed to record audit row for commit ${commit.commitSha} on session ${session.id}: ${reason}`,
+    );
+  }
 
   return {
     ok: true,
