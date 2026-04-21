@@ -32,6 +32,7 @@ import {
   releaseWorkspaceWriteLock,
   WorkspaceLockConflictError,
 } from '../workspaceLock';
+import { findSymbolRangeInFile } from '../codeIndex/query';
 
 const execFileAsync = promisify(execFile);
 
@@ -567,24 +568,87 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   workspace_read: {
     id: 'workspace_read',
-    description: 'Read a text file from an approved workspace path.',
-    usageExample: '{"path":"src/main/java/App.java"}',
+    description:
+      'Read a text file. Prefer passing `symbol` (an exact function/class name from the code index) to get JUST that symbol body plus ~10 lines of context instead of the whole file — this saves 80-95% of input tokens. Only omit `symbol` when you truly need the full file.',
+    usageExample:
+      '{"path":"src/auth/token.ts","symbol":"validateToken"} (semantic hunk) OR {"path":"README.md"} (whole file fallback)',
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
       const workspacePath = resolveWorkspacePath(capability, workItem, args.workspacePath);
-      const targetPath = resolvePathWithinWorkspace(
-        workspacePath,
-        getRequiredStringArg(args, 'path', 'workspace_read'),
-      );
+      const requestedPath = getRequiredStringArg(args, 'path', 'workspace_read');
+      const targetPath = resolvePathWithinWorkspace(workspacePath, requestedPath);
       const maxBytes = Math.max(256, Math.min(Number(args.maxBytes || 8000), 20000));
+      const requestedSymbol =
+        typeof args.symbol === 'string' && args.symbol.trim().length > 0
+          ? args.symbol.trim()
+          : null;
+      const contextLines = Math.max(
+        0,
+        Math.min(Number(args.symbolContextLines ?? 10), 50),
+      );
       const content = await fs.readFile(targetPath, 'utf8');
+      const relativePath = path.relative(workspacePath, targetPath);
 
+      // Semantic-hunk path: caller asked for a specific symbol. Look up
+      // start/end lines from the code index, slice just that region.
+      if (requestedSymbol && capability.id) {
+        const range = await findSymbolRangeInFile(
+          capability.id,
+          requestedPath,
+          requestedSymbol,
+        ).catch(() => null);
+        if (range) {
+          const allLines = content.split('\n');
+          const sliceStart = Math.max(0, range.startLine - 1 - contextLines);
+          const sliceEnd = Math.min(allLines.length, range.endLine + contextLines);
+          const hunkLines = allLines.slice(sliceStart, sliceEnd);
+          // Prefix each line with its 1-based line number so the LLM can
+          // reason about positions when asking for edits.
+          const numbered = hunkLines
+            .map((line, idx) => `${String(sliceStart + idx + 1).padStart(5, ' ')}  ${line}`)
+            .join('\n');
+          return {
+            summary: `Read ${relativePath} :: ${requestedSymbol} (${range.kind}, lines ${sliceStart + 1}-${sliceEnd}).`,
+            workingDirectory: workspacePath,
+            stdoutPreview: previewText(numbered, maxBytes),
+            details: {
+              path: targetPath,
+              symbol: requestedSymbol,
+              kind: range.kind,
+              startLine: range.startLine,
+              endLine: range.endLine,
+              sliceStartLine: sliceStart + 1,
+              sliceEndLine: sliceEnd,
+              contextLines,
+              mode: 'semantic-hunk',
+              truncated: numbered.length > maxBytes,
+            },
+          };
+        }
+        // Symbol requested but not found — fall through to whole-file read
+        // with a note so the agent knows to broaden or re-index.
+        return {
+          summary: `Symbol "${requestedSymbol}" not found in code index for ${relativePath}. Returning whole file.`,
+          workingDirectory: workspacePath,
+          stdoutPreview: previewText(content, maxBytes),
+          details: {
+            path: targetPath,
+            symbol: requestedSymbol,
+            mode: 'whole-file-fallback',
+            symbolLookupMissed: true,
+            truncated: content.length > maxBytes,
+          },
+        };
+      }
+
+      // Whole-file fallback (no symbol provided).
       return {
-        summary: `Read ${path.relative(workspacePath, targetPath)}.`,
+        summary: `Read ${relativePath}.`,
         workingDirectory: workspacePath,
         stdoutPreview: previewText(content, maxBytes),
         details: {
           path: targetPath,
+          mode: 'whole-file',
           truncated: content.length > maxBytes,
         },
       };
@@ -679,7 +743,8 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   workspace_write: {
     id: 'workspace_write',
-    description: 'Write a text file inside an approved workspace path.',
+    description:
+      'Create a NEW file at `path` with `content`. For edits to EXISTING files, use `workspace_apply_patch` (preferred) or `workspace_replace_block` instead — they are dramatically cheaper in output tokens and surface cleaner diffs to reviewers. Only use `workspace_write` when creating a file from scratch.',
     usageExample: '{"path":"src/main/java/App.java","content":"..."}',
     retryable: false,
     execute: async ({ capability, workItem }, args) => {
@@ -706,7 +771,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_replace_block: {
     id: 'workspace_replace_block',
     description:
-      'Replace a specific block of text inside an approved workspace file with anchor safety checks.',
+      'PREFERRED for targeted single-block edits to existing files. Provide `find` (must match the existing text exactly) and `replace`. Far cheaper than rewriting the whole file with `workspace_write` and safer than free-form patches. Use this for simple in-place changes to an existing function or block.',
     usageExample:
       '{"path":"src/App.tsx","find":"const oldValue = 1;","replace":"const oldValue = 2;","expectedMatches":1}',
     retryable: false,
@@ -751,7 +816,8 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   workspace_apply_patch: {
     id: 'workspace_apply_patch',
-    description: 'Apply a unified diff patch inside an approved workspace root.',
+    description:
+      'PREFERRED for editing existing files. Accepts a standard unified diff (git-style) and applies it in place. Output ONLY the diff hunks — never the full file. Strongly prefer this tool over `workspace_write` for any modification to code that already exists, since it uses a fraction of the output tokens and produces reviewable diffs.',
     usageExample:
       '{"patchText":"diff --git a/src/App.tsx b/src/App.tsx\\n--- a/src/App.tsx\\n+++ b/src/App.tsx\\n@@ ..."}',
     retryable: false,

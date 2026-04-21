@@ -19,6 +19,7 @@ import { query } from '../db';
 import { describeSignerStatus, type SignerStatus } from './signer';
 import { governanceExceptionsEnabled } from './exceptions';
 import { governanceProvenanceEnabled } from './provenance';
+import { findBindingsByPolicySelector } from './controls';
 
 const RECENT_PACKET_WINDOW_DAYS = 30;
 const RECENT_DENIAL_LIMIT = 50;
@@ -367,42 +368,48 @@ const gatherRecentDenials = async (
 ): Promise<PostureRecentDenial[]> => {
   const rows = await safeQuery<Record<string, unknown>>(
     `
-      WITH ranked AS (
-        SELECT
-          d.id            AS decision_id,
-          d.capability_id,
-          d.action_type,
-          d.decision,
-          d.reason,
-          d.created_at,
-          d.exception_id,
-          (
-            SELECT b.control_id
-            FROM governance_control_bindings b
-            WHERE b.policy_selector @> jsonb_build_object('actionType', d.action_type)
-            LIMIT 1
-          ) AS control_id
-        FROM capability_policy_decisions d
-        WHERE d.decision <> 'ALLOW'
-        ORDER BY d.created_at DESC
-        LIMIT $1
-      )
-      SELECT * FROM ranked
+      SELECT
+        d.id AS decision_id,
+        d.capability_id,
+        d.action_type,
+        d.decision,
+        d.reason,
+        d.created_at,
+        d.exception_id
+      FROM capability_policy_decisions d
+      WHERE d.decision <> 'ALLOW'
+      ORDER BY d.created_at DESC
+      LIMIT $1
     `,
     [RECENT_DENIAL_LIMIT],
     warnings,
     'denials.recent',
   );
-  return rows.map(row => ({
-    decisionId: String(row.decision_id ?? ''),
-    capabilityId: String(row.capability_id ?? ''),
-    actionType: String(row.action_type ?? ''),
-    decision: String(row.decision ?? ''),
-    reason: String(row.reason ?? ''),
-    createdAt: toIso(row.created_at) ?? '',
-    controlId: (row.control_id as string | null) ?? null,
-    exceptionId: (row.exception_id as string | null) ?? null,
-  }));
+  return Promise.all(
+    rows.map(async row => {
+      const actionType = String(row.action_type ?? '');
+      const bindings = await findBindingsByPolicySelector(
+        { actionType },
+        { capabilityScope: String(row.capability_id ?? '') || null },
+      ).catch(error => {
+        warnings.push(
+          `denials.binding-match: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return [];
+      });
+
+      return {
+        decisionId: String(row.decision_id ?? ''),
+        capabilityId: String(row.capability_id ?? ''),
+        actionType,
+        decision: String(row.decision ?? ''),
+        reason: String(row.reason ?? ''),
+        createdAt: toIso(row.created_at) ?? '',
+        controlId: bindings[0]?.controlId || null,
+        exceptionId: (row.exception_id as string | null) ?? null,
+      };
+    }),
+  );
 };
 
 // ──────────────────────────────────────────────────────────────────────────

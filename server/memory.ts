@@ -1,5 +1,7 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
+import type { PoolClient } from 'pg';
 import type {
   Capability,
   CapabilityWorkspace,
@@ -27,9 +29,6 @@ import {
 import { getWorkspaceFileIndex } from './workspaceIndex';
 
 const EMBEDDING_DIMENSIONS = getPlatformFeatureState().memoryEmbeddingDimensions;
-
-const createId = (prefix: string) =>
-  `${prefix}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 
 const slugify = (value: string) =>
   value
@@ -90,6 +89,77 @@ const splitIntoChunks = (content: string, limit = 900) => {
 
   return chunks;
 };
+
+type QueryExecutor = Pick<PoolClient, 'query'>;
+
+type MemoryRefreshChunkPlan = {
+  id: string;
+  embeddingId: string;
+  chunkIndex: number;
+  content: string;
+  tokenEstimate: number;
+  metadata: Record<string, any>;
+  embedding: number[];
+};
+
+type MemoryRefreshDocumentPlan = {
+  capabilityId: string;
+  id: string;
+  title: string;
+  sourceType: MemorySourceType;
+  tier: MemoryStoreTier;
+  sourceId?: string;
+  sourceUri?: string;
+  freshness?: MemoryDocument['freshness'];
+  metadata?: Record<string, any>;
+  contentPreview: string;
+  vectorModel: string;
+  embeddingProviderKey: EmbeddingProviderKey;
+  embeddingFallbackReason?: string;
+  chunks: MemoryRefreshChunkPlan[];
+};
+
+type MemorySourceSeed = {
+  id: string;
+  title: string;
+  sourceType: MemorySourceType;
+  tier: MemoryStoreTier;
+  sourceUri?: string;
+  sourceId?: string;
+  metadata?: Record<string, any>;
+  content: string;
+};
+
+const MANAGED_MEMORY_SOURCE_TYPES: MemorySourceType[] = [
+  'CAPABILITY_METADATA',
+  'ARTIFACT',
+  'HANDOFF',
+  'HUMAN_INTERACTION',
+  'WORK_ITEM',
+  'CHAT_SESSION',
+  'REPOSITORY_FILE',
+];
+
+const queryWithExecutor = <T = unknown>(
+  executor: QueryExecutor,
+  text: string,
+  params?: unknown[],
+) => executor.query<T>(text, params);
+
+const buildStableMemoryRowId = (
+  prefix: 'MEMCHUNK' | 'MEMEMBED',
+  capabilityId: string,
+  documentId: string,
+  chunkIndex: number,
+) =>
+  `${prefix}-${createHash('sha1')
+    .update(`${capabilityId}:${documentId}:${chunkIndex}:${prefix}`)
+    .digest('hex')
+    .slice(0, 16)
+    .toUpperCase()}`;
+
+const compareStrings = (left?: string, right?: string) =>
+  String(left || '').localeCompare(String(right || ''));
 
 const hashEmbedText = (content: string) => {
   const vector = Array.from({ length: EMBEDDING_DIMENSIONS }, () => 0);
@@ -155,20 +225,32 @@ const embedTexts = async (
   providerKey: EmbeddingProviderKey;
   model: string;
   vectors: number[][];
+  fallbackReason?: string;
 }> => {
   const response = await requestLocalOpenAIEmbeddings({
     texts,
     dimensions: EMBEDDING_DIMENSIONS,
   });
 
-  if (response.providerKey === DEFAULT_EMBEDDING_PROVIDER_KEY && response.vectors.length === texts.length) {
+  if (
+    response.providerKey === DEFAULT_EMBEDDING_PROVIDER_KEY &&
+    response.vectors.length === texts.length
+  ) {
     return response;
   }
+
+  const fallbackReason =
+    response.providerKey !== DEFAULT_EMBEDDING_PROVIDER_KEY
+      ? response.fallbackReason ||
+        'Embedding provider fell back to deterministic hash embeddings.'
+      : `Embedding provider returned ${response.vectors.length} vectors for ${texts.length} texts.`;
+  console.warn(`[memory] ${fallbackReason}`);
 
   return {
     providerKey: HASH_EMBEDDING_PROVIDER_KEY,
     model: 'deterministic-hash-v2',
     vectors: texts.map(text => hashEmbedText(text)),
+    fallbackReason,
   };
 };
 
@@ -251,30 +333,32 @@ const createMemoryDocumentId = (
 ) => `MEMDOC-${slugify(`${capabilityId}-${sourceType}-${sourceId}`)}`.toUpperCase();
 
 const replaceDocumentChunksTx = async ({
+  executor,
   capabilityId,
   documentId,
+  vectorModel,
   chunks,
 }: {
+  executor: QueryExecutor;
   capabilityId: string;
   documentId: string;
-  chunks: Array<{ content: string; metadata?: Record<string, any> }>;
+  vectorModel: string;
+  chunks: MemoryRefreshChunkPlan[];
 }) => {
-  await query(
+  await queryWithExecutor(
+    executor,
     'DELETE FROM capability_memory_chunks WHERE capability_id = $1 AND document_id = $2',
     [capabilityId, documentId],
   );
-  await query(
+  await queryWithExecutor(
+    executor,
     'DELETE FROM capability_memory_embeddings WHERE capability_id = $1 AND document_id = $2',
     [capabilityId, documentId],
   );
 
-  const embeddingResult = await embedTexts(chunks.map(chunk => chunk.content));
-
-  for (const [index, chunk] of chunks.entries()) {
-    const chunkId = createId('MEMCHUNK');
-    const embeddingId = createId('MEMEMBED');
-    const embedding = embeddingResult.vectors[index] || hashEmbedText(chunk.content);
-    await query(
+  for (const chunk of chunks) {
+    await queryWithExecutor(
+      executor,
       `
         INSERT INTO capability_memory_chunks (
           capability_id,
@@ -289,15 +373,16 @@ const replaceDocumentChunksTx = async ({
       `,
       [
         capabilityId,
-        chunkId,
+        chunk.id,
         documentId,
-        index,
+        chunk.chunkIndex,
         chunk.content,
-        approxTokenEstimate(chunk.content),
-        chunk.metadata || {},
+        chunk.tokenEstimate,
+        chunk.metadata,
       ],
     );
-    await query(
+    await queryWithExecutor(
+      executor,
       `
         INSERT INTO capability_memory_embeddings (
           capability_id,
@@ -312,28 +397,30 @@ const replaceDocumentChunksTx = async ({
       `,
       [
         capabilityId,
-        embeddingId,
+        chunk.embeddingId,
         documentId,
-        chunkId,
-        embeddingResult.model,
-        JSON.stringify(embedding),
+        chunk.id,
+        vectorModel,
+        JSON.stringify(chunk.embedding),
       ],
     );
 
     if (getPlatformFeatureState().pgvectorAvailable) {
-      await query(
+      await queryWithExecutor(
+        executor,
         `
           UPDATE capability_memory_embeddings
           SET embedding_vector = $3::vector
           WHERE capability_id = $1 AND id = $2
         `,
-        [capabilityId, embeddingId, serializeVector(embedding)],
+        [capabilityId, chunk.embeddingId, serializeVector(chunk.embedding)],
       );
     }
   }
 };
 
 const upsertMemoryDocument = async ({
+  executor,
   capabilityId,
   id,
   title,
@@ -343,8 +430,11 @@ const upsertMemoryDocument = async ({
   sourceUri,
   freshness,
   metadata,
-  content,
+  contentPreview,
+  vectorModel,
+  chunks,
 }: {
+  executor: QueryExecutor;
   capabilityId: string;
   id: string;
   title: string;
@@ -354,10 +444,12 @@ const upsertMemoryDocument = async ({
   sourceUri?: string;
   freshness?: MemoryDocument['freshness'];
   metadata?: Record<string, any>;
-  content: string;
+  contentPreview: string;
+  vectorModel: string;
+  chunks: MemoryRefreshChunkPlan[];
 }) => {
-  const preview = normalizeText(content).slice(0, 400);
-  await query(
+  await queryWithExecutor(
+    executor,
     `
       INSERT INTO capability_memory_documents (
         capability_id,
@@ -394,14 +486,16 @@ const upsertMemoryDocument = async ({
       sourceUri || null,
       freshness || null,
       metadata || {},
-      preview,
+      contentPreview,
     ],
   );
 
   await replaceDocumentChunksTx({
+    executor,
     capabilityId,
     documentId: id,
-    chunks: splitIntoChunks(content).map(chunk => ({ content: chunk })),
+    vectorModel,
+    chunks,
   });
 };
 
@@ -453,17 +547,8 @@ const buildCapabilityMetadataContent = (capability: Capability) =>
 const buildSources = (
   capability: Capability,
   workspace: CapabilityWorkspace,
-) => {
-  const sources: Array<{
-    id: string;
-    title: string;
-    sourceType: MemorySourceType;
-    tier: MemoryStoreTier;
-    sourceUri?: string;
-    sourceId?: string;
-    metadata?: Record<string, any>;
-    content: string;
-  }> = [
+): MemorySourceSeed[] => {
+  const sources: MemorySourceSeed[] = [
     {
       id: createMemoryDocumentId(capability.id, 'CAPABILITY_METADATA', capability.id),
       title: `${capability.name} Capability Profile`,
@@ -621,19 +706,12 @@ const buildRepositoryFileScore = (relativePath: string) => {
   return score;
 };
 
-const buildRepositoryFileSources = async (capability: Capability) => {
-  const repoSources: Array<{
-    id: string;
-    title: string;
-    sourceType: MemorySourceType;
-    tier: MemoryStoreTier;
-    sourceUri?: string;
-    sourceId?: string;
-    metadata?: Record<string, any>;
-    content: string;
-  }> = [];
+const buildRepositoryFileSources = async (
+  capability: Capability,
+): Promise<MemorySourceSeed[]> => {
+  const repoSources: MemorySourceSeed[] = [];
 
-  for (const directoryPath of getCapabilityWorkspaceRoots(capability)) {
+  for (const directoryPath of [...getCapabilityWorkspaceRoots(capability)].sort(compareStrings)) {
     const indexedFiles = await getWorkspaceFileIndex(directoryPath, {
       maxFiles: 5_000,
     }).catch(() => []);
@@ -644,7 +722,7 @@ const buildRepositoryFileSources = async (capability: Capability) => {
         score: buildRepositoryFileScore(relativePath),
       }))
       .filter(file => file.score >= 0)
-      .sort((left, right) => right.score - left.score)
+      .sort((left, right) => right.score - left.score || compareStrings(left.relativePath, right.relativePath))
       .slice(0, 120);
 
     for (const file of candidateFiles) {
@@ -682,6 +760,181 @@ const buildRepositoryFileSources = async (capability: Capability) => {
   return repoSources;
 };
 
+const buildMemorySourceRefreshId = (source: MemorySourceSeed) =>
+  source.sourceId ||
+  source.metadata?.artifactId ||
+  source.metadata?.workItemId ||
+  source.metadata?.capabilityId ||
+  source.id;
+
+const buildMemorySourceFreshness = (
+  tier: MemoryStoreTier,
+): MemoryDocument['freshness'] => {
+  if (tier === 'WORKING') {
+    return 'HOT';
+  }
+  if (tier === 'SESSION') {
+    return 'WARM';
+  }
+  return 'COLD';
+};
+
+const buildMemoryDocumentMetadata = ({
+  source,
+  vectorModel,
+  embeddingProviderKey,
+  embeddingFallbackReason,
+  normalizedContent,
+}: {
+  source: MemorySourceSeed;
+  vectorModel: string;
+  embeddingProviderKey: EmbeddingProviderKey;
+  embeddingFallbackReason?: string;
+  normalizedContent: string;
+}) => ({
+  ...(source.metadata || {}),
+  memoryEmbedding: {
+    providerKey: embeddingProviderKey,
+    vectorModel,
+    fallbackReason: embeddingFallbackReason || null,
+    contentLength: normalizedContent.length,
+  },
+});
+
+const buildMemoryRefreshDocumentPlan = async ({
+  capabilityId,
+  source,
+}: {
+  capabilityId: string;
+  source: MemorySourceSeed;
+}): Promise<MemoryRefreshDocumentPlan> => {
+  const normalizedContent = normalizeText(source.content);
+  const chunkContents = splitIntoChunks(normalizedContent);
+  const embeddingResult = await embedTexts(chunkContents);
+
+  if (embeddingResult.fallbackReason) {
+    console.warn(
+      `[memory] ${capabilityId}/${source.id}: ${embeddingResult.fallbackReason}`,
+    );
+  }
+  if (chunkContents.length !== embeddingResult.vectors.length) {
+    console.warn(
+      `[memory] ${capabilityId}/${source.id}: planned ${chunkContents.length} chunks but received ${embeddingResult.vectors.length} vectors from ${embeddingResult.model}.`,
+    );
+  }
+
+  const chunks = chunkContents.map((content, chunkIndex) => ({
+    id: buildStableMemoryRowId('MEMCHUNK', capabilityId, source.id, chunkIndex),
+    embeddingId: buildStableMemoryRowId('MEMEMBED', capabilityId, source.id, chunkIndex),
+    chunkIndex,
+    content,
+    tokenEstimate: approxTokenEstimate(content),
+    metadata: {
+      sourceType: source.sourceType,
+      sourceId: buildMemorySourceRefreshId(source),
+      relativePath: source.metadata?.relativePath,
+      workspacePath: source.metadata?.workspacePath,
+    },
+    embedding: embeddingResult.vectors[chunkIndex] || hashEmbedText(content),
+  }));
+
+  return {
+    capabilityId,
+    id: source.id,
+    title: source.title,
+    sourceType: source.sourceType,
+    tier: source.tier,
+    sourceId: buildMemorySourceRefreshId(source),
+    sourceUri: source.sourceUri,
+    freshness: buildMemorySourceFreshness(source.tier),
+    metadata: buildMemoryDocumentMetadata({
+      source,
+      vectorModel: embeddingResult.model,
+      embeddingProviderKey: embeddingResult.providerKey,
+      embeddingFallbackReason: embeddingResult.fallbackReason,
+      normalizedContent,
+    }),
+    contentPreview: normalizedContent.slice(0, 2_000),
+    vectorModel: embeddingResult.model,
+    embeddingProviderKey: embeddingResult.providerKey,
+    embeddingFallbackReason: embeddingResult.fallbackReason,
+    chunks,
+  };
+};
+
+const buildMemoryRefreshPlan = async ({
+  capabilityId,
+  sources,
+}: {
+  capabilityId: string;
+  sources: MemorySourceSeed[];
+}) =>
+  Promise.all(
+    [...sources]
+      .sort((left, right) => compareStrings(left.id, right.id))
+      .map(source =>
+        buildMemoryRefreshDocumentPlan({
+          capabilityId,
+          source,
+        }),
+      ),
+  );
+
+const deleteStaleManagedMemoryDocumentsTx = async ({
+  executor,
+  capabilityId,
+  activeDocumentIds,
+}: {
+  executor: QueryExecutor;
+  capabilityId: string;
+  activeDocumentIds: string[];
+}) => {
+  await queryWithExecutor(
+    executor,
+    `
+      DELETE FROM capability_memory_documents
+      WHERE capability_id = $1
+        AND source_type = ANY($2::text[])
+        AND NOT (id = ANY($3::text[]))
+    `,
+    [capabilityId, MANAGED_MEMORY_SOURCE_TYPES, activeDocumentIds],
+  );
+};
+
+const applyMemoryRefreshPlanTx = async ({
+  executor,
+  capabilityId,
+  documents,
+}: {
+  executor: QueryExecutor;
+  capabilityId: string;
+  documents: MemoryRefreshDocumentPlan[];
+}) => {
+  for (const document of documents) {
+    await upsertMemoryDocument({
+      executor,
+      capabilityId,
+      id: document.id,
+      title: document.title,
+      sourceType: document.sourceType,
+      tier: document.tier,
+      sourceId: document.sourceId,
+      sourceUri: document.sourceUri,
+      freshness: document.freshness,
+      metadata: document.metadata,
+      contentPreview: document.contentPreview,
+      vectorModel: document.vectorModel,
+      chunks: document.chunks,
+    });
+  }
+
+  await deleteStaleManagedMemoryDocumentsTx({
+    executor,
+    capabilityId,
+    activeDocumentIds: documents.map(document => document.id),
+  });
+};
+
 const getAgentSourceFilter = async (capabilityId: string, agentId?: string) => {
   if (!agentId) {
     return null;
@@ -710,27 +963,17 @@ export const refreshCapabilityMemory = async (
     ...buildSources(bundle.capability, bundle.workspace),
     ...(await buildRepositoryFileSources(bundle.capability)),
   ];
+  const refreshPlan = await buildMemoryRefreshPlan({
+    capabilityId,
+    sources,
+  });
 
-  await transaction(async () => {
-    for (const source of sources) {
-      await upsertMemoryDocument({
-        capabilityId,
-        id: source.id,
-        title: source.title,
-        sourceType: source.sourceType,
-        tier: source.tier,
-        sourceId:
-          source.sourceId ||
-          source.metadata?.artifactId ||
-          source.metadata?.workItemId ||
-          source.metadata?.capabilityId ||
-          source.id,
-        sourceUri: source.sourceUri,
-        freshness: source.tier === 'WORKING' ? 'HOT' : source.tier === 'SESSION' ? 'WARM' : 'COLD',
-        metadata: source.metadata,
-        content: source.content,
-      });
-    }
+  await transaction(async executor => {
+    await applyMemoryRefreshPlanTx({
+      executor,
+      capabilityId,
+      documents: refreshPlan,
+    });
   });
 
   if (options?.requeueAgents !== false) {

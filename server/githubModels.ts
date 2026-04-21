@@ -1736,6 +1736,7 @@ export const invokeScopedCapabilitySession = async ({
   timeoutMs,
   onDelta,
   resetSession = false,
+  workItemPhase,
 }: {
   capability: Partial<Capability>;
   agent: Partial<CapabilityAgent>;
@@ -1748,6 +1749,14 @@ export const invokeScopedCapabilitySession = async ({
   timeoutMs?: number;
   onDelta?: (delta: string) => void;
   resetSession?: boolean;
+  /**
+   * Current WorkItemPhase (e.g. "DEVELOPMENT", "QA", "RELEASE"). When
+   * provided, the copilot guidance pack is phase-sliced — QA-phase agents
+   * only receive testing rules; release-phase agents get a compact
+   * policy-focused block; dev agents get guidance + testing. Omit for
+   * full pack (chat / ad-hoc sessions).
+   */
+  workItemPhase?: string | null;
 }) => {
   const learningContextBlock = agent.learningProfile?.contextBlock?.trim() || '';
   // Load cached copilot guidance (CLAUDE.md / AGENTS.md / .cursor/rules /
@@ -1755,8 +1764,13 @@ export const invokeScopedCapabilitySession = async ({
   // No network I/O here — the refresh happens on its own endpoint; we read
   // what's cached so session init stays fast. Failures are swallowed so a
   // corrupted guidance row can never block inference.
+  // Phase slicing: when workItemPhase is provided, the injected block is
+  // scoped to just the categories relevant to that phase (biggest single
+  // input-token reduction — see `selectGuidanceCategoriesForPhase`).
   const copilotGuidanceBlock = capability.id
-    ? await loadGuidanceSystemPromptBlock(capability.id).catch(() => null)
+    ? await loadGuidanceSystemPromptBlock(capability.id, {
+        phase: workItemPhase ?? null,
+      }).catch(() => null)
     : null;
   const effectivePrompt = prependRetrievedMemory(
     initialPrompt && resetSession ? initialPrompt : prompt,
@@ -1961,6 +1975,92 @@ export const invokeScopedCapabilitySession = async ({
     sessionId: undefined,
     sessionScope: scope,
     sessionScopeId: scopeId,
+  };
+};
+
+export interface BudgetSummaryTurn {
+  role: 'assistant' | 'user';
+  content: string;
+}
+
+export interface BudgetSummaryResult {
+  summary: string;
+  model: string;
+  usage: SessionExchangeResult['usage'] | null;
+}
+
+/**
+ * Cheap-model summarizer for long tool-loop transcripts (Lever 3 of the
+ * token-optimization program — see /Users/ashokraj/.claude/plans/iridescent-tinkering-cocoa.md).
+ *
+ * Reuses the capability's provider but forces the lowest-affordability model
+ * available, using the existing BUDGET_MODEL_HINTS scoring via
+ * `pickLowestCostRuntimeModel`. When a prior summary exists, the caller is
+ * expected to pass only the new (as-yet unsummarized) older turns so we
+ * compound instead of re-summarizing every tick.
+ *
+ * Returns a 3–4 sentence state note. On any failure (provider down, model
+ * unavailable, etc.) the caller is expected to fall back to a truncated raw
+ * transcript — the rollup is a cost optimization, not a correctness gate.
+ */
+export const invokeBudgetModelSummary = async ({
+  agent,
+  priorSummary,
+  newTurns,
+  timeoutMs = 30_000,
+}: {
+  capability?: Partial<Capability>;
+  agent: Partial<CapabilityAgent>;
+  priorSummary: string;
+  newTurns: BudgetSummaryTurn[];
+  timeoutMs?: number;
+}): Promise<BudgetSummaryResult> => {
+  if (newTurns.length === 0) {
+    return { summary: priorSummary, model: '', usage: null };
+  }
+
+  const providerKey = resolveAgentProviderKey(agent);
+  const { models } = await listAvailableRuntimeModels().catch(() => ({
+    models: getStaticRuntimeModels(),
+    fromRuntime: false,
+  }));
+  const cheapest = pickLowestCostRuntimeModel(models);
+  const chosenModel = cheapest?.apiModelId || normalizeModel('gpt-4o-mini');
+
+  const transcript = newTurns
+    .map(turn => `${turn.role.toUpperCase()}: ${turn.content}`)
+    .join('\n\n');
+
+  const systemPrompt =
+    'You compress an agent tool-loop transcript into a short state note. ' +
+    'Output 3 to 4 sentences maximum. Preserve: the file or symbol under edit, ' +
+    'the most recent failure or success, and the immediate next intent. ' +
+    'Do not emit tool JSON, code fences, or bullet lists.';
+
+  const userPrompt = [
+    priorSummary ? `PRIOR SUMMARY (extend, do not repeat):\n${priorSummary}` : null,
+    `NEW TURNS TO FOLD IN:\n${transcript}`,
+    'Write the updated state note now.',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  const messages: GitHubModelsMessage[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt },
+  ];
+
+  const result = await requestGitHubModel({
+    model: chosenModel,
+    providerKey,
+    messages,
+    timeoutMs,
+  });
+
+  return {
+    summary: (result.content || priorSummary || '').trim(),
+    model: result.model || chosenModel,
+    usage: result.usage ?? null,
   };
 };
 

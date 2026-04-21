@@ -231,6 +231,7 @@ export const requestLocalOpenAIEmbeddings = async ({
   providerKey: EmbeddingProviderKey;
   model: string;
   vectors: number[][];
+  fallbackReason?: string;
 }> => {
   if (!texts.length) {
     return {
@@ -245,6 +246,7 @@ export const requestLocalOpenAIEmbeddings = async ({
       providerKey: HASH_EMBEDDING_PROVIDER_KEY,
       model: 'deterministic-hash-v2',
       vectors: [],
+      fallbackReason: 'Local embedding provider is not configured.',
     };
   }
 
@@ -281,11 +283,15 @@ export const requestLocalOpenAIEmbeddings = async ({
       model: String(payload.model || getLocalOpenAIEmbeddingModel()),
       vectors: (payload.data || []).map(item => normalizeEmbedding(item.embedding, dimensions)),
     };
-  } catch {
+  } catch (error) {
     return {
       providerKey: HASH_EMBEDDING_PROVIDER_KEY,
       model: 'deterministic-hash-v2',
       vectors: [],
+      fallbackReason:
+        error instanceof Error
+          ? error.message
+          : 'Local embedding provider request failed.',
     };
   } finally {
     clearTimeout(timeout);

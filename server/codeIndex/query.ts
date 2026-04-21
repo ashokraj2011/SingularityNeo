@@ -188,3 +188,47 @@ export const searchCodeSymbols = async (
     indexedAt: row.indexed_at,
   }));
 };
+
+/**
+ * Look up a single symbol by exact (file_path, symbol_name) match, scoped
+ * to a capability. Used by `workspace_read` to return semantic hunks
+ * (only the function/class body) instead of whole files.
+ *
+ * Matches either a relative file path or a suffix match so callers can pass
+ * `src/foo/bar.ts` even when the index stores `<repoRoot>/src/foo/bar.ts`.
+ * Returns the first match (is_exported desc, shortest path first).
+ */
+export const findSymbolRangeInFile = async (
+  capabilityId: string,
+  filePath: string,
+  symbolName: string,
+): Promise<{ startLine: number; endLine: number; kind: string } | null> => {
+  const trimmedPath = (filePath || '').trim();
+  const trimmedName = (symbolName || '').trim();
+  if (!trimmedPath || !trimmedName) return null;
+
+  const result = await query(
+    `
+      SELECT start_line, end_line, kind, file_path
+      FROM capability_code_symbols
+      WHERE capability_id = $1
+        AND symbol_name = $2
+        AND (file_path = $3 OR file_path LIKE $4)
+      ORDER BY is_exported DESC, LENGTH(file_path) ASC
+      LIMIT 1
+    `,
+    [capabilityId, trimmedName, trimmedPath, `%/${trimmedPath}`],
+  );
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0] as {
+    start_line: number;
+    end_line: number;
+    kind: string;
+  };
+  return {
+    startLine: Number(row.start_line) || 1,
+    endLine: Number(row.end_line) || 1,
+    kind: String(row.kind || ''),
+  };
+};

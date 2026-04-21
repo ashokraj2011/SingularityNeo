@@ -691,6 +691,20 @@ export interface CapabilityExecutionConfig {
   allowedWorkspacePaths: string[];
   commandTemplates: CapabilityExecutionCommandTemplate[];
   deploymentTargets: CapabilityDeploymentTarget[];
+  /**
+   * Tool-loop history rollup tuning (Lever 3 of the token-optimization
+   * program). When the inner execution loop exceeds `threshold` tool
+   * turns, the oldest prefix is summarized by a budget model and the
+   * main model only sees that summary plus the last `keepLastN` raw
+   * turns. Unset → defaults (enabled, keepLastN=6, threshold=10). Set
+   * `enabled: false` to bypass the rollup entirely for debugging a
+   * specific capability.
+   */
+  historyRollup?: {
+    enabled?: boolean;
+    keepLastN?: number;
+    threshold?: number;
+  };
 }
 
 export interface CapabilityOnboardingDraft {

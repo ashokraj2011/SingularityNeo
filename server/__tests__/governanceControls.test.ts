@@ -270,17 +270,15 @@ const queryImpl = async (rawSql: string, params?: unknown[]): Promise<QueryResul
   }
 
   // ────────────────────────────────────────────────────────────────────
-  // findBindingsByPolicySelector — JSONB @> match
+  // findBindingsByPolicySelector — selector match
   // ────────────────────────────────────────────────────────────────────
   if (
     sql.startsWith('SELECT * FROM governance_control_bindings') &&
-    sql.includes('policy_selector @>')
+    !sql.includes('WHERE control_id = $1')
   ) {
-    const probe = parseJsonbParam((params as unknown[])[0]);
-    const scopeParam = (params as unknown[])[1] as string | undefined;
-    const hasScopeParam = sql.includes('capability_scope = $2');
+    const scopeParam = (params as unknown[])[0] as string | undefined;
+    const hasScopeParam = sql.includes('capability_scope = $1');
     const matches = Array.from(bindings.values())
-      .filter(binding => containsSelector(binding.policy_selector, probe))
       .filter(binding => {
         if (hasScopeParam) {
           return binding.capability_scope === null || binding.capability_scope === scopeParam;
@@ -622,7 +620,7 @@ describe('governance/controls Slice 2 surface', () => {
   });
 
   // ──────────────────────────────────────────────────────────────────────
-  // findBindingsByPolicySelector — JSONB @> containment
+  // findBindingsByPolicySelector — normalized selector matching
   // ──────────────────────────────────────────────────────────────────────
   describe('findBindingsByPolicySelector', () => {
     it('matches every seed binding that names a given toolId', async () => {
@@ -632,13 +630,22 @@ describe('governance/controls Slice 2 surface', () => {
       await ensureControlsSeeded();
       const { CONTROL_BINDING_SEEDS } = await import('../governance/controlsCatalog');
       const expected = CONTROL_BINDING_SEEDS.filter(
-        b => (b.policySelector as { toolId?: string }).toolId === 'workspace_write',
+        b =>
+          (b.policySelector as { toolId?: string; actionType?: string }).toolId ===
+            'workspace_write' ||
+          (b.policySelector as { actionType?: string }).actionType === 'workspace_write',
       );
       expect(expected.length).toBeGreaterThan(0);
       const matches = await findBindingsByPolicySelector({ toolId: 'workspace_write' });
       expect(matches.length).toBe(expected.length);
       for (const binding of matches) {
-        expect((binding.policySelector as { toolId?: string }).toolId).toBe('workspace_write');
+        const selector = binding.policySelector as {
+          toolId?: string;
+          actionType?: string;
+        };
+        expect(
+          selector.toolId === 'workspace_write' || selector.actionType === 'workspace_write',
+        ).toBe(true);
       }
     });
 

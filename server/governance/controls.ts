@@ -19,6 +19,7 @@
  */
 import type { PoolClient } from 'pg';
 import { query, transaction } from '../db';
+import { matchesPolicySelector } from '../policy';
 import {
   CONTROLS_SEED_VERSION,
   CONTROL_BINDING_SEEDS,
@@ -390,22 +391,29 @@ export const findBindingsByPolicySelector = async (
   if (!probe || typeof probe !== 'object' || Object.keys(probe).length === 0) {
     return [];
   }
-  const params: unknown[] = [JSON.stringify(probe)];
+  const params: unknown[] = [];
   const scopeClause = options.capabilityScope
-    ? `AND (capability_scope IS NULL OR capability_scope = $2)`
-    : `AND capability_scope IS NULL`;
+    ? `WHERE capability_scope IS NULL OR capability_scope = $1`
+    : `WHERE capability_scope IS NULL`;
   if (options.capabilityScope) {
     params.push(options.capabilityScope);
   }
   const sql = `
     SELECT *
     FROM governance_control_bindings
-    WHERE policy_selector @> $1::jsonb
     ${scopeClause}
     ORDER BY binding_id
   `;
   const res = await query<Record<string, unknown>>(sql, params);
-  return res.rows.map(rowToBinding);
+  return res.rows
+    .map(rowToBinding)
+    .filter(binding =>
+      matchesPolicySelector({
+        selector: binding.policySelector,
+        actionType: typeof probe.actionType === 'string' ? probe.actionType : undefined,
+        toolId: typeof probe.toolId === 'string' ? probe.toolId : undefined,
+      }),
+    );
 };
 
 /**

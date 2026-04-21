@@ -457,20 +457,94 @@ export const readCapabilityCopilotGuidance = async (
 // ─────────────────────────────────────────────────────────────────────────
 
 /**
+ * Phase → guidance category router.
+ *
+ * `WorkItemPhase` is a free-form string (DESIGN, DEVELOPMENT, QA, RELEASE,
+ * ANALYSIS, GOVERNANCE, …) that varies per workflow template, so we match
+ * on lowercased substrings rather than a fixed enum. Agents running in a
+ * QA/testing phase only receive the "testing" category (≈8 KB) and skip
+ * the full 24 KB guidance pack — the single biggest input-token saving.
+ *
+ * Pass an unknown phase → returns null → caller should fall back to
+ * today's behavior (full guidance pack).
+ */
+export const selectGuidanceCategoriesForPhase = (
+  phase: string | null | undefined,
+): { categories: CapabilityCopilotGuidanceCategory[]; byteBudget?: number } | null => {
+  const normalized = (phase || '').trim().toLowerCase();
+  if (!normalized) return null;
+
+  // Testing / validation / QA phases: only testing rules.
+  if (/\b(qa|test|valid|verif)/i.test(normalized)) {
+    return { categories: ['testing'], byteBudget: 8 * 1024 };
+  }
+
+  // Release / deploy / delivery phases: compact guidance, no testing.
+  if (/\b(release|deliver|deploy|launch)/i.test(normalized)) {
+    return { categories: ['guidance'], byteBudget: 6 * 1024 };
+  }
+
+  // Governance / review phases: compact guidance only (policy & checklists).
+  if (/\b(govern|review|audit)/i.test(normalized)) {
+    return { categories: ['guidance'], byteBudget: 8 * 1024 };
+  }
+
+  // Discover / analyze / plan / design / inception / elaboration: guidance
+  // only, full budget (architecture + house style are actually useful here).
+  if (/\b(discover|analy|plan|design|incept|elabor)/i.test(normalized)) {
+    return { categories: ['guidance'], byteBudget: PROMPT_GUIDANCE_BUDGET_BYTES };
+  }
+
+  // Development / build / construction / implementation: guidance + testing.
+  if (/\b(dev|build|constr|impl|code)/i.test(normalized)) {
+    return {
+      categories: ['guidance', 'testing'],
+      byteBudget: PROMPT_GUIDANCE_BUDGET_BYTES,
+    };
+  }
+
+  // Unknown phase string — let caller fall back to today's default.
+  return null;
+};
+
+/**
  * Assemble a compact, deduped text block from the cached guidance files.
  * Applies the aggregate byte budget and tags each file so the agent can
  * cite it back in its responses. Returns null when no files are cached.
+ *
+ * `categoryFilter` accepts either a single category (legacy) or an array
+ * (phase-sliced). `phase` is a convenience shortcut that looks up the
+ * right categories + byteBudget for a `WorkItemPhase` string.
  */
 export const buildGuidanceBlockFromPack = (
   pack: CapabilityCopilotGuidancePack,
   options: {
-    categoryFilter?: CapabilityCopilotGuidanceCategory;
+    categoryFilter?: CapabilityCopilotGuidanceCategory | CapabilityCopilotGuidanceCategory[];
     byteBudget?: number;
+    phase?: string | null;
   } = {},
 ): string | null => {
-  const budget = options.byteBudget ?? PROMPT_GUIDANCE_BUDGET_BYTES;
-  const selected = options.categoryFilter
-    ? pack.files.filter(file => file.category === options.categoryFilter)
+  // Resolve phase first so an explicit categoryFilter can still override it.
+  let effectiveCategories: CapabilityCopilotGuidanceCategory[] | null = null;
+  let effectiveBudget = options.byteBudget ?? PROMPT_GUIDANCE_BUDGET_BYTES;
+
+  if (options.categoryFilter) {
+    effectiveCategories = Array.isArray(options.categoryFilter)
+      ? options.categoryFilter
+      : [options.categoryFilter];
+  } else if (options.phase) {
+    const phaseSlice = selectGuidanceCategoriesForPhase(options.phase);
+    if (phaseSlice) {
+      effectiveCategories = phaseSlice.categories;
+      if (options.byteBudget === undefined && phaseSlice.byteBudget !== undefined) {
+        effectiveBudget = phaseSlice.byteBudget;
+      }
+    }
+  }
+
+  const budget = effectiveBudget;
+  const selected = effectiveCategories
+    ? pack.files.filter(file => effectiveCategories!.includes(file.category))
     : pack.files;
   if (!selected.length) return null;
 
@@ -505,8 +579,19 @@ export const buildGuidanceBlockFromPack = (
  */
 export const loadGuidanceSystemPromptBlock = async (
   capabilityId: string,
+  options: { phase?: string | null } = {},
 ): Promise<string | null> => {
   const pack = await readCapabilityCopilotGuidance(capabilityId);
+  // If a phase is provided and we have a mapping for it, use the phase
+  // slice (which may select testing-only, guidance-only, or both with a
+  // tighter budget). Otherwise default to the "guidance" category with
+  // the full budget (today's behavior).
+  if (options.phase) {
+    const phaseSlice = selectGuidanceCategoriesForPhase(options.phase);
+    if (phaseSlice) {
+      return buildGuidanceBlockFromPack(pack, { phase: options.phase });
+    }
+  }
   return buildGuidanceBlockFromPack(pack, { categoryFilter: 'guidance' });
 };
 

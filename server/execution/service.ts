@@ -76,6 +76,10 @@ import {
 } from '../../src/lib/workItemStakeholders';
 import { invokeScopedCapabilitySession } from '../githubModels';
 import {
+  rollupToolHistory,
+  type RollupCacheEntry,
+} from './historyRollup';
+import {
   queueExperienceDistillationRefresh,
   queueSingleAgentLearningRefresh,
 } from '../agentLearning/service';
@@ -1582,6 +1586,7 @@ const repairMalformedExecutionDecision = async ({
     agent,
     scope: workItem.id ? 'WORK_ITEM' : 'TASK',
     scopeId: workItem.id || runStep.id,
+    workItemPhase: step.phase,
     developerPrompt:
       'You repair malformed workflow execution responses. Return one valid JSON object only with no markdown.',
     prompt: [
@@ -1667,6 +1672,7 @@ const requestContrarianConflictReview = async ({
     agent: reviewer,
     scope: 'WORK_ITEM',
     scopeId: workItem.id,
+    workItemPhase: step.phase,
     developerPrompt:
       'You are an adversarial workflow reviewer. Return JSON only with no markdown.',
     memoryPrompt: memoryContext.prompt || undefined,
@@ -1755,6 +1761,10 @@ const requestStepDecision = async ({
   compiledWorkItemPlan,
   toolHistory,
   operatorGuidanceContext,
+  rollupCacheRef,
+  runId,
+  traceId,
+  spanId,
 }: {
   capability: Capability;
   workItem: WorkItem;
@@ -1768,7 +1778,59 @@ const requestStepDecision = async ({
   compiledWorkItemPlan: CompiledWorkItemPlan;
   toolHistory: Array<{ role: 'assistant' | 'user'; content: string }>;
   operatorGuidanceContext?: string;
+  /**
+   * Mutable carrier so the outer iteration loop can share the rollup
+   * cache across ticks without an extra return channel (Lever 3).
+   */
+  rollupCacheRef?: { current: RollupCacheEntry | null };
+  runId?: string;
+  traceId?: string;
+  spanId?: string;
 }): Promise<DecisionEnvelope> => {
+  // History rollup (Lever 3): when toolHistory is long, collapse the oldest
+  // prefix into a single summary turn produced by the cheapest model on the
+  // capability's provider. Only the last `keepLastN` turns reach the main
+  // (expensive) model verbatim. Respects the optional
+  // `executionConfig.historyRollup` knobs and fails open on any error.
+  const rollupConfig = capability.executionConfig?.historyRollup;
+  const rollupEnabled = rollupConfig?.enabled !== false;
+  let effectiveToolHistory = toolHistory;
+  if (rollupEnabled && toolHistory.length > 0) {
+    try {
+      const { rolled, nextCache } = await rollupToolHistory({
+        capability,
+        agent,
+        toolHistory,
+        cache: rollupCacheRef?.current ?? null,
+        keepLastN: rollupConfig?.keepLastN,
+        rollupThreshold: rollupConfig?.threshold,
+      });
+      effectiveToolHistory = rolled.compressed;
+      if (rollupCacheRef) rollupCacheRef.current = nextCache;
+      if (rolled.summarizedTurnCount > 0 && runId) {
+        await emitRunProgressEvent({
+          capabilityId: capability.id,
+          runId,
+          workItemId: workItem.id,
+          runStepId: runStep.id,
+          traceId,
+          spanId,
+          type: 'HISTORY_ROLLUP',
+          message: `Condensed ${rolled.summarizedTurnCount} older tool turn${rolled.summarizedTurnCount === 1 ? '' : 's'} via budget model${rolled.usedModel ? ` (${rolled.usedModel})` : ''}.`,
+          details: {
+            stage: 'HISTORY_ROLLUP',
+            summarizedTurns: rolled.summarizedTurnCount,
+            retainedTurns: rolled.retainedTurnCount,
+            usedModel: rolled.usedModel,
+            totalTurns: toolHistory.length,
+          },
+        });
+      }
+    } catch (error) {
+      console.warn('[requestStepDecision] history rollup failed; passing raw toolHistory', error);
+      effectiveToolHistory = toolHistory;
+    }
+  }
   const allowedToolIds = compiledStepContext.executionBoundary.allowedToolIds;
   const toolDescriptions = allowedToolIds.length
     ? listToolDescriptions(allowedToolIds).join('\n')
@@ -1849,6 +1911,7 @@ const requestStepDecision = async ({
     agent,
     scope: workItem.id ? 'WORK_ITEM' : 'TASK',
     scopeId: workItem.id || runStep.id,
+    workItemPhase: step.phase || workItem.phase,
     developerPrompt:
       'You are an execution engine inside a capability workflow. Return JSON only with no markdown.',
     memoryPrompt: memoryContext.prompt || undefined,
@@ -1870,8 +1933,8 @@ const requestStepDecision = async ({
       `Explicit operator guidance and override context:\n${operatorGuidanceContext || 'None'}`,
       `Allowed tools:\n${toolDescriptions}`,
       `Workspace policy:\n${workspaceGuidance}`,
-      toolHistory.length
-        ? `Prior tool loop transcript:\n${toolHistory
+      effectiveToolHistory.length
+        ? `Prior tool loop transcript:\n${effectiveToolHistory
             .map(item => `${item.role.toUpperCase()}: ${item.content}`)
             .join('\n\n')}`
         : null,
@@ -5808,6 +5871,11 @@ const executeAutomatedStep = async (
   });
 
   const toolHistory: Array<{ role: 'assistant' | 'user'; content: string }> = [];
+  // Ephemeral cache for the Lever-3 history rollup — lives for the duration
+  // of this step execution only. Lets `requestStepDecision` fold only the
+  // new older turns into the cached summary instead of re-summarizing the
+  // same prefix on every iteration.
+  const rollupCacheRef: { current: RollupCacheEntry | null } = { current: null };
   const inspectedPaths = new Set<string>();
   const attemptedTools: ToolAdapterId[] = [];
   let hasApprovedDeployment = runningDetail.steps.some(
@@ -5941,6 +6009,10 @@ const executeAutomatedStep = async (
       compiledWorkItemPlan,
       toolHistory,
       operatorGuidanceContext,
+      rollupCacheRef,
+      runId: detail.run.id,
+      traceId,
+      spanId: stepSpan.id,
     });
     const decision = decisionEnvelope.decision;
 

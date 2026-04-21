@@ -1,7 +1,9 @@
 import type express from 'express';
 
 export const getApiErrorStatus = (message: string) =>
-  /not found/i.test(message)
+  /unauthorized|not registered in this workspace/i.test(message)
+    ? 401
+    : /not found/i.test(message)
     ? 404
     : /already has an active or waiting workflow run|already exists/i.test(message)
       ? 409

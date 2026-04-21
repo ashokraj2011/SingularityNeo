@@ -45,6 +45,99 @@ const HIGH_IMPACT_TOOLS = new Set<ToolAdapterId>([
   'run_deploy',
 ]);
 
+const ACTION_TYPE_BY_TOOL_ID: Partial<Record<ToolAdapterId, PolicyActionType>> = {
+  workspace_write: 'workspace_write',
+  workspace_replace_block: 'workspace_write',
+  workspace_apply_patch: 'workspace_write',
+  run_build: 'run_build',
+  run_test: 'run_test',
+  run_docs: 'run_docs',
+  run_deploy: 'run_deploy',
+};
+
+export const getPolicyActionTypeForToolId = (toolId?: ToolAdapterId | string | null) =>
+  toolId && toolId in ACTION_TYPE_BY_TOOL_ID
+    ? ACTION_TYPE_BY_TOOL_ID[toolId as ToolAdapterId] || 'custom'
+    : 'custom';
+
+export const matchesPolicySelector = ({
+  selector,
+  actionType,
+  toolId,
+}: {
+  selector?: Record<string, unknown> | null;
+  actionType?: PolicyActionType | string | null;
+  toolId?: ToolAdapterId | string | null;
+}) => {
+  if (!selector || typeof selector !== 'object') {
+    return false;
+  }
+
+  const selectorActionType = String(selector.actionType || '').trim();
+  const selectorToolId = String(selector.toolId || '').trim();
+  const normalizedActionType = String(actionType || '').trim();
+  const normalizedToolId = String(toolId || '').trim();
+
+  if (selectorActionType && normalizedActionType && selectorActionType === normalizedActionType) {
+    return true;
+  }
+
+  if (
+    selectorToolId &&
+    normalizedActionType &&
+    getPolicyActionTypeForToolId(selectorToolId) === normalizedActionType
+  ) {
+    return true;
+  }
+
+  if (selectorToolId && normalizedToolId && selectorToolId === normalizedToolId) {
+    return true;
+  }
+
+  if (
+    selectorActionType &&
+    normalizedToolId &&
+    selectorActionType === getPolicyActionTypeForToolId(normalizedToolId)
+  ) {
+    return true;
+  }
+
+  return false;
+};
+
+export const findMatchingActivePolicyException = async ({
+  capabilityId,
+  actionType,
+  toolId,
+}: {
+  capabilityId: string;
+  actionType?: PolicyActionType;
+  toolId?: ToolAdapterId;
+}) => {
+  const probes = [
+    actionType ? { actionType } : null,
+    toolId ? { toolId } : null,
+  ].filter(Boolean) as Array<Record<string, unknown>>;
+  const seen = new Set<string>();
+
+  for (const probe of probes) {
+    const key = JSON.stringify(probe);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    const exception = await findActiveException({
+      capabilityId,
+      probe,
+    });
+    if (exception) {
+      return exception;
+    }
+  }
+
+  return null;
+};
+
 export const createPolicyDecision = async (
   decision: Omit<PolicyDecision, 'id' | 'createdAt'> & { id?: string; createdAt?: string },
 ) => {
@@ -144,18 +237,7 @@ export const evaluateToolPolicy = async ({
     });
   }
 
-  let actionType: PolicyActionType =
-    toolId === 'workspace_write' ||
-    toolId === 'workspace_replace_block' ||
-    toolId === 'workspace_apply_patch' ||
-    toolId === 'run_build' ||
-    toolId === 'run_test' ||
-    toolId === 'run_docs' ||
-    toolId === 'run_deploy'
-      ? toolId === 'workspace_replace_block' || toolId === 'workspace_apply_patch'
-        ? 'workspace_write'
-        : toolId
-      : 'custom';
+  const actionType = getPolicyActionTypeForToolId(toolId);
   let decision: PolicyDecisionResult = 'ALLOW';
   let reason = `${toolId} is allowed under the current execution policy.`;
 
@@ -202,9 +284,10 @@ export const evaluateToolPolicy = async ({
   let exceptionExpiresAt: string | undefined;
   if (decision === 'REQUIRE_APPROVAL') {
     try {
-      const activeException = await findActiveException({
+      const activeException = await findMatchingActivePolicyException({
         capabilityId: capability.id,
-        probe: { toolId },
+        actionType,
+        toolId,
       });
       if (activeException) {
         decision = 'ALLOW';
@@ -249,14 +332,41 @@ export const evaluateBranchPolicy = async ({
   traceId?: string;
   requestedByAgentId?: string;
   targetId?: string;
-}) =>
-  createPolicyDecision({
+}) => {
+  let decision: PolicyDecisionResult = 'REQUIRE_APPROVAL';
+  let reason =
+    'Creating branches is a high-impact repository mutation and requires human approval in the enterprise policy engine.';
+  let exceptionId: string | undefined;
+  let exceptionExpiresAt: string | undefined;
+
+  try {
+    const activeException = await findMatchingActivePolicyException({
+      capabilityId: capability.id,
+      actionType: 'git_branch',
+    });
+    if (activeException) {
+      decision = 'ALLOW';
+      exceptionId = activeException.exceptionId;
+      exceptionExpiresAt = activeException.expiresAt ?? undefined;
+      reason = `Policy satisfied by governance exception ${activeException.exceptionId} (control ${activeException.controlId}, expires ${activeException.expiresAt ?? 'unspecified'}).`;
+    }
+  } catch (error) {
+    console.warn(
+      `[policy] governance exception lookup failed for ${capability.id}/git_branch: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
+  return createPolicyDecision({
     capabilityId: capability.id,
     traceId,
     requestedByAgentId,
     actionType: 'git_branch',
     targetId,
-    decision: 'REQUIRE_APPROVAL',
-    reason:
-      'Creating branches is a high-impact repository mutation and requires human approval in the enterprise policy engine.',
+    decision,
+    reason,
+    exceptionId,
+    exceptionExpiresAt,
   });
+};

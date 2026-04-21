@@ -108,7 +108,7 @@ describe('evaluateToolPolicy — governance exception hook', () => {
 
     expect(findActiveExceptionMock).toHaveBeenCalledWith({
       capabilityId: 'CAP-1',
-      probe: { toolId: 'run_deploy' },
+      probe: { actionType: 'run_deploy' },
     });
     expect(decision.decision).toBe('ALLOW');
     expect(decision.exceptionId).toBe('GOV-EXC-ABC');

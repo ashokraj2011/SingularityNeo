@@ -585,19 +585,19 @@ export const CONTROL_BINDING_SEEDS: readonly ControlBindingSeed[] = Object.freez
   {
     bindingId: 'GOV-BND-SEED-001',
     controlId: 'GOV-CTRL-NIST-008', // PR.AA-05
-    policySelector: { toolId: 'workspace_write' },
+    policySelector: { actionType: 'workspace_write', toolId: 'workspace_write' },
     bindingKind: 'POLICY_DECISION',
   },
   {
     bindingId: 'GOV-BND-SEED-002',
     controlId: 'GOV-CTRL-SOC2-008', // CC6.3
-    policySelector: { toolId: 'workspace_write' },
+    policySelector: { actionType: 'workspace_write', toolId: 'workspace_write' },
     bindingKind: 'POLICY_DECISION',
   },
   {
     bindingId: 'GOV-BND-SEED-003',
     controlId: 'GOV-CTRL-ISO-010', // A.8.3
-    policySelector: { toolId: 'workspace_write' },
+    policySelector: { actionType: 'workspace_write', toolId: 'workspace_write' },
     bindingKind: 'POLICY_DECISION',
   },
 
@@ -605,19 +605,19 @@ export const CONTROL_BINDING_SEEDS: readonly ControlBindingSeed[] = Object.freez
   {
     bindingId: 'GOV-BND-SEED-004',
     controlId: 'GOV-CTRL-NIST-011', // PR.IP-01
-    policySelector: { toolId: 'workspace_apply_patch' },
+    policySelector: { actionType: 'workspace_write', toolId: 'workspace_apply_patch' },
     bindingKind: 'POLICY_DECISION',
   },
   {
     bindingId: 'GOV-BND-SEED-005',
     controlId: 'GOV-CTRL-SOC2-014', // CC8.1
-    policySelector: { toolId: 'workspace_apply_patch' },
+    policySelector: { actionType: 'workspace_write', toolId: 'workspace_apply_patch' },
     bindingKind: 'POLICY_DECISION',
   },
   {
     bindingId: 'GOV-BND-SEED-006',
     controlId: 'GOV-CTRL-ISO-015', // A.8.32
-    policySelector: { toolId: 'workspace_apply_patch' },
+    policySelector: { actionType: 'workspace_write', toolId: 'workspace_apply_patch' },
     bindingKind: 'POLICY_DECISION',
   },
 
@@ -625,19 +625,19 @@ export const CONTROL_BINDING_SEEDS: readonly ControlBindingSeed[] = Object.freez
   {
     bindingId: 'GOV-BND-SEED-007',
     controlId: 'GOV-CTRL-NIST-012', // PR.IP-04
-    policySelector: { toolId: 'run_deploy' },
+    policySelector: { actionType: 'run_deploy', toolId: 'run_deploy' },
     bindingKind: 'POLICY_DECISION',
   },
   {
     bindingId: 'GOV-BND-SEED-008',
     controlId: 'GOV-CTRL-SOC2-014', // CC8.1
-    policySelector: { toolId: 'run_deploy' },
+    policySelector: { actionType: 'run_deploy', toolId: 'run_deploy' },
     bindingKind: 'POLICY_DECISION',
   },
   {
     bindingId: 'GOV-BND-SEED-009',
     controlId: 'GOV-CTRL-ISO-015', // A.8.32
-    policySelector: { toolId: 'run_deploy' },
+    policySelector: { actionType: 'run_deploy', toolId: 'run_deploy' },
     bindingKind: 'POLICY_DECISION',
   },
 
