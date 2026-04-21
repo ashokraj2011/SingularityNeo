@@ -1,0 +1,55 @@
+# Single-command local stack: Postgres + Singularity Neo app container.
+# The app image serves the built Vite client AND /api/* on one port
+# (see server/index.ts — express.static(distDir) + /^(?!\/api).*/).
+#
+# Usage:
+#   docker compose up --build
+#   open http://localhost:3001
+#
+# To point at a managed Postgres instead, remove the `db` service and
+# set PGHOST/PGUSER/PGPASSWORD/PGDATABASE via `.env` or the shell.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: singularity
+      POSTGRES_USER: singularity
+      POSTGRES_PASSWORD: singularity
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U singularity -d singularity"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 3001
+      PGHOST: db
+      PGPORT: 5432
+      PGDATABASE: singularity
+      PGUSER: singularity
+      PGPASSWORD: singularity
+      # Pass through provider credentials from the host shell if set.
+      # Leave empty/undefined if you don't need them — the server
+      # tolerates missing keys and degrades the relevant features.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "3001:3001"
+    volumes:
+      # Persist server-written state (database-runtime.json, uploads).
+      - singularity_state:/app/.singularity
+
+volumes:
+  pgdata:
+  singularity_state:

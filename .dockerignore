@@ -1,0 +1,35 @@
+# Keep the build context small so `docker build` is fast and the image
+# doesn't accidentally pick up local state (node_modules, logs, secrets).
+
+node_modules
+dist
+out
+.git
+.gitignore
+
+# Runtime state that must stay on the host, not in the image.
+.singularity
+.env
+.env.local
+
+# Platform targets we don't ship in the server container.
+desktop
+
+# Tests + tooling that only run on the host dev box.
+tests
+playwright.config.ts
+playwright-report
+test-results
+
+# Editor + OS noise.
+.vscode
+.idea
+.DS_Store
+**/*.log
+npm-debug.log*
+
+# Docker meta — no point shipping it into itself.
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml

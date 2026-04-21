@@ -1,5 +1,6 @@
 import React from 'react';
 import { cn } from '../lib/utils';
+import { reformatPseudoToolCalls } from '../lib/chatContent';
 
 type MarkdownBlock =
   | { type: 'heading'; level: 1 | 2 | 3; text: string }
@@ -215,7 +216,12 @@ type MarkdownContentProps = {
 };
 
 const MarkdownContent = ({ content, className }: MarkdownContentProps) => {
-  const trimmed = content.trim();
+  // Rewrite Claude-style tool-use XML (<function_calls>…) into a
+  // readable fenced "tool-call" code block BEFORE markdown parsing.
+  // Without this, the raw XML leaks straight into the transcript.
+  // Idempotent and cheap — probe short-circuits when there's no tag.
+  const prepared = reformatPseudoToolCalls(content);
+  const trimmed = prepared.trim();
   if (!trimmed) {
     return null;
   }
@@ -302,8 +308,11 @@ const MarkdownContent = ({ content, className }: MarkdownContentProps) => {
         }
 
         if (block.type === 'code') {
+          // Expose language on the <pre> too so CSS can style specific
+          // languages without :has() — notably `tool-call` for the
+          // Claude-style tool-use blocks we rewrite in chatContent.ts.
           return (
-            <pre key={key}>
+            <pre key={key} data-language={block.language || undefined}>
               <code data-language={block.language || undefined}>{block.code}</code>
             </pre>
           );

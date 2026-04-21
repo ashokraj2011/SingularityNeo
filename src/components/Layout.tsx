@@ -45,6 +45,7 @@ import {
 import { readViewPreference, writeViewPreference } from '../lib/viewPreferences';
 import { StatusBadge } from './EnterpriseUI';
 import { SingularityHelpMenu } from './SingularityHelpMenu';
+import { AssistantDock } from './AssistantDock';
 
 const primaryNavItems = [
   { name: 'Work', shortName: 'Work', icon: Trello, path: '/' },
@@ -1652,6 +1653,10 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
           }}
         />
       ) : null}
+
+      {/* Always-on assistant. Hides itself on /chat, /login, immersive
+          viewers, and onboarding — see AssistantDock's HIDDEN_PATH_PREFIXES. */}
+      {!isImmersiveRoute ? <AssistantDock /> : null}
     </div>
   );
 };

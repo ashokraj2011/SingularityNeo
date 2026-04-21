@@ -1203,6 +1203,23 @@
     @apply bg-transparent p-0 text-inherit;
   }
 
+  /*
+   * Tool-use blocks: Anthropic-style `<function_calls>` XML that leaks
+   * into chat replies gets rewritten to a `tool-call` fenced block by
+   * src/lib/chatContent.ts. Style it distinctly from real code so
+   * readers recognize it as an *attempted* tool call, not runnable code.
+   */
+  .markdown-content pre[data-language='tool-call'] {
+    @apply border border-amber-300/70 bg-amber-50 text-amber-950;
+  }
+  .markdown-content pre[data-language='tool-call']::before {
+    content: 'Attempted tool call';
+    @apply mb-2 block text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-amber-800;
+  }
+  .markdown-content pre[data-language='tool-call'] code {
+    @apply text-amber-950;
+  }
+
   .markdown-content a {
     @apply font-semibold text-primary underline decoration-primary/35 underline-offset-4;
   }
