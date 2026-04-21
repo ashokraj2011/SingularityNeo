@@ -3,14 +3,16 @@
  * viewer — file-level summary at the top, expandable hunks below with
  * `+` / `-` / context lines colour-coded.
  *
- * Deliberately framework-free: we re-parse the diff client-side with
- * the same grammar we ship server-side (see server/patch/validate.ts)
- * so the two stay in lockstep. This component does NOT import the
- * server parser — the dependency direction is fixed by the frontend
- * build — but the grammar is narrow enough to duplicate here safely.
+ * Parser is shared with ArtifactDiffViewer via src/lib/diffParser.ts so
+ * grammar fixes apply to both viewers in one edit.
  */
 import React, { useMemo, useState } from 'react';
 import type { CodePatchPayload } from '../types';
+import {
+  type DiffFile,
+  type DiffHunk,
+  parseUnifiedDiff,
+} from '../lib/diffParser';
 
 export interface PatchDiffViewerProps {
   /** Raw unified-diff text — typically `Artifact.contentText`. */
@@ -23,131 +25,10 @@ export interface PatchDiffViewerProps {
   caption?: string;
 }
 
-interface ViewerHunk {
-  oldStart: number;
-  oldLines: number;
-  newStart: number;
-  newLines: number;
-  header?: string;
-  lines: string[];
-}
-
-interface ViewerFile {
-  oldPath: string;
-  newPath: string;
-  status: 'ADDED' | 'MODIFIED' | 'DELETED' | 'RENAMED';
-  isBinary: boolean;
-  hunks: ViewerHunk[];
-  additions: number;
-  deletions: number;
-}
-
-const HUNK_HEADER_RE =
-  /^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@\s*(.*)$/;
-
-const stripGitPrefix = (raw: string): string => {
-  const trimmed = raw.trim();
-  if (trimmed === '/dev/null') return '';
-  if (trimmed.startsWith('a/')) return trimmed.slice(2);
-  if (trimmed.startsWith('b/')) return trimmed.slice(2);
-  return trimmed;
-};
-
-const parse = (raw: string): ViewerFile[] => {
-  if (!raw) return [];
-  const lines = raw.replace(/\r\n/g, '\n').split('\n');
-  const files: ViewerFile[] = [];
-  let currentFile: ViewerFile | null = null;
-  let currentHunk: ViewerHunk | null = null;
-  let pendingOldPath: string | null = null;
-
-  const flushHunk = () => {
-    if (currentFile && currentHunk) {
-      currentFile.hunks.push(currentHunk);
-      currentHunk = null;
-    }
-  };
-  const pushFile = () => {
-    flushHunk();
-    if (currentFile) files.push(currentFile);
-    currentFile = null;
-  };
-
-  const startFile = (oldPath: string, newPath: string): ViewerFile => {
-    let status: ViewerFile['status'] = 'MODIFIED';
-    if (!oldPath && newPath) status = 'ADDED';
-    else if (oldPath && !newPath) status = 'DELETED';
-    else if (oldPath && newPath && oldPath !== newPath) status = 'RENAMED';
-    return {
-      oldPath,
-      newPath,
-      status,
-      isBinary: false,
-      hunks: [],
-      additions: 0,
-      deletions: 0,
-    };
-  };
-
-  for (const line of lines) {
-    if (line.startsWith('diff --git ')) {
-      pushFile();
-      continue;
-    }
-    if (line.startsWith('--- ')) {
-      flushHunk();
-      if (currentFile) {
-        files.push(currentFile);
-        currentFile = null;
-      }
-      pendingOldPath = stripGitPrefix(line.slice(4));
-      continue;
-    }
-    if (line.startsWith('+++ ')) {
-      currentFile = startFile(pendingOldPath ?? '', stripGitPrefix(line.slice(4)));
-      pendingOldPath = null;
-      continue;
-    }
-    if (line.startsWith('Binary files ') && line.includes(' differ')) {
-      if (!currentFile) currentFile = startFile('', '');
-      currentFile.isBinary = true;
-      continue;
-    }
-    const hunkMatch = line.match(HUNK_HEADER_RE);
-    if (hunkMatch) {
-      if (!currentFile) currentFile = startFile('', '');
-      flushHunk();
-      currentHunk = {
-        oldStart: Number.parseInt(hunkMatch[1], 10),
-        oldLines: hunkMatch[2] ? Number.parseInt(hunkMatch[2], 10) : 1,
-        newStart: Number.parseInt(hunkMatch[3], 10),
-        newLines: hunkMatch[4] ? Number.parseInt(hunkMatch[4], 10) : 1,
-        header: hunkMatch[5] || undefined,
-        lines: [],
-      };
-      continue;
-    }
-    if (currentHunk && currentFile) {
-      if (
-        line.startsWith('+') ||
-        line.startsWith('-') ||
-        line.startsWith(' ') ||
-        line.startsWith('\\')
-      ) {
-        currentHunk.lines.push(line);
-        if (line.startsWith('+') && !line.startsWith('+++')) {
-          currentFile.additions += 1;
-        } else if (line.startsWith('-') && !line.startsWith('---')) {
-          currentFile.deletions += 1;
-        }
-        continue;
-      }
-      flushHunk();
-    }
-  }
-  pushFile();
-  return files;
-};
+// Local aliases so we don't have to rename every usage below.
+type ViewerHunk = DiffHunk;
+type ViewerFile = DiffFile;
+const parse = parseUnifiedDiff;
 
 const statusTone: Record<ViewerFile['status'], string> = {
   ADDED: 'bg-emerald-100 text-emerald-700',

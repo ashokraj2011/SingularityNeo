@@ -56,6 +56,7 @@ import {
 import {
   initializeDatabase,
   inspectDatabaseBootstrapStatus,
+  query,
   setDatabaseRuntimeConfig,
 } from './db';
 import {
@@ -156,6 +157,7 @@ import {
   buildOperationsDashboardSnapshot,
   buildReportExportPayload,
   buildTeamQueueSnapshot,
+  buildWorkItemEfficiencySnapshot,
 } from './reporting';
 import { hasPermission } from '../src/lib/accessControl';
 import {
@@ -1186,6 +1188,20 @@ app.use(
   }),
 );
 
+// Health check — used by Docker HEALTHCHECK, k8s probes, and load balancers.
+// Returns 200 when the server + DB are both live; 503 when the DB is down.
+// The response body is JSON so monitoring tools can parse db/ts fields.
+app.get('/api/health', async (_request, response) => {
+  try {
+    await query('SELECT 1');
+    response.json({ status: 'ok', db: 'ok', ts: new Date().toISOString() });
+  } catch (err) {
+    response
+      .status(503)
+      .json({ status: 'degraded', db: 'error', ts: new Date().toISOString() });
+  }
+});
+
 app.post('/api/onboarding/validate-connectors', (request, response) => {
   const body = request.body as {
     githubRepositories?: string[];
@@ -1890,6 +1906,25 @@ app.get('/api/reports/capability/:capabilityId', async (request, response) => {
     });
     response.json(
       await buildCapabilityHealthSnapshot({
+        actor,
+        capabilityId: request.params.capabilityId,
+      }),
+    );
+  } catch (error) {
+    sendRepositoryError(response, error);
+  }
+});
+
+app.get('/api/reports/work-items/:capabilityId', async (request, response) => {
+  try {
+    const actor = parseActorContext(request, 'Workspace Operator');
+    await assertCapabilityPermission({
+      capabilityId: request.params.capabilityId,
+      actor,
+      action: 'capability.read.rollup',
+    });
+    response.json(
+      await buildWorkItemEfficiencySnapshot({
         actor,
         capabilityId: request.params.capabilityId,
       }),

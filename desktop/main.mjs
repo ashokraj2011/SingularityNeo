@@ -6,6 +6,7 @@ import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import dotenv from 'dotenv';
+import { probeRendererUrl } from './rendererProbe.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -278,13 +279,20 @@ const createWindow = async () => {
   });
 
   if (rendererDevUrl) {
-    const targetUrl =
-      startupRouteHash && !rendererDevUrl.includes('#')
-        ? `${rendererDevUrl.replace(/\/+$/, '')}/${startupRouteHash}`
-        : rendererDevUrl;
-    await mainWindow.loadURL(targetUrl);
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
-    return;
+    const devRendererIsValid = await probeRendererUrl(rendererDevUrl, 2_500);
+    if (devRendererIsValid) {
+      const targetUrl =
+        startupRouteHash && !rendererDevUrl.includes('#')
+          ? `${rendererDevUrl.replace(/\/+$/, '')}/${startupRouteHash}`
+          : rendererDevUrl;
+      await mainWindow.loadURL(targetUrl);
+      mainWindow.webContents.openDevTools({ mode: 'detach' });
+      return;
+    }
+
+    console.warn(
+      `Configured renderer URL ${rendererDevUrl} did not look like the Singularity renderer. Falling back to the packaged desktop build.`,
+    );
   }
 
   const rendererIssue = detectDesktopRendererIssue();

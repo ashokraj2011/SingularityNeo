@@ -27,6 +27,11 @@ import {
   publishBountySignal,
   waitForBountySignal,
 } from '../eventBus';
+import {
+  acquireWorkspaceWriteLock,
+  releaseWorkspaceWriteLock,
+  WorkspaceLockConflictError,
+} from '../workspaceLock';
 
 const execFileAsync = promisify(execFile);
 
@@ -321,6 +326,13 @@ export const classifyToolExecutionError = ({
   const normalized = message.trim();
   if (!normalized) {
     return null;
+  }
+
+  if (/^WRITE_CONTROL lock held by agent\b/i.test(normalized)) {
+    return {
+      recoverable: true,
+      feedback: `The workspace write lock is currently held by another agent. ${normalized} Wait a moment, then retry the write operation.`,
+    };
   }
 
   if (new RegExp(`^${toolId}\\s+requires\\b`, 'i').test(normalized)) {
@@ -1013,6 +1025,12 @@ const SHADOW_MOCKED_TOOLS = new Set([
   'run_deploy'
 ]);
 
+const WRITE_LOCK_TOOLS = new Set<ToolAdapterId>([
+  'workspace_write',
+  'workspace_replace_block',
+  'workspace_apply_patch',
+]);
+
 export const executeTool = async ({
   capability,
   agent,
@@ -1020,6 +1038,9 @@ export const executeTool = async ({
   toolId,
   args,
   requireApprovedDeployment,
+  runId,
+  runStepId,
+  stepName,
 }: {
   capability: Capability;
   agent: CapabilityAgent;
@@ -1027,6 +1048,9 @@ export const executeTool = async ({
   toolId: ToolAdapterId;
   args: Record<string, any>;
   requireApprovedDeployment?: boolean;
+  runId?: string;
+  runStepId?: string;
+  stepName?: string;
 }) => {
   const adapter = getToolAdapter(toolId);
 
@@ -1046,13 +1070,29 @@ export const executeTool = async ({
     };
   }
 
-  const result = await adapter.execute(
-    { capability, agent, workItem, requireApprovedDeployment },
-    args,
-  );
+  if (WRITE_LOCK_TOOLS.has(toolId) && runId && runStepId) {
+    await acquireWorkspaceWriteLock({
+      capabilityId: capability.id,
+      runStepId,
+      runId,
+      agentId: agent.id,
+      stepName: stepName ?? toolId,
+    });
+  }
 
-  return {
-    ...result,
-    retryable: adapter.retryable,
-  };
+  try {
+    const result = await adapter.execute(
+      { capability, agent, workItem, requireApprovedDeployment },
+      args,
+    );
+
+    return {
+      ...result,
+      retryable: adapter.retryable,
+    };
+  } finally {
+    if (WRITE_LOCK_TOOLS.has(toolId) && runId && runStepId) {
+      await releaseWorkspaceWriteLock({ capabilityId: capability.id, runStepId });
+    }
+  }
 };

@@ -341,6 +341,17 @@ export const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS capability_workspace_write_locks (
+      capability_id TEXT PRIMARY KEY REFERENCES capabilities(id) ON DELETE CASCADE,
+      run_step_id   TEXT NOT NULL,
+      run_id        TEXT NOT NULL,
+      agent_id      TEXT NOT NULL,
+      step_name     TEXT NOT NULL DEFAULT '',
+      acquired_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at    TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '5 minutes'
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS capability_skills (
       capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
       id TEXT NOT NULL,
@@ -1554,6 +1565,17 @@ export const schemaStatements = [
 ];
 
 export const migrationStatements = [
+  `
+    CREATE TABLE IF NOT EXISTS capability_workspace_write_locks (
+      capability_id TEXT PRIMARY KEY REFERENCES capabilities(id) ON DELETE CASCADE,
+      run_step_id   TEXT NOT NULL,
+      run_id        TEXT NOT NULL,
+      agent_id      TEXT NOT NULL,
+      step_name     TEXT NOT NULL DEFAULT '',
+      acquired_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at    TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '5 minutes'
+    )
+  `,
   `
     ALTER TABLE capabilities
     ADD COLUMN IF NOT EXISTS git_repositories TEXT[] NOT NULL DEFAULT '{}'

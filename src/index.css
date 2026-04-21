@@ -467,11 +467,17 @@
   }
 
   .orchestrator-view-toggle {
-    @apply inline-flex items-center gap-1 self-start rounded-2xl border border-outline-variant/45 bg-white/90 p-1 shadow-[0_6px_18px_rgba(15,23,42,0.05)];
+    /* flex w-full: spans the full available container width so it never
+       pushes past the panel edge. flex-wrap: if labels are too wide to fit
+       on one row (e.g. "Approvals" + "Paused") they wrap to a second row
+       rather than overflowing the card. */
+    @apply flex w-full flex-wrap items-center gap-1 rounded-2xl border border-outline-variant/45 bg-white/90 p-1 shadow-[0_6px_18px_rgba(15,23,42,0.05)];
   }
 
   .orchestrator-view-toggle-button {
-    @apply inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-secondary transition-all hover:bg-surface-container-low hover:text-on-surface;
+    /* Slightly tighter horizontal padding so all five labels fit on one row
+       at the 22rem inbox width. flex-1 evenly distributes leftover space. */
+    @apply inline-flex flex-1 items-center justify-center gap-2 rounded-xl px-2.5 py-1.5 text-[0.8125rem] font-semibold text-secondary transition-all hover:bg-surface-container-low hover:text-on-surface;
   }
 
   .orchestrator-view-toggle-button-active {
@@ -567,14 +573,16 @@
   }
 
   .orchestrator-list-top-grid {
-    @apply grid items-start gap-4 xl:grid-cols-[22rem_minmax(0,1fr)];
+    /* items-stretch: both panels expand to the same row height so their
+       top AND bottom edges always align — no more mismatched card heights. */
+    @apply grid items-stretch gap-4 xl:grid-cols-[22rem_minmax(0,1fr)];
   }
 
   .orchestrator-list-inbox-panel {
     @apply flex min-h-[44rem] flex-col;
     /* Let the inbox grow with the viewport so it comfortably holds a dozen+
-       cards without feeling cramped. Old ceiling was 42rem; now we trade off
-       against the shell chrome (~14rem) instead of the stats rail (22rem). */
+       cards without feeling cramped. The summary panel uses the same ceiling
+       so both cards are always the same height. */
     max-height: min(60rem, calc(100vh - 14rem));
   }
 
@@ -583,8 +591,11 @@
   }
 
   .orchestrator-list-summary-panel {
-    @apply flex min-h-[34rem] flex-col;
-    max-height: min(42rem, calc(100vh - 22rem));
+    /* Match inbox min-h and max-height exactly so both cards are the same
+       height at every viewport size. Previously 34rem / 42rem caused the
+       right panel to be visibly shorter than the inbox on the left. */
+    @apply flex min-h-[44rem] flex-col;
+    max-height: min(60rem, calc(100vh - 14rem));
   }
 
   .orchestrator-navigator-card {

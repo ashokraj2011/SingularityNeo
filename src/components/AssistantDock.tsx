@@ -23,10 +23,14 @@ import MarkdownContent from './MarkdownContent';
  * login, and immersive viewers) gets a bottom-right bubble that can
  * stream a reply against the active capability's primary agent.
  *
- * Transcript is kept in local state — the dock intentionally does NOT
- * write through to `appendCapabilityMessage` so it can't pollute the
- * /chat page's GENERAL_CHAT session. Users who want persistence should
- * use /chat; the dock is for quick contextual questions.
+ * Transcript lives in local component state for the live session view,
+ * and each message is also fire-and-forget persisted via
+ * `appendCapabilityMessage` so the /chat page can show the history.
+ * Both user and agent turns are written under `sessionScope: GENERAL_CHAT`
+ * so they land in the same session bucket as the main /chat page — the
+ * dock is a lightweight overlay on the same conversation, not a silo.
+ * When a work item is selected in the Orchestrator the dock also passes
+ * its id to `streamCapabilityChat` so the server can load WI context.
  *
  * `chatWorkspace.ts` (server) already intercepts a few intents before
  * the LLM call — STATUS, MOVE_PHASE, FIND_SYMBOL. Those short-circuits
@@ -120,9 +124,20 @@ const QUICK_ACTIONS: QuickAction[] = [
   { label: 'Find symbol', prompt: 'find ' },
 ];
 
+// Storage key written by Orchestrator to persist the selected work item.
+// We read it (not write it) so the dock can show context without needing
+// the selected id to live in CapabilityContext.
+const ORCHESTRATOR_SELECTED_KEY = 'singularity.orchestrator.selected';
+
+const readSelectedWorkItemId = (): string | null => {
+  if (typeof window === 'undefined') return null;
+  // Orchestrator stores it in sessionStorage via writeViewPreference.
+  return window.sessionStorage.getItem(ORCHESTRATOR_SELECTED_KEY) || null;
+};
+
 export const AssistantDock: React.FC = () => {
   const location = useLocation();
-  const { activeCapability, getCapabilityWorkspace } = useCapability();
+  const { activeCapability, appendCapabilityMessage, getCapabilityWorkspace } = useCapability();
 
   const [isOpen, setIsOpen] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
@@ -184,6 +199,19 @@ export const AssistantDock: React.FC = () => {
     );
   }, [workspace]);
 
+  // Read the Orchestrator's selected work item from sessionStorage.
+  // Re-derive on every render so the dock picks it up without an event
+  // listener — cheap enough since it's just a sessionStorage read.
+  const selectedWorkItemId = readSelectedWorkItemId();
+  const selectedWorkItem = useMemo(
+    () =>
+      selectedWorkItemId && workspace
+        ? (workspace.workItems ?? []).find(wi => wi.id === selectedWorkItemId) ?? null
+        : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedWorkItemId, workspace],
+  );
+
   // Resolve the current route once and memoize by pathname so quick
   // actions always see a consistent description (label + purpose).
   const currentRoute = useMemo(
@@ -227,6 +255,17 @@ export const AssistantDock: React.FC = () => {
     setMessages(current => [...current, userMsg]);
     setInput('');
 
+    // Persist the user turn (fire-and-forget — don't block the stream start).
+    void appendCapabilityMessage(activeCapability.id, {
+      id: userMsg.id,
+      role: 'user',
+      content: trimmed,
+      timestamp: new Date(userMsg.createdAt).toISOString(),
+      sessionScope: 'GENERAL_CHAT',
+      sessionScopeId: activeCapability.id,
+      workItemId: selectedWorkItemId ?? undefined,
+    });
+
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -240,7 +279,8 @@ export const AssistantDock: React.FC = () => {
           sessionMode: 'resume',
           sessionScope: 'GENERAL_CHAT',
           sessionScopeId: activeCapability.id,
-          contextMode: 'GENERAL',
+          contextMode: selectedWorkItemId ? 'WORK_ITEM_STAGE' : 'GENERAL',
+          workItemId: selectedWorkItemId ?? undefined,
         },
         {
           onEvent: event => {
@@ -264,15 +304,36 @@ export const AssistantDock: React.FC = () => {
         throw new Error('The assistant returned an empty response.');
       }
 
+      const agentMsgId = `a-${Date.now().toString(36)}`;
+      const agentCreatedAt = result.completeEvent?.createdAt
+        ? new Date(result.completeEvent.createdAt).toISOString()
+        : new Date().toISOString();
+
       setMessages(current => [
         ...current,
         {
-          id: `a-${Date.now().toString(36)}`,
+          id: agentMsgId,
           role: 'agent',
           content: finalContent,
           createdAt: Date.now(),
         },
       ]);
+
+      // Persist the agent turn (fire-and-forget).
+      void appendCapabilityMessage(activeCapability.id, {
+        id: agentMsgId,
+        role: 'agent',
+        content: finalContent,
+        timestamp: agentCreatedAt,
+        agentId: activeAgent.id,
+        agentName: activeAgent.name,
+        traceId: result.completeEvent?.traceId,
+        model: result.completeEvent?.model || activeAgent.model,
+        sessionId: result.completeEvent?.sessionId,
+        sessionScope: result.completeEvent?.sessionScope ?? 'GENERAL_CHAT',
+        sessionScopeId: result.completeEvent?.sessionScopeId ?? activeCapability.id,
+        workItemId: selectedWorkItemId ?? undefined,
+      });
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
       setError((err as Error).message || 'The assistant could not complete the request.');
@@ -364,6 +425,16 @@ export const AssistantDock: React.FC = () => {
             <StatusBadge tone="neutral">On: {currentPageLabel}</StatusBadge>
             {activeAgent ? (
               <StatusBadge tone="neutral">via {activeAgent.name}</StatusBadge>
+            ) : null}
+            {selectedWorkItem ? (
+              <span title={selectedWorkItem.title}>
+                <StatusBadge tone="warning">
+                  WI:{' '}
+                  {selectedWorkItem.title.length > 22
+                    ? `${selectedWorkItem.title.slice(0, 22)}…`
+                    : selectedWorkItem.title}
+                </StatusBadge>
+              </span>
             ) : null}
           </div>
         </div>

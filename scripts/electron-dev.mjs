@@ -1,6 +1,6 @@
-import http from 'node:http';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { probeHttpSuccessUrl, probeRendererUrl } from '../desktop/rendererProbe.mjs';
 
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const electronCommand = path.join(
@@ -15,34 +15,32 @@ const controlPlaneUrl = process.env.SINGULARITY_CONTROL_PLANE_URL || 'http://127
 
 let isShuttingDown = false;
 
-const waitForUrl = (url, timeoutMs = 120_000) =>
+const waitForCondition = (predicate, timeoutLabel, timeoutMs = 120_000) =>
   new Promise((resolve, reject) => {
     const startedAt = Date.now();
 
-    const attempt = () => {
-      const request = http.get(url, response => {
-        response.resume();
-        if ((response.statusCode || 500) < 500) {
-          resolve(undefined);
-          return;
-        }
-        if (Date.now() - startedAt > timeoutMs) {
-          reject(new Error(`Timed out waiting for ${url}`));
-          return;
-        }
-        setTimeout(attempt, 1000);
-      });
+    const attempt = async () => {
+      const ready = await predicate().catch(() => false);
+      if (ready) {
+        resolve(undefined);
+        return;
+      }
 
-      request.on('error', () => {
+      if (Date.now() - startedAt > timeoutMs) {
+        reject(new Error(`Timed out waiting for ${timeoutLabel}`));
+        return;
+      }
+
+      setTimeout(() => {
         if (Date.now() - startedAt > timeoutMs) {
-          reject(new Error(`Timed out waiting for ${url}`));
-          return;
+          reject(new Error(`Timed out waiting for ${timeoutLabel}`));
+        } else {
+          void attempt();
         }
-        setTimeout(attempt, 1000);
-      });
+      }, 1000);
     };
 
-    attempt();
+    void attempt();
   });
 
 const devProcess = spawn(npmCommand, ['run', 'dev:web'], {
@@ -68,8 +66,14 @@ const shutdown = (signal = 'SIGTERM') => {
 };
 
 const startElectron = async () => {
-  await waitForUrl(devServerUrl);
-  await waitForUrl(`${controlPlaneUrl}/api/state`);
+  await waitForCondition(
+    () => probeRendererUrl(devServerUrl),
+    `Singularity renderer at ${devServerUrl}`,
+  );
+  await waitForCondition(
+    () => probeHttpSuccessUrl(`${controlPlaneUrl}/api/state`),
+    `control plane at ${controlPlaneUrl}/api/state`,
+  );
 
   electronProcess = spawn(electronCommand, ['.'], {
     cwd: process.cwd(),

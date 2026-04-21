@@ -6229,6 +6229,9 @@ const executeAutomatedStep = async (
                 toolId: decision.toolCall.toolId,
                 args: decision.toolCall.args || {},
                 requireApprovedDeployment: hasApprovedDeployment,
+                runId: detail.run.id,
+                runStepId: currentRunStep.id,
+                stepName: step.name,
               });
         const toolLatency = Date.now() - toolStartedAt;
         const completedTool = await updateToolInvocation({

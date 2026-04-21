@@ -42,6 +42,7 @@ const GovernanceControlsPage = lazy(() => import('./pages/GovernanceControls'));
 const GovernanceExceptionsPage = lazy(() => import('./pages/GovernanceExceptions'));
 const GovernanceProvenancePage = lazy(() => import('./pages/GovernanceProvenance'));
 const GovernancePosturePage = lazy(() => import('./pages/GovernancePosture'));
+const WorkItemReport = lazy(() => import('./pages/WorkItemReport'));
 
 const RouteLoader = () => (
   <div className="section-card ambient-shadow min-h-[calc(100vh-12rem)] p-8">
@@ -122,6 +123,7 @@ export default function App() {
                   <Route path="/run-console" element={<RunConsole />} />
                   <Route path="/memory" element={<MemoryExplorer />} />
                   <Route path="/evals" element={<EvalCenter />} />
+                  <Route path="/reports/work-items" element={<WorkItemReport />} />
                   <Route path="/e/:bundleId" element={<EvidencePacketPage />} />
                   <Route path="*" element={<Orchestrator />} />
                 </Routes>

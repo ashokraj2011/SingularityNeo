@@ -47,10 +47,8 @@ VOLUME ["/app/.singularity"]
 
 EXPOSE 3001
 
-# TCP probe — the repo has no /api/health endpoint yet, so we just
-# confirm the listener is up. Swap to an HTTP GET once a real health
-# route exists in server/index.ts.
+# HTTP health check — hits /api/health which tests DB connectivity too.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "require('net').connect(Number(process.env.PORT||3001),'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3001)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["npm", "start"]

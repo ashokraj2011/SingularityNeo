@@ -2290,6 +2290,15 @@ export interface CapabilityExecutionOwnership {
   updatedAt: string;
 }
 
+export interface WorkspaceWriteLock {
+  runStepId: string;
+  runId: string;
+  agentId: string;
+  stepName: string;
+  acquiredAt: string;
+  expiresAt: string;
+}
+
 export interface WorkItemPendingRequest {
   type: 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION';
   message: string;
@@ -4164,6 +4173,81 @@ export interface ReportWorkItemSummary {
   activeWriterUserId?: string;
   blockedAgeHours?: number;
   lastUpdatedAt?: string;
+}
+
+/**
+ * One row in the Work Item Efficiency Report.
+ * All numeric values default to 0 when no data exists for a work item.
+ */
+/** Per-agent contribution to a single work item. */
+export interface AgentEfficiencyRow {
+  agentId: string;
+  agentName: string;
+  /** Wall-clock hours the agent's run-steps were active (started → completed). */
+  elapsedHours: number;
+  /** Sum of cost_usd from tool invocations attributed to this agent's run-steps. */
+  costUsd: number;
+  /**
+   * Approximate lines of code written by this agent — sum of newline counts
+   * in the `content` / `new_content` fields of workspace_write,
+   * workspace_replace_block, and workspace_apply_patch tool invocations.
+   */
+  linesOfCode: number;
+  /**
+   * Count of substantive artifacts produced by this agent for this work item
+   * (PHASE_OUTPUT, CODE_PATCH, HANDOFF_PACKET, EVIDENCE_PACKET,
+   * EXECUTION_PLAN, REVIEW_PACKET, EXECUTION_SUMMARY).
+   */
+  documentsProduced: number;
+}
+
+export interface WorkItemEfficiencyRow {
+  workItemId: string;
+  title: string;
+  status: WorkItemStatus;
+  phase: WorkItemPhase;
+  priority: WorkItem['priority'];
+  /** Sum of cost_usd across all metric samples scoped to this work item. */
+  totalCostUsd: number;
+  /** Sum of tokens across all metric samples scoped to this work item. */
+  totalTokens: number;
+  /** Wall-clock hours from first run start to last run end/update. */
+  elapsedHours: number;
+  /** Count of human-gated waits (APPROVAL, INPUT, CONFLICT_RESOLUTION). */
+  humanInteractions: number;
+  /** Hours the agent was paused waiting on a human decision. */
+  humanWaitHours: number;
+  /** Highest attempt_number across all runs (1 = no retry). */
+  runAttempts: number;
+  /**
+   * Percentage of elapsed time the agent was running autonomously.
+   * (elapsedHours - humanWaitHours) / elapsedHours × 100.
+   * 100 when elapsedHours = 0 (no data yet).
+   */
+  agentAutonomyPct: number;
+  /** Total lines of code written across all agents for this work item. */
+  totalLinesOfCode: number;
+  /** Total substantive documents produced across all agents for this work item. */
+  totalDocumentsProduced: number;
+  /** Per-agent contribution breakdown. */
+  agentBreakdowns: AgentEfficiencyRow[];
+}
+
+export interface WorkItemEfficiencySnapshot {
+  generatedAt: string;
+  capabilityId: string;
+  capabilityName: string;
+  /** Totals across all rows for the header stat tiles. */
+  totals: {
+    totalCostUsd: number;
+    totalTokens: number;
+    avgElapsedHours: number;
+    avgHumanInteractions: number;
+    avgAgentAutonomyPct: number;
+    totalLinesOfCode: number;
+    totalDocumentsProduced: number;
+  };
+  rows: WorkItemEfficiencyRow[];
 }
 
 export interface ApprovalInboxEntry {

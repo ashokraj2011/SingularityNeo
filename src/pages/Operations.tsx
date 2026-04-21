@@ -1,10 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Activity,
   ArrowRight,
   Bot,
+  ExternalLink,
   Laptop2,
   LoaderCircle,
+  Lock,
+  LockOpen,
   RefreshCw,
   ShieldCheck,
   Trash2,
@@ -19,11 +22,12 @@ import {
   claimCapabilityExecution,
   fetchExecutorRegistry,
   fetchRuntimeStatus,
+  fetchWorkspaceWriteLock,
   releaseCapabilityExecution,
   removeDesktopExecutor,
   type RuntimeStatus,
 } from '../lib/api';
-import type { ExecutorRegistrySummary } from '../types';
+import type { ExecutorRegistrySummary, WorkspaceWriteLock } from '../types';
 
 const formatTimestamp = (value?: string) => {
   if (!value) {
@@ -66,6 +70,8 @@ const Operations = () => {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState('');
+  const [writeLock, setWriteLock] = useState<WorkspaceWriteLock | null>(null);
+  const lockPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const canClaimExecution = hasPermission(
     activeCapability.effectivePermissions,
@@ -96,6 +102,29 @@ const Operations = () => {
 
   useEffect(() => {
     void refreshData();
+  }, [activeCapability.id]);
+
+  useEffect(() => {
+    if (!activeCapability.id) return;
+
+    const pollLock = async () => {
+      try {
+        const lock = await fetchWorkspaceWriteLock(activeCapability.id);
+        setWriteLock(lock);
+      } catch {
+        // Ignore — lock panel shows last known state
+      }
+    };
+
+    void pollLock();
+    lockPollRef.current = setInterval(() => void pollLock(), 5_000);
+
+    return () => {
+      if (lockPollRef.current !== null) {
+        clearInterval(lockPollRef.current);
+        lockPollRef.current = null;
+      }
+    };
   }, [activeCapability.id]);
 
   const currentDesktopOwnsCapability =
@@ -412,6 +441,61 @@ const Operations = () => {
           )}
         </SectionCard>
       </div>
+
+      <SectionCard
+        title="WRITE_CONTROL token"
+        description="Only the agent holding this token may perform workspace write operations. The token is acquired atomically before each write tool call and released immediately after, preventing concurrent file edits between agents."
+        icon={Lock}
+        action={
+          <StatusBadge tone={writeLock ? 'warning' : 'success'}>
+            {writeLock ? 'Locked' : 'Free'}
+          </StatusBadge>
+        }
+      >
+        {writeLock ? (
+          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-2xl border border-outline-variant/40 bg-white px-4 py-4">
+              <p className="form-kicker">Held by agent</p>
+              <p className="mt-2 text-sm font-semibold text-on-surface">{writeLock.agentId}</p>
+            </div>
+            <div className="rounded-2xl border border-outline-variant/40 bg-white px-4 py-4">
+              <p className="form-kicker">Current step</p>
+              <p className="mt-2 text-sm font-semibold text-on-surface">{writeLock.stepName || '—'}</p>
+            </div>
+            <div className="rounded-2xl border border-outline-variant/40 bg-white px-4 py-4">
+              <p className="form-kicker">Acquired at</p>
+              <p className="mt-2 text-sm font-semibold text-on-surface">
+                {formatTimestamp(writeLock.acquiredAt)}
+              </p>
+            </div>
+            <div className="rounded-2xl border border-outline-variant/40 bg-white px-4 py-4">
+              <p className="form-kicker">Expires at</p>
+              <p className="mt-2 text-sm font-semibold text-on-surface">
+                {formatTimestamp(writeLock.expiresAt)}
+              </p>
+              <p className="mt-1 text-xs text-secondary">5-minute safety TTL</p>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 rounded-2xl border border-outline-variant/30 bg-surface-container-low px-4 py-4">
+            <LockOpen size={18} className="shrink-0 text-secondary" />
+            <p className="text-sm text-secondary">
+              No agent currently holds the write token. All write tools are available for dispatch.
+            </p>
+          </div>
+        )}
+        {writeLock && (
+          <div className="mt-3">
+            <a
+              href={`/run-console?runId=${writeLock.runId}`}
+              className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+            >
+              <ExternalLink size={12} />
+              View run in console
+            </a>
+          </div>
+        )}
+      </SectionCard>
 
       {!canClaimExecution ? (
         <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-900">

@@ -113,7 +113,8 @@ export type AdvancedToolId =
   | 'governance-controls'
   | 'governance-exceptions'
   | 'governance-provenance'
-  | 'governance-posture';
+  | 'governance-posture'
+  | 'work-item-report';
 
 export type AdvancedToolAudience =
   | 'ALL'
@@ -372,6 +373,17 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     description:
       'One-screen read over signer health, control coverage, active exceptions, and provenance integrity — the view auditors and operators open first.',
     audience: 'ADMINS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'work-item-report',
+    label: 'Work Item Report',
+    shortName: 'WI Report',
+    path: '/reports/work-items',
+    description:
+      'Per-work-item breakdown of AI cost, token usage, elapsed time, human interaction count, and agent autonomy percentage.',
+    audience: 'OPERATORS',
     exposureMode: 'ALWAYS',
     contextTriggers: [],
   },

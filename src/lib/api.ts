@@ -86,6 +86,7 @@ import {
   ReadinessContract,
   TeamQueueSnapshot,
   AuditReportSnapshot,
+  WorkItemEfficiencySnapshot,
   ApprovalWorkspaceContext,
   ApprovalStructuredPacket,
   AttestationChain,
@@ -125,6 +126,7 @@ import {
   ApprovalAssignment,
   AgentSessionScope,
   WorkspaceDatabaseRuntimeInfo,
+  WorkspaceWriteLock,
 } from '../types';
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from './desktop';
 
@@ -359,6 +361,15 @@ export const fetchRuntimeStatus = async (): Promise<RuntimeStatus> => {
   }
 
   return requestJson<RuntimeStatus>('/api/runtime/status');
+};
+
+export const fetchWorkspaceWriteLock = async (
+  capabilityId: string,
+): Promise<WorkspaceWriteLock | null> => {
+  const data = await requestJson<{ lock: WorkspaceWriteLock | null }>(
+    `/api/capabilities/${capabilityId}/workspace-lock`,
+  );
+  return data.lock;
 };
 
 export const updateRuntimeCredentials = async (
@@ -2346,6 +2357,13 @@ export const fetchExecutiveSummarySnapshot =
 
 export const fetchAuditReportSnapshot = async (): Promise<AuditReportSnapshot> =>
   requestJson<AuditReportSnapshot>('/api/reports/audit');
+
+export const fetchWorkItemEfficiencySnapshot = async (
+  capabilityId: string,
+): Promise<WorkItemEfficiencySnapshot> =>
+  requestJson<WorkItemEfficiencySnapshot>(
+    `/api/reports/work-items/${encodeURIComponent(capabilityId)}`,
+  );
 
 export const fetchReportExportPayload = async (
   reportType: ReportExportPayload['reportType'],

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
-import http from 'node:http';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { probeHttpSuccessUrl, probeRendererUrl } from '../desktop/rendererProbe.mjs';
 
 const projectRoot = process.cwd();
 const electronCommand = path.join(
@@ -13,25 +13,6 @@ const electronCommand = path.join(
 
 const devServerUrl = process.env.SINGULARITY_ELECTRON_DEV_SERVER_URL || 'http://127.0.0.1:3000';
 const controlPlaneUrl = process.env.SINGULARITY_CONTROL_PLANE_URL || 'http://127.0.0.1:3001';
-
-const probeUrl = (url, timeoutMs = 1500) =>
-  new Promise(resolve => {
-    const request = http.get(url, response => {
-      response.resume();
-      clearTimeout(timeout);
-      resolve((response.statusCode || 500) < 500);
-    });
-
-    request.on('error', () => {
-      clearTimeout(timeout);
-      resolve(false);
-    });
-
-    const timeout = setTimeout(() => {
-      request.destroy();
-      resolve(false);
-    }, timeoutMs);
-  });
 
 const inspectDesktopRendererBuild = () => {
   const distIndexPath = path.join(projectRoot, 'dist', 'index.html');
@@ -86,8 +67,10 @@ const main = async () => {
   if (!env.SINGULARITY_ELECTRON_START_ROUTE) {
     env.SINGULARITY_ELECTRON_START_ROUTE = '/home';
   }
-  const devServerIsReady = await probeUrl(devServerUrl);
-  const controlPlaneIsReady = await probeUrl(`${controlPlaneUrl}/api/runtime/status`);
+  const devServerIsReady = await probeRendererUrl(devServerUrl);
+  const controlPlaneIsReady = await probeHttpSuccessUrl(
+    `${controlPlaneUrl}/api/runtime/status`,
+  );
 
   if (devServerIsReady) {
     env.SINGULARITY_ELECTRON_DEV_SERVER_URL = devServerUrl;
@@ -99,6 +82,9 @@ const main = async () => {
       );
     }
   } else {
+    console.log(
+      `No Singularity renderer responded at ${devServerUrl}. Falling back to the packaged renderer in dist/.`,
+    );
     let rendererBuild = inspectDesktopRendererBuild();
     if (!rendererBuild.ready) {
       console.log(rendererBuild.message);

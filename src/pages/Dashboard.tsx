@@ -90,6 +90,7 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   'governance-exceptions': ShieldOff,
   'governance-provenance': Search,
   'governance-posture': Gauge,
+  'work-item-report': ClipboardCheck,
 };
 
 const Dashboard = () => {

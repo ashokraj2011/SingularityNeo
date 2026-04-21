@@ -4,6 +4,7 @@ import { getTelemetrySummary } from './telemetry';
 import type {
   AccessAuditEvent,
   ActorContext,
+  AgentEfficiencyRow,
   ApprovalDecision,
   ApprovalInboxEntry,
   AuditReportSnapshot,
@@ -17,6 +18,8 @@ import type {
   ReportWorkItemSummary,
   TeamQueueSnapshot,
   WorkItem,
+  WorkItemEfficiencyRow,
+  WorkItemEfficiencySnapshot,
 } from '../src/types';
 import { canReadCapabilityLiveDetail } from '../src/lib/accessControl';
 
@@ -570,3 +573,312 @@ export const buildReportExportPayload = ({
   filters,
   payload,
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Work Item Efficiency Report
+//
+// Aggregates cost, tokens, elapsed time, and human wait hours per work item
+// for a single capability. All three queries run in parallel and are joined
+// in-process against the workspace work item list — no scan of the full
+// work_items table required since the capability workspace is already loaded.
+//
+// Metric scope note: the execution service writes usage metrics with
+//   scope_type = 'STEP', scope_id = workItem.id
+// for the main agent loop. We sum all metric_samples where scope_id matches
+// a work item id in this capability, regardless of scope_type, so we also
+// pick up any future metrics emitted at other granularities.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const buildWorkItemEfficiencySnapshot = async ({
+  actor,
+  capabilityId,
+}: {
+  actor?: ActorContext | null;
+  capabilityId: string;
+}): Promise<WorkItemEfficiencySnapshot> => {
+  const state = await getAuthorizedAppState(actor);
+  const capability = state.capabilities.find(c => c.id === capabilityId);
+  const workspace = state.capabilityWorkspaces.find(w => w.capabilityId === capabilityId);
+  if (!capability || !workspace) {
+    throw new Error(`Capability ${capabilityId} not found or not accessible.`);
+  }
+
+  const workItems = workspace.workItems ?? [];
+
+  // ── 1. Run counts + timing (first start → last end per work item) ────────
+  const runsQuery = query<{
+    work_item_id: string;
+    run_attempts: string;
+    first_started: string | null;
+    last_updated: string | null;
+  }>(
+    `SELECT
+       work_item_id,
+       MAX(attempt_number)::text                        AS run_attempts,
+       MIN(COALESCE(started_at, created_at))            AS first_started,
+       MAX(COALESCE(completed_at, updated_at))          AS last_updated
+     FROM capability_workflow_runs
+     WHERE capability_id = $1
+     GROUP BY work_item_id`,
+    [capabilityId],
+  );
+
+  // ── 2. Cost + tokens (metrics keyed to work item id) ────────────────────
+  const metricsQuery = query<{
+    scope_id: string;
+    total_cost: string | null;
+    total_tokens: string | null;
+  }>(
+    `SELECT
+       scope_id,
+       SUM(metric_value) FILTER (WHERE metric_name = 'cost')::text   AS total_cost,
+       SUM(metric_value) FILTER (WHERE metric_name = 'tokens')::text AS total_tokens
+     FROM capability_metric_samples
+     WHERE capability_id = $1
+       AND scope_id = ANY($2::text[])
+     GROUP BY scope_id`,
+    [capabilityId, workItems.map(wi => wi.id)],
+  );
+
+  // ── 3. Human waits (joined through runs to get work_item_id) ────────────
+  const waitsQuery = query<{
+    work_item_id: string;
+    interaction_count: string;
+    total_wait_hours: string | null;
+  }>(
+    `SELECT
+       runs.work_item_id,
+       COUNT(waits.id)::text                                          AS interaction_count,
+       SUM(
+         EXTRACT(EPOCH FROM (
+           COALESCE(waits.resolved_at, NOW()) - waits.created_at
+         )) / 3600.0
+       )::text                                                        AS total_wait_hours
+     FROM capability_run_waits AS waits
+     JOIN capability_workflow_runs AS runs
+       ON runs.capability_id = waits.capability_id
+      AND runs.id = waits.run_id
+     WHERE waits.capability_id = $1
+       AND waits.type IN ('APPROVAL', 'INPUT', 'CONFLICT_RESOLUTION')
+     GROUP BY runs.work_item_id`,
+    [capabilityId],
+  );
+
+  // ── 4. Agent step timing + tool cost + lines of code ────────────────────
+  const agentStepsQuery = query<{
+    work_item_id: string;
+    agent_id: string;
+    agent_elapsed_hours: string | null;
+    agent_cost_usd: string | null;
+    lines_written: string | null;
+  }>(
+    `SELECT
+       runs.work_item_id,
+       rs.agent_id,
+       SUM(
+         EXTRACT(EPOCH FROM (
+           COALESCE(rs.completed_at, NOW()) - COALESCE(rs.started_at, rs.created_at)
+         )) / 3600.0
+       )::text                                                        AS agent_elapsed_hours,
+       COALESCE(SUM(ti.cost_usd), 0)::text                           AS agent_cost_usd,
+       COALESCE(SUM(
+         CASE
+           WHEN ti.tool_id IN (
+             'workspace_write', 'workspace_replace_block', 'workspace_apply_patch'
+           )
+           THEN COALESCE(
+             array_length(
+               regexp_split_to_array(
+                 COALESCE(
+                   ti.request->>'content',
+                   ti.request->>'new_content',
+                   ti.request->>'patch',
+                   ''
+                 ),
+                 E'\\n'
+               ),
+               1
+             ),
+             0
+           )
+           ELSE 0
+         END
+       ), 0)::text                                                    AS lines_written
+     FROM capability_workflow_run_steps AS rs
+     JOIN capability_workflow_runs AS runs
+       ON runs.capability_id = rs.capability_id
+      AND runs.id = rs.run_id
+     LEFT JOIN capability_tool_invocations AS ti
+       ON ti.capability_id = rs.capability_id
+      AND ti.run_step_id = rs.id
+     WHERE rs.capability_id = $1
+       AND rs.agent_id IS NOT NULL
+       AND rs.agent_id != ''
+     GROUP BY runs.work_item_id, rs.agent_id`,
+    [capabilityId],
+  );
+
+  // ── 5. Documents produced per agent per work item ────────────────────────
+  const docsQuery = query<{
+    work_item_id: string;
+    agent_id: string;
+    doc_count: string;
+  }>(
+    `SELECT
+       work_item_id,
+       connected_agent_id AS agent_id,
+       COUNT(*)::text AS doc_count
+     FROM capability_artifacts
+     WHERE capability_id = $1
+       AND work_item_id IS NOT NULL
+       AND connected_agent_id IS NOT NULL
+       AND artifact_kind IN (
+         'PHASE_OUTPUT', 'CODE_PATCH', 'HANDOFF_PACKET', 'EVIDENCE_PACKET',
+         'EXECUTION_PLAN', 'REVIEW_PACKET', 'EXECUTION_SUMMARY', 'CODE_DIFF'
+       )
+     GROUP BY work_item_id, connected_agent_id`,
+    [capabilityId],
+  );
+
+  const [runsResult, metricsResult, waitsResult, agentStepsResult, docsResult] =
+    await Promise.all([runsQuery, metricsQuery, waitsQuery, agentStepsQuery, docsQuery]);
+
+  // Index results for O(1) lookup
+  const runsByItemId     = new Map(runsResult.rows.map(r => [r.work_item_id, r]));
+  const metricsByItemId  = new Map(metricsResult.rows.map(r => [r.scope_id, r]));
+  const waitsByItemId    = new Map(waitsResult.rows.map(r => [r.work_item_id, r]));
+
+  // Build nested index: workItemId → agentId → { elapsed, cost, lines }
+  const agentStepsByItem = new Map<string, Map<string, (typeof agentStepsResult.rows)[0]>>();
+  for (const row of agentStepsResult.rows) {
+    let byAgent = agentStepsByItem.get(row.work_item_id);
+    if (!byAgent) { byAgent = new Map(); agentStepsByItem.set(row.work_item_id, byAgent); }
+    const existing = byAgent.get(row.agent_id);
+    if (existing) {
+      // Merge — multiple run attempts may produce duplicate (work_item_id, agent_id) pairs
+      existing.agent_elapsed_hours = String(
+        (Number(existing.agent_elapsed_hours ?? 0) + Number(row.agent_elapsed_hours ?? 0)),
+      );
+      existing.agent_cost_usd = String(
+        (Number(existing.agent_cost_usd ?? 0) + Number(row.agent_cost_usd ?? 0)),
+      );
+      existing.lines_written = String(
+        (Number(existing.lines_written ?? 0) + Number(row.lines_written ?? 0)),
+      );
+    } else {
+      byAgent.set(row.agent_id, { ...row });
+    }
+  }
+
+  // workItemId → agentId → doc_count
+  const docsByItem = new Map<string, Map<string, number>>();
+  for (const row of docsResult.rows) {
+    let byAgent = docsByItem.get(row.work_item_id);
+    if (!byAgent) { byAgent = new Map(); docsByItem.set(row.work_item_id, byAgent); }
+    byAgent.set(row.agent_id, (byAgent.get(row.agent_id) ?? 0) + Number(row.doc_count));
+  }
+
+  // Build a quick agent-name lookup from the workspace roster
+  const agentNameById = new Map<string, string>(
+    (workspace.agents ?? []).map(a => [a.id, a.name]),
+  );
+
+  const rows: WorkItemEfficiencyRow[] = workItems.map(wi => {
+    const run     = runsByItemId.get(wi.id);
+    const metrics = metricsByItemId.get(wi.id);
+    const waits   = waitsByItemId.get(wi.id);
+
+    const elapsedHours =
+      run?.first_started && run?.last_updated
+        ? Math.max(
+            0,
+            (new Date(run.last_updated).getTime() - new Date(run.first_started).getTime()) /
+              36e5,
+          )
+        : 0;
+
+    const humanWaitHours = Math.max(0, Number(waits?.total_wait_hours ?? 0));
+
+    const agentAutonomyPct =
+      elapsedHours > 0
+        ? Math.max(0, Math.min(100, Math.round(((elapsedHours - humanWaitHours) / elapsedHours) * 100)))
+        : 100;
+
+    // Build per-agent breakdowns for this work item
+    const stepsForItem = agentStepsByItem.get(wi.id) ?? new Map();
+    const docsForItem  = docsByItem.get(wi.id) ?? new Map();
+
+    // Union of agent IDs that appear in either steps or docs
+    const allAgentIds = new Set([...stepsForItem.keys(), ...docsForItem.keys()]);
+
+    const agentBreakdowns: AgentEfficiencyRow[] = Array.from(allAgentIds)
+      .map(agentId => {
+        const step = stepsForItem.get(agentId);
+        return {
+          agentId,
+          agentName:         agentNameById.get(agentId) ?? agentId,
+          elapsedHours:      Math.round(Math.max(0, Number(step?.agent_elapsed_hours ?? 0)) * 100) / 100,
+          costUsd:           Math.round(Math.max(0, Number(step?.agent_cost_usd ?? 0)) * 10000) / 10000,
+          linesOfCode:       Math.max(0, Number(step?.lines_written ?? 0)),
+          documentsProduced: docsForItem.get(agentId) ?? 0,
+        };
+      })
+      .sort((a, b) => b.elapsedHours - a.elapsedHours);
+
+    const totalLinesOfCode      = agentBreakdowns.reduce((s, a) => s + a.linesOfCode, 0);
+    const totalDocumentsProduced = agentBreakdowns.reduce((s, a) => s + a.documentsProduced, 0);
+
+    return {
+      workItemId:             wi.id,
+      title:                  wi.title,
+      status:                 wi.status,
+      phase:                  wi.phase,
+      priority:               wi.priority,
+      totalCostUsd:           Math.max(0, Number(metrics?.total_cost   ?? 0)),
+      totalTokens:            Math.max(0, Number(metrics?.total_tokens ?? 0)),
+      elapsedHours:           Math.round(elapsedHours * 100) / 100,
+      humanInteractions:      Number(waits?.interaction_count ?? 0),
+      humanWaitHours:         Math.round(humanWaitHours * 100) / 100,
+      runAttempts:            Math.max(0, Number(run?.run_attempts ?? 0)),
+      agentAutonomyPct,
+      totalLinesOfCode,
+      totalDocumentsProduced,
+      agentBreakdowns,
+    };
+  });
+
+  // ── Compute totals for the header stat tiles ─────────────────────────────
+  const nonZeroRows = rows.filter(r => r.runAttempts > 0);
+  const totalCostUsd           = rows.reduce((acc, r) => acc + r.totalCostUsd, 0);
+  const totalTokens            = rows.reduce((acc, r) => acc + r.totalTokens, 0);
+  const totalLinesOfCode       = rows.reduce((acc, r) => acc + r.totalLinesOfCode, 0);
+  const totalDocumentsProduced = rows.reduce((acc, r) => acc + r.totalDocumentsProduced, 0);
+  const avgElapsedHours =
+    nonZeroRows.length > 0
+      ? nonZeroRows.reduce((acc, r) => acc + r.elapsedHours, 0) / nonZeroRows.length
+      : 0;
+  const avgHumanInteractions =
+    nonZeroRows.length > 0
+      ? nonZeroRows.reduce((acc, r) => acc + r.humanInteractions, 0) / nonZeroRows.length
+      : 0;
+  const avgAgentAutonomyPct =
+    nonZeroRows.length > 0
+      ? nonZeroRows.reduce((acc, r) => acc + r.agentAutonomyPct, 0) / nonZeroRows.length
+      : 100;
+
+  return {
+    generatedAt:    new Date().toISOString(),
+    capabilityId,
+    capabilityName: capability.name,
+    totals: {
+      totalCostUsd:           Math.round(totalCostUsd * 10000) / 10000,
+      totalTokens,
+      avgElapsedHours:        Math.round(avgElapsedHours * 100) / 100,
+      avgHumanInteractions:   Math.round(avgHumanInteractions * 10) / 10,
+      avgAgentAutonomyPct:    Math.round(avgAgentAutonomyPct),
+      totalLinesOfCode,
+      totalDocumentsProduced,
+    },
+    rows,
+  };
+};

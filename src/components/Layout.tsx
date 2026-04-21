@@ -14,6 +14,7 @@ import {
   Gauge,
   KeyRound,
   LayoutDashboard,
+  LoaderCircle,
   LogOut,
   MessageSquare,
   PanelLeftClose,
@@ -33,11 +34,13 @@ import {
   Workflow,
   Wrench,
   X,
+  Zap,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
-import { fetchRuntimeStatus, type RuntimeStatus } from '../lib/api';
+import { claimCapabilityExecution, fetchRuntimeStatus, type RuntimeStatus } from '../lib/api';
+import { hasPermission } from '../lib/accessControl';
 import {
   getVisibleAdvancedToolDescriptors,
   type AdvancedToolId,
@@ -81,6 +84,7 @@ const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
   'governance-exceptions': ShieldOff,
   'governance-provenance': Search,
   'governance-posture': Gauge,
+  'work-item-report': BarChart3,
 };
 
 const routeTitles: Record<string, string> = {
@@ -103,6 +107,7 @@ const routeTitles: Record<string, string> = {
   '/governance/exceptions': 'Governance Exceptions',
   '/governance/provenance': 'Prove the Negative',
   '/governance/posture': 'Posture Dashboard',
+  '/reports/work-items': 'Work Item Report',
 };
 
 const SIDEBAR_STORAGE_KEY = 'singularity.sidebar.collapsed';
@@ -760,6 +765,9 @@ const TopBar = ({
   currentWorkspaceUserId,
   workspaceUsers,
   onChangeWorkspaceUser,
+  onClaimExecution,
+  isClaiming,
+  isClaimedByThisDesktop,
 }: {
   isSidebarCollapsed: boolean;
   navItems: Array<{ name: string; path: string }>;
@@ -772,6 +780,9 @@ const TopBar = ({
   currentWorkspaceUserId?: string;
   workspaceUsers: Array<{ id: string; name: string; title?: string }>;
   onChangeWorkspaceUser: (userId: string) => void;
+  onClaimExecution?: () => void;
+  isClaiming?: boolean;
+  isClaimedByThisDesktop?: boolean;
 }) => {
   const location = useLocation();
 
@@ -828,6 +839,29 @@ const TopBar = ({
               </span>
             </button>
 
+            {/* Claim execution — shown when capability is not yet claimed by this desktop */}
+            {isClaimedByThisDesktop ? (
+              <StatusBadge tone="success" className="w-full justify-center xl:w-auto">
+                <Zap size={12} className="shrink-0" />
+                Claimed
+              </StatusBadge>
+            ) : onClaimExecution ? (
+              <button
+                type="button"
+                onClick={onClaimExecution}
+                disabled={isClaiming}
+                className="enterprise-button enterprise-button-primary w-full xl:w-auto"
+                title="Claim execution of this capability on the current desktop executor"
+              >
+                {isClaiming ? (
+                  <LoaderCircle size={16} className="animate-spin" />
+                ) : (
+                  <Zap size={16} />
+                )}
+                <span>{isClaiming ? 'Claiming…' : 'Claim'}</span>
+              </button>
+            ) : null}
+
             <button
               type="button"
               onClick={onOpenHelp}
@@ -878,6 +912,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     getCapabilityWorkspace,
     lastSyncError,
     preferredCapabilityId,
+    refreshCapabilityBundle,
     retryInitialSync,
     setActiveCapability,
     setActiveChatAgent,
@@ -886,7 +921,9 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     updateCapabilityMetadata,
     workspaceOrganization,
   } = useCapability();
-  const { success } = useToast();
+  const { success, error: showError } = useToast();
+  const [topbarRuntimeStatus, setTopbarRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [isClaiming, setIsClaiming] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     if (typeof window === 'undefined') {
       return false;
@@ -926,12 +963,55 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     writeViewPreference(ADVANCED_NAV_STORAGE_KEY, isAdvancedNavOpen ? 'open' : 'closed');
   }, [isAdvancedNavOpen]);
 
+  // Poll runtime status for claim button state in TopBar
+  useEffect(() => {
+    let isMounted = true;
+    const load = () => {
+      void fetchRuntimeStatus()
+        .then(s => { if (isMounted) setTopbarRuntimeStatus(s); })
+        .catch(() => {});
+    };
+    load();
+    const interval = window.setInterval(load, 20_000);
+    return () => { isMounted = false; window.clearInterval(interval); };
+  }, [activeCapability.id]);
+
   const isImmersiveRoute =
     location.pathname === '/workflow-designer-neo' || location.pathname === '/designer';
   const isPreferredCapability = preferredCapabilityId === activeCapability.id;
   const activeWorkspace = activeCapability.id
     ? getCapabilityWorkspace(activeCapability.id)
     : null;
+
+  // Claim execution state (depends on activeWorkspace declared above)
+  const executionOwnership = activeWorkspace?.executionOwnership ?? null;
+  const isClaimedByThisDesktop =
+    !!executionOwnership?.executorId &&
+    !!topbarRuntimeStatus?.executorId &&
+    executionOwnership.executorId === topbarRuntimeStatus.executorId;
+  const canClaimExecution = hasPermission(
+    activeCapability.effectivePermissions,
+    'capability.execution.claim',
+  );
+
+  const handleClaimExecution = async () => {
+    setIsClaiming(true);
+    try {
+      await claimCapabilityExecution({ capabilityId: activeCapability.id });
+      await Promise.all([
+        refreshCapabilityBundle(activeCapability.id),
+        fetchRuntimeStatus().then(s => setTopbarRuntimeStatus(s)).catch(() => {}),
+      ]);
+      success(
+        'Execution claimed',
+        `${activeCapability.name} is now owned by this desktop executor.`,
+      );
+    } catch (err) {
+      showError('Claim failed', err instanceof Error ? err.message : 'Unable to claim execution.');
+    } finally {
+      setIsClaiming(false);
+    }
+  };
   const visibleAdvancedNavItems = useMemo(
     () =>
       activeWorkspace
@@ -1186,6 +1266,9 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
             currentWorkspaceUserId={currentWorkspaceUserId}
             workspaceUsers={workspaceOrganization.users}
             onChangeWorkspaceUser={setCurrentWorkspaceUserId}
+            onClaimExecution={canClaimExecution && !isClaimedByThisDesktop ? handleClaimExecution : undefined}
+            isClaiming={isClaiming}
+            isClaimedByThisDesktop={isClaimedByThisDesktop}
           />
         ) : null}
         <main className={cn('shell-main', isImmersiveRoute && 'shell-main-immersive')}>
@@ -1303,7 +1386,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
           <div className="relative h-full w-[22rem] max-w-[90vw] overflow-y-auto border-r border-outline-variant/60 bg-white px-5 py-5 shadow-[0_20px_60px_rgba(12,23,39,0.2)]">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-base font-bold text-on-surface">Singulairy</h2>
+                <h2 className="text-base font-bold text-on-surface">Singularity</h2>
                 <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-secondary">
                   Delivery Console
                 </p>

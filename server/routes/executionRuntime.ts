@@ -56,6 +56,7 @@ import {
   startTelemetrySpan,
 } from '../telemetry';
 import { appendAccessAuditEvent } from '../workspaceOrganization';
+import { getWorkspaceWriteLock } from '../workspaceLock';
 
 const parseHeaderStringList = (value: unknown) => {
   const raw = String(value || '').trim();
@@ -506,6 +507,16 @@ export const registerExecutionRuntimeRoutes = (app: express.Express) => {
         executionDispatchState: dispatch.executionDispatchState,
         executionQueueReason: dispatch.executionQueueReason,
       });
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.get('/api/capabilities/:capabilityId/workspace-lock', async (request, response) => {
+    try {
+      const capabilityId = String(request.params.capabilityId || '').trim();
+      const lock = await getWorkspaceWriteLock(capabilityId);
+      response.json({ lock });
     } catch (error) {
       sendApiError(response, error);
     }
