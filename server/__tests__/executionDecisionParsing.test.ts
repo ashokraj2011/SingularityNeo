@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import type { WorkflowStep } from '../../src/types';
 import {
   buildToolLoopExhaustedWaitMessage,
+  buildRepeatedToolLoopFailureMessage,
   buildExecutionFailureRecoveryMessage,
   extractJsonObject,
+  hasConcreteImplementationGuidance,
   getExecutionDecisionRepairReason,
   getRecoverableDecisionFeedback,
   normalizeExecutionDecision,
@@ -176,5 +178,34 @@ describe('buildToolLoopExhaustedWaitMessage', () => {
         attemptedTools: ['workspace_search', 'workspace_read'],
       }),
     ).toContain('src/main/java/App.java');
+  });
+});
+
+describe('hasConcreteImplementationGuidance', () => {
+  it('rejects vague operator input', () => {
+    expect(hasConcreteImplementationGuidance('go ahead')).toBe(false);
+    expect(
+      hasConcreteImplementationGuidance('create test directory and add test cases'),
+    ).toBe(false);
+  });
+
+  it('accepts guidance with exact files and commands', () => {
+    expect(
+      hasConcreteImplementationGuidance(
+        'Edit src/main/java/org/example/rules/Operator.java and src/main/java/org/example/rules/RuleEngineService.java to add endsWith/notEndsWith support, then run mvn test from /repo/root.',
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('buildRepeatedToolLoopFailureMessage', () => {
+  it('explains that repeated retries are no longer allowed', () => {
+    expect(
+      buildRepeatedToolLoopFailureMessage({
+        step: buildStep(),
+        inspectedPaths: ['src/main/java/App.java'],
+        attemptedTools: ['workspace_read', 'workspace_search'],
+      }),
+    ).toContain('repeatedly even after human guidance');
   });
 });

@@ -513,6 +513,11 @@ export const OrchestratorOperatePanel = ({
                   type="button"
                   onClick={onGuideAndRestart}
                   disabled={!canGuideAndRestart || busyAction !== null}
+                  title={
+                    !canGuideAndRestart
+                      ? 'Add operator guidance to the note field above, then use this button to restart.'
+                      : undefined
+                  }
                   className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {busyAction === 'guideRestart' ? (
@@ -539,6 +544,11 @@ export const OrchestratorOperatePanel = ({
                   type="button"
                   onClick={onResolveWait}
                   disabled={!canResolveSelectedWait || busyAction !== null}
+                  title={
+                    !canResolveSelectedWait
+                      ? 'Complete the required note field above to resolve this wait state.'
+                      : undefined
+                  }
                   className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {busyAction === 'resolve' ? (
@@ -586,6 +596,13 @@ export const OrchestratorOperatePanel = ({
             ref={resolutionNoteRef}
             value={resolutionNote}
             onChange={event => onResolutionNoteChange(event.target.value)}
+            onKeyDown={event => {
+              if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                event.preventDefault();
+                if (canGuideAndRestart && busyAction === null) onGuideAndRestart();
+                else if (canResolveSelectedWait && busyAction === null) onResolveWait();
+              }
+            }}
             placeholder={resolutionPlaceholder}
             className="field-textarea mt-3 h-28 bg-white"
           />
@@ -686,6 +703,11 @@ export const OrchestratorOperatePanel = ({
               type="button"
               onClick={onInitializeExecutionContext}
               disabled={!canInitializeExecutionContext || busyAction !== null}
+              title={
+                !canInitializeExecutionContext
+                  ? 'An execution repository must be configured before the context can be initialized.'
+                  : undefined
+              }
               className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
             >
               {busyAction === 'initExecutionContext' ? (
@@ -699,6 +721,11 @@ export const OrchestratorOperatePanel = ({
               type="button"
               onClick={onCreateSharedBranch}
               disabled={!canCreateSharedBranch || busyAction !== null}
+              title={
+                !canCreateSharedBranch
+                  ? 'Initialize an execution context first to create a shared branch.'
+                  : undefined
+              }
               className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
             >
               {busyAction === 'createSharedBranch' ? (
@@ -785,6 +812,13 @@ export const OrchestratorOperatePanel = ({
                 type="button"
                 onClick={onCreateHandoff}
                 disabled={!resolutionNote.trim() || busyAction !== null || !canControlWorkItems}
+                title={
+                  !resolutionNote.trim()
+                    ? 'Add a resolution note above to create a handoff packet.'
+                    : !canControlWorkItems
+                      ? 'Write control is required to create a handoff.'
+                      : undefined
+                }
                 className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {busyAction === 'createHandoff' ? (
@@ -1738,6 +1772,12 @@ export const OrchestratorOperatePanel = ({
                 <textarea
                   value={stageChatInput}
                   onChange={event => onStageChatInputChange(event.target.value)}
+                  onKeyDown={event => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                      event.preventDefault();
+                      event.currentTarget.closest('form')?.requestSubmit();
+                    }
+                  }}
                   placeholder={`Ask ${selectedAgent.name} about this stage, blockers, files, artifacts, or next steps.`}
                   className="field-textarea h-28 bg-white"
                 />
@@ -1745,10 +1785,12 @@ export const OrchestratorOperatePanel = ({
                   <p className="text-xs leading-relaxed text-secondary">
                     Scoped to <strong>{selectedWorkItem.id}</strong> and{' '}
                     <strong>{selectedCurrentStep?.name || 'the active stage'}</strong>.
+                    {' '}<span className="opacity-60">⌘↵ to send.</span>
                   </p>
                   <button
                     type="submit"
                     disabled={!stageChatInput.trim() || isStageChatSending || !canWriteChat}
+                    title={!canWriteChat ? 'Chat is read-only — take control to send messages.' : undefined}
                     className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {isStageChatSending ? (

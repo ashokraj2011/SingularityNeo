@@ -148,6 +148,8 @@ import { resolveQueuedRunDispatch } from '../executionOwnership';
 import { isRemoteExecutionClient } from './runtimeClient';
 
 const MAX_AGENT_TOOL_LOOPS = 8;
+const TOOL_LOOP_EXHAUSTION_WAIT_REASON = 'TOOL_LOOP_EXHAUSTED';
+const MAX_RESOLVED_TOOL_LOOP_EXHAUSTION_WAITS = 2;
 
 const createHistoryId = () => `HIST-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createLogId = () => `LOG-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
@@ -468,6 +470,131 @@ export const buildToolLoopExhaustedWaitMessage = ({
     : 'No specific files were inspected';
 
   return `${step.name} explored the workspace for too long without moving into a concrete implementation result. It already used: ${attemptedSummary}. Recent files or paths inspected: ${inspectedSummary}. Provide direct implementation guidance such as the exact files to edit, the change to make, or confirmation that it should start writing code now.`;
+};
+
+const buildEscalatedToolLoopWaitMessage = ({
+  step,
+  inspectedPaths,
+  attemptedTools,
+}: {
+  step: WorkflowStep;
+  inspectedPaths: string[];
+  attemptedTools: ToolAdapterId[];
+}) => {
+  const attemptedSummary = attemptedTools.length
+    ? attemptedTools.map(formatToolLabel).join(', ')
+    : 'No tools were executed';
+  const inspectedSummary = inspectedPaths.length
+    ? inspectedPaths.join(', ')
+    : 'No specific files were inspected';
+
+  return `${step.name} exhausted its tool loop again after prior operator guidance. It already used: ${attemptedSummary}. Recent files or paths inspected: ${inspectedSummary}. Do not answer with a general instruction. Specify the exact files to edit, the exact code change to make, and any build or test command the agent should run next.`;
+};
+
+export const buildRepeatedToolLoopFailureMessage = ({
+  step,
+  inspectedPaths,
+  attemptedTools,
+}: {
+  step: WorkflowStep;
+  inspectedPaths: string[];
+  attemptedTools: ToolAdapterId[];
+}) => {
+  const attemptedSummary = attemptedTools.length
+    ? attemptedTools.map(formatToolLabel).join(', ')
+    : 'No tools were executed';
+  const inspectedSummary = inspectedPaths.length
+    ? inspectedPaths.join(', ')
+    : 'No specific files were inspected';
+
+  return `${step.name} exhausted its tool loop repeatedly even after human guidance. It already used: ${attemptedSummary}. Recent files or paths inspected: ${inspectedSummary}. Stop retrying this step until the operator supplies an exact implementation plan with target files and any required build/test command.`;
+};
+
+const buildToolLoopRequestedInputFields = ({
+  escalated,
+}: {
+  escalated: boolean;
+}): CompiledRequiredInputField[] => [
+  {
+    id: 'implementation-direction',
+    label: 'Implementation direction',
+    description: escalated
+      ? 'State the exact code change to make next. Generic replies like "go ahead" are not enough.'
+      : 'Tell the agent exactly what change it should make next.',
+    required: true,
+    source: 'HUMAN_INPUT',
+    kind: 'MARKDOWN',
+    status: 'MISSING',
+  },
+  {
+    id: 'target-files',
+    label: 'Target files',
+    description:
+      'List the exact files to edit or create, for example src/main/java/.../Operator.java.',
+    required: escalated,
+    source: 'HUMAN_INPUT',
+    kind: 'MARKDOWN',
+    status: 'MISSING',
+  },
+  {
+    id: 'build-test-command',
+    label: 'Build/test command',
+    description:
+      'If validation matters here, give the exact command to run, for example mvn test from the repo root.',
+    required: false,
+    source: 'HUMAN_INPUT',
+    kind: 'MARKDOWN',
+    status: 'MISSING',
+  },
+];
+
+const isToolLoopExhaustionWait = (
+  wait: Pick<RunWait, 'type' | 'message' | 'payload'>,
+) =>
+  wait.type === 'INPUT' &&
+  (
+    wait.payload?.reason === TOOL_LOOP_EXHAUSTION_WAIT_REASON ||
+    wait.message.includes(
+      'explored the workspace for too long without moving into a concrete implementation result.',
+    )
+  );
+
+const countResolvedToolLoopExhaustionWaits = ({
+  detail,
+  runStepId,
+}: {
+  detail: WorkflowRunDetail;
+  runStepId: string;
+}) =>
+  detail.waits.filter(
+    wait =>
+      wait.runStepId === runStepId &&
+      wait.status === 'RESOLVED' &&
+      isToolLoopExhaustionWait(wait),
+  ).length;
+
+export const hasConcreteImplementationGuidance = (value: string) => {
+  const normalized = normalizeString(value);
+  if (!normalized || normalized.length < 24) {
+    return false;
+  }
+
+  const lower = normalized.toLowerCase();
+  const hasPathHint =
+    /(?:^|[\s(])(?:\/|\.\/|\.\.\/)[^\s,;]+/.test(normalized) ||
+    /\b[\w./-]+\.(java|kt|kts|ts|tsx|js|jsx|py|rb|php|cs|cpp|c|h|hpp|sql|json|ya?ml|md|go)\b/i.test(
+      normalized,
+    );
+  const hasActionVerb =
+    /\b(edit|update|change|modify|create|add|implement|write|patch|replace|rename|extend|test)\b/i.test(
+      lower,
+    );
+  const hasCommandHint =
+    /\b(mvn|gradle|npm|pnpm|yarn|bun|go test|pytest|jest|vitest|cargo test|dotnet test|make)\b/i.test(
+      lower,
+    );
+
+  return (hasPathHint && hasActionVerb) || (hasActionVerb && hasCommandHint);
 };
 
 const emitRunProgressEvent = async ({
@@ -4017,6 +4144,7 @@ export const createWorkItemRecord = async ({
         capabilityId,
         workItem: { id: nextWorkItem.id, title: nextWorkItem.title },
         repositories: bundle.capability.repositories || [],
+        workspaceRoots: getCapabilityWorkspaceRoots(bundle.capability),
       });
     } catch (error) {
       console.error('[agentGit/autoWire] autoStart dispatch failed', error);
@@ -4308,6 +4436,15 @@ const resolveRunWaitAndQueue = async ({
     !canActorOperateWorkItem({ actor, workItem: projection.workItem })
   ) {
     throw new Error('Only the current phase owner can resolve this workflow wait.');
+  }
+  if (
+    expectedType === 'INPUT' &&
+    isToolLoopExhaustionWait(openWait) &&
+    !hasConcreteImplementationGuidance(resolution)
+  ) {
+    throw new Error(
+      'This stalled execution needs exact implementation guidance. Include the files to edit and, if relevant, the build/test command. Example: "Edit src/.../Operator.java and src/.../RuleEngineService.java to add endsWith support, then run mvn test from /repo/root."',
+    );
   }
 
   await resolveRunWait({
@@ -6833,37 +6970,62 @@ const executeAutomatedStep = async (
   await finishTelemetrySpan({
     capabilityId: detail.run.capabilityId,
     spanId: stepSpan.id,
-    status: 'WAITING',
+    status:
+      countResolvedToolLoopExhaustionWaits({
+        detail: runningDetail,
+        runStepId: currentRunStep.id,
+      }) >= MAX_RESOLVED_TOOL_LOOP_EXHAUSTION_WAITS
+        ? 'ERROR'
+        : 'WAITING',
     attributes: {
       waitType: 'INPUT',
       error: `${step.name} exceeded the maximum tool loop iterations.`,
     },
   });
+
+  const resolvedLoopExhaustionCount = countResolvedToolLoopExhaustionWaits({
+    detail: runningDetail,
+    runStepId: currentRunStep.id,
+  });
+  const attemptedToolList = Array.from(new Set(attemptedTools));
+  const inspectedPathList = Array.from(inspectedPaths);
+
+  if (resolvedLoopExhaustionCount >= MAX_RESOLVED_TOOL_LOOP_EXHAUSTION_WAITS) {
+    return failRun({
+      detail: runningDetail,
+      message: buildRepeatedToolLoopFailureMessage({
+        step,
+        inspectedPaths: inspectedPathList.slice(-5),
+        attemptedTools: attemptedToolList.slice(-5),
+      }),
+    });
+  }
+
+  const escalatedToolLoopWait = resolvedLoopExhaustionCount > 0;
   return completeRunWithWait({
     detail: runningDetail,
     waitType: 'INPUT',
-    waitMessage: buildToolLoopExhaustedWaitMessage({
-      step,
-      inspectedPaths: Array.from(inspectedPaths).slice(-5),
-      attemptedTools: Array.from(new Set(attemptedTools)).slice(-5),
-    }),
+    waitMessage: escalatedToolLoopWait
+      ? buildEscalatedToolLoopWaitMessage({
+          step,
+          inspectedPaths: inspectedPathList.slice(-5),
+          attemptedTools: attemptedToolList.slice(-5),
+        })
+      : buildToolLoopExhaustedWaitMessage({
+          step,
+          inspectedPaths: inspectedPathList.slice(-5),
+          attemptedTools: attemptedToolList.slice(-5),
+        }),
     waitPayload: {
-      requestedInputFields: [
-        {
-          id: 'implementation-direction',
-          label: 'Implementation direction',
-          description:
-            'Tell the agent exactly which files to edit or what concrete change to make next.',
-          required: true,
-          source: 'HUMAN_INPUT',
-          kind: 'MARKDOWN',
-          status: 'MISSING',
-        } satisfies CompiledRequiredInputField,
-      ],
+      reason: TOOL_LOOP_EXHAUSTION_WAIT_REASON,
+      escalationCount: resolvedLoopExhaustionCount + 1,
+      requestedInputFields: buildToolLoopRequestedInputFields({
+        escalated: escalatedToolLoopWait,
+      }),
       compiledStepContext,
       compiledWorkItemPlan,
-      attemptedTools: Array.from(new Set(attemptedTools)),
-      inspectedPaths: Array.from(inspectedPaths),
+      attemptedTools: attemptedToolList,
+      inspectedPaths: inspectedPathList,
     },
   });
 };

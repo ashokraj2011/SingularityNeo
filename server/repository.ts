@@ -117,6 +117,7 @@ import {
   isRemoteExecutionClient,
 } from './execution/runtimeClient';
 import { buildCapabilityReadinessContract } from './readinessContract';
+import { getCapabilityWorkspaceRoots } from './workspacePaths';
 
 type CapabilityBundle = {
   capability: Capability;
@@ -4547,6 +4548,7 @@ export const replaceCapabilityWorkspaceContentRecord = async (
                 artifact,
                 workItem: { id: workItem.id, title: workItem.title },
                 repositories,
+                workspaceRoots: getCapabilityWorkspaceRoots(bundle.capability),
               });
             }),
           );

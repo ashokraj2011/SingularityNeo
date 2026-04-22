@@ -1,5 +1,5 @@
 import React from 'react';
-import { ExternalLink, FileCode, FileText } from 'lucide-react';
+import { Copy, ExternalLink, FileCode, FileText } from 'lucide-react';
 import ArtifactPreview from '../ArtifactPreview';
 import { compactMarkdownPreview } from '../../lib/markdown';
 import { formatEnumLabel, getStatusTone } from '../../lib/enterprise';
@@ -164,9 +164,21 @@ export const OrchestratorArtifactsPanel = ({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="workspace-meta-label">Artifact preview</p>
-            <p className="mt-2 text-sm font-semibold text-on-surface">
-              {selectedArtifact?.name || 'No document selected'}
-            </p>
+            <div className="mt-2 flex items-center gap-2">
+              <p className="text-sm font-semibold text-on-surface">
+                {selectedArtifact?.name || 'No document selected'}
+              </p>
+              {selectedArtifact ? (
+                <button
+                  type="button"
+                  title="Copy artifact name"
+                  onClick={() => void navigator.clipboard.writeText(selectedArtifact.name)}
+                  className="rounded-lg p-1 text-secondary transition-colors hover:bg-surface-container hover:text-on-surface"
+                >
+                  <Copy size={13} />
+                </button>
+              ) : null}
+            </div>
             <p className="mt-1 text-xs text-secondary">
               {selectedArtifact
                 ? compactMarkdownPreview(

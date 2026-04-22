@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { ScrollText } from 'lucide-react';
+import { ExternalLink, ScrollText } from 'lucide-react';
 import { formatEnumLabel, getStatusTone } from '../../lib/enterprise';
 import { AdvancedDisclosure } from '../WorkspaceUI';
 import {
@@ -150,6 +150,16 @@ export const OrchestratorAttemptsPanel = ({
               <span className="text-xs text-secondary">
                 {runStep ? `${runStep.attemptCount} attempts` : 'Not started'}
               </span>
+              {selectedWorkflow ? (
+                <Link
+                  to={`/designer?workflowId=${encodeURIComponent(selectedWorkflow.id)}&stepId=${encodeURIComponent(step.id)}`}
+                  className="flex items-center gap-1 text-[0.68rem] text-primary hover:underline"
+                  title="Open this step in the Workflow Designer"
+                >
+                  <ExternalLink size={11} />
+                  Designer
+                </Link>
+              ) : null}
             </div>
           </div>
         );

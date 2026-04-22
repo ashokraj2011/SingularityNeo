@@ -2,13 +2,16 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertCircle,
+  ArrowUpRight,
   Bot,
   Clock3,
   Database,
   DollarSign,
   MessageSquare,
   RefreshCw,
+  RotateCcw,
   ShieldCheck,
+  XCircle,
   Workflow,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -19,6 +22,8 @@ import {
   fetchCapabilityWorkflowRun,
   fetchCapabilityWorkflowRunEvents,
   fetchRunConsoleSnapshot,
+  restartCapabilityWorkflowRun,
+  cancelCapabilityWorkflowRun,
 } from '../lib/api';
 import { hasPermission } from '../lib/accessControl';
 import { createApiEventSource } from '../lib/desktop';
@@ -105,6 +110,34 @@ const RunConsole = () => {
   const [error, setError] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isExplainOpen, setIsExplainOpen] = useState(false);
+  const [runActionBusy, setRunActionBusy] = useState<'restart' | 'cancel' | null>(null);
+  const [runActionError, setRunActionError] = useState('');
+
+  const handleRestartRun = async (runId: string) => {
+    setRunActionBusy('restart');
+    setRunActionError('');
+    try {
+      await restartCapabilityWorkflowRun(activeCapability.id, runId);
+      await loadSnapshot();
+    } catch (err) {
+      setRunActionError(err instanceof Error ? err.message : 'Restart failed');
+    } finally {
+      setRunActionBusy(null);
+    }
+  };
+
+  const handleCancelRun = async (runId: string) => {
+    setRunActionBusy('cancel');
+    setRunActionError('');
+    try {
+      await cancelCapabilityWorkflowRun(activeCapability.id, runId);
+      await loadSnapshot();
+    } catch (err) {
+      setRunActionError(err instanceof Error ? err.message : 'Cancel failed');
+    } finally {
+      setRunActionBusy(null);
+    }
+  };
 
   const loadSnapshot = async () => {
     setIsRefreshing(true);
@@ -536,8 +569,21 @@ const RunConsole = () => {
                 <p className="text-sm text-secondary">
                   Current phase: {formatEnumLabel(selectedRun.currentPhase)} • Attempt {selectedRun.attemptNumber}
                 </p>
-                {selectedWorkItem ? (
-                  <div className="pt-2">
+                <div className="flex flex-wrap items-center gap-2 pt-2">
+                  {/* View in Work — always shown when a work item exists */}
+                  {selectedWorkItem ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        navigate(`/?selected=${encodeURIComponent(selectedRun.workItemId)}`)
+                      }
+                      className="enterprise-button enterprise-button-secondary"
+                    >
+                      <ArrowUpRight size={14} />
+                      View in Work
+                    </button>
+                  ) : null}
+                  {selectedWorkItem ? (
                     <button
                       type="button"
                       onClick={() => setIsExplainOpen(true)}
@@ -545,7 +591,37 @@ const RunConsole = () => {
                     >
                       Explain
                     </button>
-                  </div>
+                  ) : null}
+                  {/* Recovery actions — shown when run is in a terminal/waiting state */}
+                  {['FAILED', 'WAITING_INPUT', 'WAITING_APPROVAL', 'WAITING_CONFLICT'].includes(
+                    selectedRun.status,
+                  ) ? (
+                    <button
+                      type="button"
+                      disabled={runActionBusy !== null}
+                      onClick={() => void handleRestartRun(selectedRun.id)}
+                      className="enterprise-button enterprise-button-primary"
+                    >
+                      <RotateCcw size={14} className={runActionBusy === 'restart' ? 'animate-spin' : ''} />
+                      {runActionBusy === 'restart' ? 'Restarting…' : 'Restart run'}
+                    </button>
+                  ) : null}
+                  {['RUNNING', 'WAITING_INPUT', 'WAITING_APPROVAL', 'WAITING_CONFLICT', 'FAILED'].includes(
+                    selectedRun.status,
+                  ) ? (
+                    <button
+                      type="button"
+                      disabled={runActionBusy !== null}
+                      onClick={() => void handleCancelRun(selectedRun.id)}
+                      className="enterprise-button enterprise-button-secondary text-red-700 hover:bg-red-50"
+                    >
+                      <XCircle size={14} className={runActionBusy === 'cancel' ? 'animate-pulse' : ''} />
+                      {runActionBusy === 'cancel' ? 'Cancelling…' : 'Cancel run'}
+                    </button>
+                  ) : null}
+                </div>
+                {runActionError ? (
+                  <p className="rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">{runActionError}</p>
                 ) : null}
               </div>
 

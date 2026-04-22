@@ -190,8 +190,10 @@ const Sidebar = ({
   } = useCapability();
   const { success } = useToast();
   const [isCapabilityMenuOpen, setIsCapabilityMenuOpen] = useState(false);
+  const [capabilitySearchQuery, setCapabilitySearchQuery] = useState('');
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const capabilitySearchRef = useRef<HTMLInputElement | null>(null);
 
   const activeCapabilities = useMemo(
     () => capabilities.filter(capability => capability.status !== 'ARCHIVED'),
@@ -201,6 +203,22 @@ const Sidebar = ({
     () => capabilities.filter(capability => capability.status === 'ARCHIVED'),
     [capabilities],
   );
+
+  const filteredActiveCapabilities = useMemo(() => {
+    const q = capabilitySearchQuery.trim().toLowerCase();
+    if (!q) return activeCapabilities;
+    return activeCapabilities.filter(c =>
+      [c.name, c.domain, c.businessUnit, c.description].join(' ').toLowerCase().includes(q),
+    );
+  }, [activeCapabilities, capabilitySearchQuery]);
+
+  const filteredInactiveCapabilities = useMemo(() => {
+    const q = capabilitySearchQuery.trim().toLowerCase();
+    if (!q) return inactiveCapabilities;
+    return inactiveCapabilities.filter(c =>
+      [c.name, c.domain, c.description].join(' ').toLowerCase().includes(q),
+    );
+  }, [inactiveCapabilities, capabilitySearchQuery]);
   const isPreferredCapability = preferredCapabilityId === activeCapability.id;
 
   useEffect(() => {
@@ -217,6 +235,13 @@ const Sidebar = ({
   useEffect(() => {
     setIsCapabilityMenuOpen(false);
   }, [isCollapsed]);
+
+  // Reset typeahead search when the capability menu closes.
+  useEffect(() => {
+    if (!isCapabilityMenuOpen) {
+      setCapabilitySearchQuery('');
+    }
+  }, [isCapabilityMenuOpen]);
 
   useEffect(() => {
     let isMounted = true;
@@ -504,13 +529,36 @@ const Sidebar = ({
                 isCollapsed ? 'absolute left-full top-0 z-40 ml-3 w-[21rem]' : 'mt-2',
               )}
             >
+              {/* Typeahead search — only shown when there are multiple capabilities */}
+              {capabilities.length > 3 ? (
+                <div className="mb-2 flex items-center gap-2 rounded-lg border border-outline-variant/50 bg-surface-container-low px-3 py-2">
+                  <Search size={13} className="shrink-0 text-outline" />
+                  <input
+                    ref={capabilitySearchRef}
+                    value={capabilitySearchQuery}
+                    onChange={event => setCapabilitySearchQuery(event.target.value)}
+                    placeholder="Search capabilities…"
+                    className="w-full bg-transparent text-xs outline-none placeholder:text-outline"
+                    autoFocus
+                  />
+                  {capabilitySearchQuery ? (
+                    <button
+                      type="button"
+                      onClick={() => setCapabilitySearchQuery('')}
+                      className="shrink-0 text-outline hover:text-on-surface"
+                    >
+                      <X size={12} />
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="space-y-3">
                 <div>
                   <p className="px-2 py-1.5 text-[0.625rem] font-bold uppercase tracking-[0.16em] text-outline">
                     Active capabilities
                   </p>
                   <div className="space-y-1">
-                    {activeCapabilities.map(capability => (
+                    {filteredActiveCapabilities.map(capability => (
                       <button
                         key={capability.id}
                         type="button"
@@ -537,13 +585,13 @@ const Sidebar = ({
                   </div>
                 </div>
 
-                {inactiveCapabilities.length > 0 ? (
+                {filteredInactiveCapabilities.length > 0 ? (
                   <div>
                     <p className="px-2 py-1.5 text-[0.625rem] font-bold uppercase tracking-[0.16em] text-outline">
                       Inactive capabilities
                     </p>
                     <div className="space-y-1">
-                      {inactiveCapabilities.map(capability => (
+                      {filteredInactiveCapabilities.map(capability => (
                         <button
                           key={capability.id}
                           type="button"
@@ -979,7 +1027,9 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isHelpMenuOpen, setIsHelpMenuOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
+  const [commandFocusedIndex, setCommandFocusedIndex] = useState(-1);
   const commandInputRef = useRef<HTMLInputElement | null>(null);
+  const commandResultRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const currentWorkspaceUser =
     workspaceOrganization.users.find(user => user.id === currentWorkspaceUserId) ||
     workspaceOrganization.users[0];
@@ -1166,14 +1216,25 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     const workItemResults =
       activeWorkspace?.workItems
         .filter(item => matches([item.title, item.id, item.status, item.phase].join(' ')))
-        .map(item => ({
-          key: `work-item:${item.id}`,
-          label: item.title,
-          description: `${item.id} • ${item.status} • ${item.phase}`,
-          section: 'Work items',
-          type: 'work-item' as const,
-          onSelect: () => navigate(`/?selected=${encodeURIComponent(item.id)}`),
-        })) || [];
+        .map(item => {
+          const attentionBadge =
+            item.status === 'BLOCKED'
+              ? { label: '⚠ Blocked', className: 'bg-red-100 text-red-700' }
+              : item.status === 'PENDING_APPROVAL'
+              ? { label: '⌛ Approval', className: 'bg-amber-100 text-amber-800' }
+              : item.status === 'PAUSED'
+              ? { label: '⏸ Paused', className: 'bg-slate-100 text-slate-600' }
+              : null;
+          return {
+            key: `work-item:${item.id}`,
+            label: item.title,
+            description: `${item.id} • ${item.phase || 'No phase'}`,
+            section: 'Work items',
+            type: 'work-item' as const,
+            attentionBadge,
+            onSelect: () => navigate(`/?selected=${encodeURIComponent(item.id)}`),
+          };
+        }) || [];
 
     const helpResults = [
       {
@@ -1194,7 +1255,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
       ...capabilityResults,
       ...agentResults,
       ...workItemResults,
-    ].slice(0, 18);
+    ].slice(0, 30);
   }, [
     activeCapability.id,
     activeCapability.name,
@@ -1266,8 +1327,14 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
     if (!isCommandPaletteOpen) {
       return;
     }
+    setCommandFocusedIndex(-1);
     commandInputRef.current?.focus();
   }, [isCommandPaletteOpen]);
+
+  // Reset focus index whenever the query changes so stale indices don't fire.
+  useEffect(() => {
+    setCommandFocusedIndex(-1);
+  }, [commandQuery]);
 
   return (
     <div
@@ -1704,6 +1771,31 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
                 onChange={event => setCommandQuery(event.target.value)}
                 placeholder="Search routes, capabilities, agents, and work items"
                 className="w-full bg-transparent text-sm outline-none"
+                onKeyDown={event => {
+                  if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    const next = Math.min(commandFocusedIndex + 1, commandResults.length - 1);
+                    setCommandFocusedIndex(next);
+                    commandResultRefs.current[next]?.scrollIntoView({ block: 'nearest' });
+                  } else if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    const prev = commandFocusedIndex - 1;
+                    if (prev < 0) {
+                      setCommandFocusedIndex(-1);
+                    } else {
+                      setCommandFocusedIndex(prev);
+                      commandResultRefs.current[prev]?.scrollIntoView({ block: 'nearest' });
+                    }
+                  } else if (event.key === 'Enter' && commandFocusedIndex >= 0) {
+                    event.preventDefault();
+                    const result = commandResults[commandFocusedIndex];
+                    if (result) {
+                      result.onSelect();
+                      setIsCommandPaletteOpen(false);
+                      setCommandQuery('');
+                    }
+                  }
+                }}
               />
               <button
                 type="button"
@@ -1716,41 +1808,76 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
 
             <div className="mt-4 max-h-[60vh] overflow-y-auto">
               {commandResults.length > 0 ? (
-                <div className="space-y-2">
-                  {commandResultGroups.map(group => (
-                    <div key={group.section} className="space-y-2">
-                      <p className="px-2 pt-2 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                        {group.section}
-                      </p>
-                      <div className="space-y-2">
-                        {group.results.map(result => (
-                          <button
-                            key={result.key}
-                            type="button"
-                            onClick={() => {
-                              result.onSelect();
-                              setIsCommandPaletteOpen(false);
-                              setCommandQuery('');
-                            }}
-                            className="flex w-full items-start justify-between gap-4 rounded-2xl border border-outline-variant/40 px-4 py-3 text-left transition hover:bg-surface-container-low"
-                          >
-                            <div className="min-w-0">
-                              <p className="text-sm font-semibold text-on-surface">
-                                {result.label}
-                              </p>
-                              <p className="mt-1 text-xs text-secondary">
-                                {result.description}
-                              </p>
-                            </div>
-                            <span className="rounded-full bg-surface-container-low px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                              {result.type}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
+                (() => {
+                  let flatIndex = -1;
+                  return (
+                    <div className="space-y-2">
+                      {commandResultGroups.map(group => (
+                        <div key={group.section} className="space-y-2">
+                          <p className="px-2 pt-2 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                            {group.section}
+                          </p>
+                          <div className="space-y-1">
+                            {group.results.map(result => {
+                              flatIndex += 1;
+                              const idx = flatIndex;
+                              const isFocused = idx === commandFocusedIndex;
+                              const badge = (result as any).attentionBadge as
+                                | { label: string; className: string }
+                                | null
+                                | undefined;
+                              return (
+                                <button
+                                  key={result.key}
+                                  ref={el => {
+                                    commandResultRefs.current[idx] = el;
+                                  }}
+                                  type="button"
+                                  onClick={() => {
+                                    result.onSelect();
+                                    setIsCommandPaletteOpen(false);
+                                    setCommandQuery('');
+                                  }}
+                                  onMouseEnter={() => setCommandFocusedIndex(idx)}
+                                  className={cn(
+                                    'flex w-full items-start justify-between gap-4 rounded-2xl border px-4 py-3 text-left transition',
+                                    isFocused
+                                      ? 'border-primary/30 bg-primary/5 ring-1 ring-primary/20'
+                                      : 'border-outline-variant/40 hover:bg-surface-container-low',
+                                  )}
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2">
+                                      <p className="text-sm font-semibold text-on-surface">
+                                        {result.label}
+                                      </p>
+                                      {badge ? (
+                                        <span
+                                          className={cn(
+                                            'rounded-full px-2 py-px text-[0.6rem] font-bold',
+                                            badge.className,
+                                          )}
+                                        >
+                                          {badge.label}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                    <p className="mt-0.5 text-xs text-secondary">
+                                      {result.description}
+                                    </p>
+                                  </div>
+                                  <span className="shrink-0 rounded-full bg-surface-container-low px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                                    {result.type}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  );
+                })()
               ) : (
                 <div className="flex min-h-[12rem] items-center justify-center text-center">
                   <div className="space-y-2">

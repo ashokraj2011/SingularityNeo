@@ -92,6 +92,8 @@ const buildBranchName = (
   return `agent/cap-${capSlug}/wi-${workItem.id.toLowerCase()}-${titleSlug}`;
 };
 
+export const buildAgentBranchName = buildBranchName;
+
 const pickPrimaryRepository = (
   repositories: CapabilityRepository[],
   repositoryId?: string,

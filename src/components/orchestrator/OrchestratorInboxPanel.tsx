@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import {
   LoaderCircle,
   Pause,
@@ -49,6 +49,8 @@ type OrchestratorInboxPanelProps = {
   onSearchQueryChange: (value: string) => void;
   queueView: WorkbenchQueueView;
   onQueueViewChange: (value: WorkbenchQueueView) => void;
+  /** Per-queue item counts shown as badges on each tab. */
+  queueCounts?: Partial<Record<WorkbenchQueueView, number>>;
   isInboxFilterTrayOpen: boolean;
   onToggleInboxFilterTray: () => void;
   workflowFilter: string;
@@ -96,6 +98,7 @@ export const OrchestratorInboxPanel = ({
   onSearchQueryChange,
   queueView,
   onQueueViewChange,
+  queueCounts,
   isInboxFilterTrayOpen,
   onToggleInboxFilterTray,
   workflowFilter,
@@ -118,6 +121,41 @@ export const OrchestratorInboxPanel = ({
   getStatusTone,
   getStatusLabel,
 }: OrchestratorInboxPanelProps) => {
+  // J / K keyboard navigation — move selection up/down through the inbox list.
+  // Only fires when focus is not inside a text input or textarea so typing is
+  // never intercepted.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const tag = (event.target as HTMLElement)?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      if (event.key !== 'j' && event.key !== 'k') return;
+      event.preventDefault();
+
+      if (inboxEntries.length === 0) return;
+
+      const currentIndex = selectedWorkItemId
+        ? inboxEntries.findIndex(e => e.item.id === selectedWorkItemId)
+        : -1;
+
+      let nextIndex: number;
+      if (event.key === 'j') {
+        nextIndex = currentIndex < inboxEntries.length - 1 ? currentIndex + 1 : currentIndex;
+      } else {
+        nextIndex = currentIndex > 0 ? currentIndex - 1 : 0;
+      }
+
+      const nextEntry = inboxEntries[nextIndex];
+      if (nextEntry) {
+        onSelectInboxEntry(nextEntry.item.id, false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [inboxEntries, selectedWorkItemId, onSelectInboxEntry]);
+
   return (
     <aside className="workspace-surface orchestrator-list-inbox-panel overflow-hidden p-0">
       <div className="border-b border-outline-variant/25 px-4 pb-4 pt-5">
@@ -147,19 +185,37 @@ export const OrchestratorInboxPanel = ({
 
         <div className="mt-4">
           <div className="orchestrator-view-toggle" aria-label="Choose work queue">
-            {QUEUE_OPTIONS.map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => onQueueViewChange(value)}
-                className={cn(
-                  'orchestrator-view-toggle-button',
-                  queueView === value && 'orchestrator-view-toggle-button-active',
-                )}
-              >
-                {label}
-              </button>
-            ))}
+            {QUEUE_OPTIONS.map(([value, label]) => {
+              const count = queueCounts?.[value];
+              const isAttention = value === 'ATTENTION';
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => onQueueViewChange(value)}
+                  className={cn(
+                    'orchestrator-view-toggle-button',
+                    queueView === value && 'orchestrator-view-toggle-button-active',
+                  )}
+                >
+                  {label}
+                  {count !== undefined && count > 0 && (
+                    <span
+                      className={cn(
+                        'ml-1.5 rounded-full px-1.5 py-px text-[0.6rem] font-bold leading-none',
+                        queueView === value
+                          ? 'bg-white/30 text-inherit'
+                          : isAttention
+                          ? 'bg-rose-100 text-rose-700'
+                          : 'bg-secondary/10 text-secondary',
+                      )}
+                    >
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
 

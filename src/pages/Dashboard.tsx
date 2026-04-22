@@ -324,6 +324,7 @@ const Dashboard = () => {
             helper: 'Items currently moving',
             icon: BriefcaseBusiness,
             tone: 'brand' as const,
+            navPath: '/?queue=ALL_WORK',
           },
           {
             label: 'Needs attention',
@@ -338,6 +339,7 @@ const Dashboard = () => {
                 : (healthSnapshot?.pendingApprovalCount ?? experience.approvalCount) > 0
                 ? ('warning' as const)
                 : ('success' as const),
+            navPath: '/?queue=ATTENTION',
           },
           {
             label: 'Delivered work',
@@ -345,6 +347,7 @@ const Dashboard = () => {
             helper: 'Completed work items',
             icon: CheckCircle2,
             tone: 'success' as const,
+            navPath: '/ledger',
           },
           {
             label: 'Evidence outputs',
@@ -352,9 +355,15 @@ const Dashboard = () => {
             helper: 'Artifacts and handoffs',
             icon: FileText,
             tone: 'info' as const,
+            navPath: '/ledger',
           },
         ].map(item => (
-          <div key={item.label} className="stat-tile">
+          <button
+            key={item.label}
+            type="button"
+            onClick={() => navigate(item.navPath)}
+            className="stat-tile group cursor-pointer text-left transition-shadow hover:shadow-md hover:ring-1 hover:ring-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          >
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="stat-label">{item.label}</p>
@@ -362,7 +371,7 @@ const Dashboard = () => {
               </div>
               <div
                 className={cn(
-                  'stat-icon',
+                  'stat-icon transition-transform group-hover:scale-110',
                   item.tone === 'danger'
                     ? 'border-red-200 bg-red-50 text-red-700'
                     : item.tone === 'warning'
@@ -378,7 +387,7 @@ const Dashboard = () => {
               </div>
             </div>
             <div className="stat-helper">{item.helper}</div>
-          </div>
+          </button>
         ))}
       </section>
 

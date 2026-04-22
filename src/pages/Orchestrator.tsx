@@ -903,6 +903,18 @@ const Orchestrator = () => {
       shouldReplace = true;
     }
 
+    const queueParam = searchParams.get('queue') as WorkbenchQueueView | null;
+    if (queueParam) {
+      const valid: WorkbenchQueueView[] = [
+        'ALL_WORK', 'MY_QUEUE', 'TEAM_QUEUE', 'ATTENTION', 'PAUSED', 'WATCHING', 'ARCHIVE',
+      ];
+      if (valid.includes(queueParam)) {
+        setQueueView(queueParam);
+        nextSearchParams.delete('queue');
+        shouldReplace = true;
+      }
+    }
+
     if (shouldReplace) {
       setSearchParams(nextSearchParams, { replace: true });
     }
@@ -1042,6 +1054,45 @@ const Orchestrator = () => {
     workItems,
     workflowsById,
   ]);
+
+  // Per-queue counts displayed as badges on the inbox tab strip.
+  // Computed from the raw workItems list (not filtered by the active queue/search)
+  // so the counts are stable while the developer types in the search box.
+  const queueCounts = useMemo(() => {
+    const actorUserId = currentActorContext.userId;
+    const actorTeamIds = currentActorContext.teamIds;
+    const counts: Partial<Record<WorkbenchQueueView, number>> = {};
+    for (const item of workItems) {
+      if (item.status === 'ARCHIVED') {
+        counts.ARCHIVE = (counts.ARCHIVE ?? 0) + 1;
+        continue;
+      }
+      counts.ALL_WORK = (counts.ALL_WORK ?? 0) + 1;
+      if (
+        actorUserId &&
+        (item.claimOwnerUserId === actorUserId ||
+          (item.phaseOwnerTeamId ? actorTeamIds.includes(item.phaseOwnerTeamId) : true))
+      ) {
+        counts.MY_QUEUE = (counts.MY_QUEUE ?? 0) + 1;
+      }
+      if (item.phaseOwnerTeamId && actorTeamIds.includes(item.phaseOwnerTeamId)) {
+        counts.TEAM_QUEUE = (counts.TEAM_QUEUE ?? 0) + 1;
+      }
+      if (
+        item.status !== 'PAUSED' &&
+        (item.status === 'BLOCKED' || item.status === 'PENDING_APPROVAL' || Boolean(item.pendingRequest))
+      ) {
+        counts.ATTENTION = (counts.ATTENTION ?? 0) + 1;
+      }
+      if (item.status === 'PAUSED') {
+        counts.PAUSED = (counts.PAUSED ?? 0) + 1;
+      }
+      if (actorUserId && item.watchedByUserIds?.includes(actorUserId)) {
+        counts.WATCHING = (counts.WATCHING ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [workItems, currentActorContext.userId, currentActorContext.teamIds]);
 
   const attentionItems = useMemo(
     () =>
@@ -4747,6 +4798,7 @@ const Orchestrator = () => {
               onSearchQueryChange={setSearchQuery}
               queueView={queueView}
               onQueueViewChange={setQueueView}
+              queueCounts={queueCounts}
               isInboxFilterTrayOpen={isInboxFilterTrayOpen}
               onToggleInboxFilterTray={() => setIsInboxFilterTrayOpen(current => !current)}
               workflowFilter={workflowFilter}
@@ -5413,6 +5465,23 @@ const Orchestrator = () => {
                     getRunEventLabel,
                   }}
                   receiptsProps={{ selectedRunEvents }}
+                  failureRecoveryProps={{
+                    selectedWorkItem,
+                    currentRun,
+                    selectedFailureReason,
+                    selectedCurrentStep,
+                    failedRunStep: selectedRunStep,
+                    busyAction,
+                    canRestartFromPhase,
+                    restartPhaseLabel: `Restart ${getPhaseMeta(selectedWorkItem.phase).label}`,
+                    canResetAndRestart,
+                    selectedCanGuideBlockedAgent,
+                    currentRunIsActive,
+                    onRestartExecution: () => void handleRestartExecution(),
+                    onResetAndRestart: () => void handleResetAndRestart(),
+                    onGuideBlockedAgent: focusGuidanceComposer,
+                    onCancelRun: () => void handleCancelRun(),
+                  }}
                 />
               )}
             </OrchestratorWorkbenchCanvas>

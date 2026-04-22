@@ -23,6 +23,10 @@ vi.mock('../../evidence/PromptReceiptPanel', () => ({
   PromptReceiptPanel: () => <div>Receipts panel</div>,
 }));
 
+vi.mock('../OrchestratorFailureRecoveryPanel', () => ({
+  OrchestratorFailureRecoveryPanel: () => null,
+}));
+
 describe('OrchestratorWorkbenchDetailContent', () => {
   it('composes header plus all detail tabs and switches panels', async () => {
     const user = userEvent.setup();
@@ -37,6 +41,7 @@ describe('OrchestratorWorkbenchDetailContent', () => {
         artifactsProps={{} as never}
         attemptsProps={{} as never}
         receiptsProps={{ selectedRunEvents: [] }}
+        failureRecoveryProps={{} as never}
       />,
     );
 
@@ -55,6 +60,7 @@ describe('OrchestratorWorkbenchDetailContent', () => {
         artifactsProps={{} as never}
         attemptsProps={{} as never}
         receiptsProps={{ selectedRunEvents: [] }}
+        failureRecoveryProps={{} as never}
       />,
     );
 

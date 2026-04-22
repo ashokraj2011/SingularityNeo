@@ -3,6 +3,7 @@ import type { DetailTab } from '../../lib/orchestrator/support';
 import { PromptReceiptPanel } from '../evidence/PromptReceiptPanel';
 import { OrchestratorArtifactsPanel } from './OrchestratorArtifactsPanel';
 import { OrchestratorAttemptsPanel } from './OrchestratorAttemptsPanel';
+import { OrchestratorFailureRecoveryPanel } from './OrchestratorFailureRecoveryPanel';
 import { OrchestratorOperatePanel } from './OrchestratorOperatePanel';
 import { OrchestratorWorkbenchDetailHeader } from './OrchestratorWorkbenchDetailHeader';
 import { OrchestratorWorkbenchDetailTabs } from './OrchestratorWorkbenchDetailTabs';
@@ -15,6 +16,7 @@ type Props = {
   artifactsProps: React.ComponentProps<typeof OrchestratorArtifactsPanel>;
   attemptsProps: React.ComponentProps<typeof OrchestratorAttemptsPanel>;
   receiptsProps: React.ComponentProps<typeof PromptReceiptPanel>;
+  failureRecoveryProps: React.ComponentProps<typeof OrchestratorFailureRecoveryPanel>;
 };
 
 export const OrchestratorWorkbenchDetailContent = ({
@@ -25,9 +27,12 @@ export const OrchestratorWorkbenchDetailContent = ({
   artifactsProps,
   attemptsProps,
   receiptsProps,
+  failureRecoveryProps,
 }: Props) => (
   <div className="flex h-full flex-col">
     <OrchestratorWorkbenchDetailHeader {...headerProps} />
+    {/* Inline failure recovery — visible regardless of active tab */}
+    <OrchestratorFailureRecoveryPanel {...failureRecoveryProps} />
     <OrchestratorWorkbenchDetailTabs
       detailTab={detailTab}
       onDetailTabChange={onDetailTabChange}

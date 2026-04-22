@@ -465,6 +465,35 @@ const getNodeIcon = (type: WorkflowNodeType) => {
   }
 };
 
+/** Human-readable annotation shown beneath a node name in the simulation path. */
+const getSimNodeNote = (nodeType: string): string | undefined => {
+  switch (nodeType) {
+    case 'HUMAN_APPROVAL': return 'Pauses for operator approval';
+    case 'EVENT': return 'Emits a workflow event';
+    case 'ALERT': return 'Raises an alert';
+    case 'PARALLEL_SPLIT': return 'Creates parallel branches';
+    case 'PARALLEL_JOIN': return 'Waits for all branches to converge';
+    case 'DECISION': return 'Routes work based on outcome';
+    case 'GOVERNANCE_GATE': return 'Governance gate must pass';
+    case 'END': return 'Execution complete';
+    default: return undefined;
+  }
+};
+
+/** Human-readable label for an edge condition type. */
+const getConditionLabel = (conditionType: WorkflowEdge['conditionType'], branchKey?: string): string => {
+  if (branchKey) return branchKey;
+  switch (conditionType) {
+    case 'SUCCESS': return 'On success';
+    case 'FAILURE': return 'On failure';
+    case 'APPROVED': return 'On approval';
+    case 'REJECTED': return 'On rejection';
+    case 'PARALLEL': return 'Parallel branch';
+    case 'CUSTOM': return 'Custom route';
+    default: return 'Default path';
+  }
+};
+
 const getSamplePath = (
   workflow: Workflow,
   lifecycle = createDefaultCapabilityLifecycle(),
@@ -584,6 +613,31 @@ type CanvasWidgetKey = 'library' | 'palette' | 'tree' | 'insights';
 type WidgetDockMode = 'free' | 'left' | 'right';
 type NeoInsightsTab = 'overview' | 'validation' | 'history' | 'simulation';
 type NeoInspectorMode = 'workflow' | 'node' | 'edge';
+
+/** One step in the user-built interactive simulation path. */
+type SimulationPathStep = {
+  nodeId: string;
+  label: string;
+  nodeType: string;
+  note?: string;
+  /** The edge ID chosen from this node to advance to the next step. */
+  chosenEdgeId?: string;
+};
+
+/** Pending branch choice — set when the simulation reaches a DECISION or PARALLEL_SPLIT node. */
+type SimulationBranchPending = {
+  fromNodeId: string;
+  fromLabel: string;
+  fromType: 'DECISION' | 'PARALLEL_SPLIT';
+  options: Array<{
+    edgeId: string;
+    toNodeId: string;
+    toLabel: string;
+    conditionType: WorkflowEdge['conditionType'];
+    branchKey?: string;
+    edgeLabel?: string;
+  }>;
+};
 type NeoContextMenuState =
   | {
       x: number;
@@ -952,6 +1006,9 @@ export default function WorkflowStudio({
     active: false,
     stepIndex: 0,
   });
+  const [simulationPath, setSimulationPath] = useState<SimulationPathStep[]>([]);
+  const [simulationBranchPending, setSimulationBranchPending] =
+    useState<SimulationBranchPending | null>(null);
   const [canvasViewport, setCanvasViewport] = useState({
     scrollLeft: 0,
     scrollTop: 0,
@@ -1183,10 +1240,10 @@ export default function WorkflowStudio({
   }, [nodes, selectedNodeId]);
 
   useEffect(() => {
-    setSimulationState(current => ({
-      active: current.active && workflowSamplePath.length > 0,
-      stepIndex: Math.min(current.stepIndex, Math.max(workflowSamplePath.length - 1, 0)),
-    }));
+    // When the workflow graph changes, reset simulation to avoid stale paths.
+    setSimulationState({ active: false, stepIndex: 0 });
+    setSimulationPath([]);
+    setSimulationBranchPending(null);
   }, [workflowSamplePath.length]);
 
   useEffect(() => {
@@ -1821,77 +1878,136 @@ export default function WorkflowStudio({
   };
 
   const simulationNodeIds = useMemo(() => {
-    if (!simulationState.active) {
-      return new Set<string>();
-    }
-    return new Set(
-      workflowSamplePath
-        .slice(0, simulationState.stepIndex + 1)
-        .map(step => step.nodeId),
-    );
-  }, [simulationState.active, simulationState.stepIndex, workflowSamplePath]);
+    if (!simulationState.active) return new Set<string>();
+    return new Set(simulationPath.map(s => s.nodeId));
+  }, [simulationState.active, simulationPath]);
 
   const simulationEdgeIds = useMemo(() => {
     const ids = new Set<string>();
-    if (!simulationState.active || !selectedWorkflow) {
-      return ids;
-    }
-
-    for (let index = 0; index < simulationState.stepIndex; index += 1) {
-      const current = workflowSamplePath[index];
-      const next = workflowSamplePath[index + 1];
-      if (!current || !next) {
-        continue;
-      }
-      const edge = edges.find(
-        item => item.fromNodeId === current.nodeId && item.toNodeId === next.nodeId,
-      );
-      if (edge) {
-        ids.add(edge.id);
-      }
+    if (!simulationState.active) return ids;
+    for (const step of simulationPath) {
+      if (step.chosenEdgeId) ids.add(step.chosenEdgeId);
     }
     return ids;
-  }, [edges, selectedWorkflow, simulationState.active, simulationState.stepIndex, workflowSamplePath]);
+  }, [simulationState.active, simulationPath]);
 
   const currentSimulationStep = simulationState.active
-    ? workflowSamplePath[simulationState.stepIndex] || null
+    ? simulationPath[simulationPath.length - 1] || null
     : null;
 
+  /** Build a SimulationPathStep for a given nodeId from a normalised workflow. */
+  const buildSimStep = (nodeId: string, workflow: Workflow): SimulationPathStep => {
+    const node = getWorkflowNode(workflow, nodeId);
+    const nodeType = node?.type || 'DELIVERY';
+    return { nodeId, label: node?.name || nodeId, nodeType, note: getSimNodeNote(nodeType) };
+  };
+
   const handleStartSimulation = () => {
-    if (!workflowSamplePath.length) {
+    if (!selectedWorkflow) {
+      warning('Simulation unavailable', 'Select a workflow first.');
+      return;
+    }
+    const normalized = buildWorkflowFromGraph(
+      normalizeWorkflowGraph(selectedWorkflow, capabilityLifecycle),
+      capabilityLifecycle,
+    );
+    // Walk past the START node to get the actual first step.
+    const startNode = getWorkflowNode(normalized, normalized.entryNodeId);
+    const firstEdge = startNode ? getOutgoingWorkflowEdges(normalized, startNode.id)[0] : null;
+    const firstNodeId = firstEdge?.toNodeId ?? startNode?.id;
+    if (!firstNodeId) {
       warning('Simulation unavailable', 'Add connected nodes before running a simulation.');
       return;
     }
+    const firstStep = buildSimStep(firstNodeId, normalized);
+    setSimulationPath([firstStep]);
+    setSimulationBranchPending(null);
     setSimulationState({ active: true, stepIndex: 0 });
-    const firstNodeId = workflowSamplePath[0]?.nodeId;
-    if (firstNodeId) {
-      focusNodeOnCanvas(firstNodeId);
-    }
+    focusNodeOnCanvas(firstNodeId);
   };
 
   const handleSimulationStep = (direction: 'next' | 'prev') => {
-    if (!workflowSamplePath.length) {
+    if (!simulationState.active || !selectedWorkflow) return;
+
+    if (direction === 'prev') {
+      // Dismiss pending branch choice first, then step back.
+      if (simulationBranchPending) {
+        setSimulationBranchPending(null);
+        return;
+      }
+      if (simulationPath.length <= 1) return;
+      const newPath = simulationPath.slice(0, -1);
+      setSimulationPath(newPath);
+      setSimulationState({ active: true, stepIndex: newPath.length - 1 });
+      const prevId = newPath[newPath.length - 1]?.nodeId;
+      if (prevId) setTimeout(() => focusNodeOnCanvas(prevId), 0);
       return;
     }
 
-    setSimulationState(current => {
-      const nextIndex =
-        direction === 'next'
-          ? Math.min(current.stepIndex + 1, workflowSamplePath.length - 1)
-          : Math.max(current.stepIndex - 1, 0);
-      const nextNodeId = workflowSamplePath[nextIndex]?.nodeId;
-      if (nextNodeId) {
-        setTimeout(() => focusNodeOnCanvas(nextNodeId), 0);
-      }
-      return {
-        active: true,
-        stepIndex: nextIndex,
-      };
-    });
+    // direction === 'next'
+    if (simulationBranchPending) return; // user must choose a branch first
+
+    const normalized = buildWorkflowFromGraph(
+      normalizeWorkflowGraph(selectedWorkflow, capabilityLifecycle),
+      capabilityLifecycle,
+    );
+    const current = simulationPath[simulationPath.length - 1];
+    if (!current) return;
+    const currentNode = getWorkflowNode(normalized, current.nodeId);
+    if (!currentNode || currentNode.type === 'END') return;
+
+    const outgoing = getOutgoingWorkflowEdges(normalized, currentNode.id);
+    if (outgoing.length === 0) return;
+
+    if (outgoing.length === 1) {
+      // Single edge — auto-advance.
+      const edge = outgoing[0];
+      const updatedCurrent: SimulationPathStep = { ...current, chosenEdgeId: edge.id };
+      const nextStep = buildSimStep(edge.toNodeId, normalized);
+      const newPath = [...simulationPath.slice(0, -1), updatedCurrent, nextStep];
+      setSimulationPath(newPath);
+      setSimulationState({ active: true, stepIndex: newPath.length - 1 });
+      setTimeout(() => focusNodeOnCanvas(edge.toNodeId), 0);
+    } else {
+      // Multiple edges — pause and show branch picker.
+      const fromType = currentNode.type as 'DECISION' | 'PARALLEL_SPLIT';
+      setSimulationBranchPending({
+        fromNodeId: currentNode.id,
+        fromLabel: currentNode.name,
+        fromType,
+        options: outgoing.map(edge => ({
+          edgeId: edge.id,
+          toNodeId: edge.toNodeId,
+          toLabel: getWorkflowNode(normalized, edge.toNodeId)?.name || edge.toNodeId,
+          conditionType: edge.conditionType,
+          branchKey: edge.branchKey,
+          edgeLabel: edge.label,
+        })),
+      });
+    }
+  };
+
+  const handleBranchChoice = (option: SimulationBranchPending['options'][number]) => {
+    if (!simulationBranchPending || !simulationState.active || !selectedWorkflow) return;
+    const normalized = buildWorkflowFromGraph(
+      normalizeWorkflowGraph(selectedWorkflow, capabilityLifecycle),
+      capabilityLifecycle,
+    );
+    const current = simulationPath[simulationPath.length - 1];
+    if (!current) return;
+    const updatedCurrent: SimulationPathStep = { ...current, chosenEdgeId: option.edgeId };
+    const nextStep = buildSimStep(option.toNodeId, normalized);
+    const newPath = [...simulationPath.slice(0, -1), updatedCurrent, nextStep];
+    setSimulationPath(newPath);
+    setSimulationState({ active: true, stepIndex: newPath.length - 1 });
+    setSimulationBranchPending(null);
+    setTimeout(() => focusNodeOnCanvas(option.toNodeId), 0);
   };
 
   const handleResetSimulation = () => {
     setSimulationState({ active: false, stepIndex: 0 });
+    setSimulationPath([]);
+    setSimulationBranchPending(null);
   };
 
   const handleCreateWorkflow = (event: React.FormEvent) => {
@@ -2448,6 +2564,12 @@ export default function WorkflowStudio({
     setSelectedNodeIds([nextNode.id]);
     setSelectedEdgeId(null);
     setConnectFromNodeId(null);
+    // Auto-open the inspector so the developer can immediately configure
+    // the new node without an extra right-click → Advanced config step.
+    if (isNeo) {
+      setNeoInspectorCollapsed(false);
+      setNeoInspectorMode('node');
+    }
   };
 
   const handleConnectNodes = (targetNodeId: string) => {
@@ -4021,6 +4143,15 @@ export default function WorkflowStudio({
         return;
       }
 
+      // Cmd/Ctrl+S — force-save the current workflow state.
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        if (selectedWorkflow && activeWorkflows.length > 0) {
+          void persistWorkflows(activeWorkflows, 'Saved', 'Workflow layout saved.');
+        }
+        return;
+      }
+
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault();
         if (event.shiftKey) {
@@ -4105,7 +4236,7 @@ export default function WorkflowStudio({
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [commandActions, isNeo, selectedEdgeId, selectedNode, selectedNodeId]);
+  }, [activeWorkflows, commandActions, isNeo, persistWorkflows, selectedEdgeId, selectedNode, selectedNodeId, selectedWorkflow]);
 
   const publishState = selectedWorkflow ? getWorkflowPublishState(selectedWorkflow) : 'DRAFT';
   const nodeDimensions = getWorkflowNodeDimensions();
@@ -4398,6 +4529,7 @@ export default function WorkflowStudio({
 
       {neoInsightsTab === 'simulation' ? (
         <section className="designer-palette-section">
+          {/* ── Header ────────────────────────────────────────── */}
           <div className="designer-palette-section-header">
             <div className="flex items-center gap-2">
               <Play size={14} className="text-emerald-300" />
@@ -4411,50 +4543,136 @@ export default function WorkflowStudio({
               {simulationState.active ? 'Reset' : 'Start'}
             </button>
           </div>
+
+          {/* ── Navigation controls ───────────────────────────── */}
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => handleSimulationStep('prev')}
-              disabled={!simulationState.active || simulationState.stepIndex === 0}
+              disabled={
+                !simulationState.active ||
+                (simulationPath.length <= 1 && !simulationBranchPending)
+              }
               className="designer-widget-action disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Previous
+              {simulationBranchPending ? 'Cancel choice' : 'Previous'}
             </button>
             <button
               type="button"
               onClick={() => handleSimulationStep('next')}
               disabled={
                 !simulationState.active ||
-                simulationState.stepIndex >= workflowSamplePath.length - 1
+                Boolean(simulationBranchPending) ||
+                currentSimulationStep?.nodeType === 'END'
               }
               className="designer-widget-action disabled:cursor-not-allowed disabled:opacity-50"
+              title={simulationBranchPending ? 'Choose a branch below first' : undefined}
             >
               Next
             </button>
+            {simulationState.active ? (
+              <span className="ml-auto text-[0.625rem] text-slate-400">
+                {simulationPath.length} step{simulationPath.length !== 1 ? 's' : ''}
+              </span>
+            ) : null}
           </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {workflowSamplePath.length ? (
-              workflowSamplePath.map((step, index) => (
-                <div
-                  key={`${step.label}-${index}`}
-                  className={cn(
-                    'rounded-2xl border px-3 py-2 text-[0.6875rem] font-semibold',
-                    simulationState.active && simulationState.stepIndex === index
-                      ? 'border-sky-400/50 bg-sky-500/15 text-sky-50'
-                      : simulationState.active && simulationState.stepIndex > index
-                      ? 'border-emerald-400/50 bg-emerald-500/15 text-emerald-50'
-                      : 'border-slate-800 bg-slate-950/70 text-slate-300',
-                  )}
-                >
-                  {step.label}
-                </div>
-              ))
+
+          {/* ── Branch picker ─────────────────────────────────── */}
+          {simulationBranchPending ? (
+            <div className="mt-3 rounded-2xl border border-sky-500/30 bg-sky-500/10 px-3 py-3">
+              <div className="flex items-center gap-2">
+                {simulationBranchPending.fromType === 'PARALLEL_SPLIT' ? (
+                  <Split size={13} className="shrink-0 text-sky-300" />
+                ) : (
+                  <GitBranch size={13} className="shrink-0 text-sky-300" />
+                )}
+                <p className="text-[0.6875rem] font-bold uppercase tracking-[0.14em] text-sky-200">
+                  {simulationBranchPending.fromType === 'PARALLEL_SPLIT'
+                    ? 'Parallel split — pick a branch to trace'
+                    : 'Decision point — pick a route'}
+                </p>
+              </div>
+              <p className="mt-1 text-[0.6875rem] text-slate-400">
+                <span className="font-semibold text-slate-200">{simulationBranchPending.fromLabel}</span>
+                {simulationBranchPending.fromType === 'PARALLEL_SPLIT'
+                  ? ' fans out to all branches in production. Trace one path here.'
+                  : ' routes work based on outcome. Choose which path to follow.'}
+              </p>
+              <div className="mt-3 space-y-2">
+                {simulationBranchPending.options.map(option => (
+                  <button
+                    key={option.edgeId}
+                    type="button"
+                    onClick={() => handleBranchChoice(option)}
+                    className="group flex w-full items-start gap-3 rounded-xl border border-slate-700/60 bg-slate-900/60 px-3 py-2.5 text-left transition hover:border-sky-500/50 hover:bg-sky-500/10"
+                  >
+                    <ArrowRight
+                      size={13}
+                      className="mt-0.5 shrink-0 text-slate-500 transition group-hover:text-sky-300"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-slate-100">{option.toLabel}</p>
+                      <p className="mt-0.5 text-[0.6rem] text-slate-400">
+                        {getConditionLabel(option.conditionType, option.branchKey)}
+                        {option.edgeLabel && option.edgeLabel !== option.branchKey
+                          ? ` · ${option.edgeLabel}`
+                          : ''}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {/* ── Path so far ───────────────────────────────────── */}
+          <div className="mt-3">
+            {simulationPath.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {simulationPath.map((step, index) => (
+                  <React.Fragment key={`${step.nodeId}-${index}`}>
+                    <div
+                      className={cn(
+                        'rounded-xl border px-2.5 py-1.5 text-[0.6875rem] font-semibold transition',
+                        index === simulationPath.length - 1 && !simulationBranchPending
+                          ? 'border-sky-400/50 bg-sky-500/20 text-sky-50'
+                          : index === simulationPath.length - 1 && simulationBranchPending
+                          ? 'border-amber-400/50 bg-amber-500/15 text-amber-100'
+                          : 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200',
+                      )}
+                      title={step.note}
+                    >
+                      {step.label}
+                    </div>
+                    {index < simulationPath.length - 1 ? (
+                      <ArrowRight size={11} className="shrink-0 text-slate-500" />
+                    ) : null}
+                  </React.Fragment>
+                ))}
+                {simulationBranchPending ? (
+                  <>
+                    <ArrowRight size={11} className="shrink-0 text-sky-400 opacity-60" />
+                    <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-2.5 py-1.5 text-[0.6875rem] font-semibold text-sky-400 opacity-80">
+                      ?
+                    </div>
+                  </>
+                ) : null}
+              </div>
             ) : (
               <p className="text-xs leading-relaxed text-slate-400">
-                Add connected nodes and hand-offs to preview a representative execution path.
+                {selectedWorkflow
+                  ? 'Press Start to walk the workflow step by step. At decision or parallel-split nodes you will choose which branch to trace.'
+                  : 'Select a workflow from the library first.'}
               </p>
             )}
           </div>
+
+          {/* ── Current step note ─────────────────────────────── */}
+          {currentSimulationStep?.note && !simulationBranchPending ? (
+            <div className="mt-2 rounded-xl border border-slate-700/60 bg-slate-900/50 px-3 py-2">
+              <p className="text-[0.6875rem] text-slate-400">{currentSimulationStep.note}</p>
+            </div>
+          ) : null}
         </section>
       ) : null}
     </div>
@@ -6630,35 +6848,86 @@ export default function WorkflowStudio({
                       <button
                         type="button"
                         onClick={() => handleSimulationStep('prev')}
-                        disabled={!simulationState.active || simulationState.stepIndex === 0}
+                        disabled={
+                          !simulationState.active ||
+                          (simulationPath.length <= 1 && !simulationBranchPending)
+                        }
                         className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        Previous
+                        {simulationBranchPending ? 'Cancel choice' : 'Previous'}
                       </button>
                       <button
                         type="button"
                         onClick={() => handleSimulationStep('next')}
                         disabled={
                           !simulationState.active ||
-                          simulationState.stepIndex >= workflowSamplePath.length - 1
+                          Boolean(simulationBranchPending) ||
+                          currentSimulationStep?.nodeType === 'END'
                         }
                         className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         Next
                       </button>
                     </div>
+
+                    {/* Branch picker */}
+                    {simulationBranchPending ? (
+                      <div className="mt-4 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-4">
+                        <div className="flex items-center gap-2">
+                          {simulationBranchPending.fromType === 'PARALLEL_SPLIT'
+                            ? <Split size={15} className="shrink-0 text-sky-600" />
+                            : <GitBranch size={15} className="shrink-0 text-sky-600" />}
+                          <p className="text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-sky-700">
+                            {simulationBranchPending.fromType === 'PARALLEL_SPLIT'
+                              ? 'Parallel split — pick a branch to trace'
+                              : 'Decision point — pick a route'}
+                          </p>
+                        </div>
+                        <p className="mt-2 text-xs leading-relaxed text-secondary">
+                          <span className="font-semibold text-on-surface">{simulationBranchPending.fromLabel}</span>
+                          {simulationBranchPending.fromType === 'PARALLEL_SPLIT'
+                            ? ' fans out to all branches in production. Pick one to trace here.'
+                            : ' routes work based on the execution outcome. Pick a path to continue.'}
+                        </p>
+                        <div className="mt-3 space-y-2">
+                          {simulationBranchPending.options.map(option => (
+                            <button
+                              key={option.edgeId}
+                              type="button"
+                              onClick={() => handleBranchChoice(option)}
+                              className="group flex w-full items-start gap-3 rounded-xl border border-outline-variant/50 bg-white px-3 py-2.5 text-left transition hover:border-primary/30 hover:bg-primary/5"
+                            >
+                              <ArrowRight
+                                size={14}
+                                className="mt-0.5 shrink-0 text-outline transition group-hover:text-primary"
+                              />
+                              <div className="min-w-0">
+                                <p className="text-sm font-semibold text-on-surface">{option.toLabel}</p>
+                                <p className="mt-0.5 text-xs text-secondary">
+                                  {getConditionLabel(option.conditionType, option.branchKey)}
+                                  {option.edgeLabel && option.edgeLabel !== option.branchKey
+                                    ? ` · ${option.edgeLabel}`
+                                    : ''}
+                                </p>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+
                     <div className="mt-4 flex flex-wrap items-center gap-2">
-                      {workflowSamplePath.length ? (
-                        workflowSamplePath.map((step, index) => (
-                          <React.Fragment key={`${step.label}-${index}`}>
+                      {simulationPath.length > 0 ? (
+                        simulationPath.map((step, index) => (
+                          <React.Fragment key={`${step.nodeId}-${index}`}>
                             <div
                               className={cn(
                                 'rounded-2xl border px-3 py-2 shadow-sm',
-                                simulationState.active && simulationState.stepIndex === index
+                                index === simulationPath.length - 1 && !simulationBranchPending
                                   ? 'border-sky-300 bg-sky-50'
-                                  : simulationState.active && simulationState.stepIndex > index
-                                  ? 'border-emerald-200 bg-emerald-50'
-                                  : 'border-outline-variant/60 bg-surface-container-low',
+                                  : index === simulationPath.length - 1 && simulationBranchPending
+                                  ? 'border-amber-200 bg-amber-50'
+                                  : 'border-emerald-200 bg-emerald-50',
                               )}
                             >
                               <p className="text-xs font-semibold text-on-surface">{step.label}</p>
@@ -6666,18 +6935,19 @@ export default function WorkflowStudio({
                                 <p className="mt-1 text-[0.6875rem] text-secondary">{step.note}</p>
                               ) : null}
                             </div>
-                            {index < workflowSamplePath.length - 1 ? (
+                            {index < simulationPath.length - 1 ? (
                               <ArrowRight size={14} className="text-outline" />
                             ) : null}
                           </React.Fragment>
                         ))
                       ) : (
                         <p className="text-sm text-secondary">
-                          Add nodes and hand-offs to preview a sample execution path.
+                          Press Start to walk through the workflow step by step.
                         </p>
                       )}
                     </div>
-                    {currentSimulationStep ? (
+
+                    {currentSimulationStep && !simulationBranchPending ? (
                       <div className="mt-4 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3">
                         <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-sky-700">
                           Simulation Focus
@@ -7126,6 +7396,7 @@ export default function WorkflowStudio({
               <div className="grid gap-3">
                 {[
                   ['Cmd/Ctrl + K', 'Open command palette'],
+                  ['Cmd/Ctrl + S', 'Save workflow'],
                   ['Cmd/Ctrl + Z', 'Undo'],
                   ['Cmd/Ctrl + Shift + Z', 'Redo'],
                   ['Cmd/Ctrl + D', 'Duplicate selected node'],
