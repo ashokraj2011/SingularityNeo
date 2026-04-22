@@ -6,6 +6,7 @@ import {
   MessageSquareText,
   Play,
   RefreshCw,
+  ScrollText,
   ShieldCheck,
   Square,
   Trash2,
@@ -47,6 +48,8 @@ type Props = {
   onBackToFlowMap: () => void;
   onExplain: () => void;
   onCreateEvidencePacket: () => void;
+  canOpenReleasePassport?: boolean;
+  onOpenReleasePassport?: () => void;
   onOpenFullChat: () => void;
   onTakeControl: () => void;
   onToggleControl: () => void;
@@ -91,6 +94,8 @@ export const OrchestratorWorkbenchDetailHeader = ({
   onBackToFlowMap,
   onExplain,
   onCreateEvidencePacket,
+  canOpenReleasePassport,
+  onOpenReleasePassport,
   onOpenFullChat,
   onTakeControl,
   onToggleControl,
@@ -170,6 +175,16 @@ export const OrchestratorWorkbenchDetailHeader = ({
           )}
           Evidence packet
         </button>
+        {canOpenReleasePassport ? (
+          <button
+            type="button"
+            onClick={onOpenReleasePassport}
+            className="enterprise-button enterprise-button-brand-muted"
+          >
+            <ScrollText size={16} />
+            Release Passport
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={onOpenFullChat}

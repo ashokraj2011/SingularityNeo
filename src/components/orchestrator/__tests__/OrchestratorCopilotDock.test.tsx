@@ -9,6 +9,7 @@ describe('OrchestratorCopilotDock', () => {
     const user = userEvent.setup();
     const onClearChat = vi.fn();
     const onAskAgent = vi.fn();
+    const onOpenReleasePassport = vi.fn();
 
     render(
       <OrchestratorCopilotDock
@@ -19,6 +20,8 @@ describe('OrchestratorCopilotDock', () => {
         copilotRoutingLabel="Primary copilot active"
         dockMessagesCount={2}
         busyAction={null}
+        canOpenReleasePassport
+        onOpenReleasePassport={onOpenReleasePassport}
         onClearChat={onClearChat}
         statusContent={<div>status content</div>}
         threadContent={<div>thread content</div>}
@@ -54,6 +57,9 @@ describe('OrchestratorCopilotDock', () => {
     expect(screen.getByText('Capability Copilot')).toBeInTheDocument();
     expect(screen.getByText(/WI-1 · Improve dock UX/i)).toBeInTheDocument();
     expect(screen.getByText('thread content')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Release Passport' }));
+    expect(onOpenReleasePassport).toHaveBeenCalledTimes(1);
 
     await user.click(screen.getByRole('button', { name: 'Clear chat' }));
     expect(onClearChat).toHaveBeenCalledTimes(1);

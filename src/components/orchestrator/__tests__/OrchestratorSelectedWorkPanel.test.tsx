@@ -65,6 +65,7 @@ describe('OrchestratorSelectedWorkPanel', () => {
     const user = userEvent.setup();
     const onStartExecution = vi.fn();
     const onOpenArchive = vi.fn();
+    const onOpenReleasePassport = vi.fn();
 
     render(
       <OrchestratorSelectedWorkPanel
@@ -93,6 +94,8 @@ describe('OrchestratorSelectedWorkPanel', () => {
         onStartExecution={onStartExecution}
         onExplain={vi.fn()}
         onCreateEvidencePacket={vi.fn()}
+        canOpenReleasePassport
+        onOpenReleasePassport={onOpenReleasePassport}
         onOpenFullChat={vi.fn()}
         onPauseRun={vi.fn()}
         onResumeRun={vi.fn()}
@@ -105,6 +108,9 @@ describe('OrchestratorSelectedWorkPanel', () => {
 
     await user.click(screen.getByRole('button', { name: 'Start execution' }));
     expect(onStartExecution).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole('button', { name: 'Release Passport' }));
+    expect(onOpenReleasePassport).toHaveBeenCalledTimes(1);
 
     await user.click(screen.getByRole('button', { name: 'Delete' }));
     expect(onOpenArchive).toHaveBeenCalledTimes(1);

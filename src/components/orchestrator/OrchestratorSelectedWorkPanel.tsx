@@ -7,6 +7,7 @@ import {
   Pause,
   Play,
   RefreshCw,
+  ScrollText,
   Trash2,
   X,
 } from 'lucide-react';
@@ -39,6 +40,8 @@ type Props = {
   onStartExecution: () => void;
   onExplain: () => void;
   onCreateEvidencePacket: () => void;
+  canOpenReleasePassport?: boolean;
+  onOpenReleasePassport?: () => void;
   onOpenFullChat: () => void;
   onPauseRun: () => void;
   onResumeRun: () => void;
@@ -74,6 +77,8 @@ export const OrchestratorSelectedWorkPanel = ({
   onStartExecution,
   onExplain,
   onCreateEvidencePacket,
+  canOpenReleasePassport,
+  onOpenReleasePassport,
   onOpenFullChat,
   onPauseRun,
   onResumeRun,
@@ -147,6 +152,16 @@ export const OrchestratorSelectedWorkPanel = ({
               )}
               Evidence packet
             </button>
+            {canOpenReleasePassport ? (
+              <button
+                type="button"
+                onClick={onOpenReleasePassport}
+                className="enterprise-button enterprise-button-brand-muted"
+              >
+                <ScrollText size={16} />
+                Release Passport
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={onOpenFullChat}

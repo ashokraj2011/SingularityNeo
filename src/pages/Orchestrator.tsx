@@ -212,6 +212,12 @@ const ACTIVE_RUN_STATUSES: WorkflowRun['status'][] = [
 
 const LIVE_EXECUTION_RUN_STATUSES: WorkflowRun['status'][] = ['QUEUED', 'RUNNING'];
 
+const PASSPORT_ELIGIBLE_RUN_STATUSES = new Set<WorkflowRun['status']>([
+  'WAITING_APPROVAL',
+  'COMPLETED',
+  'FAILED',
+]);
+
 const toDraftPhaseStakeholder = (
   stakeholder?: CapabilityStakeholder,
 ) => ({
@@ -1516,6 +1522,9 @@ const Orchestrator = () => {
   const currentRun = selectedRunRecord || selectedRunHistory[0] || null;
   const currentRunId =
     currentRun?.id || selectedWorkItem?.activeRunId || selectedRunHistory[0]?.id || null;
+  const releasePassportRun =
+    currentRun && PASSPORT_ELIGIBLE_RUN_STATUSES.has(currentRun.status) ? currentRun : null;
+  const canOpenReleasePassport = Boolean(selectedWorkItem && releasePassportRun);
   const currentRunIsActive = Boolean(
     currentRun && ACTIVE_RUN_STATUSES.includes(currentRun.status),
   );
@@ -1596,6 +1605,12 @@ const Orchestrator = () => {
     capabilityExperience.canStartDelivery &&
     runtimeReady &&
     canControlWorkItems;
+  const handleOpenReleasePassport = () => {
+    if (!selectedWorkItem || !releasePassportRun) {
+      return;
+    }
+    navigate(`/passport/${selectedWorkItem.capabilityId}/${releasePassportRun.id}`);
+  };
   const currentActorOwnsSelectedWorkItem = Boolean(
     selectedWorkItem &&
       currentActorContext.userId &&
@@ -4894,6 +4909,8 @@ const Orchestrator = () => {
             onStartExecution={() => void handleStartExecution()}
             onExplain={() => setIsExplainOpen(true)}
             onCreateEvidencePacket={() => void handleCreateEvidencePacket()}
+            canOpenReleasePassport={canOpenReleasePassport}
+            onOpenReleasePassport={handleOpenReleasePassport}
             onOpenFullChat={() => void handleOpenFullChat()}
             onPauseRun={() =>
               currentRun && selectedWorkItem
@@ -4946,6 +4963,8 @@ const Orchestrator = () => {
             }
             dockMessagesCount={dockMessages.length}
             busyAction={busyAction}
+            canOpenReleasePassport={canOpenReleasePassport}
+            onOpenReleasePassport={handleOpenReleasePassport}
             onClearChat={() => void handleClearDockChat()}
             statusContent={dockStatusContent}
             threadContent={dockThreadContent}
@@ -5259,6 +5278,8 @@ const Orchestrator = () => {
                     onBackToFlowMap: () => clearSelectedWorkItem({ focusBoard: true }),
                     onExplain: () => setIsExplainOpen(true),
                     onCreateEvidencePacket: () => void handleCreateEvidencePacket(),
+                    canOpenReleasePassport,
+                    onOpenReleasePassport: handleOpenReleasePassport,
                     onOpenFullChat: () => void handleOpenFullChat(),
                     onTakeControl: () => setIsStageControlOpen(true),
                     onToggleControl: () =>

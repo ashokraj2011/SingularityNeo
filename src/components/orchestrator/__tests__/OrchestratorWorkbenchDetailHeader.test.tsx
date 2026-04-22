@@ -10,6 +10,7 @@ describe('OrchestratorWorkbenchDetailHeader', () => {
     const onTakeControl = vi.fn();
     const onStartExecution = vi.fn();
     const onOpenCancel = vi.fn();
+    const onOpenReleasePassport = vi.fn();
 
     render(
       <OrchestratorWorkbenchDetailHeader
@@ -46,6 +47,8 @@ describe('OrchestratorWorkbenchDetailHeader', () => {
         onBackToFlowMap={vi.fn()}
         onExplain={vi.fn()}
         onCreateEvidencePacket={vi.fn()}
+        canOpenReleasePassport
+        onOpenReleasePassport={onOpenReleasePassport}
         onOpenFullChat={vi.fn()}
         onTakeControl={onTakeControl}
         onToggleControl={vi.fn()}
@@ -73,6 +76,9 @@ describe('OrchestratorWorkbenchDetailHeader', () => {
 
     await user.click(screen.getByRole('button', { name: 'Start current phase' }));
     expect(onStartExecution).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole('button', { name: 'Release Passport' }));
+    expect(onOpenReleasePassport).toHaveBeenCalledTimes(1);
 
     await user.click(screen.getByRole('button', { name: 'Cancel work item' }));
     expect(onOpenCancel).toHaveBeenCalledTimes(1);

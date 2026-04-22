@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertCircle, Trash2 } from 'lucide-react';
+import { AlertCircle, ScrollText, Trash2 } from 'lucide-react';
 import { StatusBadge } from '../EnterpriseUI';
 import {
   OrchestratorCopilotComposer,
@@ -14,6 +14,8 @@ type Props = {
   copilotRoutingLabel?: string | null;
   dockMessagesCount: number;
   busyAction: string | null;
+  canOpenReleasePassport?: boolean;
+  onOpenReleasePassport?: () => void;
   onClearChat: () => void;
   statusContent: React.ReactNode;
   threadContent: React.ReactNode;
@@ -53,6 +55,8 @@ export const OrchestratorCopilotDock = ({
   copilotRoutingLabel,
   dockMessagesCount,
   busyAction,
+  canOpenReleasePassport,
+  onOpenReleasePassport,
   onClearChat,
   statusContent,
   threadContent,
@@ -110,6 +114,16 @@ export const OrchestratorCopilotDock = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-start">
+          {canOpenReleasePassport ? (
+            <button
+              type="button"
+              onClick={onOpenReleasePassport}
+              className="enterprise-button enterprise-button-brand-muted px-3 py-2 text-[0.72rem]"
+            >
+              <ScrollText size={14} />
+              Release Passport
+            </button>
+          ) : null}
           <StatusBadge tone="neutral">
             {dockMessagesCount} message{dockMessagesCount === 1 ? '' : 's'}
           </StatusBadge>
