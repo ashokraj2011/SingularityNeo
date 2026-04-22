@@ -13,6 +13,8 @@ describe('OrchestratorCopilotDock', () => {
     render(
       <OrchestratorCopilotDock
         selectedWorkItemPresent
+        selectedWorkItemId="WI-1"
+        selectedWorkItemTitle="Improve dock UX"
         primaryCopilotAgentName="Architect"
         copilotRoutingLabel="Primary copilot active"
         dockMessagesCount={2}
@@ -50,6 +52,7 @@ describe('OrchestratorCopilotDock', () => {
     );
 
     expect(screen.getByText('Capability Copilot')).toBeInTheDocument();
+    expect(screen.getByText(/WI-1 · Improve dock UX/i)).toBeInTheDocument();
     expect(screen.getByText('thread content')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Clear chat' }));

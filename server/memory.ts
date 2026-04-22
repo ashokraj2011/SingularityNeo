@@ -116,6 +116,8 @@ type MemoryRefreshDocumentPlan = {
   vectorModel: string;
   embeddingProviderKey: EmbeddingProviderKey;
   embeddingFallbackReason?: string;
+  embeddingInputCount: number;
+  embeddingVectorCount: number;
   chunks: MemoryRefreshChunkPlan[];
 };
 
@@ -221,6 +223,10 @@ const getSourceBoost = (document: MemoryDocument) => {
 
 const embedTexts = async (
   texts: string[],
+  options?: {
+    suppressFallbackLog?: boolean;
+    fallbackLogContext?: string;
+  },
 ): Promise<{
   providerKey: EmbeddingProviderKey;
   model: string;
@@ -244,7 +250,10 @@ const embedTexts = async (
       ? response.fallbackReason ||
         'Embedding provider fell back to deterministic hash embeddings.'
       : `Embedding provider returned ${response.vectors.length} vectors for ${texts.length} texts.`;
-  console.warn(`[memory] ${fallbackReason}`);
+  if (!options?.suppressFallbackLog) {
+    const contextPrefix = options?.fallbackLogContext ? `${options.fallbackLogContext}: ` : '';
+    console.warn(`[memory] ${contextPrefix}${fallbackReason}`);
+  }
 
   return {
     providerKey: HASH_EMBEDDING_PROVIDER_KEY,
@@ -810,18 +819,9 @@ const buildMemoryRefreshDocumentPlan = async ({
 }): Promise<MemoryRefreshDocumentPlan> => {
   const normalizedContent = normalizeText(source.content);
   const chunkContents = splitIntoChunks(normalizedContent);
-  const embeddingResult = await embedTexts(chunkContents);
-
-  if (embeddingResult.fallbackReason) {
-    console.warn(
-      `[memory] ${capabilityId}/${source.id}: ${embeddingResult.fallbackReason}`,
-    );
-  }
-  if (chunkContents.length !== embeddingResult.vectors.length) {
-    console.warn(
-      `[memory] ${capabilityId}/${source.id}: planned ${chunkContents.length} chunks but received ${embeddingResult.vectors.length} vectors from ${embeddingResult.model}.`,
-    );
-  }
+  const embeddingResult = await embedTexts(chunkContents, {
+    suppressFallbackLog: true,
+  });
 
   const chunks = chunkContents.map((content, chunkIndex) => ({
     id: buildStableMemoryRowId('MEMCHUNK', capabilityId, source.id, chunkIndex),
@@ -858,6 +858,8 @@ const buildMemoryRefreshDocumentPlan = async ({
     vectorModel: embeddingResult.model,
     embeddingProviderKey: embeddingResult.providerKey,
     embeddingFallbackReason: embeddingResult.fallbackReason,
+    embeddingInputCount: chunkContents.length,
+    embeddingVectorCount: embeddingResult.vectors.length,
     chunks,
   };
 };
@@ -879,6 +881,56 @@ const buildMemoryRefreshPlan = async ({
         }),
       ),
   );
+
+export const buildMemoryEmbeddingRefreshSummary = ({
+  capabilityId,
+  documents,
+}: {
+  capabilityId: string;
+  documents: MemoryRefreshDocumentPlan[];
+}) => {
+  const fallbackDocuments = documents.filter(document => document.embeddingFallbackReason);
+  if (fallbackDocuments.length === 0) {
+    return null;
+  }
+
+  const reasonCounts = new Map<string, number>();
+  const sourceTypeCounts = new Map<MemorySourceType, number>();
+  let mismatchCount = 0;
+
+  fallbackDocuments.forEach(document => {
+    const reason =
+      String(document.embeddingFallbackReason || '')
+        .trim()
+        .replace(/[.]+$/g, '') || 'Embedding fallback';
+    reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+    sourceTypeCounts.set(
+      document.sourceType,
+      (sourceTypeCounts.get(document.sourceType) || 0) + 1,
+    );
+    if (document.embeddingInputCount !== document.embeddingVectorCount) {
+      mismatchCount += 1;
+    }
+  });
+
+  const reasonSummary = [...reasonCounts.entries()]
+    .sort((left, right) => right[1] - left[1] || compareStrings(left[0], right[0]))
+    .map(([reason, count]) => `${count}x ${reason}.`)
+    .join('; ');
+  const sourceSummary = [...sourceTypeCounts.entries()]
+    .sort((left, right) => right[1] - left[1] || compareStrings(left[0], right[0]))
+    .map(([sourceType, count]) => `${sourceType}: ${count}`)
+    .join(', ');
+  const mismatchSummary =
+    mismatchCount > 0
+      ? ` ${mismatchCount} document${mismatchCount === 1 ? '' : 's'} also received mismatched vector counts and were normalized with deterministic hash embeddings.`
+      : '';
+  const configHint = /not configured/i.test(reasonSummary)
+    ? ' Set LOCAL_OPENAI_BASE_URL (or OPENAI_COMPAT_BASE_URL) to enable semantic embeddings.'
+    : '';
+
+  return `[memory] ${capabilityId}: ${fallbackDocuments.length}/${documents.length} memory documents used deterministic hash embeddings during refresh. Sources: ${sourceSummary}. Reasons: ${reasonSummary}${mismatchSummary}${configHint}`;
+};
 
 const deleteStaleManagedMemoryDocumentsTx = async ({
   executor,
@@ -967,6 +1019,13 @@ export const refreshCapabilityMemory = async (
     capabilityId,
     sources,
   });
+  const refreshFallbackSummary = buildMemoryEmbeddingRefreshSummary({
+    capabilityId,
+    documents: refreshPlan,
+  });
+  if (refreshFallbackSummary) {
+    console.warn(refreshFallbackSummary);
+  }
 
   await transaction(async executor => {
     await applyMemoryRefreshPlanTx({

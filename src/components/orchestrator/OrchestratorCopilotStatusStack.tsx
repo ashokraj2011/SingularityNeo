@@ -39,6 +39,54 @@ type Props = {
   canEditCapability: boolean;
 };
 
+const summarizeWaitMessage = (message: string) => {
+  const normalized = message.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  const sentences = normalized
+    .split(/(?<=[.!?])\s+/)
+    .map(sentence => sentence.trim())
+    .filter(Boolean);
+  const firstTwo = sentences.slice(0, 2).join(' ');
+  const summary = firstTwo || normalized;
+
+  return summary.length > 260 ? `${summary.slice(0, 257).trimEnd()}...` : summary;
+};
+
+const getWaitModeMeta = (wait: RunWait | null) => {
+  switch (wait?.type) {
+    case 'APPROVAL':
+      return {
+        title: 'Decision required',
+        subtitle:
+          'Review the evidence, ask follow-up questions if needed, then move into the approval review flow.',
+        tone: 'warning' as const,
+      };
+    case 'CONFLICT_RESOLUTION':
+      return {
+        title: 'Conflict resolution needed',
+        subtitle:
+          'Choose the final path, constraints, or escalation outcome so the workflow can proceed cleanly.',
+        tone: 'warning' as const,
+      };
+    case 'INPUT':
+      return {
+        title: 'Specific input needed',
+        subtitle:
+          'Give the agent concrete business or implementation guidance. Generic replies will not unblock the run.',
+        tone: 'warning' as const,
+      };
+    default:
+      return {
+        title: 'No pending request',
+        subtitle: 'The workflow is not waiting on a human decision right now.',
+        tone: 'neutral' as const,
+      };
+  }
+};
+
 export const OrchestratorCopilotStatusStack = ({
   selectedWorkItemPresent,
   deliveryBlockingItem,
@@ -72,156 +120,263 @@ export const OrchestratorCopilotStatusStack = ({
   if (!selectedWorkItemPresent) {
     return (
       <div className="workspace-meta-card">
-        Select a work item to see pending requests and start a focused copilot thread.
+        Select a work item to see the current decision state, pending requests, and the focused
+        copilot thread for that item.
       </div>
     );
   }
 
-  return (
-    <>
-      {!selectedOpenWait && deliveryBlockingItem ? (
-        <div className="workspace-meta-card border-amber-200/80 bg-amber-50/60">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="workspace-meta-label">Execution blocked</p>
-              <p className="mt-2 text-sm font-semibold text-on-surface">
-                {deliveryBlockingItem.label}
-              </p>
-              <p className="mt-1 text-xs leading-relaxed text-secondary">
-                {deliveryBlockingItem.nextRequiredAction ||
-                  deliveryBlockingItem.blockingReason ||
-                  deliveryBlockingItem.summary}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={onOpenBlockingAction}
-              className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem]"
-            >
-              <ArrowRight size={14} />
-              {deliveryBlockingItem.actionLabel}
-            </button>
-          </div>
-        </div>
-      ) : null}
+  const normalizedWaitMessage = selectedOpenWait
+    ? normalizeMarkdownishText(selectedOpenWait.message)
+    : '';
+  const waitSummary = summarizeWaitMessage(normalizedWaitMessage);
+  const waitMeta = getWaitModeMeta(selectedOpenWait);
+  const showFullWaitRequest =
+    Boolean(normalizedWaitMessage.trim()) &&
+    normalizedWaitMessage.replace(/\s+/g, ' ').trim() !== waitSummary;
 
-      {!selectedOpenWait && !deliveryBlockingItem && canStartExecution ? (
-        <div className="workspace-meta-card border-emerald-200/70 bg-emerald-50/55">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="workspace-meta-label">Execution ready</p>
-              <p className="mt-2 text-sm font-semibold text-on-surface">
-                This work item can start from the dock
-              </p>
-              <p className="mt-1 text-xs leading-relaxed text-secondary">
-                Add optional kickoff guidance below, upload context if needed, then start execution
-                to generate real workflow artifacts, waits, and approvals.
-              </p>
-            </div>
-            <StatusBadge tone="success">{executionDispatchLabel}</StatusBadge>
-          </div>
+  const phaseCard = (
+    <div className="workspace-meta-card border-primary/18 bg-primary/5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="workspace-meta-label">Current phase</p>
+          <p className="mt-2 text-base font-semibold text-on-surface">{phaseLabel}</p>
+          <p className="mt-1 text-xs leading-relaxed text-secondary">
+            Keep the response grounded in what this phase must decide or produce next.
+          </p>
         </div>
-      ) : null}
+        {canRestartFromPhase ? (
+          <button
+            type="button"
+            onClick={onRestartExecution}
+            disabled={busyAction !== null}
+            className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {busyAction === 'restart' ? (
+              <LoaderCircle size={14} className="animate-spin" />
+            ) : (
+              <RefreshCw size={14} />
+            )}
+            Restart {phaseLabel}
+          </button>
+        ) : (
+          <StatusBadge tone="brand">{phaseLabel}</StatusBadge>
+        )}
+      </div>
+    </div>
+  );
 
-      {canRestartFromPhase ? (
-        <div className="workspace-meta-card border-primary/20 bg-primary/5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="workspace-meta-label">Current phase</p>
-              <p className="mt-2 text-sm font-semibold text-on-surface">{phaseLabel}</p>
-              <p className="mt-1 text-xs leading-relaxed text-secondary">
-                Restart this phase if you want to rerun the current stage from a clean attempt.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={onRestartExecution}
-              disabled={busyAction !== null}
-              className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {busyAction === 'restart' ? (
-                <LoaderCircle size={14} className="animate-spin" />
-              ) : (
-                <RefreshCw size={14} />
-              )}
-              Restart {phaseLabel}
-            </button>
-          </div>
+  const pausedCard = isPaused ? (
+    <div className="workspace-meta-card border-slate-200 bg-slate-50/70">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="workspace-meta-label">Paused</p>
+          <p className="mt-2 text-sm font-semibold text-on-surface">Execution is paused</p>
+          <p className="mt-1 text-xs leading-relaxed text-secondary">
+            Resume to continue, or capture the required decision from this dock first.
+          </p>
         </div>
-      ) : null}
+        <button
+          type="button"
+          onClick={onResumeRun}
+          disabled={!canResumeRun}
+          className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {busyAction?.startsWith('resume-') ? (
+            <LoaderCircle size={14} className="animate-spin" />
+          ) : (
+            <Play size={14} />
+          )}
+          Resume
+        </button>
+      </div>
+    </div>
+  ) : null;
 
-      {!selectedOpenWait && selectedCanGuideBlockedAgent ? (
-        <div className="workspace-meta-card border-primary/20 bg-primary/5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="workspace-meta-label">Blocked execution</p>
-              <p className="mt-2 text-sm font-semibold text-on-surface">
-                Restart from this dock with explicit guidance
-              </p>
-              <p className="mt-1 text-xs leading-relaxed text-secondary">
-                Explain what changed and what the next attempt should do differently, then restart
-                directly from the composer below.
-              </p>
-            </div>
-            <StatusBadge tone="brand">Restart-ready</StatusBadge>
+  const readyCard =
+    !selectedOpenWait && !deliveryBlockingItem && canStartExecution ? (
+      <div className="workspace-meta-card border-emerald-200/75 bg-emerald-50/60">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="workspace-meta-label">Execution ready</p>
+            <p className="mt-2 text-sm font-semibold text-on-surface">
+              This work item can start from the dock
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-secondary">
+              Add optional kickoff guidance below, upload any context that matters, then start the
+              workflow from here.
+            </p>
           </div>
+          <StatusBadge tone="success">{executionDispatchLabel}</StatusBadge>
         </div>
-      ) : null}
+      </div>
+    ) : null;
 
-      {isPaused ? (
-        <div className="workspace-meta-card border-slate-200 bg-slate-50/60">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="workspace-meta-label">Paused</p>
-              <p className="mt-2 text-sm font-semibold text-on-surface">Execution is paused</p>
-              <p className="mt-1 text-xs leading-relaxed text-secondary">
-                Resume to continue, or resolve pending requests from this dock.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={onResumeRun}
-              disabled={!canResumeRun}
-              className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {busyAction?.startsWith('resume-') ? (
-                <LoaderCircle size={14} className="animate-spin" />
-              ) : (
-                <Play size={14} />
-              )}
-              Resume
-            </button>
+  const blockingCard =
+    !selectedOpenWait && deliveryBlockingItem ? (
+      <div className="workspace-meta-card border-amber-200/85 bg-amber-50/65">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="workspace-meta-label">Execution blocked</p>
+            <p className="mt-2 text-sm font-semibold text-on-surface">
+              {deliveryBlockingItem.label}
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-secondary">
+              {deliveryBlockingItem.nextRequiredAction ||
+                deliveryBlockingItem.blockingReason ||
+                deliveryBlockingItem.summary}
+            </p>
           </div>
+          <button
+            type="button"
+            onClick={onOpenBlockingAction}
+            className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem]"
+          >
+            <ArrowRight size={14} />
+            {deliveryBlockingItem.actionLabel}
+          </button>
         </div>
-      ) : null}
+      </div>
+    ) : null;
 
-      {selectedOpenWait ? (
-        <div className="workspace-meta-card border-amber-200/80 bg-amber-50/50">
+  const restartGuidanceCard =
+    !selectedOpenWait && selectedCanGuideBlockedAgent ? (
+      <div className="workspace-meta-card border-primary/18 bg-primary/5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="workspace-meta-label">Blocked execution</p>
+            <p className="mt-2 text-sm font-semibold text-on-surface">
+              Restart from this dock with explicit guidance
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-secondary">
+              Explain what changed and what the next attempt should do differently. The composer
+              below becomes the new restart brief.
+            </p>
+          </div>
+          <StatusBadge tone="brand">Restart-ready</StatusBadge>
+        </div>
+      </div>
+    ) : null;
+
+  const workspacePathCard = waitRequiresApprovedWorkspace ? (
+    <div className="workspace-meta-card border-outline-variant/30 bg-white/92">
+      <p className="workspace-meta-label">Approved workspace path</p>
+      {hasApprovedWorkspaceConfigured ? (
+        <>
+          <p className="mt-2 text-xs leading-relaxed text-secondary">Configured roots:</p>
+          <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
+            {approvedWorkspaceRoots.slice(0, 4).map(root => (
+              <li key={root} className="font-mono text-[0.72rem]">
+                {root}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p className="mt-2 text-xs leading-relaxed text-secondary">
+          No approved workspace paths are configured yet.
+        </p>
+      )}
+
+      <p className="mt-3 text-xs leading-relaxed text-secondary">
+        {hasApprovedWorkspaceConfigured
+          ? 'Add another path if this work item needs a different codebase.'
+          : 'Add a local directory path that tools are allowed to read and write.'}
+      </p>
+      <input
+        value={approvedWorkspaceDraft}
+        onChange={event => onApprovedWorkspaceDraftChange(event.target.value)}
+        placeholder="/Users/you/projects/my-repo"
+        className="mt-3 field-input font-mono text-[0.8rem]"
+      />
+      <div className="mt-3 flex flex-wrap gap-2">
+        {approvedWorkspaceSuggestions.map(root => (
+          <button
+            key={root}
+            type="button"
+            onClick={() => onSelectApprovedWorkspaceDraft(root)}
+            className="enterprise-button enterprise-button-secondary"
+          >
+            {root}
+          </button>
+        ))}
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={onApproveWorkspacePathAndContinue}
+          disabled={busyAction !== null}
+          className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {busyAction === 'approveWorkspacePath' ? (
+            <LoaderCircle size={16} className="animate-spin" />
+          ) : (
+            <ShieldCheck size={16} />
+          )}
+          Approve and continue
+        </button>
+        <button
+          type="button"
+          onClick={onApproveWorkspacePathOnly}
+          disabled={busyAction !== null}
+          className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Approve only
+        </button>
+      </div>
+      {approvedWorkspaceValidation ? (
+        <p
+          className={cn(
+            'mt-2 text-xs font-medium',
+            approvedWorkspaceValidation.valid ? 'text-emerald-700' : 'text-amber-800',
+          )}
+        >
+          {approvedWorkspaceValidation.message}
+        </p>
+      ) : null}
+      {!canEditCapability ? (
+        <p className="mt-2 text-xs font-medium text-amber-800">
+          Approving new paths requires capability edit access. Switch Current Operator to a
+          workspace admin if needed.
+        </p>
+      ) : null}
+    </div>
+  ) : null;
+
+  if (selectedOpenWait) {
+    return (
+      <div className="orchestrator-copilot-status-grid">
+        <div className="workspace-meta-card orchestrator-copilot-status-hero border-amber-200/85 bg-amber-50/55">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="workspace-meta-label">Pending request</p>
-              <p className="mt-2 text-sm font-semibold text-on-surface">
-                {selectedAttentionLabel}
-              </p>
+              <p className="mt-2 text-base font-semibold text-on-surface">{selectedAttentionLabel}</p>
+              <p className="mt-1 text-sm leading-relaxed text-secondary">{waitMeta.subtitle}</p>
             </div>
-            <StatusBadge tone="warning">{formatEnumLabel(selectedOpenWait.type)}</StatusBadge>
+            <StatusBadge tone={waitMeta.tone}>{formatEnumLabel(selectedOpenWait.type)}</StatusBadge>
           </div>
-          <div className="mt-3 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
-            <MarkdownContent content={normalizeMarkdownishText(selectedOpenWait.message)} />
+
+          <div className="orchestrator-copilot-status-summary mt-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="workspace-meta-label">What needs your decision</p>
+                <p className="mt-2 text-sm font-semibold text-on-surface">{waitMeta.title}</p>
+              </div>
+              <StatusBadge tone="neutral">Respond from the dock</StatusBadge>
+            </div>
+            <p className="mt-3 text-sm leading-7 text-on-surface">{waitSummary || normalizedWaitMessage}</p>
           </div>
 
           {dockMissingFieldLabels.length > 0 ? (
             <div className="mt-4">
-              <p className="text-xs leading-relaxed text-secondary">
-                Click a chip to add it to your response.
-              </p>
+              <p className="workspace-meta-label">Still missing from your response</p>
               <div className="mt-2 flex flex-wrap gap-2">
                 {dockMissingFieldLabels.map(label => (
                   <button
                     key={label}
                     type="button"
                     onClick={() => onFieldChipClick(label)}
-                    className="rounded-full border border-outline-variant/30 bg-white/85 px-3 py-1 text-xs font-semibold text-on-surface"
+                    className="rounded-full border border-outline-variant/30 bg-white/92 px-3 py-1.5 text-xs font-semibold text-on-surface transition-colors hover:bg-surface-container-low"
                   >
                     {label}
                   </button>
@@ -230,97 +385,46 @@ export const OrchestratorCopilotStatusStack = ({
             </div>
           ) : null}
 
-          {waitRequiresApprovedWorkspace ? (
-            <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
-              <p className="workspace-meta-label">Approved workspace path</p>
-              {hasApprovedWorkspaceConfigured ? (
-                <>
-                  <p className="mt-2 text-xs leading-relaxed text-secondary">Configured roots:</p>
-                  <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
-                    {approvedWorkspaceRoots.slice(0, 4).map(root => (
-                      <li key={root} className="font-mono text-[0.72rem]">
-                        {root}
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              ) : (
-                <p className="mt-2 text-xs leading-relaxed text-secondary">
-                  No approved workspace paths are configured yet.
-                </p>
-              )}
-
-              <p className="mt-3 text-xs leading-relaxed text-secondary">
-                {hasApprovedWorkspaceConfigured
-                  ? 'Add another path if this work item needs a different codebase.'
-                  : 'Add a local directory path that tools are allowed to read and write.'}
-              </p>
-              <input
-                value={approvedWorkspaceDraft}
-                onChange={event => onApprovedWorkspaceDraftChange(event.target.value)}
-                placeholder="/Users/you/projects/my-repo"
-                className="mt-3 field-input font-mono text-[0.8rem]"
-              />
-              <div className="mt-3 flex flex-wrap gap-2">
-                {approvedWorkspaceSuggestions.map(root => (
-                  <button
-                    key={root}
-                    type="button"
-                    onClick={() => onSelectApprovedWorkspaceDraft(root)}
-                    className="enterprise-button enterprise-button-secondary"
-                  >
-                    {root}
-                  </button>
-                ))}
+          {showFullWaitRequest ? (
+            <details className="orchestrator-copilot-status-details mt-4">
+              <summary>Show full request</summary>
+              <div className="mt-3 rounded-2xl border border-outline-variant/25 bg-white/92 px-4 py-3">
+                <MarkdownContent content={normalizedWaitMessage} />
               </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={onApproveWorkspacePathAndContinue}
-                  disabled={busyAction !== null}
-                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {busyAction === 'approveWorkspacePath' ? (
-                    <LoaderCircle size={16} className="animate-spin" />
-                  ) : (
-                    <ShieldCheck size={16} />
-                  )}
-                  Approve and continue
-                </button>
-                <button
-                  type="button"
-                  onClick={onApproveWorkspacePathOnly}
-                  disabled={busyAction !== null}
-                  className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Approve only
-                </button>
-              </div>
-              {approvedWorkspaceValidation ? (
-                <p
-                  className={cn(
-                    'mt-2 text-xs font-medium',
-                    approvedWorkspaceValidation.valid ? 'text-emerald-700' : 'text-amber-800',
-                  )}
-                >
-                  {approvedWorkspaceValidation.message}
-                </p>
-              ) : null}
-              {!canEditCapability ? (
-                <p className="mt-2 text-xs font-medium text-amber-800">
-                  Approving new paths requires capability edit access. Switch Current Operator to a
-                  workspace admin if needed.
-                </p>
-              ) : null}
-            </div>
+            </details>
           ) : null}
+
+          {workspacePathCard ? <div className="mt-4">{workspacePathCard}</div> : null}
         </div>
-      ) : (
-        <div className="workspace-meta-card">
-          No open approval, input, or conflict wait is attached to the selected work item right
-          now.
+
+        <div className="orchestrator-copilot-status-rail">
+          {phaseCard}
+          {pausedCard}
         </div>
-      )}
-    </>
+      </div>
+    );
+  }
+
+  const passiveCards = [
+    { key: 'blocking', node: blockingCard },
+    { key: 'ready', node: readyCard },
+    { key: 'restart-guidance', node: restartGuidanceCard },
+    { key: 'paused', node: pausedCard },
+  ].filter((entry): entry is { key: string; node: React.ReactElement } => Boolean(entry.node));
+
+  return (
+    <div className="orchestrator-copilot-status-grid">
+      <div className="orchestrator-copilot-status-rail">{phaseCard}</div>
+      <div className="orchestrator-copilot-status-grid-cards">
+        {passiveCards.length > 0 ? (
+          passiveCards.map(entry => <React.Fragment key={entry.key}>{entry.node}</React.Fragment>)
+        ) : (
+          <div className="workspace-meta-card">
+            No open approval, input, or conflict wait is attached to the selected work item right
+            now.
+          </div>
+        )}
+      </div>
+    </div>
   );
 };

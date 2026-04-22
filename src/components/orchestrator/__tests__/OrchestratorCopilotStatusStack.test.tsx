@@ -126,7 +126,9 @@ describe('OrchestratorCopilotStatusStack', () => {
     );
 
     expect(screen.getByText('Pending request')).toBeInTheDocument();
+    expect(screen.getByText('Still missing from your response')).toBeInTheDocument();
     expect(screen.getByText('Workspace path is valid.')).toBeInTheDocument();
+    expect(screen.getByText('Specific input needed')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Approved workspace path' }));
     expect(onFieldChipClick).toHaveBeenCalledWith('Approved workspace path');

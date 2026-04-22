@@ -1659,12 +1659,16 @@ const Orchestrator = () => {
             ? 'Guide the next attempt. Explain what changed, what the agent should do differently, and any constraints it must respect.'
             : 'Approval note, human input, restart note, or cancellation reason.';
   const dockComposerLabel = selectedOpenWait
-    ? 'Resolve wait mode'
+    ? selectedOpenWait.type === 'APPROVAL'
+      ? 'Prepare approval decision'
+      : selectedOpenWait.type === 'INPUT'
+        ? 'Provide requested details'
+        : 'Resolve the conflict'
     : selectedCanGuideBlockedAgent
-    ? 'Guide blocked execution'
+    ? 'Guide the next attempt'
     : canStartExecution
-    ? 'Start and guide execution'
-    : 'Ask copilot';
+    ? 'Kick off execution'
+    : 'Ask the copilot';
   const dockComposerPlaceholder = selectedOpenWait
     ? selectedOpenWait.type === 'APPROVAL'
       ? 'Approval decisions now happen in the review window. Use this dock to ask the agent follow-up questions or capture context before you open the approval review.'
@@ -4930,6 +4934,8 @@ const Orchestrator = () => {
         copilotDock={
           <OrchestratorCopilotDock
             selectedWorkItemPresent={Boolean(selectedWorkItem)}
+            selectedWorkItemId={selectedWorkItem?.id || null}
+            selectedWorkItemTitle={selectedWorkItem?.title || null}
             primaryCopilotAgentName={primaryCopilotAgent?.name || null}
             copilotRoutingLabel={
               primaryCopilotAgent

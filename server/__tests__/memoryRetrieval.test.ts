@@ -1,13 +1,15 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const transactionExecutorQueryMock = vi.fn();
+
 vi.mock('../db', () => ({
   getPlatformFeatureState: () => ({
     pgvectorAvailable: false,
     memoryEmbeddingDimensions: 4,
   }),
   query: vi.fn(),
-  transaction: vi.fn(async callback => callback()),
+  transaction: vi.fn(async callback => callback({ query: transactionExecutorQueryMock })),
 }));
 
 vi.mock('../repository', () => ({
@@ -34,15 +36,19 @@ vi.mock('../workspaceIndex', () => ({
 
 import { query } from '../db';
 import { getAgentLearningProfile } from '../agentLearning/repository';
+import { getCapabilityBundle } from '../repository';
 import { requestLocalOpenAIEmbeddings } from '../localOpenAIProvider';
 import {
+  buildMemoryEmbeddingRefreshSummary,
   buildMemoryContext,
   rankMemoryCorpusByQuery,
+  refreshCapabilityMemory,
   searchCapabilityMemory,
 } from '../memory';
 
 const queryMock = vi.mocked(query);
 const getAgentLearningProfileMock = vi.mocked(getAgentLearningProfile);
+const getCapabilityBundleMock = vi.mocked(getCapabilityBundle);
 const requestLocalOpenAIEmbeddingsMock = vi.mocked(requestLocalOpenAIEmbeddings);
 
 const buildSearchRow = ({
@@ -113,6 +119,8 @@ const buildCorpus = () => [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  transactionExecutorQueryMock.mockReset();
+  transactionExecutorQueryMock.mockResolvedValue({ rows: [] } as any);
   getAgentLearningProfileMock.mockResolvedValue({
     capabilityId: 'CAP-MEM',
     agentId: 'AGENT-1',
@@ -129,6 +137,123 @@ beforeEach(() => {
 });
 
 describe('memory retrieval hardening', () => {
+  it('builds a single refresh summary for deterministic-hash fallback', () => {
+    const summary = buildMemoryEmbeddingRefreshSummary({
+      capabilityId: 'CAP-MEM',
+      documents: [
+        {
+          capabilityId: 'CAP-MEM',
+          id: 'DOC-1',
+          title: 'Human interaction',
+          sourceType: 'HUMAN_INTERACTION',
+          tier: 'SESSION',
+          contentPreview: 'Need exact repository root',
+          vectorModel: 'deterministic-hash-v2',
+          embeddingProviderKey: 'deterministic-hash',
+          embeddingFallbackReason: 'Local embedding provider is not configured.',
+          embeddingInputCount: 2,
+          embeddingVectorCount: 0,
+          chunks: [],
+        },
+        {
+          capabilityId: 'CAP-MEM',
+          id: 'DOC-2',
+          title: 'Work item',
+          sourceType: 'WORK_ITEM',
+          tier: 'WORKING',
+          contentPreview: 'Implement operator support',
+          vectorModel: 'deterministic-hash-v2',
+          embeddingProviderKey: 'deterministic-hash',
+          embeddingFallbackReason: 'Local embedding provider is not configured.',
+          embeddingInputCount: 1,
+          embeddingVectorCount: 0,
+          chunks: [],
+        },
+      ],
+    });
+
+    expect(summary).toContain('2/2 memory documents used deterministic hash embeddings');
+    expect(summary).toContain('Sources: HUMAN_INTERACTION: 1, WORK_ITEM: 1');
+    expect(summary).toContain('2x Local embedding provider is not configured.');
+    expect(summary).toContain('Set LOCAL_OPENAI_BASE_URL');
+  });
+
+  it('logs one refresh summary instead of one warning per document fallback', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    requestLocalOpenAIEmbeddingsMock.mockResolvedValue({
+      providerKey: 'deterministic-hash',
+      model: 'deterministic-hash-v2',
+      vectors: [],
+      fallbackReason: 'Local embedding provider is not configured.',
+    });
+    getCapabilityBundleMock.mockResolvedValue({
+      capability: {
+        id: 'CAP-MEM',
+        name: 'Memory Capability',
+        description: 'Tracks memory refresh behavior.',
+        domain: '',
+        businessUnit: '',
+        ownerTeam: '',
+        teamNames: [],
+        databaseConfigs: [],
+        gitRepositories: [],
+        executionConfig: {
+          defaultWorkspacePath: '',
+          allowedWorkspacePaths: [],
+        },
+        localDirectories: [],
+        documentationNotes: '',
+        stakeholders: [],
+      },
+      workspace: {
+        artifacts: [
+          {
+            id: 'ART-1',
+            name: 'Operator note',
+            artifactKind: 'INPUT_NOTE',
+            workItemId: 'WI-1',
+            phase: 'ANALYSIS',
+            traceId: null,
+            contentText: 'Confirm whether operator names are case insensitive.',
+            summary: '',
+            description: '',
+            sourceRunId: null,
+            runId: null,
+            sourceRunStepId: null,
+            runStepId: null,
+            handoffFromAgentId: null,
+            handoffToAgentId: null,
+          },
+        ],
+        workItems: [
+          {
+            id: 'WI-1',
+            title: 'Implement operator',
+            description: 'Need endsWith support.',
+            phase: 'ANALYSIS',
+            status: 'ACTIVE',
+            history: [],
+          },
+        ],
+        messages: [],
+        agents: [],
+      },
+    } as any);
+    queryMock.mockResolvedValue({ rows: [] } as any);
+
+    await refreshCapabilityMemory('CAP-MEM', { requeueAgents: false });
+
+    const memoryWarnings = warnSpy.mock.calls
+      .map(call => String(call[0] || ''))
+      .filter(message => message.startsWith('[memory]'));
+
+    expect(memoryWarnings).toHaveLength(1);
+    expect(memoryWarnings[0]).toContain('CAP-MEM: 3/3 memory documents used deterministic hash embeddings');
+    expect(memoryWarnings[0]).toContain('CAPABILITY_METADATA: 1, HUMAN_INTERACTION: 1, WORK_ITEM: 1');
+
+    warnSpy.mockRestore();
+  });
+
   it('falls back to deterministic hash when the embedding provider is unavailable', async () => {
     requestLocalOpenAIEmbeddingsMock.mockResolvedValue({
       providerKey: 'deterministic-hash',

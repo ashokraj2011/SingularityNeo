@@ -8,6 +8,8 @@ import {
 
 type Props = {
   selectedWorkItemPresent: boolean;
+  selectedWorkItemId?: string | null;
+  selectedWorkItemTitle?: string | null;
   primaryCopilotAgentName?: string | null;
   copilotRoutingLabel?: string | null;
   dockMessagesCount: number;
@@ -45,6 +47,8 @@ type Props = {
 
 export const OrchestratorCopilotDock = ({
   selectedWorkItemPresent,
+  selectedWorkItemId,
+  selectedWorkItemTitle,
   primaryCopilotAgentName,
   copilotRoutingLabel,
   dockMessagesCount,
@@ -80,25 +84,32 @@ export const OrchestratorCopilotDock = ({
   dockTextareaRef,
 }: Props) => (
   <section className="workspace-surface orchestrator-copilot-dock-shell flex min-h-0 flex-col p-0">
-    <div className="border-b border-outline-variant/25 px-5 pb-4 pt-5">
+    <div className="orchestrator-copilot-dock-header border-b border-outline-variant/25 px-5 pb-4 pt-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
+        <div className="min-w-0">
           <p className="form-kicker">Capability Copilot</p>
-          <h2 className="mt-1 text-lg font-bold text-on-surface">Operate from one dock</h2>
-          <p className="mt-1 text-sm leading-relaxed text-secondary">
-            Upload evidence, ask questions, and resolve pending requests without switching screens.
+          <h2 className="mt-1 text-xl font-bold text-on-surface">Operate from one dock</h2>
+          <p className="mt-1 max-w-3xl text-sm leading-relaxed text-secondary">
+            Keep the developer loop in one place: review what is blocked, ask follow-up questions,
+            upload evidence, and unblock or restart execution without jumping between surfaces.
           </p>
-          {primaryCopilotAgentName ? (
-            <div className="mt-3 flex flex-wrap gap-2">
+          <div className="mt-3 flex flex-wrap gap-2">
+            {selectedWorkItemPresent && selectedWorkItemId ? (
+              <StatusBadge tone="neutral">
+                {selectedWorkItemId}
+                {selectedWorkItemTitle ? ` · ${selectedWorkItemTitle}` : ''}
+              </StatusBadge>
+            ) : null}
+            {primaryCopilotAgentName ? (
               <StatusBadge tone="brand">{primaryCopilotAgentName}</StatusBadge>
-              {copilotRoutingLabel ? (
-                <StatusBadge tone="neutral">{copilotRoutingLabel}</StatusBadge>
-              ) : null}
-            </div>
-          ) : null}
+            ) : null}
+            {copilotRoutingLabel ? (
+              <StatusBadge tone="neutral">{copilotRoutingLabel}</StatusBadge>
+            ) : null}
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 self-start">
           <StatusBadge tone="neutral">
             {dockMessagesCount} message{dockMessagesCount === 1 ? '' : 's'}
           </StatusBadge>

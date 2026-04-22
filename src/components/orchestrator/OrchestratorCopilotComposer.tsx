@@ -75,6 +75,32 @@ export const OrchestratorCopilotComposer = ({
   busyAction,
   dockTextareaRef,
 }: Props) => {
+  const composerModeLabel = selectedOpenWaitPresent
+    ? dockAllowsChatOnly
+      ? 'Follow-up chat'
+      : 'Workflow response'
+    : selectedCanGuideBlockedAgent
+      ? 'Restart brief'
+      : canStartExecution
+        ? 'Kickoff guidance'
+        : 'Chat turn';
+  const composerModeCopy = selectedOpenWaitPresent
+    ? dockAllowsChatOnly
+      ? 'Use this note to ask the agent a clarifying question before you resolve the gate.'
+      : 'What you write here becomes the response that unblocks the workflow.'
+    : selectedCanGuideBlockedAgent
+      ? 'This note becomes the guidance for the next execution attempt.'
+      : canStartExecution
+        ? 'Optional context here is applied before the workflow starts.'
+        : 'Use this area for normal copilot conversation and evidence uploads.';
+  const primaryActionKind = selectedOpenWaitPresent
+    ? 'Unblock action'
+    : selectedCanGuideBlockedAgent
+      ? 'Restart action'
+      : canStartExecution
+        ? 'Start action'
+        : 'Send action';
+
   const renderAttachmentIcon = (upload: OrchestratorCopilotUploadChip) => {
     if (renderUploadIcon) {
       return renderUploadIcon(upload);
@@ -100,20 +126,36 @@ export const OrchestratorCopilotComposer = ({
         onComposerDrop(event.dataTransfer.files);
       }}
     >
-      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-secondary">
-        {dockComposerLabel}
-      </p>
+      <div className="orchestrator-copilot-composer-mode">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-secondary">
+            {dockComposerLabel}
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-outline-variant/30 bg-white px-3 py-1 text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-on-surface">
+              {composerModeLabel}
+            </span>
+            <span className="text-xs leading-relaxed text-secondary">{composerModeCopy}</span>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-outline">
+            {primaryActionKind}
+          </p>
+          <p className="mt-1 text-sm font-semibold text-on-surface">{dockPrimaryActionLabel}</p>
+        </div>
+      </div>
       <textarea
         ref={dockTextareaRef}
         value={dockInput}
         onChange={event => onDockInputChange(event.target.value)}
         placeholder={dockComposerPlaceholder}
-        className="mt-3 min-h-[6.5rem] w-full resize-none rounded-2xl border border-outline-variant/35 bg-surface-container-low/35 px-4 py-3 text-sm leading-6 text-on-surface shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] focus:border-primary/40 focus:outline-none"
+        className="mt-4 min-h-[6rem] w-full resize-none rounded-2xl border border-outline-variant/35 bg-surface-container-low/35 px-4 py-3 text-sm leading-6 text-on-surface shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] focus:border-primary/40 focus:outline-none"
       />
       {helperText}
 
       {dockUploads.length > 0 ? (
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className="mt-4 flex flex-wrap gap-2">
           {dockUploads.map(upload => (
             <div
               key={upload.id}
@@ -134,7 +176,7 @@ export const OrchestratorCopilotComposer = ({
         </div>
       ) : null}
 
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-outline-variant/20 pt-4">
         <label className="enterprise-button enterprise-button-secondary cursor-pointer">
           <Plus size={14} />
           Upload files
