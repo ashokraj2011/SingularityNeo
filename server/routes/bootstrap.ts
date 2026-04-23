@@ -118,7 +118,7 @@ const validateCommandTemplatePayload = ({
     allowedWorkspacePaths.length > 0 &&
     !isWorkspacePathApproved(template.workingDirectory, allowedWorkspacePaths)
   ) {
-    issues.push('Working directory must be inside an approved workspace path.');
+    issues.push('Working directory must be inside the configured workspace path.');
   }
 
   return {
@@ -160,7 +160,7 @@ const validateDeploymentTargetPayload = ({
     allowedWorkspacePaths.length > 0 &&
     !isWorkspacePathApproved(target.workspacePath, allowedWorkspacePaths)
   ) {
-    issues.push('Deployment workspace path must be inside an approved workspace path.');
+    issues.push('Deployment workspace path must be inside the configured workspace path.');
   }
 
   return {

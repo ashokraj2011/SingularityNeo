@@ -44,4 +44,10 @@ contextBridge.exposeInMainWorld('singularityDesktop', {
   },
   cancelRuntimeChatStream: streamId =>
     ipcRenderer.invoke('desktop:runtime:chat-stream:cancel', { streamId }),
+  listLocalConnectors: () => ipcRenderer.invoke('desktop:local-connectors:list'),
+  saveLocalConnector: payload => ipcRenderer.invoke('desktop:local-connectors:save', payload),
+  deleteLocalConnector: provider =>
+    ipcRenderer.invoke('desktop:local-connectors:delete', { provider }),
+  validateLocalConnector: provider =>
+    ipcRenderer.invoke('desktop:local-connectors:validate', { provider }),
 });

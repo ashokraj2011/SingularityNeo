@@ -581,11 +581,11 @@ export const claimCapabilityExecution = async ({
     throw new Error('The desktop executor is registered for a different workspace operator.');
   }
 
-  // Use the caller-supplied approvedWorkspaceRoots directly.  The route
+  // Use the caller-supplied desktop workspace roots directly.  The route
   // handler already builds this list server-side (including the
   // executor's SINGULARITY_WORKING_DIRECTORY fallback when no
   // per-capability mapping exists), so re-querying here would discard
-  // that fallback and cause a spurious "no approved workspace root"
+  // that fallback and cause a spurious "no desktop workspace root"
   // error even when the operator has set a working directory.
   const normalizedRoots = Array.from(
     new Set(
@@ -594,7 +594,7 @@ export const claimCapabilityExecution = async ({
   );
   if (normalizedRoots.length === 0) {
     throw new Error(
-      'This desktop does not have an approved local workspace root for the selected capability.',
+      'This desktop operator does not have a validated workspace root for the selected capability.',
     );
   }
 

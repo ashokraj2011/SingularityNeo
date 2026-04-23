@@ -359,6 +359,69 @@ export interface WorkspaceConnectorSettings {
   confluence: WorkspaceConfluenceConnectorSettings;
 }
 
+export type DesktopLocalConnectorProvider =
+  | "github"
+  | "jira"
+  | "confluence"
+  | "jenkins"
+  | "datadog"
+  | "splunk"
+  | "servicenow";
+
+export type DesktopLocalConnectorAuthType =
+  | "TOKEN"
+  | "BASIC"
+  | "API_KEY"
+  | "BEARER"
+  | "NONE";
+
+export type DesktopLocalConnectorStatus =
+  | "READY"
+  | "NEEDS_CONFIGURATION"
+  | "ERROR";
+
+export interface DesktopLocalConnectorConfig {
+  provider: DesktopLocalConnectorProvider;
+  enabled: boolean;
+  label: string;
+  baseUrl?: string;
+  authType: DesktopLocalConnectorAuthType;
+  username?: string;
+  projectKey?: string;
+  spaceKey?: string;
+  organization?: string;
+  notes?: string;
+  tokenStored: boolean;
+  encryption?: "safeStorage" | "plaintext-local-fallback" | "none";
+  updatedAt?: string;
+  lastValidatedAt?: string;
+  lastValidationStatus?: DesktopLocalConnectorStatus;
+  lastValidationMessage?: string;
+}
+
+export interface DesktopLocalConnectorSavePayload {
+  provider: DesktopLocalConnectorProvider;
+  enabled: boolean;
+  label?: string;
+  baseUrl?: string;
+  authType?: DesktopLocalConnectorAuthType;
+  username?: string;
+  projectKey?: string;
+  spaceKey?: string;
+  organization?: string;
+  notes?: string;
+  token?: string;
+  clearToken?: boolean;
+}
+
+export interface DesktopLocalConnectorValidationResult {
+  provider: DesktopLocalConnectorProvider;
+  status: DesktopLocalConnectorStatus;
+  message: string;
+  checkedAt: string;
+  details?: Record<string, unknown>;
+}
+
 export type WorkspaceUserStatus = "ACTIVE" | "INVITED" | "DISABLED";
 export type WorkspaceRole =
   | "WORKSPACE_ADMIN"

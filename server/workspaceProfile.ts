@@ -82,7 +82,7 @@ const unique = (items: string[]) => Array.from(new Set(items.filter(Boolean)));
 
 const createGenericProfile = (
   workspacePath?: string,
-  summary = 'No clear Node, Python, or Java stack was detected from the approved workspace.',
+  summary = 'No clear Node, Python, or Java stack was detected from the desktop workspace.',
 ): WorkspaceStackProfile => ({
   stack: 'GENERIC',
   buildTool: 'UNKNOWN',
@@ -506,7 +506,7 @@ const analyzeRoot = (root: string): RootAnalysis => {
       root,
       profile: createGenericProfile(
         root,
-        'No supported Node, Python, or Java manifest files were found in the approved workspace.',
+        'No supported Node, Python, or Java manifest files were found in the desktop workspace.',
       ),
       evidenceFiles: evidenceFiles as string[],
       recommendedCommandTemplates: [],
@@ -553,8 +553,8 @@ export const detectWorkspaceProfile = ({
       profile: createGenericProfile(
         preferredRoot || requestedPaths[0],
         requestedPaths.length === 0
-          ? 'No approved workspace path is configured yet.'
-          : 'The approved workspace path could not be inspected from the local filesystem.',
+          ? 'No desktop workspace path is configured yet.'
+          : 'The desktop workspace path could not be inspected from the local filesystem.',
       ),
       evidenceFiles: [],
       recommendedCommandTemplates: [],

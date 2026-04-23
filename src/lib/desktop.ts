@@ -1,3 +1,10 @@
+import type {
+  DesktopLocalConnectorConfig,
+  DesktopLocalConnectorProvider,
+  DesktopLocalConnectorSavePayload,
+  DesktopLocalConnectorValidationResult,
+} from '../types';
+
 export interface DesktopWorkerPing {
   status: string;
   pid: number;
@@ -38,6 +45,16 @@ export interface SingularityDesktopBridge {
     onEvent: (event: unknown) => void,
   ) => Promise<unknown>;
   cancelRuntimeChatStream: (streamId: string) => Promise<unknown>;
+  listLocalConnectors: () => Promise<DesktopLocalConnectorConfig[]>;
+  saveLocalConnector: (
+    payload: DesktopLocalConnectorSavePayload,
+  ) => Promise<DesktopLocalConnectorConfig>;
+  deleteLocalConnector: (
+    provider: DesktopLocalConnectorProvider,
+  ) => Promise<{ deleted: boolean; provider: DesktopLocalConnectorProvider }>;
+  validateLocalConnector: (
+    provider: DesktopLocalConnectorProvider,
+  ) => Promise<DesktopLocalConnectorValidationResult>;
 }
 
 declare global {

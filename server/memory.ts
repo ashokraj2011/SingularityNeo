@@ -581,7 +581,7 @@ const buildCapabilityMetadataContent = (capability: Capability) =>
       ? `Default workspace path: ${capability.executionConfig.defaultWorkspacePath}`
       : null,
     capability.executionConfig.allowedWorkspacePaths.length
-      ? `Approved workspace paths: ${capability.executionConfig.allowedWorkspacePaths.join(', ')}`
+      ? `Legacy workspace hints: ${capability.executionConfig.allowedWorkspacePaths.join(', ')}`
       : null,
     capability.localDirectories.length ? `Local directories: ${capability.localDirectories.join(', ')}` : null,
     capability.documentationNotes ? `Documentation notes: ${capability.documentationNotes}` : null,

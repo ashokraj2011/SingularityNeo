@@ -933,8 +933,17 @@ const CapabilityDatabases = () => {
 
       <SectionCard
         title="Workspace connectors"
-        description="Shared connector credentials live at the workspace level so capabilities can reuse GitHub, Jira, and Confluence access without duplicating secrets."
+        description="Shared connector metadata can stay here for headless/server flows. Personal security tokens should be configured in Local Connectors on each desktop and are not stored on the server."
         icon={RefreshCcw}
+        action={
+          <button
+            type="button"
+            onClick={() => navigate('/desktop/connectors')}
+            className="enterprise-button enterprise-button-secondary"
+          >
+            Open Local Connectors
+          </button>
+        }
       >
         <div className="grid gap-4 xl:grid-cols-3">
           <div className="rounded-3xl border border-outline-variant/20 bg-white px-5 py-5">

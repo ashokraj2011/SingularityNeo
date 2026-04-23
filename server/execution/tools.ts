@@ -394,7 +394,7 @@ const resolveWorkspacePath = async (
 
   if (!candidate) {
     throw new Error(
-      `Capability ${capability.name} does not have an approved local workspace path configured.`,
+      `Capability ${capability.name} does not have a desktop-user workspace path available for this run.`,
     );
   }
 
@@ -404,7 +404,7 @@ const resolveWorkspacePath = async (
     }
 
     throw new Error(
-      `Workspace path ${candidate} is not approved for capability ${capability.name}. Approved workspace roots: ${formatApprovedWorkspaceRoots(allowed)}.`,
+      `Workspace path ${candidate} is outside the desktop-user workspace roots for capability ${capability.name}. Desktop workspace roots: ${formatApprovedWorkspaceRoots(allowed)}.`,
     );
   }
 
@@ -425,7 +425,7 @@ const resolvePathWithinWorkspace = (
     relative.startsWith(`..${path.sep}`) ||
     path.isAbsolute(relative)
   ) {
-    throw new Error(`Path ${filePath} escapes the approved workspace root.`);
+    throw new Error(`Path ${filePath} escapes the desktop workspace root.`);
   }
 
   return nextPath;
@@ -466,11 +466,13 @@ export const classifyToolExecutionError = ({
 
   if (
     /is not approved for capability/i.test(normalized) ||
-    /escapes the approved workspace root/i.test(normalized)
+    /outside the desktop-user workspace roots/i.test(normalized) ||
+    /escapes the approved workspace root/i.test(normalized) ||
+    /escapes the desktop workspace root/i.test(normalized)
   ) {
     return {
       recoverable: true,
-      feedback: `Tool ${toolId} used an invalid workspace path: ${normalized} Pick an approved workspace root or child path and try again.`,
+      feedback: `Tool ${toolId} used an invalid workspace path: ${normalized} Pick a desktop workspace root or child path and try again.`,
     };
   }
 
@@ -639,7 +641,7 @@ const executeCommandTemplate = async (
 const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_list: {
     id: "workspace_list",
-    description: "List files inside an approved workspace path.",
+    description: "List files inside the current desktop-user workspace path.",
     usageExample: '{"path":"src","limit":200,"cursor":"..."}',
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
@@ -902,7 +904,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_search: {
     id: "workspace_search",
     description:
-      "Search within an approved workspace for a string or regex pattern.",
+      "Search within the current desktop-user workspace for a string or regex pattern.",
     usageExample:
       '{"pattern":"Operator","path":"src","limit":100,"cursor":"..."}',
     retryable: true,
@@ -987,7 +989,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   git_status: {
     id: "git_status",
-    description: "Inspect git status for an approved workspace repository.",
+    description: "Inspect git status for the current desktop-user workspace repository.",
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
       const workspacePath = await resolveWorkspacePath(

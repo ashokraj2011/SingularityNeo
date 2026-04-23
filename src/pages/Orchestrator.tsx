@@ -993,13 +993,26 @@ const Orchestrator = () => {
 
   useEffect(() => {
     const preferred =
-      activeCapability.executionConfig.defaultWorkspacePath ||
-      activeCapability.executionConfig.allowedWorkspacePaths[0] ||
-      activeCapability.localDirectories[0] ||
-      "";
+      typeof runtimeStatus?.workingDirectory === "string"
+        ? runtimeStatus.workingDirectory.trim()
+        : "";
     setApprovedWorkspaceDraft(preferred);
     setApprovedWorkspaceValidation(null);
-  }, [activeCapability.id]);
+  }, [activeCapability.id, runtimeStatus?.workingDirectory]);
+
+  useEffect(() => {
+    const preferred =
+      desktopWorkspaceMappings.find((mapping) => mapping.validation.valid)
+        ?.workingDirectoryPath ||
+      desktopWorkspaceMappings.find((mapping) => mapping.validation.valid)
+        ?.localRootPath ||
+      "";
+    if (!preferred || approvedWorkspaceDraft.trim()) {
+      return;
+    }
+    setApprovedWorkspaceDraft(preferred);
+    setApprovedWorkspaceValidation(null);
+  }, [approvedWorkspaceDraft, desktopWorkspaceMappings]);
 
   useEffect(() => {
     if (
@@ -1516,10 +1529,9 @@ const Orchestrator = () => {
   );
 
   const preferredApprovedWorkspaceRoot = useMemo(() => {
-    // Priority: user-level desktop dir → per-capability mapping → capability
-    // metadata → first approved root. The user-level dir (from executor
-    // registration's working_directory) wins when the desktop client includes
-    // it in runtimeStatus — this makes workspace config capability-independent.
+    // Priority: user-level desktop dir → per-capability desktop mapping →
+    // first validated desktop root. Capability metadata can suggest migration
+    // values elsewhere, but it is not runtime authority for workspace access.
     const desktopUserLevelDir =
       typeof runtimeStatus?.workingDirectory === "string" &&
       runtimeStatus.workingDirectory.trim()
@@ -1531,23 +1543,14 @@ const Orchestrator = () => {
       desktopWorkspaceMappings.find((mapping) => mapping.validation.valid)
         ?.localRootPath ||
       "";
-    const legacySuggestion =
-      String(
-        activeCapability.executionConfig.defaultWorkspacePath || "",
-      ).trim() ||
-      activeCapability.localDirectories.find(Boolean) ||
-      "";
     return (
       desktopUserLevelDir ||
       mappedWorkingDirectory ||
-      legacySuggestion ||
       approvedWorkspaceRoots[0] ||
       ""
     );
   }, [
     runtimeStatus?.workingDirectory,
-    activeCapability.executionConfig.defaultWorkspacePath,
-    activeCapability.localDirectories,
     approvedWorkspaceRoots,
     desktopWorkspaceMappings,
   ]);
@@ -2586,7 +2589,6 @@ const Orchestrator = () => {
           ? [selectedExecutionRepository.localRootHint]
           : []),
         ...approvedWorkspaceRoots.slice(0, 2),
-        ...activeCapability.localDirectories.slice(0, 2),
       ].filter(
         (root, index, array): root is string =>
           Boolean(root) && array.indexOf(root) === index,
@@ -6314,8 +6316,7 @@ const Orchestrator = () => {
                         },
                         onApproveWorkspacePath: (options) =>
                           void handleApproveWorkspacePath(options),
-                        activeCapabilityLocalDirectories:
-                          activeCapability.localDirectories,
+                        activeCapabilityLocalDirectories: [],
                         approvedWorkspaceValidation,
                         canEditCapability,
                         selectedCodeDiffArtifactId,

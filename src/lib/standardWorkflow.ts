@@ -280,7 +280,7 @@ export const STANDARD_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
       'run_test',
     ],
     executionNotes:
-      'Implementation can modify files inside capability-approved workspaces and should run build/test validation before completing the step.',
+      'Implementation can modify files inside the current desktop-user workspace mapping and should run build/test validation before completing the step.',
     artifactContract: createArtifactContract(
       [
         'Solution Design Document',
@@ -610,7 +610,7 @@ export const BROKERAGE_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
       'run_test',
     ],
     executionNotes:
-      'Construction can modify approved workspace files and should execute build or test commands before handing to QA.',
+      'Construction can modify files inside the current desktop-user workspace mapping and should execute build or test commands before handing to QA.',
     artifactContract: createArtifactContract(
       ['Construction Handoff Packet', 'Validation Focus Areas', 'Acceptance Criteria Matrix'],
       ['Code Change Set', 'Construction Test Evidence', 'Implementation Notes'],

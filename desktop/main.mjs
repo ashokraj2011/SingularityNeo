@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron';
 import dotenv from 'dotenv';
 import { probeRendererUrl } from './rendererProbe.mjs';
 
@@ -80,6 +80,360 @@ const resolveDesktopExecutorId = () => {
   } catch {
     return `desktop-executor-${randomUUID().slice(0, 12)}`;
   }
+};
+
+const LOCAL_CONNECTOR_PROVIDERS = new Set([
+  'github',
+  'jira',
+  'confluence',
+  'jenkins',
+  'datadog',
+  'splunk',
+  'servicenow',
+]);
+
+const LOCAL_CONNECTOR_DEFAULTS = {
+  github: {
+    label: 'GitHub',
+    baseUrl: 'https://api.github.com',
+    authType: 'TOKEN',
+  },
+  jira: {
+    label: 'Jira',
+    baseUrl: '',
+    authType: 'BASIC',
+  },
+  confluence: {
+    label: 'Confluence',
+    baseUrl: '',
+    authType: 'BASIC',
+  },
+  jenkins: {
+    label: 'Jenkins',
+    baseUrl: '',
+    authType: 'BASIC',
+  },
+  datadog: {
+    label: 'Datadog',
+    baseUrl: 'https://api.datadoghq.com',
+    authType: 'API_KEY',
+  },
+  splunk: {
+    label: 'Splunk',
+    baseUrl: '',
+    authType: 'BEARER',
+  },
+  servicenow: {
+    label: 'ServiceNow',
+    baseUrl: '',
+    authType: 'BASIC',
+  },
+};
+
+const localConnectorStorePath = () =>
+  path.join(app.getPath('userData'), 'local-connectors.json');
+
+const normalizeProvider = value => {
+  const provider = String(value || '').trim().toLowerCase();
+  if (!LOCAL_CONNECTOR_PROVIDERS.has(provider)) {
+    throw new Error(`Unsupported local connector provider: ${String(value || 'unknown')}`);
+  }
+  return provider;
+};
+
+const normalizeConnectorUrl = value => String(value || '').trim().replace(/\/+$/, '');
+
+const readLocalConnectorStore = () => {
+  const storePath = localConnectorStorePath();
+  try {
+    if (!fs.existsSync(storePath)) {
+      return { version: 1, connectors: {} };
+    }
+    const parsed = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+    return {
+      version: 1,
+      connectors:
+        parsed?.connectors && typeof parsed.connectors === 'object'
+          ? parsed.connectors
+          : {},
+    };
+  } catch (error) {
+    console.warn('Unable to read local connector store.', error);
+    return { version: 1, connectors: {} };
+  }
+};
+
+const writeLocalConnectorStore = store => {
+  const storePath = localConnectorStorePath();
+  fs.mkdirSync(path.dirname(storePath), { recursive: true });
+  fs.writeFileSync(storePath, `${JSON.stringify(store, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+};
+
+const encryptLocalSecret = value => {
+  const token = String(value || '');
+  if (!token) {
+    return undefined;
+  }
+  if (safeStorage.isEncryptionAvailable()) {
+    return {
+      encryptedSecret: safeStorage.encryptString(token).toString('base64'),
+      encryption: 'safeStorage',
+    };
+  }
+  return {
+    encryptedSecret: Buffer.from(token, 'utf8').toString('base64'),
+    encryption: 'plaintext-local-fallback',
+  };
+};
+
+const decryptLocalSecret = connector => {
+  if (!connector?.encryptedSecret) {
+    return '';
+  }
+  try {
+    const payload = Buffer.from(connector.encryptedSecret, 'base64');
+    if (connector.encryption === 'safeStorage') {
+      return safeStorage.decryptString(payload);
+    }
+    return payload.toString('utf8');
+  } catch {
+    return '';
+  }
+};
+
+const redactLocalConnector = connector => {
+  const provider = normalizeProvider(connector?.provider);
+  const defaults = LOCAL_CONNECTOR_DEFAULTS[provider];
+  return {
+    provider,
+    enabled: Boolean(connector.enabled),
+    label: String(connector.label || defaults.label),
+    baseUrl: normalizeConnectorUrl(connector.baseUrl || defaults.baseUrl),
+    authType: connector.authType || defaults.authType,
+    username: String(connector.username || ''),
+    projectKey: String(connector.projectKey || ''),
+    spaceKey: String(connector.spaceKey || ''),
+    organization: String(connector.organization || ''),
+    notes: String(connector.notes || ''),
+    tokenStored: Boolean(connector.encryptedSecret),
+    encryption: connector.encryption || 'none',
+    updatedAt: connector.updatedAt,
+    lastValidatedAt: connector.lastValidatedAt,
+    lastValidationStatus: connector.lastValidationStatus,
+    lastValidationMessage: connector.lastValidationMessage,
+  };
+};
+
+const listLocalConnectors = () => {
+  const store = readLocalConnectorStore();
+  return Array.from(LOCAL_CONNECTOR_PROVIDERS).map(provider =>
+    redactLocalConnector({
+      provider,
+      ...LOCAL_CONNECTOR_DEFAULTS[provider],
+      ...(store.connectors[provider] || {}),
+    }),
+  );
+};
+
+const upsertLocalConnector = payload => {
+  const provider = normalizeProvider(payload?.provider);
+  const store = readLocalConnectorStore();
+  const existing = store.connectors[provider] || {};
+  const defaults = LOCAL_CONNECTOR_DEFAULTS[provider];
+  const next = {
+    ...existing,
+    provider,
+    enabled: Boolean(payload?.enabled),
+    label: String(payload?.label || existing.label || defaults.label),
+    baseUrl: normalizeConnectorUrl(payload?.baseUrl ?? existing.baseUrl ?? defaults.baseUrl),
+    authType: String(payload?.authType || existing.authType || defaults.authType),
+    username: String(payload?.username ?? existing.username ?? ''),
+    projectKey: String(payload?.projectKey ?? existing.projectKey ?? ''),
+    spaceKey: String(payload?.spaceKey ?? existing.spaceKey ?? ''),
+    organization: String(payload?.organization ?? existing.organization ?? ''),
+    notes: String(payload?.notes ?? existing.notes ?? ''),
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (payload?.clearToken) {
+    delete next.encryptedSecret;
+    delete next.encryption;
+  } else if (typeof payload?.token === 'string' && payload.token.length > 0) {
+    Object.assign(next, encryptLocalSecret(payload.token));
+  }
+
+  store.connectors[provider] = next;
+  writeLocalConnectorStore(store);
+  return redactLocalConnector(next);
+};
+
+const deleteLocalConnector = payload => {
+  const provider = normalizeProvider(payload?.provider);
+  const store = readLocalConnectorStore();
+  delete store.connectors[provider];
+  writeLocalConnectorStore(store);
+  return { deleted: true, provider };
+};
+
+const fetchWithTimeout = async (url, options = {}) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const basicAuthHeader = (username, token) =>
+  `Basic ${Buffer.from(`${String(username || '')}:${String(token || '')}`, 'utf8').toString(
+    'base64',
+  )}`;
+
+const validationResult = (provider, status, message, details = {}) => ({
+  provider,
+  status,
+  message,
+  checkedAt: new Date().toISOString(),
+  details,
+});
+
+const validateLocalConnector = async payload => {
+  const provider = normalizeProvider(payload?.provider);
+  const store = readLocalConnectorStore();
+  const connector = {
+    provider,
+    ...LOCAL_CONNECTOR_DEFAULTS[provider],
+    ...(store.connectors[provider] || {}),
+  };
+  const baseUrl = normalizeConnectorUrl(connector.baseUrl);
+  const token = decryptLocalSecret(connector);
+
+  let result;
+  try {
+    if (!connector.enabled) {
+      result = validationResult(provider, 'NEEDS_CONFIGURATION', 'Connector is saved but disabled.');
+    } else if (!baseUrl) {
+      result = validationResult(provider, 'NEEDS_CONFIGURATION', 'Base URL is required.');
+    } else if (!token) {
+      result = validationResult(provider, 'NEEDS_CONFIGURATION', 'A local token is required.');
+    } else if (provider === 'github') {
+      const response = await fetchWithTimeout(`${baseUrl}/user`, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      result = response.ok
+        ? validationResult(provider, 'READY', 'GitHub token validated.')
+        : validationResult(provider, 'ERROR', `GitHub validation failed with HTTP ${response.status}.`);
+    } else if (provider === 'jira') {
+      if (!connector.username) {
+        result = validationResult(provider, 'NEEDS_CONFIGURATION', 'Jira email is required.');
+      } else {
+        const response = await fetchWithTimeout(`${baseUrl}/rest/api/3/myself`, {
+          headers: {
+            Accept: 'application/json',
+            Authorization: basicAuthHeader(connector.username, token),
+          },
+        });
+        result = response.ok
+          ? validationResult(provider, 'READY', 'Jira credentials validated.')
+          : validationResult(provider, 'ERROR', `Jira validation failed with HTTP ${response.status}.`);
+      }
+    } else if (provider === 'confluence') {
+      if (!connector.username) {
+        result = validationResult(provider, 'NEEDS_CONFIGURATION', 'Confluence email is required.');
+      } else {
+        const response = await fetchWithTimeout(`${baseUrl}/wiki/rest/api/user/current`, {
+          headers: {
+            Accept: 'application/json',
+            Authorization: basicAuthHeader(connector.username, token),
+          },
+        });
+        result = response.ok
+          ? validationResult(provider, 'READY', 'Confluence credentials validated.')
+          : validationResult(
+              provider,
+              'ERROR',
+              `Confluence validation failed with HTTP ${response.status}.`,
+            );
+      }
+    } else if (provider === 'jenkins') {
+      const response = await fetchWithTimeout(`${baseUrl}/api/json`, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: connector.username
+            ? basicAuthHeader(connector.username, token)
+            : `Bearer ${token}`,
+        },
+      });
+      result = response.ok
+        ? validationResult(provider, 'READY', 'Jenkins credentials validated.')
+        : validationResult(provider, 'ERROR', `Jenkins validation failed with HTTP ${response.status}.`);
+    } else if (provider === 'datadog') {
+      const response = await fetchWithTimeout(`${baseUrl}/api/v1/validate`, {
+        headers: {
+          Accept: 'application/json',
+          'DD-API-KEY': token,
+        },
+      });
+      result = response.ok
+        ? validationResult(provider, 'READY', 'Datadog API key validated.')
+        : validationResult(provider, 'ERROR', `Datadog validation failed with HTTP ${response.status}.`);
+    } else if (provider === 'splunk') {
+      const response = await fetchWithTimeout(`${baseUrl}/services/server/info?output_mode=json`, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      result = response.ok
+        ? validationResult(provider, 'READY', 'Splunk token validated.')
+        : validationResult(provider, 'ERROR', `Splunk validation failed with HTTP ${response.status}.`);
+    } else if (provider === 'servicenow') {
+      if (!connector.username) {
+        result = validationResult(provider, 'NEEDS_CONFIGURATION', 'ServiceNow username is required.');
+      } else {
+        const response = await fetchWithTimeout(`${baseUrl}/api/now/table/sys_user?sysparm_limit=1`, {
+          headers: {
+            Accept: 'application/json',
+            Authorization: basicAuthHeader(connector.username, token),
+          },
+        });
+        result = response.ok
+          ? validationResult(provider, 'READY', 'ServiceNow credentials validated.')
+          : validationResult(
+              provider,
+              'ERROR',
+              `ServiceNow validation failed with HTTP ${response.status}.`,
+            );
+      }
+    }
+  } catch (error) {
+    result = validationResult(
+      provider,
+      'ERROR',
+      error?.name === 'AbortError'
+        ? 'Validation timed out.'
+        : 'Validation failed before the connector responded.',
+    );
+  }
+
+  store.connectors[provider] = {
+    ...connector,
+    lastValidatedAt: result.checkedAt,
+    lastValidationStatus: result.status,
+    lastValidationMessage: result.message,
+  };
+  writeLocalConnectorStore(store);
+  return result;
 };
 
 let mainWindow = null;
@@ -402,6 +756,16 @@ ipcMain.handle('desktop:runtime:chat-stream:cancel', async (_event, payload) => 
   }
   return { cancelled: true };
 });
+ipcMain.handle('desktop:local-connectors:list', async () => listLocalConnectors());
+ipcMain.handle('desktop:local-connectors:save', async (_event, payload) =>
+  upsertLocalConnector(payload || {}),
+);
+ipcMain.handle('desktop:local-connectors:delete', async (_event, payload) =>
+  deleteLocalConnector(payload || {}),
+);
+ipcMain.handle('desktop:local-connectors:validate', async (_event, payload) =>
+  validateLocalConnector(payload || {}),
+);
 
 app.whenReady().then(async () => {
   startLocalWorker();

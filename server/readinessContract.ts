@@ -43,7 +43,7 @@ export const buildCapabilityReadinessContract = ({
     executionRuntimeSummary: hasFreshOwner
       ? `${executionOwnership?.actorDisplayName || 'A desktop executor'} currently owns execution for this capability.`
       : hasEligibleExecutor
-      ? 'A desktop executor with an approved local workspace root is online and can claim this capability.'
+      ? 'A desktop executor with a validated user workspace root is online and can claim this capability.'
       : isDesktopExecutionRuntime()
       ? 'No eligible desktop executor is currently online for this capability.'
       : 'Desktop-owned execution mode is not active on the control plane.',

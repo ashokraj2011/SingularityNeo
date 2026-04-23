@@ -146,6 +146,8 @@ describe('capability experience model', () => {
         tokenSource: 'headless-cli',
         defaultModel: 'gpt-4.1',
         availableModels: [],
+        workingDirectory: '/workspace/payments',
+        workingDirectorySource: 'mapping',
       },
     });
 

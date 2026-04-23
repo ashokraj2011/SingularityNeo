@@ -154,12 +154,12 @@ const buildProfile = (agent: CapabilityAgent): AgentOperatingProfile => {
     case 'SOFTWARE-DEVELOPER':
       return {
         rolePolicy: {
-          summary: 'Implement inside approved workspaces, stay inside the workflow boundary, and produce reviewable code evidence.',
+          summary: 'Implement inside the current desktop-user workspace mapping, stay inside the workflow boundary, and produce reviewable code evidence.',
           allowedToolIds: toolIds,
-          escalationTriggers: ['Escalate when code changes need unapproved paths, unsafe writes, or missing design inputs.'],
+          escalationTriggers: ['Escalate when code changes need paths outside the desktop workspace mapping, unsafe writes, or missing design inputs.'],
         },
         memoryScope: {
-          summary: 'Uses current work-item context, approved workspace knowledge, code evidence, and prior attempts.',
+          summary: 'Uses current work-item context, desktop workspace knowledge, code evidence, and prior attempts.',
           scopeLabels: ['Current work item', 'Workspace context', 'Code and test evidence'],
         },
         qualityBar: {

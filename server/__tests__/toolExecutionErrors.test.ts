@@ -96,7 +96,7 @@ describe('tool execution validation helpers', () => {
     ).toEqual({
       recoverable: true,
       feedback:
-        'Tool workspace_read used an invalid workspace path: Workspace path /tmp/outside is not approved for capability Test Capability. Pick an approved workspace root or child path and try again.',
+        'Tool workspace_read used an invalid workspace path: Workspace path /tmp/outside is not approved for capability Test Capability. Pick a desktop workspace root or child path and try again.',
     });
   });
 

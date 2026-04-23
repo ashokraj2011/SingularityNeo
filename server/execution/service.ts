@@ -2127,16 +2127,16 @@ const requestStepDecision = async ({
             }`
           : null,
         capability.executionConfig.defaultWorkspacePath
-          ? `Default approved workspace path: ${capability.executionConfig.defaultWorkspacePath}`
+          ? `Legacy default workspace hint: ${capability.executionConfig.defaultWorkspacePath}`
           : null,
-        `Approved workspace paths: ${approvedWorkspacePaths.join(", ")}`,
+        `Desktop workspace roots for this run: ${approvedWorkspacePaths.join(", ")}`,
         ...buildWorkspaceProfilePromptLines(workspaceProfile),
-        "When using workspace tools, prefer relative file paths and omit workspacePath unless you intentionally need a non-default approved workspace or approved subfolder.",
-        "If you do provide workspacePath, it must be the approved root or a child folder inside one approved workspace root. Do not use sibling paths or parent traversal.",
+        "When using workspace tools, prefer relative file paths and omit workspacePath unless you intentionally need a non-default desktop workspace root or child folder.",
+        "If you do provide workspacePath, it must be the desktop workspace root or a child folder inside one desktop workspace root. Do not use sibling paths or parent traversal.",
       ]
         .filter(Boolean)
         .join("\n")
-    : "No approved workspace paths are configured for this capability.";
+    : "No desktop workspace path is available for this run.";
   const startedAt = Date.now();
   const workItemInputArtifacts = artifacts
     .filter(
@@ -6909,9 +6909,9 @@ const executeAutomatedStep = async (
     detail.run.workItemId,
     detail.run.workflowSnapshot,
   );
-  // Inject the executor's user-level working_directory (if set) into the
-  // capability's localDirectories so getCapabilityWorkspaceRoots returns it
-  // at every call site inside this step — independently of capability metadata.
+  // Inject the executor's user-level working_directory (if set) into this
+  // run projection so workspace tooling resolves the desktop user's path
+  // independently of capability metadata.
   const executorRegistration = detail.run.assignedExecutorId
     ? await getDesktopExecutorRegistration(detail.run.assignedExecutorId).catch(() => null)
     : null;
@@ -6921,7 +6921,7 @@ const executeAutomatedStep = async (
           ...rawProjection,
           capability: {
             ...rawProjection.capability,
-            // Prepend so the user-level dir sorts first in the approved roots.
+            // Prepend so the user-level dir sorts first in the runtime roots.
             localDirectories: [
               executorRegistration.workingDirectory,
               ...(rawProjection.capability.localDirectories || []),

@@ -25,6 +25,7 @@ Today, the platform is split like this:
   - desktop shell
   - user-facing runtime status
   - runtime token handling
+  - desktop-local connector token vault
   - direct chat and streamed chat
   - desktop worker
 
@@ -55,6 +56,24 @@ Resolution precedence is:
 4. no metadata fallback
 
 `working_directory_path` must stay inside `local_root_path`.
+
+## Desktop Connector Authority
+
+Personal connector tokens are local desktop state, not control-plane state.
+Use `Operations` → `Local Connectors` inside the Electron app to configure and
+validate GitHub, Jira, Confluence, Jenkins, Datadog, Splunk, and ServiceNow
+tokens for the current OS user.
+
+The security boundary is:
+
+- token values are stored under Electron `userData` on the laptop
+- Electron safe storage is used when the OS keychain is available
+- the renderer only sees redacted token-present flags and validation messages
+- the Express server should not receive or persist these personal token values
+
+Workspace connector metadata and server-side secret references remain useful
+for shared/headless deployments, but enterprise desktop operation should prefer
+the local connector vault for operator-owned credentials.
 
 ## Recommended Topology
 
@@ -283,6 +302,7 @@ npm run desktop:down
 - direct agent chat
 - streamed agent chat
 - desktop workspace validation
+- desktop-local connector validation
 - local branch / checkout setup for repo-backed work
 
 ## Current Important Caveat
@@ -340,7 +360,7 @@ Check on the laptop:
 - `COPILOT_CLI_URL`
 - or `GITHUB_MODELS_TOKEN`
 
-### Claim fails because no approved local workspace roots are available
+### Claim fails because no desktop workspace roots are available
 
 This usually means the current operator has not saved a valid Desktop
 Workspaces mapping for this capability on this desktop.

@@ -574,7 +574,7 @@ const buildWorkItemStatusSummary = async (
         : null,
       branchLine,
       repositories.length > 0 ? `Repositories: ${repositories.join(', ')}` : null,
-      approvedRoots.length > 0 ? `Approved workspaces: ${approvedRoots.join(', ')}` : null,
+      approvedRoots.length > 0 ? `Legacy workspace hints: ${approvedRoots.join(', ')}` : null,
       databases.length > 0 ? `Databases: ${databases.join(', ')}` : null,
       toolLines.length > 0 ? 'Recent tool activity:' : null,
       ...toolLines,
@@ -704,7 +704,7 @@ export const buildWorkItemStageControlBriefing = async ({
     compiledStepContext?.nextActions?.length
       ? `Next allowed actions: ${compiledStepContext.nextActions.join('; ')}`
       : null,
-    approvedRoots.length > 0 ? `Approved workspaces: ${approvedRoots.join(', ')}` : null,
+    approvedRoots.length > 0 ? `Legacy workspace hints: ${approvedRoots.join(', ')}` : null,
     `Release readiness: ${explain.releaseReadiness.status} (${explain.releaseReadiness.score}%)`,
     `Operator goal: help the user understand and complete only the current stage. Stay focused on this work item and current step, and produce concrete stage-ready guidance.`,
   ]
@@ -1037,7 +1037,7 @@ const buildCapabilityMetadataSummary = (bundle: CapabilityBundle) => {
     capability.ownerTeam ? `Owner team: ${capability.ownerTeam}` : null,
     workflowNames.length > 0 ? `Workflows: ${workflowNames.join(', ')}` : null,
     repositories.length > 0 ? `Repositories: ${repositories.join(', ')}` : null,
-    approvedRoots.length > 0 ? `Approved workspaces: ${approvedRoots.join(', ')}` : null,
+    approvedRoots.length > 0 ? `Legacy workspace hints: ${approvedRoots.join(', ')}` : null,
     databases.length > 0 ? `Databases: ${databases.join(', ')}` : null,
   ]
     .filter(Boolean)
@@ -1436,7 +1436,7 @@ export const maybeHandleCapabilityChatAction = async ({
     if (!action.note?.trim()) {
       return {
         handled: true,
-        content: `Add the guidance after a colon, for example: guide agent for ${workItem.id}: use the approved workspace path /repo/app and keep the API surface unchanged`,
+        content: `Add the guidance after a colon, for example: guide agent for ${workItem.id}: use the desktop workspace path /repo/app and keep the API surface unchanged`,
       };
     }
 
@@ -1533,7 +1533,7 @@ export const maybeHandleCapabilityChatAction = async ({
       handled: true,
       content:
         action.type === 'UNBLOCK' && workItem.status === 'BLOCKED'
-          ? `${formatWorkItemHeading(workItem)} is blocked without an open wait. Add guidance after a colon, for example: unblock ${workItem.id}: use the approved workspace path /repo/app and retry from the current phase`
+          ? `${formatWorkItemHeading(workItem)} is blocked without an open wait. Add guidance after a colon, for example: unblock ${workItem.id}: use the desktop workspace path /repo/app and retry from the current phase`
           : `${formatWorkItemHeading(workItem)} does not currently have an open wait to resolve.`,
     };
   }
@@ -1583,7 +1583,7 @@ export const maybeHandleCapabilityChatAction = async ({
         handled: true,
         content: requestedFields?.length
           ? `This item is waiting for input. Reply with the exact input after a colon, for example: provide input for ${workItem.id}: ${requestedFields.join(', ')}`
-          : `This item is waiting for input. Reply with the input after a colon, for example: provide input for ${workItem.id}: approved workspace path is /repo/app`,
+          : `This item is waiting for input. Reply with the input after a colon, for example: provide input for ${workItem.id}: desktop workspace path is /repo/app`,
       };
     }
 

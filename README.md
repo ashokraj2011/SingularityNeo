@@ -20,6 +20,7 @@ SingularityNeo isn't just about running agents; it's about **Enterprise Safety a
 - 🤝 **Strict Human-in-the-Loop Governance**: Agents can plan, design, implement, and review, but the platform ensures humans retain ultimate control over approvals, policy boundaries, and conflict resolution.
 - 💡 **9-Lever Token Optimization**: A principled context-budgeting layer keeps every main-model call lean. Phase-sliced guidance, semantic-hunk reads, tool-loop history rollup, diff-first prompting, per-phase token budgets with priority-based eviction, caller/callee retrieval bundles, diff-enforcement policy, structured rollup summaries, and per-call Prompt Receipts — all active by default, all tunable per capability. See [Token Optimization](./docs/token-optimization.md).
 - 💻 **User-Scoped Desktop Workspaces**: Local execution paths are resolved from `Desktop Workspaces`, not shared capability metadata. Each operator can save a different local root and working directory per desktop executor, with repository rows taking precedence over a capability fallback.
+- 🔐 **Desktop-Local Connector Vault**: Operator-owned tokens for GitHub, Jira, Confluence, Jenkins, Datadog, Splunk, and ServiceNow are configured from `Local Connectors` in the Electron app. Tokens stay in the desktop user profile and are never written to the control-plane database.
 - 🌿 **Work-Item Branch Standardization**: Repo-backed work-item execution now converges on one branch rule everywhere: the shared branch, checkout session, local commit flow, and push target all use the exact literal `workItem.id`.
 - 🛂 **Release Passport**: A structured governance gate that aggregates run evidence, approval chains, risk signals, and open findings into a single release-readiness document. Passport approvals are linked to the run, signed, and stored alongside the evidence packet.
 - 💥 **Blast Radius Analysis**: Before a proposed file change is deployed, Shadow Execution maps which capabilities and files would break. Dependents are classified `CRITICAL`, `WARNING`, or `SAFE` so teams can assess risk before a single line ships.
@@ -68,7 +69,7 @@ The sidebar organises specialist tools into four labelled groups visible to user
 | -------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------- |
 | **Governance** | Posture Dashboard, Controls Catalog, Exceptions, Provenance, Work Item Report                                 | Admins / Portfolio owners |
 | **Security**   | Sentinel Mode, Blast Radius                                                                                   | Operators, Architects     |
-| **Operations** | Ops Console, Incidents, MRM, Run Console, Memory, Evals                                                       | Operators                 |
+| **Operations** | Ops Console, Local Connectors, Incidents, MRM, Run Console, Memory, Evals                                     | Operators                 |
 | **Platform**   | Architecture, Access, Skills, Tools, Tool Access, Policies, Artifact Designer, Agent Studio, Tasks, Databases | Builders / Admins         |
 
 ## Operator Roles & Audiences
@@ -272,6 +273,21 @@ The runtime uses this precedence:
 metadata fields such as repository `localRootHint`, `localDirectories`, and
 `defaultWorkspacePath` remain visible as suggestions, but they are no longer
 runtime authority for claim, branch creation, or local git execution.
+
+### Local Connectors
+
+Use `Operations` → `Local Connectors` to configure desktop-local tokens for
+GitHub, Jira, Confluence, Jenkins, Datadog, Splunk, and ServiceNow.
+
+These tokens are operator-owned and machine-local:
+
+- they are stored under the Electron `userData` profile for this OS user
+- the renderer receives only redacted metadata and validation status
+- the Express control plane does not receive or persist the token values
+
+Workspace connector settings can still hold shared metadata or legacy
+headless secret references, but personal connector tokens belong in `Local
+Connectors`.
 
 ### Work-Item Branch Rule
 

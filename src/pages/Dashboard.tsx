@@ -74,6 +74,7 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   architecture: Building2,
   identity: KeyRound,
   operations: Gauge,
+  'desktop-connectors': KeyRound,
   access: ShieldCheck,
   databases: Database,
   memory: Database,
@@ -944,11 +945,10 @@ const Dashboard = () => {
             },
             {
               label: 'Repositories',
-              value: activeCapability.gitRepositories.length + activeCapability.localDirectories.length,
+              value: activeCapability.gitRepositories.length,
               helper:
                 activeCapability.gitRepositories[0] ||
-                activeCapability.localDirectories[0] ||
-                'No source workspace linked',
+                'No repository linked',
               icon: FolderGit2,
               path: '/capabilities/metadata',
             },

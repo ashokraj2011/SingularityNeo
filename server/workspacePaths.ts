@@ -7,8 +7,7 @@ export const normalizeDirectoryPath = (value?: string | null) => {
 };
 
 /**
- * Returns the ordered set of approved local workspace root paths for a
- * capability.
+ * Returns the ordered set of desktop workspace root paths for a capability run.
  *
  * When `desktopWorkingDirectory` is provided it takes priority over
  * everything else — the user-level directory registered on

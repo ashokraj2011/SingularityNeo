@@ -2208,7 +2208,7 @@ export default function CapabilityMetadata() {
                   onChange={event =>
                     setField('operatingPolicySummary', event.target.value)
                   }
-                  placeholder="Optional. Example: Rule changes stay inside approved workspaces and high-impact updates require review."
+                  placeholder="Optional. Example: Rule changes stay inside the current desktop-user workspace mapping and high-impact updates require review."
                   className="field-textarea h-28"
                 />
               </label>
@@ -2956,7 +2956,7 @@ export default function CapabilityMetadata() {
                       <div>
                         <p className="form-kicker">Detected workspace profile</p>
                         <p className="mt-2 text-sm leading-relaxed text-secondary">
-                          Infer stack-aware Java, Python, or Node execution recommendations from the approved workspace paths.
+                          Infer stack-aware Java, Python, or Node execution recommendations from the legacy workspace hints. Runtime execution still uses Desktop Workspaces.
                         </p>
                       </div>
                       <button

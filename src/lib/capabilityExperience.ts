@@ -96,6 +96,7 @@ export type AdvancedToolId =
   | 'architecture'
   | 'identity'
   | 'operations'
+  | 'desktop-connectors'
   | 'incidents'
   | 'mrm'
   | 'access'
@@ -191,6 +192,17 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     audience: 'OPERATORS',
     exposureMode: 'WHEN_RELEVANT',
     contextTriggers: ['HAS_WORKFLOW'],
+  },
+  {
+    id: 'desktop-connectors',
+    label: 'Local Connectors',
+    shortName: 'Connectors',
+    path: '/desktop/connectors',
+    description:
+      'Configure and validate desktop-local tokens for GitHub, Jira, Confluence, Jenkins, Datadog, Splunk, and ServiceNow.',
+    audience: 'OPERATORS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
   },
   {
     id: 'architecture',
@@ -419,11 +431,6 @@ const hasCapabilityOwner = (capability: Capability) =>
   hasText(capability.ownerTeam) ||
   capability.stakeholders.length > 0 ||
   capability.teamNames.length > 0;
-
-const hasWorkspaceSource = (capability: Capability) =>
-  capability.localDirectories.length > 0 ||
-  Boolean(capability.executionConfig.defaultWorkspacePath) ||
-  capability.executionConfig.allowedWorkspacePaths.length > 0;
 
 const demoModeEnabled =
   String((import.meta as any).env?.VITE_ENABLE_DEMO_MODE || '').toLowerCase() === 'true';
@@ -702,13 +709,67 @@ const hasExecutionPath = (runtimeStatus?: RuntimeStatus | null) =>
       (runtimeStatus.configured || runtimeStatus.executionRuntimeOwner === 'DESKTOP'),
   );
 
+const hasDesktopWorkspaceAuthority = (runtimeStatus?: RuntimeStatus | null) =>
+  Boolean(
+    runtimeStatus?.workingDirectory?.trim() ||
+      runtimeStatus?.workingDirectorySource === 'mapping' ||
+      runtimeStatus?.workingDirectorySource === 'env' ||
+      runtimeStatus?.workingDirectorySource === 'project-root',
+  );
+
+const getDesktopWorkspaceReadiness = (
+  runtimeStatus?: RuntimeStatus | null,
+): Pick<
+  CapabilityReadinessItem,
+  'description' | 'status' | 'blockingReason' | 'nextRequiredAction'
+> => {
+  if (hasDesktopWorkspaceAuthority(runtimeStatus)) {
+    const source = runtimeStatus?.workingDirectorySource;
+    const sourceLabel =
+      source === 'mapping'
+        ? 'a Desktop Workspaces mapping'
+        : source === 'env'
+        ? 'SINGULARITY_WORKING_DIRECTORY'
+        : source === 'project-root'
+        ? 'the desktop project root fallback'
+        : 'desktop runtime state';
+    return {
+      description: `Execution will use ${sourceLabel} for this operator on this desktop.`,
+      status: 'READY',
+      blockingReason: undefined,
+      nextRequiredAction: undefined,
+    };
+  }
+
+  if (!runtimeStatus) {
+    return {
+      description:
+        'Workspace authority is resolved from the current operator on the current desktop.',
+      status: 'IN_PROGRESS',
+      blockingReason:
+        'Execution needs a desktop-user workspace mapping or SINGULARITY_WORKING_DIRECTORY before local tools can run.',
+      nextRequiredAction:
+        'Open Operations and save a Desktop Workspaces mapping for this operator on this desktop.',
+    };
+  }
+
+  return {
+    description:
+      'No desktop-user workspace mapping or working directory fallback is available yet.',
+    status: 'NEEDS_SETUP',
+    blockingReason:
+      'Local execution paths are desktop-user scoped and are not approved from capability metadata.',
+    nextRequiredAction:
+      'Open Desktop Workspaces and save a working directory for this operator on this desktop.',
+  };
+};
+
 const getCapabilityBoundarySignals = (capability: Capability) =>
   [
     ...capability.applications,
     ...capability.apis,
     ...capability.databases,
     ...capability.gitRepositories,
-    ...capability.localDirectories,
   ].filter(Boolean);
 
 const buildOutcomeContract = (
@@ -741,6 +802,16 @@ const buildProofItems = (
   const completedWorkCount = workspace.workItems.filter(item => item.status === 'COMPLETED').length;
   const outcomeContract = buildOutcomeContract(capability);
   const hasBoundary = outcomeContract.serviceBoundary.length > 0;
+  const sourceReferenceCount = Array.from(
+    new Set(
+      [
+        ...outcomeContract.serviceBoundary,
+        capability.jiraBoardLink,
+        capability.confluenceLink,
+        capability.documentationNotes,
+      ].filter(Boolean),
+    ),
+  ).length;
 
   const milestoneStates = [
     {
@@ -767,13 +838,13 @@ const buildProofItems = (
     {
       level: 'CONNECTED' as const,
       label: 'Connected',
-      description: 'Real source systems and approved workspaces are linked to the capability.',
-      ready: hasConnectorSetup(capability) && hasWorkspaceSource(capability),
-      inProgress: hasConnectorSetup(capability) || hasWorkspaceSource(capability),
+      description: 'Real source systems, repositories, or service boundaries are linked to the capability.',
+      ready: hasConnectorSetup(capability) || hasBoundary,
+      inProgress: hasConnectorSetup(capability) || hasBoundary,
       proofSignal:
-        hasConnectorSetup(capability) && hasWorkspaceSource(capability)
-          ? `${capability.gitRepositories.length + capability.localDirectories.length} source locations and approved paths are linked.`
-          : 'Link GitHub, Jira, Confluence, or approved local paths.',
+        hasConnectorSetup(capability) || hasBoundary
+          ? `${sourceReferenceCount} source or service boundary reference${sourceReferenceCount === 1 ? '' : 's'} linked. Desktop execution paths are configured separately per operator.`
+          : 'Link GitHub, Jira, Confluence, documentation, or a service boundary.',
       actionLabel: 'Connect sources',
       path: '/capabilities/metadata',
     },
@@ -938,7 +1009,7 @@ const getTrustDescription = (
     case 'GROUNDED':
       return 'The team is grounded in context. Finish execution setup to make the capability operable.';
     case 'CONNECTED':
-      return 'Sources and workspace links exist. Ground the agents before relying on outcomes.';
+      return 'Source-system links exist. Ground the agents before relying on outcomes.';
     default:
       return nextGap.proofSignal;
   }
@@ -967,6 +1038,7 @@ const buildReadinessItems = (
     (total, agent) => total + (agent.learningProfile.sourceCount || 0),
     0,
   );
+  const desktopWorkspaceReadiness = getDesktopWorkspaceReadiness(runtimeStatus);
 
   return [
     {
@@ -1001,15 +1073,14 @@ const buildReadinessItems = (
     },
     {
       id: 'workspace',
-      label: 'Workspace approval',
-      description: 'Local paths are explicitly approved for agent execution.',
-      status: hasWorkspaceSource(capability) ? 'READY' : 'NEEDS_SETUP',
-      actionLabel: 'Approve paths',
-      path: '/capabilities/metadata',
+      label: 'Desktop workspace',
+      description: desktopWorkspaceReadiness.description,
+      status: desktopWorkspaceReadiness.status,
+      actionLabel: 'Open Desktop Workspaces',
+      path: '/operations#desktop-workspaces',
       isBlocking: true,
-      blockingReason:
-        'Runtime-backed work must stay inside an approved local workspace before execution can start.',
-      nextRequiredAction: 'Approve at least one workspace path for this capability.',
+      blockingReason: desktopWorkspaceReadiness.blockingReason,
+      nextRequiredAction: desktopWorkspaceReadiness.nextRequiredAction,
     },
     {
       id: 'commands',
@@ -1280,9 +1351,11 @@ const buildGoldenPathProgress = ({
     },
     {
       id: 'workspace',
-      label: 'Approve a workspace',
-      description: readinessById.get('workspace')?.description || 'Approve an execution workspace.',
-      path: '/capabilities/metadata',
+      label: 'Save desktop workspace',
+      description:
+        readinessById.get('workspace')?.description ||
+        'Save an operator/desktop working directory mapping.',
+      path: readinessById.get('workspace')?.path || '/operations#desktop-workspaces',
       complete: readinessById.get('workspace')?.status === 'READY',
     },
     {

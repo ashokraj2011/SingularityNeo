@@ -372,7 +372,7 @@ describe('chat workspace bridge', () => {
 
     expect(briefing).toContain('Live capability context');
     expect(briefing).toContain('Business outcome: Ship the next release with clear execution visibility.');
-    expect(briefing).toContain('Approved workspaces: /repo/todo-app');
+    expect(briefing).toContain('Legacy workspace hints: /repo/todo-app');
     expect(briefing).toContain('Work summary: 0 active, 0 blocked, 1 pending approval, 0 completed.');
     expect(briefing).toContain('WI-123 | Ship todo filters | Development | PENDING_APPROVAL');
   });

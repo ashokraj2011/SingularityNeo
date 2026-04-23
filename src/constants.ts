@@ -1131,7 +1131,7 @@ export const CAPABILITIES: Capability[] = [
     successMetrics: ['Common calculator requests return the expected numeric result.'],
     definitionOfDone: 'The capability can accept a work item, produce evidence, and complete a release-safe execution path.',
     requiredEvidenceKinds: ['Requirements pack', 'Test evidence', 'Release decision'],
-    operatingPolicySummary: 'Execution stays inside approved workspaces and release-affecting actions remain approval-gated.',
+    operatingPolicySummary: 'Execution stays inside the current desktop-user workspace mapping and release-affecting actions remain approval-gated.',
     applications: [],
     apis: [],
     databases: [],

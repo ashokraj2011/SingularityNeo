@@ -95,7 +95,7 @@ export const deriveExecutionBoundary = (
       : []),
     ...(capability.executionConfig.allowedWorkspacePaths.length === 0 &&
     workspaceMode !== 'NONE'
-      ? ['No approved workspace paths are configured yet.']
+      ? ['No desktop workspace mapping is available yet.']
       : []),
   ];
 
@@ -153,8 +153,8 @@ const buildDefaultRequiredInputs = ({
   if ((step.allowedToolIds || []).length > 0 || hasText(step.preferredWorkspacePath)) {
     fields.push({
       id: 'approved-workspace',
-      label: 'Approved workspace',
-      description: 'A validated workspace path that tools can safely inspect or execute inside.',
+      label: 'Desktop workspace',
+      description: 'A validated desktop-user workspace path that tools can safely inspect or execute inside.',
       required: true,
       source: 'WORKSPACE',
       kind: 'PATH',

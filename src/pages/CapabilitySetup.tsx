@@ -1418,7 +1418,7 @@ export default function CapabilitySetup() {
                           <div>
                             <p className="form-kicker">Detected workspace profile</p>
                             <p className="mt-2 text-sm leading-relaxed text-secondary">
-                              Validate or refresh the approved workspace paths to infer Java, Python, or Node execution setup from the local codebase.
+                              Validate or refresh the legacy workspace hints to infer Java, Python, or Node execution setup from the local codebase. Runtime execution still uses Desktop Workspaces.
                             </p>
                           </div>
                           <button

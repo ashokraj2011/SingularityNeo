@@ -468,7 +468,7 @@ export interface AutoStartInput {
  *
  * Short-circuits when the capability has no git repositories attached.
  * When GitHub auth is missing, it falls back to a local branch session using
- * the approved workspace root so the work item can still get its own branch.
+ * the desktop workspace root so the work item can still get its own branch.
  */
 export const autoStartSessionForWorkItem = async (
   input: AutoStartInput,
