@@ -1801,8 +1801,8 @@ export interface CodePatchPayload {
 // Persistence shapes for the agent's long-lived branch session + any
 // PRs it opens from that branch. The workflow is:
 //   1. Operator (or automation) calls `startAgentBranchSession` for a
-//      work item — we create `wi/<workItemId>-<slug>` anchored at the
-//      repo's default branch.
+//      work item — we create a branch named exactly as the work item id,
+//      anchored at the repo's default branch.
 //   2. Agent emits CODE_PATCH artifacts (see `CodePatchPayload`); each
 //      one is appended as a commit via `commitPatchToBranch`.
 //   3. Operator clicks "Open PR" — we record the PR row and flip the

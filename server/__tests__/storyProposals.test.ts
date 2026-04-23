@@ -22,6 +22,7 @@ vi.mock('../repository', () => ({
 import { __storyProposalTestUtils } from '../storyProposals';
 import { transaction } from '../db';
 import { createWorkItemRecord } from '../execution/service';
+import { getCapabilityBundle } from '../repository';
 import { promoteStoryProposalBatch } from '../storyProposals';
 
 const buildBundle = () =>
@@ -44,11 +45,13 @@ const buildBundle = () =>
     workspace: {
       agents: [],
       workflows: [{ id: 'WF-PLAN', name: 'Delivery' }],
+      workItems: [],
     },
   }) as any;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getCapabilityBundle).mockResolvedValue(buildBundle());
 });
 
 describe('story proposal helpers', () => {
@@ -290,5 +293,139 @@ describe('story proposal helpers', () => {
         }),
       }),
     );
+  });
+
+  it('reuses existing proposal work items when promotion is retried before proposal state is marked', async () => {
+    const now = new Date('2026-04-22T07:00:00.000Z');
+    const batchRow = {
+      id: 'SPB-1',
+      capability_id: 'CAP-PLAN',
+      title: 'Rule Engine story plan',
+      status: 'APPROVED',
+      selected_workflow_id: 'WF-PLAN',
+      source_prompt: 'Plan the next release.',
+      summary: 'Break the work into a parent epic and one reviewable story.',
+      assumptions: [],
+      dependencies: [],
+      risks: [],
+      sizing_policy: 'Dual-size each item.',
+      generated_by_agent_id: null,
+      generation_mode: 'PLANNING_AGENT',
+      planning_artifacts: [],
+      created_by_user_id: 'USR-1',
+      created_at: now,
+      updated_at: now,
+    };
+    const epicRow = {
+      id: 'SPI-EPIC',
+      capability_id: 'CAP-PLAN',
+      batch_id: 'SPB-1',
+      item_type: 'EPIC',
+      parent_item_id: null,
+      title: 'Ship rule-engine upgrade',
+      description: 'Coordinate delivery of the next rule-engine slice.',
+      business_outcome: 'Safer, faster release planning.',
+      acceptance_criteria: ['Epic is approved.'],
+      dependencies: [],
+      risks: [],
+      recommended_workflow_id: 'WF-PLAN',
+      recommended_task_type: 'STRATEGIC_INITIATIVE',
+      story_points: 8,
+      t_shirt_size: 'L',
+      sizing_confidence: 'HIGH',
+      sizing_rationale: 'Broad cross-team planning scope.',
+      implementation_notes: 'Promote this into a parent work item.',
+      tags: ['planning'],
+      review_state: 'APPROVED',
+      sort_order: 0,
+      promoted_work_item_id: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const storyRow = {
+      id: 'SPI-STORY-1',
+      capability_id: 'CAP-PLAN',
+      batch_id: 'SPB-1',
+      item_type: 'STORY',
+      parent_item_id: 'SPI-EPIC',
+      title: 'Implement operator parsing update',
+      description: 'Add the concrete delivery slice.',
+      business_outcome: 'Operators resolve correctly.',
+      acceptance_criteria: ['Tests cover the new behavior.'],
+      dependencies: [],
+      risks: [],
+      recommended_workflow_id: 'WF-PLAN',
+      recommended_task_type: 'FEATURE_ENHANCEMENT',
+      story_points: 3,
+      t_shirt_size: 'S',
+      sizing_confidence: 'MEDIUM',
+      sizing_rationale: 'Small isolated code change.',
+      implementation_notes: 'Promote this into a child work item.',
+      tags: ['rule-engine'],
+      review_state: 'APPROVED',
+      sort_order: 1,
+      promoted_work_item_id: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const existingEpic = {
+      id: 'WI-EPIC01',
+      title: 'Ship rule-engine upgrade',
+      planningBatchId: 'SPB-1',
+      planningProposalItemId: 'SPI-EPIC',
+    };
+    const existingStory = {
+      id: 'WI-STORY1',
+      title: 'Implement operator parsing update',
+      planningBatchId: 'SPB-1',
+      planningProposalItemId: 'SPI-STORY-1',
+      parentWorkItemId: 'WI-EPIC01',
+    };
+    vi.mocked(getCapabilityBundle).mockResolvedValue({
+      ...buildBundle(),
+      workspace: {
+        ...buildBundle().workspace,
+        workItems: [existingEpic, existingStory],
+      },
+    } as any);
+
+    let readPhase = 0;
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('FROM capability_story_proposal_batches')) {
+          return { rows: [batchRow], rowCount: 1 };
+        }
+        if (
+          sql.includes('SELECT') &&
+          sql.includes('FROM capability_story_proposal_items')
+        ) {
+          readPhase += 1;
+          if (readPhase < 3) {
+            return { rows: [epicRow, storyRow], rowCount: 2 };
+          }
+          return {
+            rows: [
+              { ...epicRow, review_state: 'PROMOTED', promoted_work_item_id: 'WI-EPIC01' },
+              { ...storyRow, review_state: 'PROMOTED', promoted_work_item_id: 'WI-STORY1' },
+            ],
+            rowCount: 2,
+          };
+        }
+        if (sql.includes('FROM capability_story_proposal_decisions')) {
+          return { rows: [], rowCount: 0 };
+        }
+        return { rows: [], rowCount: 0 };
+      }),
+    };
+    vi.mocked(transaction).mockImplementation(async callback => callback(client as any));
+
+    const result = await promoteStoryProposalBatch({
+      capabilityId: 'CAP-PLAN',
+      batchId: 'SPB-1',
+      actor: { userId: 'USR-1', displayName: 'Planner', teamIds: [] },
+    });
+
+    expect(createWorkItemRecord).not.toHaveBeenCalled();
+    expect(result.workItems.map(item => item.id)).toEqual(['WI-EPIC01', 'WI-STORY1']);
   });
 });

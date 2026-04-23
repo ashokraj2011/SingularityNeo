@@ -38,6 +38,31 @@ import { refreshCapabilityCodeIndex } from '../codeIndex/ingest';
 
 const fetchMock = vi.fn();
 const temporaryRoots: string[] = [];
+const disabledConnectorSettings = {
+  databaseConfigs: [],
+  connectors: {
+    github: {
+      enabled: false,
+      baseUrl: '',
+      secretReference: '',
+      ownerHint: '',
+    },
+    jira: {
+      enabled: false,
+      baseUrl: '',
+      email: '',
+      secretReference: '',
+      projectKey: '',
+    },
+    confluence: {
+      enabled: false,
+      baseUrl: '',
+      email: '',
+      secretReference: '',
+      spaceKey: '',
+    },
+  },
+};
 
 describe('code index ingest hardening', () => {
   const originalFetch = global.fetch;
@@ -283,6 +308,32 @@ describe('code index ingest hardening', () => {
     expect(init?.headers).toMatchObject({
       Authorization: 'Bearer enterprise-token',
     });
+  });
+
+  it('preserves the existing repo index when remote access fails before parsing', async () => {
+    process.env.GITHUB_TOKEN = '';
+    process.env.GH_TOKEN = '';
+    getWorkspaceSettingsMock.mockResolvedValue(disabledConnectorSettings);
+    queryMock.mockResolvedValue({ rows: [] } as any);
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 403,
+      headers: new Headers([['x-ratelimit-remaining', '1']]),
+      json: async () => ({}),
+    } as any);
+
+    await refreshCapabilityCodeIndex('CAP-INDEX');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const destructiveRefreshCalls = clientQueryMock.mock.calls.filter(call => {
+      const sql = String(call[0] || '');
+      return (
+        sql.includes('DELETE FROM capability_code_symbols') ||
+        sql.includes('DELETE FROM capability_code_references') ||
+        sql.includes('DELETE FROM capability_code_symbol_edges')
+      );
+    });
+    expect(destructiveRefreshCalls).toEqual([]);
   });
 
   it('indexes from a readable local clone without calling GitHub', async () => {

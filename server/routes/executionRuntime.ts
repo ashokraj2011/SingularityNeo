@@ -678,7 +678,7 @@ export const registerExecutionRuntimeRoutes = (app: express.Express) => {
           return;
         }
 
-        const approvedWorkspaceRoots = actor.userId
+        let approvedWorkspaceRoots = actor.userId
           ? (
               await listValidatedWorkspaceRootsByCapability({
                 executorId,
@@ -686,6 +686,26 @@ export const registerExecutionRuntimeRoutes = (app: express.Express) => {
               })
             )[capabilityId] || []
           : registration.approvedWorkspaceRoots?.[capabilityId] || [];
+
+        if (actor.userId && approvedWorkspaceRoots.length === 0) {
+          const fallbackResolution = await resolveDesktopWorkspace({
+            executorId,
+            userId: actor.userId,
+            capabilityId,
+          }).catch(() => null);
+          if (
+            fallbackResolution?.validation.valid &&
+            fallbackResolution.localRootPath
+          ) {
+            approvedWorkspaceRoots = Array.from(
+              new Set([
+                ...(fallbackResolution.approvedWorkspaceRoots || []),
+                fallbackResolution.localRootPath,
+              ]),
+            );
+          }
+        }
+
         if (approvedWorkspaceRoots.length === 0) {
           response.status(409).json({
             error:

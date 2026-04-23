@@ -43,6 +43,30 @@ const startupRouteHash = normalizeStartupRoute(
   process.env.SINGULARITY_ELECTRON_START_ROUTE || '',
 );
 
+const resolveDesktopExecutorId = () => {
+  const configured = String(process.env.SINGULARITY_DESKTOP_EXECUTOR_ID || '').trim();
+  if (configured) {
+    return configured;
+  }
+
+  const userDataPath = app.getPath('userData');
+  const executorIdPath = path.join(userDataPath, 'desktop-executor-id');
+  try {
+    fs.mkdirSync(userDataPath, { recursive: true });
+    if (fs.existsSync(executorIdPath)) {
+      const existing = fs.readFileSync(executorIdPath, 'utf8').trim();
+      if (existing) {
+        return existing;
+      }
+    }
+    const next = `desktop-executor-${randomUUID().slice(0, 12)}`;
+    fs.writeFileSync(executorIdPath, `${next}\n`, 'utf8');
+    return next;
+  } catch {
+    return `desktop-executor-${randomUUID().slice(0, 12)}`;
+  }
+};
+
 let mainWindow = null;
 let localWorker = null;
 const pendingWorkerRequests = new Map();
@@ -170,6 +194,7 @@ const startLocalWorker = () => {
     env: {
       ...process.env,
       SINGULARITY_CONTROL_PLANE_URL: controlPlaneUrl,
+      SINGULARITY_DESKTOP_EXECUTOR_ID: resolveDesktopExecutorId(),
       SINGULARITY_PROJECT_ROOT: projectRoot,
     },
   });

@@ -1120,10 +1120,13 @@ export const refreshCapabilityCodeIndex = async (
     }
   }
 
-  const allSymbols = repoResults.flatMap(r => r.symbolRows);
-  const allReferences = repoResults.flatMap(r => r.referenceRows);
-  const allEdges = repoResults.flatMap(r => r.edgeRows);
-  const touchedRepoIds = repoResults.map(r => r.repositoryId);
+  const refreshedRepoResults = repoResults.filter(
+    r => r.status === 'OK' || r.status === 'PARTIAL',
+  );
+  const allSymbols = refreshedRepoResults.flatMap(r => r.symbolRows);
+  const allReferences = refreshedRepoResults.flatMap(r => r.referenceRows);
+  const allEdges = refreshedRepoResults.flatMap(r => r.edgeRows);
+  const touchedRepoIds = refreshedRepoResults.map(r => r.repositoryId);
 
   // Write in a single transaction so search queries never observe a
   // half-updated index.

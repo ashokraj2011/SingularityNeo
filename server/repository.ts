@@ -2996,11 +2996,11 @@ const getCapabilityBundleTx = async (
   return { capability: enrichedCapability, workspace };
 };
 
-// Branch name is the canonical `wi/{workItemId}` — deterministic, short, and
-// directly addressable by work item ID alone. No title slug appended so any
-// tool can derive the branch name from just the ID.
+// Work-item-owned branches use the exact literal work item id so local
+// checkout sessions, agent-git, PR heads, and execution context never split
+// across separate naming schemes.
 const buildSharedBranchName = (workItem: Pick<WorkItem, 'id'>) =>
-  `wi/${String(workItem.id || '').toLowerCase().trim()}`;
+  String(workItem.id || '').trim();
 
 export const getCapabilityRepositoriesRecord = async (
   capabilityId: string,
@@ -3076,9 +3076,35 @@ export const initializeWorkItemExecutionContextRecord = async ({
       );
     }
 
+    const expectedSharedBranch = buildSharedBranchName(workItem);
     const existingContexts = await buildWorkItemExecutionContextsTx(client, capabilityId);
     const existing = existingContexts.get(workItemId);
     if (existing?.repositoryAssignments.length && existing.branch) {
+      if (
+        existing.branch.sharedBranch !== expectedSharedBranch &&
+        existing.branch.status === 'NOT_CREATED'
+      ) {
+        await client.query(
+          `
+            UPDATE capability_work_item_branches
+            SET shared_branch = $3,
+                updated_at = ${withUpdatedTimestamp}
+            WHERE capability_id = $1
+              AND id = $2
+          `,
+          [capabilityId, existing.branch.id, expectedSharedBranch],
+        );
+        const refreshedContexts = await buildWorkItemExecutionContextsTx(client, capabilityId);
+        return (
+          refreshedContexts.get(workItemId) || {
+            ...existing,
+            branch: {
+              ...existing.branch,
+              sharedBranch: expectedSharedBranch,
+            },
+          }
+        );
+      }
       return existing;
     }
 
@@ -3107,7 +3133,7 @@ export const initializeWorkItemExecutionContextRecord = async ({
       workItemId,
       repositoryId: primaryRepository.id,
       baseBranch: primaryRepository.defaultBranch || 'main',
-      sharedBranch: buildSharedBranchName(workItem),
+      sharedBranch: expectedSharedBranch,
       createdByUserId: actorUserId,
       createdAt: new Date().toISOString(),
       status: 'NOT_CREATED',

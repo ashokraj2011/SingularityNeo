@@ -1618,9 +1618,39 @@ export const promoteStoryProposalBatch = async ({
     );
   }
 
-  const createdWorkItems: WorkItem[] = [];
+  const bundle = await getCapabilityBundle(capabilityId);
+  const existingWorkItems = Array.isArray(bundle.workspace.workItems)
+    ? bundle.workspace.workItems
+    : [];
+  const existingWorkItemById = new Map<string, WorkItem>();
+  const existingWorkItemByProposalId = new Map<string, WorkItem>();
+  for (const workItem of existingWorkItems) {
+    existingWorkItemById.set(workItem.id, workItem);
+    if (
+      workItem.planningBatchId === batchId &&
+      workItem.planningProposalItemId
+    ) {
+      existingWorkItemByProposalId.set(workItem.planningProposalItemId, workItem);
+    }
+  }
+
+  const promotedWorkItems: WorkItem[] = [];
+  const promotedWorkItemIds = new Set<string>();
+  const addPromotedWorkItem = (workItem?: WorkItem | null) => {
+    if (!workItem || promotedWorkItemIds.has(workItem.id)) {
+      return;
+    }
+    promotedWorkItemIds.add(workItem.id);
+    promotedWorkItems.push(workItem);
+  };
   const workItemIdByProposalId = new Map<string, string>();
   let epicWorkItemId = selectedEpic.promotedWorkItemId;
+  const existingEpicWorkItem =
+    (epicWorkItemId ? existingWorkItemById.get(epicWorkItemId) : undefined) ||
+    existingWorkItemByProposalId.get(selectedEpic.id);
+  if (!epicWorkItemId && existingEpicWorkItem) {
+    epicWorkItemId = existingEpicWorkItem.id;
+  }
   if (!epicWorkItemId) {
     const epicWorkItem = await createWorkItemRecord({
       capabilityId,
@@ -1642,16 +1672,26 @@ export const promoteStoryProposalBatch = async ({
         planningProposalItemId: selectedEpic.id,
       },
     });
-    createdWorkItems.push(epicWorkItem);
+    addPromotedWorkItem(epicWorkItem);
     epicWorkItemId = epicWorkItem.id;
     workItemIdByProposalId.set(selectedEpic.id, epicWorkItem.id);
   } else {
     workItemIdByProposalId.set(selectedEpic.id, epicWorkItemId);
+    addPromotedWorkItem(existingEpicWorkItem || existingWorkItemById.get(epicWorkItemId));
   }
 
   for (const story of selectedStories) {
-    if (story.reviewState === 'PROMOTED' && story.promotedWorkItemId) {
-      workItemIdByProposalId.set(story.id, story.promotedWorkItemId);
+    const existingStoryWorkItem =
+      (story.promotedWorkItemId
+        ? existingWorkItemById.get(story.promotedWorkItemId)
+        : undefined) || existingWorkItemByProposalId.get(story.id);
+    const existingStoryWorkItemId =
+      story.promotedWorkItemId || existingStoryWorkItem?.id;
+    if (existingStoryWorkItemId) {
+      workItemIdByProposalId.set(story.id, existingStoryWorkItemId);
+      addPromotedWorkItem(
+        existingStoryWorkItem || existingWorkItemById.get(existingStoryWorkItemId),
+      );
       continue;
     }
 
@@ -1675,7 +1715,7 @@ export const promoteStoryProposalBatch = async ({
         planningProposalItemId: story.id,
       },
     });
-    createdWorkItems.push(created);
+    addPromotedWorkItem(created);
     workItemIdByProposalId.set(story.id, created.id);
   }
 
@@ -1727,7 +1767,7 @@ export const promoteStoryProposalBatch = async ({
 
   return {
     batch: nextBatch,
-    workItems: createdWorkItems,
+    workItems: promotedWorkItems,
   };
 };
 

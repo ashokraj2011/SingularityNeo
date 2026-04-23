@@ -89,7 +89,14 @@ const controlPlaneUrl = String(
 
 const EXECUTOR_LEASE_MS = 30_000;
 const EXECUTOR_POLL_MS = 2_500;
-const executorId = `desktop-executor-${process.pid}-${randomUUID().slice(0, 8)}`;
+const resolveExecutorId = () => {
+  const configured = String(process.env.SINGULARITY_DESKTOP_EXECUTOR_ID || '').trim();
+  if (configured) {
+    return configured;
+  }
+  return `desktop-executor-${randomUUID().slice(0, 12)}`;
+};
+const executorId = resolveExecutorId();
 
 // User-level working directory — the single source of truth for this
 // machine's workspace root. Capability-level workspace paths are only
