@@ -2638,6 +2638,10 @@ export default function WorkflowStudio({
       return;
     }
 
+    // Prevent the browser from starting a native HTML drag operation on the
+    // parent draggable node card. Without this, mousedown + move triggers
+    // the node-card onDragStart instead of the port mouse-drag sequence.
+    event.preventDefault();
     event.stopPropagation();
     const nextPoint = getCanvasPointFromMouse(
       event.clientX,
@@ -2653,7 +2657,7 @@ export default function WorkflowStudio({
   };
 
   const handleCompleteDragLink = (
-    event: React.MouseEvent<HTMLButtonElement>,
+    event: React.MouseEvent<HTMLElement>,
     targetNodeId: string,
   ) => {
     event.stopPropagation();
@@ -6337,6 +6341,44 @@ export default function WorkflowStudio({
                         </div>
                       </div>
                     ) : null}
+
+                    {/* Connect-mode hint — floats at the top of the canvas so
+                        operators always know they're in hand-off mode and what
+                        to do next. Dismissed by clicking the × or any canvas. */}
+                    {connectFromNodeId ? (
+                      <div className="pointer-events-none absolute inset-x-0 top-4 z-40 flex justify-center">
+                        <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-emerald-400/60 bg-emerald-950/90 px-4 py-2 text-sm font-medium text-emerald-200 shadow-xl backdrop-blur">
+                          <Route size={14} className="text-emerald-400" />
+                          <span>
+                            Hand-off mode — click any node to connect from{' '}
+                            <strong className="text-emerald-100">
+                              {getWorkflowNode(selectedWorkflow, connectFromNodeId)?.name || 'selected node'}
+                            </strong>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setConnectFromNodeId(null)}
+                            className="ml-1 rounded-full p-0.5 text-emerald-400 transition hover:bg-emerald-800/50 hover:text-emerald-100"
+                            title="Cancel connection"
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {/* Drag-link mode hint — shown while user is dragging a port */}
+                    {dragLinkFromNodeId ? (
+                      <div className="pointer-events-none absolute inset-x-0 top-4 z-40 flex justify-center">
+                        <div className="pointer-events-none flex items-center gap-2 rounded-full border border-sky-400/60 bg-sky-950/90 px-4 py-2 text-sm font-medium text-sky-200 shadow-xl backdrop-blur">
+                          <Route size={14} className="text-sky-400" />
+                          <span>
+                            Drag to a target node to create a hand-off — release anywhere on the node
+                          </span>
+                        </div>
+                      </div>
+                    ) : null}
+
                     <div className="pointer-events-none absolute inset-0 z-0">
                       {laneSummaries.map(({ phase, count }, index) => {
                         if (isNeo && !neoLaneVisibility) {
@@ -6512,6 +6554,14 @@ export default function WorkflowStudio({
                             }
                             selectNode(node.id, event.shiftKey);
                           }}
+                          // When a drag-link is in progress (user held the output
+                          // port and is moving to a target), accept the drop on the
+                          // entire node card — not just the tiny 16px input port.
+                          onMouseUp={event => {
+                            if (dragLinkFromNodeId && dragLinkFromNodeId !== node.id) {
+                              handleCompleteDragLink(event, node.id);
+                            }
+                          }}
                           onContextMenu={event => {
                             event.preventDefault();
                             selectNode(node.id, event.shiftKey);
@@ -6537,6 +6587,7 @@ export default function WorkflowStudio({
                             isSelected && 'border-sky-400 ring-2 ring-sky-300/60',
                             !isSelected && isMultiSelected && 'border-primary/40 ring-2 ring-primary/20',
                             isConnectTarget && 'border-emerald-300 ring-2 ring-emerald-200/80',
+                            isPortTarget && 'border-sky-400 ring-2 ring-sky-300/60 cursor-crosshair',
                             isSimulated && 'ring-2 ring-emerald-300/60',
                             isSimulationCurrent && 'border-emerald-400 shadow-[0_0_0_3px_rgba(34,197,94,0.2)]',
                             validationState.nodeIdsWithErrors.has(node.id) &&
@@ -6595,6 +6646,35 @@ export default function WorkflowStudio({
                                 >
                                   {nodeErrors.length}
                                 </span>
+                              ) : null}
+                              {/* "Connect from here" quick button — visible on selected
+                                  nodes so operators never need to hunt for the port
+                                  dot or the palette's hand-off mode button. */}
+                              {isSelected && node.type !== 'END' ? (
+                                <button
+                                  type="button"
+                                  onClick={event => {
+                                    event.stopPropagation();
+                                    if (connectFromNodeId === node.id) {
+                                      setConnectFromNodeId(null);
+                                    } else {
+                                      setConnectFromNodeId(node.id);
+                                    }
+                                  }}
+                                  className={cn(
+                                    'rounded-lg border p-1.5 transition',
+                                    connectFromNodeId === node.id
+                                      ? 'border-emerald-400 bg-emerald-500/15 text-emerald-700'
+                                      : 'border-outline-variant/40 text-secondary hover:bg-surface-container-low hover:text-on-surface',
+                                  )}
+                                  title={
+                                    connectFromNodeId === node.id
+                                      ? 'Click another node to connect, or click here to cancel'
+                                      : `Start a hand-off from ${node.name}`
+                                  }
+                                >
+                                  <Route size={13} />
+                                </button>
                               ) : null}
                               <button
                                 type="button"
@@ -7146,6 +7226,23 @@ export default function WorkflowStudio({
               >
                 <Wrench size={14} />
                 Advanced config
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (connectFromNodeId === neoContextMenu.targetId) {
+                    setConnectFromNodeId(null);
+                  } else {
+                    setConnectFromNodeId(neoContextMenu.targetId);
+                    setSelectedNodeId(neoContextMenu.targetId);
+                    setSelectedNodeIds([neoContextMenu.targetId]);
+                  }
+                  setNeoContextMenu(null);
+                }}
+                className="workflow-neo-menu-item"
+              >
+                <Route size={14} />
+                {connectFromNodeId === neoContextMenu.targetId ? 'Cancel connection' : 'Connect from here'}
               </button>
               <button
                 type="button"
