@@ -1179,6 +1179,39 @@ export const createApprovalAssignments = async (
   return created;
 };
 
+/**
+ * Update a single assignment by its id. Used when recording a partial
+ * approval (threshold not yet met) so only the acting approver's row
+ * transitions to APPROVED / REQUEST_CHANGES, leaving others PENDING.
+ */
+export const updateSingleApprovalAssignment = async ({
+  capabilityId,
+  assignmentId,
+  status,
+}: {
+  capabilityId: string;
+  assignmentId: string;
+  status: ApprovalAssignment['status'];
+}) => {
+  if (isRemoteExecutionClient()) {
+    await executionRuntimeRpc<void>('updateSingleApprovalAssignment', {
+      capabilityId,
+      assignmentId,
+      status,
+    });
+    return;
+  }
+
+  await query(
+    `
+      UPDATE capability_approval_assignments
+      SET status = $3, updated_at = NOW()
+      WHERE capability_id = $1 AND id = $2
+    `,
+    [capabilityId, assignmentId, status],
+  );
+};
+
 export const updateApprovalAssignmentsForWait = async ({
   capabilityId,
   waitId,

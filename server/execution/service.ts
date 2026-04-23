@@ -5,6 +5,7 @@ import {
   ActorContext,
   ApprovalAssignment,
   ApprovalDecision,
+  ApprovalPolicy,
   AgentTask,
   Artifact,
   Capability,
@@ -106,6 +107,7 @@ import { transaction } from "../db";
 import {
   createApprovalAssignments,
   createApprovalDecision,
+  updateSingleApprovalAssignment,
   cancelOpenWaitsForRun,
   createRunEvent,
   createRunWait,
@@ -849,6 +851,70 @@ const canActorApproveWait = ({
 export const __executionServiceTestUtils = {
   canActorApproveWait,
   buildQueuedRunForExternalAdvance,
+};
+
+/**
+ * Evaluate whether a completed approval decision satisfies the policy gate,
+ * so we know whether to advance the workflow or hold it for more approvals.
+ *
+ * Returns { shouldAdvance, approvedCount, requiredCount } so callers can
+ * build a meaningful "X of Y approvals received" progress message.
+ *
+ * Rules:
+ *  ANY_ONE    — first APPROVE advances. (Default / legacy.)
+ *  ALL_REQUIRED — every assignment target must approve.
+ *  QUORUM     — at least policy.minimumApprovals (or ⌈n/2⌉) must approve.
+ *  REQUEST_CHANGES on any disposition always blocks regardless of mode.
+ */
+const evaluateApprovalPolicy = ({
+  policy,
+  existingDecisions,
+  thisDisposition,
+  assignments,
+}: {
+  policy?: ApprovalPolicy | null;
+  existingDecisions: ApprovalDecision[];
+  thisDisposition: "APPROVE" | "REQUEST_CHANGES";
+  assignments: ApprovalAssignment[];
+}): { shouldAdvance: boolean; approvedCount: number; requiredCount: number } => {
+  if (thisDisposition === "REQUEST_CHANGES") {
+    return { shouldAdvance: false, approvedCount: 0, requiredCount: 1 };
+  }
+
+  // Count all prior APPROVE decisions + this one.
+  const approvedCount =
+    existingDecisions.filter((d) => d.disposition === "APPROVE").length + 1;
+
+  const mode = policy?.mode ?? "ANY_ONE";
+
+  switch (mode) {
+    case "ANY_ONE":
+      return { shouldAdvance: true, approvedCount, requiredCount: 1 };
+
+    case "ALL_REQUIRED": {
+      const requiredCount = Math.max(assignments.length, 1);
+      return {
+        shouldAdvance: approvedCount >= requiredCount,
+        approvedCount,
+        requiredCount,
+      };
+    }
+
+    case "QUORUM": {
+      const requiredCount =
+        policy?.minimumApprovals != null && policy.minimumApprovals > 0
+          ? policy.minimumApprovals
+          : Math.max(Math.ceil(assignments.length / 2), 1);
+      return {
+        shouldAdvance: approvedCount >= requiredCount,
+        approvedCount,
+        requiredCount,
+      };
+    }
+
+    default:
+      return { shouldAdvance: approvedCount >= 1, approvedCount, requiredCount: 1 };
+  }
 };
 
 const buildApprovalAssignmentsForWait = ({
@@ -5026,54 +5092,147 @@ const resolveRunWaitAndQueue = async ({
     );
   }
 
-  await resolveRunWait({
-    capabilityId,
-    waitId: openWait.id,
-    resolution,
-    resolvedBy,
-    resolvedByActorUserId: actor?.userId,
-    resolvedByActorTeamIds: getActorTeamIds(actor),
-  });
+  const currentStep = getCurrentWorkflowStep(detail);
+  const currentRunStep = getCurrentRunStep(detail);
+
+  // ── Approval path ──────────────────────────────────────────────────────────
   if (expectedType === "APPROVAL") {
-    await updateApprovalAssignmentsForWait({
-      capabilityId,
-      waitId: openWait.id,
-      status:
-        approvalDisposition === "REQUEST_CHANGES"
-          ? "REQUEST_CHANGES"
-          : ("APPROVED" as const),
+    const actorTeamIds = getActorTeamIds(actor);
+    const assignments = openWait.approvalAssignments || [];
+    const existingDecisions = openWait.approvalDecisions || [];
+
+    // Guard: actor already voted on this wait — prevent double-counting.
+    const alreadyVoted = existingDecisions.some(
+      (d) =>
+        (actor?.userId && d.actorUserId === actor.userId) ||
+        (actorTeamIds.length > 0 &&
+          actorTeamIds.some((t) => d.actorTeamIds.includes(t))),
+    );
+    if (alreadyVoted) {
+      throw new Error("You have already submitted an approval decision for this step.");
+    }
+
+    // Delegation guard — if the policy disallows delegation, reject delegated decisions.
+    const policy = currentStep.approvalPolicy as ApprovalPolicy | undefined;
+    if (
+      policy &&
+      !policy.delegationAllowed &&
+      openWait.payload?.isDelegated === true
+    ) {
+      throw new Error("Delegated approvals are not permitted by the policy attached to this step.");
+    }
+
+    // Due-date check — warn in the event log but do not block (past-due approval
+    // is still better than a permanently stuck run).
+    const dueAt = assignments[0]?.dueAt;
+    const isPastDue = dueAt ? new Date(dueAt) < new Date() : false;
+
+    // Find which assignment belongs to this actor so we only update that row.
+    const actorAssignment = assignments.find((assignment) => {
+      if (!actor?.userId && actorTeamIds.length === 0) return true;
+      if (assignment.status !== "PENDING") return false;
+      if (assignment.targetType === "USER") {
+        return (assignment.assignedUserId || assignment.targetId) === actor?.userId;
+      }
+      if (assignment.targetType === "TEAM") {
+        const teamId = assignment.assignedTeamId || assignment.targetId;
+        return actorTeamIds.includes(teamId);
+      }
+      return true;
     });
+
+    // Record the decision first (before resolving the wait).
     await createApprovalDecision({
       id: createApprovalDecisionId(),
       capabilityId,
       runId,
       waitId: openWait.id,
-      assignmentId: (openWait.approvalAssignments || []).find((assignment) => {
-        if (!actor?.userId && getActorTeamIds(actor).length === 0) {
-          return true;
-        }
-        if (assignment.targetType === "USER") {
-          return (
-            (assignment.assignedUserId || assignment.targetId) === actor?.userId
-          );
-        }
-        if (assignment.targetType === "TEAM") {
-          const teamId = assignment.assignedTeamId || assignment.targetId;
-          return getActorTeamIds(actor).includes(teamId);
-        }
-        return true;
-      })?.id,
+      assignmentId: actorAssignment?.id,
       disposition: approvalDisposition,
       actorUserId: actor?.userId,
       actorDisplayName: getActorDisplayName(actor, resolvedBy),
-      actorTeamIds: getActorTeamIds(actor),
+      actorTeamIds,
       comment: resolution,
       createdAt: new Date().toISOString(),
     });
+
+    // Update only this actor's assignment (not all pending ones).
+    if (actorAssignment) {
+      await updateSingleApprovalAssignment({
+        capabilityId,
+        assignmentId: actorAssignment.id,
+        status: approvalDisposition === "REQUEST_CHANGES" ? "REQUEST_CHANGES" : "APPROVED",
+      });
+    }
+
+    // Evaluate policy: does this approval meet the threshold?
+    const evaluation = evaluateApprovalPolicy({
+      policy,
+      existingDecisions,
+      thisDisposition: approvalDisposition,
+      assignments,
+    });
+
+    if (!evaluation.shouldAdvance) {
+      // Policy threshold not yet met — keep the wait OPEN, emit progress.
+      const progressMsg = approvalDisposition === "REQUEST_CHANGES"
+        ? `Changes requested by ${getActorDisplayName(actor, resolvedBy)}. Run held for revision.${isPastDue ? " (Approval was past due.)" : ""}`
+        : `${evaluation.approvedCount} of ${evaluation.requiredCount} required approvals received${isPastDue ? " (past due)" : ""}.`;
+
+      await insertRunEvent(
+        createRunEvent({
+          capabilityId,
+          runId,
+          workItemId: detail.run.workItemId,
+          runStepId: currentRunStep.id,
+          traceId: detail.run.traceId,
+          spanId: currentRunStep.spanId,
+          type: "APPROVAL_PROGRESS",
+          level: approvalDisposition === "REQUEST_CHANGES" ? "WARN" : "INFO",
+          message: progressMsg,
+          details: {
+            waitId: openWait.id,
+            approvedCount: evaluation.approvedCount,
+            requiredCount: evaluation.requiredCount,
+            mode: policy?.mode ?? "ANY_ONE",
+            disposition: approvalDisposition,
+            actorUserId: actor?.userId,
+            isPastDue,
+          },
+        }),
+      );
+      // Return the current detail unchanged — run stays in WAITING_APPROVAL.
+      return getWorkflowRunDetail(capabilityId, runId);
+    }
+
+    // Threshold met — close the wait and mark remaining PENDING assignments.
+    await resolveRunWait({
+      capabilityId,
+      waitId: openWait.id,
+      resolution,
+      resolvedBy,
+      resolvedByActorUserId: actor?.userId,
+      resolvedByActorTeamIds: actorTeamIds,
+    });
+    // Any assignments still PENDING (other approvers who hadn't acted yet) are
+    // closed as APPROVED since the threshold is satisfied.
+    await updateApprovalAssignmentsForWait({
+      capabilityId,
+      waitId: openWait.id,
+      status: "APPROVED",
+    });
+  } else {
+    // Non-approval wait (INPUT, CONFLICT_RESOLUTION) — resolve immediately.
+    await resolveRunWait({
+      capabilityId,
+      waitId: openWait.id,
+      resolution,
+      resolvedBy,
+      resolvedByActorUserId: actor?.userId,
+      resolvedByActorTeamIds: getActorTeamIds(actor),
+    });
   }
 
-  const currentStep = getCurrentWorkflowStep(detail);
-  const currentRunStep = getCurrentRunStep(detail);
   const isRequestChangesApproval =
     expectedType === "APPROVAL" && approvalDisposition === "REQUEST_CHANGES";
   const approvalAdvancesWorkflow =

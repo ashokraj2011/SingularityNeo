@@ -5196,6 +5196,7 @@ const Orchestrator = () => {
         actionButtonLabel={actionButtonLabel}
         onOpenDiffReview={() => setIsDiffReviewOpen(true)}
         resetKey={`${selectedWorkItem.id}:${approvalReviewWait.id}:${selectedApprovalArtifact?.id || "none"}`}
+        approvalPolicy={selectedCurrentStep?.approvalPolicy}
       />
     ) : null;
 

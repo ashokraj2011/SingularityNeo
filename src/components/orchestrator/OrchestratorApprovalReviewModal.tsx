@@ -23,7 +23,7 @@ import {
   type ApprovalDecision,
   type RunWait,
 } from '../../lib/orchestrator/support';
-import type { CapabilityInteractionFeed } from '../../types';
+import type { ApprovalPolicy, CapabilityInteractionFeed } from '../../types';
 import { ModalShell, StatusBadge } from '../EnterpriseUI';
 
 type Props = {
@@ -65,6 +65,7 @@ type Props = {
   actionButtonLabel: string;
   onOpenDiffReview: () => void;
   resetKey: string;
+  approvalPolicy?: ApprovalPolicy | null;
 };
 
 export const OrchestratorApprovalReviewModal = ({
@@ -106,8 +107,53 @@ export const OrchestratorApprovalReviewModal = ({
   actionButtonLabel,
   onOpenDiffReview,
   resetKey,
-}: Props) => (
-  <div className="desktop-content-modal-overlay z-[91] px-4 py-10">
+  approvalPolicy,
+}: Props) => {
+  // ── Policy-progress computations ─────────────────────────────────────────
+  const allDecisions = [
+    ...Array.from(approvalDecisionByAssignmentId.values()),
+    ...unassignedApprovalDecisions,
+  ];
+  const approvedCount = allDecisions.filter(d => d.disposition === 'APPROVE').length;
+
+  const policyMode = approvalPolicy?.mode ?? 'ANY_ONE';
+  const requiredCount = (() => {
+    switch (policyMode) {
+      case 'ANY_ONE':
+        return 1;
+      case 'ALL_REQUIRED':
+        return Math.max(approvalAssignments.length, 1);
+      case 'QUORUM':
+        return approvalPolicy?.minimumApprovals && approvalPolicy.minimumApprovals > 0
+          ? approvalPolicy.minimumApprovals
+          : Math.max(Math.ceil(approvalAssignments.length / 2), 1);
+      default:
+        return 1;
+    }
+  })();
+
+  const policyModeLabel = (() => {
+    switch (policyMode) {
+      case 'ANY_ONE':
+        return 'Any one approval';
+      case 'ALL_REQUIRED':
+        return 'All approvers required';
+      case 'QUORUM':
+        return `Quorum — ${requiredCount} of ${Math.max(approvalAssignments.length, requiredCount)} required`;
+      default:
+        return 'Any one approval';
+    }
+  })();
+
+  const coverageTone =
+    approvedCount >= requiredCount
+      ? 'success'
+      : approvedCount > 0
+        ? 'warning'
+        : 'info';
+
+  return (
+    <div className="desktop-content-modal-overlay z-[91] px-4 py-10">
     <button
       type="button"
       aria-label="Close approval review"
@@ -186,6 +232,25 @@ export const OrchestratorApprovalReviewModal = ({
                       {hasCodeDiffApproval ? 'Yes' : 'No'}
                     </strong>
                   </p>
+                  <p>
+                    Policy:{' '}
+                    <strong className="text-on-surface">{policyModeLabel}</strong>
+                  </p>
+                  <p>
+                    Progress:{' '}
+                    <strong
+                      className={
+                        approvedCount >= requiredCount
+                          ? 'text-emerald-600'
+                          : approvedCount > 0
+                            ? 'text-amber-600'
+                            : 'text-on-surface'
+                      }
+                    >
+                      {approvedCount} of {requiredCount} approval
+                      {requiredCount === 1 ? '' : 's'} received
+                    </strong>
+                  </p>
                 </div>
               </div>
               <div className="workspace-meta-card">
@@ -196,9 +261,8 @@ export const OrchestratorApprovalReviewModal = ({
                       These assignments are the durable approval records for this gate.
                     </p>
                   </div>
-                  <StatusBadge tone="info">
-                    {approvalAssignments.length} assignment
-                    {approvalAssignments.length === 1 ? '' : 's'}
+                  <StatusBadge tone={coverageTone}>
+                    {approvedCount} / {requiredCount} approved
                   </StatusBadge>
                 </div>
                 {approvalAssignments.length === 0 ? (
@@ -469,4 +533,5 @@ export const OrchestratorApprovalReviewModal = ({
       </ErrorBoundary>
     </ModalShell>
   </div>
-);
+  );
+};
