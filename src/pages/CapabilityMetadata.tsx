@@ -54,6 +54,7 @@ import {
   retireLifecyclePhase,
 } from '../lib/capabilityLifecycle';
 import { normalizeCapabilityPhaseOwnershipRules } from '../lib/capabilityOwnership';
+import { WORK_ITEM_TASK_TYPE_OPTIONS } from '../lib/workItemTaskTypes';
 import { toWorkspaceTeamId } from '../lib/workspaceOrganization';
 import { buildWorkflowFromGraph, normalizeWorkflowGraph } from '../lib/workflowGraph';
 import {
@@ -3121,6 +3122,77 @@ export default function CapabilityMetadata() {
                     {isSavingLifecycle ? 'Saving lifecycle...' : 'Save lifecycle'}
                   </button>
                 </div>
+              </div>
+            </section>
+
+            <section className="grid gap-5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                    <WorkflowIcon size={24} />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-extrabold text-primary">
+                      Task Type Entry Points
+                    </h2>
+                    <p className="text-sm text-secondary">
+                      Map each work item type to the phase where execution begins. Overrides the
+                      built-in default so Bugfix, Production Issue, etc. land in the right phase
+                      for your team's lifecycle.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-3">
+                {WORK_ITEM_TASK_TYPE_OPTIONS.map(taskType => (
+                  <div
+                    key={taskType.value}
+                    className="grid grid-cols-[1fr_auto] items-center gap-4 rounded-2xl border border-outline-variant/15 bg-surface-container-low px-5 py-4"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-on-surface">{taskType.label}</p>
+                      <p className="mt-0.5 text-xs leading-relaxed text-secondary">
+                        {taskType.description}
+                      </p>
+                    </div>
+                    <select
+                      value={lifecycleDraft.taskTypeEntryPhases?.[taskType.value] ?? ''}
+                      onChange={event => {
+                        const newPhaseId = event.target.value;
+                        setLifecycleDraft(current => ({
+                          ...current,
+                          taskTypeEntryPhases: {
+                            ...current.taskTypeEntryPhases,
+                            [taskType.value]: newPhaseId || undefined,
+                          },
+                        }));
+                      }}
+                      className="field-select bg-white"
+                    >
+                      <option value="">Workflow default (no override)</option>
+                      {lifecycleDraft.phases.map(phase => (
+                        <option key={phase.id} value={phase.id}>
+                          {phase.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-end gap-3 rounded-3xl border border-outline-variant/15 bg-surface-container-low px-5 py-4">
+                <p className="flex-1 text-sm text-secondary">
+                  Entry point overrides are saved together with lifecycle phases.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void handleSaveLifecycle()}
+                  disabled={!lifecycleDirty || isSavingLifecycle || bootStatus !== 'ready'}
+                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isSavingLifecycle ? 'Saving lifecycle...' : 'Save lifecycle'}
+                </button>
               </div>
             </section>
 

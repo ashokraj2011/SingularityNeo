@@ -155,6 +155,7 @@ export const normalizeCapabilityLifecycle = (
     version: Number(lifecycle?.version || 1),
     phases: safePhases,
     retiredPhases,
+    taskTypeEntryPhases: lifecycle?.taskTypeEntryPhases ?? undefined,
   };
 };
 

@@ -1078,6 +1078,7 @@ export interface CapabilityLifecycle {
   version: number;
   phases: CapabilityLifecyclePhase[];
   retiredPhases: RetiredCapabilityLifecyclePhase[];
+  taskTypeEntryPhases?: Partial<Record<WorkItemTaskType, string>>;
 }
 
 export type CapabilitySystemRole = "FOUNDATION";

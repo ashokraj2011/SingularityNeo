@@ -1,6 +1,7 @@
 import { findFirstExecutableNode, findFirstExecutableNodeForPhase } from './workflowGraph';
 import type {
   CapabilityLifecycle,
+  WorkItemPhase,
   WorkItemTaskType,
   Workflow,
   WorkflowNode,
@@ -96,12 +97,20 @@ export const resolveWorkItemEntryNode = (
   taskType?: WorkItemTaskType | null,
   lifecycle?: CapabilityLifecycle | null,
 ): WorkflowNode | undefined => {
+  const normalizedTaskType = normalizeWorkItemTaskType(taskType);
+
+  // 1. Capability-configured entry phase takes priority over hardcoded default.
+  const capabilityEntryPhase = lifecycle?.taskTypeEntryPhases?.[normalizedTaskType];
+  if (capabilityEntryPhase) {
+    const phaseNode = findFirstExecutableNodeForPhase(workflow, capabilityEntryPhase as WorkItemPhase, lifecycle);
+    if (phaseNode) return phaseNode;
+  }
+
+  // 2. Fall back to hardcoded entry phase for this task type.
   const entryPhase = getWorkItemTaskTypeEntryPhase(taskType);
   if (entryPhase) {
     const phaseNode = findFirstExecutableNodeForPhase(workflow, entryPhase, lifecycle);
-    if (phaseNode) {
-      return phaseNode;
-    }
+    if (phaseNode) return phaseNode;
   }
 
   return findFirstExecutableNode(workflow);
