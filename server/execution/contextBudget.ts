@@ -41,6 +41,7 @@ export type ContextSource =
   | 'OPERATOR_GUIDANCE'    // explicit operator overrides
   | 'PLAN_SUMMARY'         // compiled work-item plan summary
   | 'APPROVAL_PACKET'      // compact approval synthesis context
+  | 'POLICY_DOCUMENT'     // step-level policy/template loaded from templatePath
   | 'STEP_CONTRACT';       // compiled step context (objective, inputs, etc.)
 
 export interface BudgetFragment {
@@ -106,6 +107,7 @@ const DEFAULT_PRIORITY: Record<ContextSource, number> = {
   LATEST_USER_MESSAGE: 925_000,
   TOOL_DESCRIPTIONS: 900_000,
   STEP_CONTRACT: 800,
+  POLICY_DOCUMENT: 780,
   WORK_ITEM_BRIEFING: 700,
   LEARNING_CONTEXT: 675,
   OPERATOR_GUIDANCE: 650,

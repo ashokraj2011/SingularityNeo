@@ -1,4 +1,6 @@
 import type { PoolClient } from "pg";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import {
   ActorContext,
   ApprovalAssignment,
@@ -164,6 +166,28 @@ import {
   getDesktopExecutorRegistration,
 } from "../executionOwnership";
 import { isRemoteExecutionClient } from "./runtimeClient";
+
+/**
+ * Try to load a step policy/template document from `step.templatePath`.
+ * Paths starting with "/" are resolved relative to the project root
+ * (i.e. cwd at server start). Returns undefined silently if the file
+ * is absent or unreadable — missing templates should never block execution.
+ */
+const loadStepPolicyDocument = async (
+  templatePath: string | undefined,
+): Promise<string | undefined> => {
+  if (!templatePath) return undefined;
+  try {
+    const resolved = templatePath.startsWith("/")
+      ? path.join(process.cwd(), templatePath)
+      : path.resolve(templatePath);
+    const content = await readFile(resolved, "utf-8");
+    return content.trim() || undefined;
+  } catch {
+    // File not found or unreadable — non-fatal; log nothing to avoid noise
+    return undefined;
+  }
+};
 
 const MAX_AGENT_TOOL_LOOPS = 8;
 const TOOL_LOOP_EXHAUSTION_WAIT_REASON = "TOOL_LOOP_EXHAUSTED";
@@ -2249,6 +2273,13 @@ const requestStepDecision = async ({
     operatorGuidanceContext || "None"
   }`;
 
+  // Load the step-level policy document from templatePath (non-blocking;
+  // returns undefined when the file is absent so execution is never blocked).
+  const policyDocumentContent = await loadStepPolicyDocument(step.templatePath);
+  const policyDocumentText = policyDocumentContent
+    ? `Step policy document (${step.templatePath}):\n${policyDocumentContent}`
+    : undefined;
+
   const fragments: BudgetFragment[] = [
     {
       source: "SYSTEM_CORE",
@@ -2266,6 +2297,16 @@ const requestStepDecision = async ({
       estimatedTokens: tok(stepContractText, "json"),
       meta: { stepName: step.name, attempt: runStep.attemptCount },
     },
+    ...(policyDocumentText
+      ? [
+          {
+            source: "POLICY_DOCUMENT" as const,
+            text: policyDocumentText,
+            estimatedTokens: tok(policyDocumentText, "prose"),
+            meta: { templatePath: step.templatePath },
+          } satisfies BudgetFragment,
+        ]
+      : []),
     {
       source: "WORK_ITEM_BRIEFING",
       text: briefingText,

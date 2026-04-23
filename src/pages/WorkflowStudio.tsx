@@ -2477,21 +2477,31 @@ export default function WorkflowStudio({
       parsedTemplate.phase,
     );
 
-    const nextNode = createWorkflowNode({
-      name:
-        parsedTemplate.label ||
-        NODE_TYPE_OPTIONS.find(option => option.type === parsedTemplate.type)?.label ||
-        'New Node',
+    const _newNodeName =
+      parsedTemplate.label ||
+      NODE_TYPE_OPTIONS.find(option => option.type === parsedTemplate.type)?.label ||
+      'New Node';
+
+    // Control-flow nodes (DECISION, PARALLEL_SPLIT, PARALLEL_JOIN) are
+    // orchestration primitives — they don't execute agent work, so they
+    // should not have a pre-assigned agent. Delivery/approval nodes get
+    // the first workspace agent as a starting point for the operator to refine.
+    const _isControlNode =
+      parsedTemplate.type === 'START' ||
+      parsedTemplate.type === 'END' ||
+      parsedTemplate.type === 'DECISION' ||
+      parsedTemplate.type === 'PARALLEL_SPLIT' ||
+      parsedTemplate.type === 'PARALLEL_JOIN';
+
+    const _rawNode = createWorkflowNode({
+      name: _newNodeName,
       type: parsedTemplate.type,
       phase: nextNodeLayout.phase,
       layout: {
         x: nextNodeLayout.x,
         y: nextNodeLayout.y,
       },
-      agentId:
-        parsedTemplate.type === 'START' || parsedTemplate.type === 'END'
-          ? undefined
-          : workspace.agents[0]?.id,
+      agentId: _isControlNode ? undefined : workspace.agents[0]?.id,
       action:
         parsedTemplate.action ||
         (parsedTemplate.type === 'DECISION'
@@ -2530,6 +2540,15 @@ export default function WorkflowStudio({
             }
           : undefined,
     }, capabilityLifecycle);
+
+    // HUMAN_APPROVAL nodes require an approvalPolicy at creation time.
+    // Without one the execution engine parks the run with no assignment
+    // target and the run stays stuck. Wire a sensible default so the
+    // operator only needs to pick who approves, not rebuild the policy.
+    const nextNode =
+      parsedTemplate.type === 'HUMAN_APPROVAL' && !_rawNode.approvalPolicy
+        ? { ..._rawNode, approvalPolicy: createDefaultApprovalPolicy(_rawNode) }
+        : _rawNode;
 
     replaceSelectedWorkflow(
       workflow => {

@@ -306,7 +306,7 @@ export const deriveWorkflowStepsFromGraph = (
         name: node.name,
         phase: node.phase,
         stepType: mapNodeTypeToStepType(node.type),
-        agentId: node.agentId || 'SYSTEM',
+        agentId: node.agentId,
         action: node.action || `${node.name} for ${node.phase}`,
         description: node.description,
         inputArtifactId: node.inputArtifactId,

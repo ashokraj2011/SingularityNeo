@@ -2267,7 +2267,7 @@ export interface WorkflowStep {
   name: string;
   phase: WorkItemPhase;
   stepType: WorkflowStepType;
-  agentId: string;
+  agentId?: string;
   action: string;
   description?: string;
   inputArtifactId?: string;
