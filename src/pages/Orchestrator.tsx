@@ -6071,7 +6071,7 @@ const Orchestrator = () => {
             quickCreateSheet={
               <OrchestratorListWorkbenchOverlays
                 quickCreateSheet={
-                  <OrchestratorQuickCreateSheet
+                  <OrchestratorBoardQuickCreateSheet
                     isOpen={isCreateSheetOpen}
                     workflows={workspace.workflows.map((workflow) => ({
                       id: workflow.id,
@@ -6079,13 +6079,21 @@ const Orchestrator = () => {
                     }))}
                     draftWorkItem={{
                       title: draftWorkItem.title,
-                      description: draftWorkItem.description,
                       workflowId: draftWorkItem.workflowId,
+                      taskType: draftWorkItem.taskType,
+                      priority: draftWorkItem.priority,
+                      description: draftWorkItem.description,
                       attachments: draftWorkItem.attachments,
+                      tags: draftWorkItem.tags,
                     }}
+                    launchSummary={draftLaunchSummary}
+                    visibleLifecyclePhases={visibleLifecyclePhases}
+                    capabilityStakeholdersCount={
+                      activeCapability.stakeholders.length
+                    }
                     busyAction={busyAction}
                     canCreateWorkItems={canCreateWorkItems}
-                    formatAttachmentSizeLabel={formatAttachmentSizeLabel}
+                    getDraftPhaseStakeholders={getDraftPhaseStakeholders}
                     onClose={() => setIsCreateSheetOpen(false)}
                     onSubmit={handleCreateWorkItem}
                     onTitleChange={(value) =>
@@ -6097,19 +6105,43 @@ const Orchestrator = () => {
                         workflowId: value,
                       }))
                     }
+                    onTaskTypeChange={(value) =>
+                      setDraftWorkItem((prev) => ({
+                        ...prev,
+                        taskType: value,
+                      }))
+                    }
+                    onPriorityChange={(value) =>
+                      setDraftWorkItem((prev) => ({
+                        ...prev,
+                        priority: value,
+                      }))
+                    }
                     onDescriptionChange={(value) =>
                       setDraftWorkItem((prev) => ({
                         ...prev,
                         description: value,
                       }))
                     }
+                    onTagsChange={(value) =>
+                      setDraftWorkItem((prev) => ({ ...prev, tags: value }))
+                    }
+                    onApplyCapabilityStakeholdersToPhase={
+                      applyCapabilityStakeholdersToPhase
+                    }
+                    onAddDraftPhaseStakeholder={addDraftPhaseStakeholder}
+                    onUpdateDraftPhaseStakeholderField={
+                      updateDraftPhaseStakeholderField
+                    }
+                    onRemoveDraftPhaseStakeholder={
+                      removeDraftPhaseStakeholder
+                    }
                     onUploadAttachments={(files) => {
                       void handleDraftAttachmentUpload(files);
                     }}
-                    onClearAttachments={() =>
-                      setDraftWorkItem((prev) => ({ ...prev, attachments: [] }))
-                    }
                     onRemoveAttachment={removeDraftAttachment}
+                    renderAttachmentIcon={renderAttachmentIcon}
+                    formatAttachmentSizeLabel={formatAttachmentSizeLabel}
                   />
                 }
                 stageControl={stageControlOverlayNode}
