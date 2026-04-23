@@ -1237,26 +1237,38 @@ export default function CapabilitySetup() {
 
                 {!isCollectionCapability ? (
                   <AdvancedDisclosure
-                    title="Approved workspace paths"
-                    description="Optional now. Add them when you want agents to read, write, or run commands inside a local codebase."
+                    title="Advanced: fallback workspace paths"
+                    description="Only needed for shared or headless runners. On personal desktops, each operator sets SINGULARITY_WORKING_DIRECTORY in their own .env.local — that value is used automatically and overrides anything here."
                     storageKey="capability-setup-workspace-paths"
                     badge={
                       <StatusBadge tone={approvedWorkspacePaths.length ? 'brand' : 'neutral'}>
                         {approvedWorkspacePaths.length
-                          ? `${approvedWorkspacePaths.length} path${approvedWorkspacePaths.length === 1 ? '' : 's'}`
-                          : 'Optional'}
+                          ? `${approvedWorkspacePaths.length} fallback path${approvedWorkspacePaths.length === 1 ? '' : 's'}`
+                          : 'Not required'}
                       </StatusBadge>
                     }
                   >
                     <div className="space-y-5">
-                      <div className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4">
+                      <div className="rounded-3xl border border-outline-variant/30 bg-surface-container-low px-5 py-4">
                         <div className="flex items-start gap-3">
-                          <FolderCode size={18} className="mt-0.5 text-amber-800" />
-                          <p className="text-sm leading-relaxed text-amber-900">
-                            Agents can read, write, and run commands only inside
-                            approved local paths. Leave this empty for a planning
-                            or discovery-first capability.
-                          </p>
+                          <FolderCode size={18} className="mt-0.5 text-secondary" />
+                          <div className="space-y-1 text-sm leading-relaxed text-secondary">
+                            <p>
+                              Each desktop operator's working directory comes
+                              from <code className="font-mono text-xs">SINGULARITY_WORKING_DIRECTORY</code>{' '}
+                              in their <code className="font-mono text-xs">.env.local</code>. That value
+                              is sent on executor registration and is the one the
+                              agent uses at runtime.
+                            </p>
+                            <p>
+                              Fill in the fields below <strong>only</strong> if
+                              you need a fallback for shared CI runners, headless
+                              executors, or admin tooling that doesn't have a
+                              desktop-level working directory. Leave empty
+                              otherwise — it is not required to create or run a
+                              capability.
+                            </p>
+                          </div>
                         </div>
                       </div>
                       <label className="space-y-2 block">
@@ -1309,9 +1321,9 @@ export default function CapabilitySetup() {
                       <div className="space-y-2">
                         {approvedWorkspacePaths.length === 0 ? (
                           <div className="rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-3 text-sm text-secondary">
-                            No local path is configured yet. The capability can
-                            still be created and used for chat, planning, and
-                            discovery before execution is enabled.
+                            No fallback path set. Personal desktops will use
+                            their own <code className="font-mono text-xs">SINGULARITY_WORKING_DIRECTORY</code>,
+                            so this is only needed for shared/headless runners.
                           </div>
                         ) : (
                           approvedWorkspacePaths.map(path => {

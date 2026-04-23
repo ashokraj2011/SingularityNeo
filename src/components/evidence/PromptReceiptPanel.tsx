@@ -13,9 +13,14 @@
  * to `type === 'PROMPT_RECEIPT'` and render one card per receipt.
  */
 import React from 'react';
-import { Info, Scissors, Layers } from 'lucide-react';
+import { Info, Scissors, Layers, Play, RotateCcw, Loader2 } from 'lucide-react';
 import type { RunEvent } from '../../types';
+import {
+  fetchPromptReceiptsForRun,
+  type PersistedPromptReceipt,
+} from '../../lib/api';
 import { EmptyState, SectionCard, StatTile, StatusBadge } from '../EnterpriseUI';
+import { PromptReceiptReplayModal } from './PromptReceiptReplayModal';
 
 // These match `ContextSource` in server/execution/contextBudget.ts. Duplicated
 // here as a string-literal union to avoid a server→client import.
@@ -329,15 +334,74 @@ const ReceiptCard = ({ event, details }: ReceiptCardProps) => {
 
 type Props = {
   selectedRunEvents: RunEvent[];
+  /**
+   * When provided, the panel also fetches persisted prompt receipts
+   * for this run from the API and surfaces a "Replay" action per
+   * receipt. Omit to keep the panel purely presentational.
+   */
+  capabilityId?: string | null;
+  runId?: string | null;
+};
+
+/**
+ * Compact card for a persisted (replayable) prompt receipt. Mirrors
+ * the look of the ephemeral ReceiptCard but adds the Replay action.
+ */
+const ReplayableReceiptCard = ({
+  receipt,
+  onReplay,
+}: {
+  receipt: PersistedPromptReceipt;
+  onReplay: (receipt: PersistedPromptReceipt) => void;
+}) => {
+  const evictedCount = receipt.evicted.length;
+  const tone: React.ComponentProps<typeof StatusBadge>['tone'] =
+    evictedCount > 0 ? 'warning' : 'success';
+  return (
+    <div className="workspace-meta-card flex flex-wrap items-center justify-between gap-3">
+      <div className="min-w-0 space-y-1">
+        <p className="workspace-meta-label">
+          {receipt.phase ? `${receipt.phase} · ` : ''}
+          {receipt.model || 'unknown model'}
+        </p>
+        <p className="truncate text-xs text-secondary">
+          {formatReceiptTimestamp(receipt.createdAt)}
+          {' · '}
+          {receipt.fragments.length} fragments ·{' '}
+          {formatTokens(receipt.totalEstimatedTokens)} /{' '}
+          {formatTokens(receipt.maxInputTokens)} tokens
+        </p>
+      </div>
+      <div className="flex items-center gap-2">
+        <StatusBadge tone={tone}>
+          {evictedCount > 0 ? `${evictedCount} evicted` : 'kept all'}
+        </StatusBadge>
+        <button
+          type="button"
+          onClick={() => onReplay(receipt)}
+          className="workspace-list-action workspace-list-action-primary flex items-center gap-1.5"
+        >
+          <Play size={12} />
+          Replay
+        </button>
+      </div>
+    </div>
+  );
 };
 
 /**
  * Renders every `PROMPT_RECEIPT` run event in the provided list as a
  * stacked-bar card showing what the main model saw and what the
- * budgeter evicted. Pure presentational — no data fetching, no side
- * effects. Drop it alongside the other Orchestrator detail panels.
+ * budgeter evicted. When `capabilityId` and `runId` are supplied, the
+ * panel also loads persisted receipts from the API and exposes a
+ * Replay action per receipt — the flight recorder / time-travel
+ * debugging surface.
  */
-export const PromptReceiptPanel = ({ selectedRunEvents }: Props) => {
+export const PromptReceiptPanel = ({
+  selectedRunEvents,
+  capabilityId,
+  runId,
+}: Props) => {
   const receipts = React.useMemo(
     () =>
       selectedRunEvents
@@ -351,25 +415,131 @@ export const PromptReceiptPanel = ({ selectedRunEvents }: Props) => {
     [selectedRunEvents],
   );
 
+  // Persisted receipts for the replay surface. Fetched lazily from
+  // the API when capabilityId + runId are both present.
+  const [persistedReceipts, setPersistedReceipts] = React.useState<
+    PersistedPromptReceipt[]
+  >([]);
+  const [isLoadingPersisted, setIsLoadingPersisted] =
+    React.useState<boolean>(false);
+  const [persistedError, setPersistedError] = React.useState<string | null>(
+    null,
+  );
+  const [activeReplayReceipt, setActiveReplayReceipt] =
+    React.useState<PersistedPromptReceipt | null>(null);
+
+  const loadPersisted = React.useCallback(async () => {
+    if (!capabilityId || !runId) return;
+    setIsLoadingPersisted(true);
+    setPersistedError(null);
+    try {
+      const rows = await fetchPromptReceiptsForRun(capabilityId, runId);
+      // Newest first so the just-captured decision is on top.
+      setPersistedReceipts(
+        [...rows].sort((a, b) =>
+          a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+        ),
+      );
+    } catch (err) {
+      setPersistedError(
+        err instanceof Error ? err.message : 'Failed to load receipts.',
+      );
+    } finally {
+      setIsLoadingPersisted(false);
+    }
+  }, [capabilityId, runId]);
+
+  React.useEffect(() => {
+    if (!capabilityId || !runId) {
+      setPersistedReceipts([]);
+      return;
+    }
+    void loadPersisted();
+    // Refetch when a new PROMPT_RECEIPT event arrives during this
+    // run — keeps the replay list fresh without polling.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [capabilityId, runId, receipts.length]);
+
   return (
-    <SectionCard
-      title="Prompt receipts"
-      description="Which context fragments the main model saw on each decision, and what the budgeter had to evict."
-      icon={Info}
-    >
-      {receipts.length === 0 ? (
-        <EmptyState
-          title="No prompt receipts yet"
-          description="Receipts appear here once the execution engine makes its first main-model call for this run."
+    <>
+      <SectionCard
+        title="Prompt receipts"
+        description="Which context fragments the main model saw on each decision, and what the budgeter had to evict."
+        icon={Info}
+        action={
+          capabilityId && runId ? (
+            <button
+              type="button"
+              onClick={() => void loadPersisted()}
+              disabled={isLoadingPersisted}
+              className="workspace-list-action flex items-center gap-1.5 text-xs"
+              aria-label="Refresh replayable receipts"
+            >
+              {isLoadingPersisted ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <RotateCcw size={12} />
+              )}
+              Refresh
+            </button>
+          ) : undefined
+        }
+      >
+        {/* Replay surface — only when we have the run context to hit the API. */}
+        {capabilityId && runId ? (
+          <div className="mb-4 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="workspace-meta-label">
+                Replayable decisions ({persistedReceipts.length})
+              </p>
+              {persistedError ? (
+                <StatusBadge tone="warning">Load error</StatusBadge>
+              ) : null}
+            </div>
+            {persistedError ? (
+              <p className="text-xs text-rose-700">{persistedError}</p>
+            ) : persistedReceipts.length === 0 ? (
+              <p className="text-xs text-secondary">
+                {isLoadingPersisted
+                  ? 'Loading replayable receipts…'
+                  : 'No persisted receipts yet. They appear here after the engine records a main-model call.'}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {persistedReceipts.map(receipt => (
+                  <ReplayableReceiptCard
+                    key={receipt.id}
+                    receipt={receipt}
+                    onReplay={setActiveReplayReceipt}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
+
+        {receipts.length === 0 ? (
+          <EmptyState
+            title="No prompt receipts yet"
+            description="Receipts appear here once the execution engine makes its first main-model call for this run."
+          />
+        ) : (
+          <div className="space-y-3">
+            {receipts.map(({ event, details }) => (
+              <ReceiptCard key={event.id} event={event} details={details} />
+            ))}
+          </div>
+        )}
+      </SectionCard>
+
+      {capabilityId && activeReplayReceipt ? (
+        <PromptReceiptReplayModal
+          capabilityId={capabilityId}
+          receipt={activeReplayReceipt}
+          onClose={() => setActiveReplayReceipt(null)}
         />
-      ) : (
-        <div className="space-y-3">
-          {receipts.map(({ event, details }) => (
-            <ReceiptCard key={event.id} event={event} details={details} />
-          ))}
-        </div>
-      )}
-    </SectionCard>
+      ) : null}
+    </>
   );
 };
 

@@ -20,6 +20,12 @@ import {
   resumeWorkflowRun,
 } from '../execution/service';
 import { wakeExecutionWorker } from '../execution/worker';
+import {
+  getPromptReceiptById,
+  listPromptReceiptsForRun,
+  listPromptReceiptsForRunStep,
+} from '../execution/promptReceipts';
+import { invokeScopedCapabilitySession } from '../githubModels';
 import { parseActorContext } from '../requestActor';
 
 type WorkflowRunRouteDeps = {
@@ -417,4 +423,149 @@ export const registerWorkflowRunRoutes = (
       sendApiError(response, error);
     }
   });
+
+  // ──────────────────────────────────────────────────────────────────
+  // Time-travel debugging for AI decisions.
+  //
+  // Every main-model LLM call inside the execution engine is persisted
+  // to `run_step_prompt_receipts`. These endpoints let operators:
+  //   • Browse the exact fragments a model saw for any step ("why did
+  //     the agent decide X?").
+  //   • Replay any receipt against an alternate model ("what would a
+  //     different model have done with the same context?") without
+  //     having to re-drive the whole step.
+  // ──────────────────────────────────────────────────────────────────
+
+  app.get(
+    '/api/capabilities/:capabilityId/runs/:runId/prompt-receipts',
+    async (request, response) => {
+      try {
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor: parseActorContext(request, 'Workspace Operator'),
+          action: 'telemetry.read',
+        });
+        const receipts = await listPromptReceiptsForRun(request.params.runId);
+        // Scope check: a receipt must belong to the capability on the URL.
+        // We filter in-memory because the column is already indexed by
+        // run_id; adding capability_id to the WHERE is cheap defense-in-depth.
+        response.json(
+          receipts.filter(r => r.capabilityId === request.params.capabilityId),
+        );
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.get(
+    '/api/capabilities/:capabilityId/run-steps/:runStepId/prompt-receipts',
+    async (request, response) => {
+      try {
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor: parseActorContext(request, 'Workspace Operator'),
+          action: 'telemetry.read',
+        });
+        const receipts = await listPromptReceiptsForRunStep(
+          request.params.runStepId,
+        );
+        response.json(
+          receipts.filter(r => r.capabilityId === request.params.capabilityId),
+        );
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.get(
+    '/api/capabilities/:capabilityId/prompt-receipts/:receiptId',
+    async (request, response) => {
+      try {
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor: parseActorContext(request, 'Workspace Operator'),
+          action: 'telemetry.read',
+        });
+        const receipt = await getPromptReceiptById(request.params.receiptId);
+        if (!receipt || receipt.capabilityId !== request.params.capabilityId) {
+          response.status(404).json({ error: 'Prompt receipt not found.' });
+          return;
+        }
+        response.json(receipt);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.post(
+    '/api/capabilities/:capabilityId/prompt-receipts/:receiptId/replay',
+    async (request, response) => {
+      try {
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor: parseActorContext(request, 'Workspace Operator'),
+          // Replay is an inference call — treat as execution control so
+          // drive-by viewers can't burn tokens. Operators with
+          // workitem.control can trigger it.
+          action: 'workitem.control',
+        });
+
+        const receipt = await getPromptReceiptById(request.params.receiptId);
+        if (!receipt || receipt.capabilityId !== request.params.capabilityId) {
+          response.status(404).json({ error: 'Prompt receipt not found.' });
+          return;
+        }
+
+        const modelOverride =
+          typeof request.body?.model === 'string' && request.body.model.trim()
+            ? String(request.body.model).trim()
+            : undefined;
+
+        // Rehydrate the agent snapshot. The stored snapshot holds only
+        // the fields `invokeScopedCapabilitySession` reads — system
+        // prompt, learning context block, model, provider — so replay
+        // reconstructs the system prompt deterministically.
+        const agentSnapshot = receipt.agentSnapshot || {};
+
+        const started = Date.now();
+        const replay = await invokeScopedCapabilitySession({
+          capability: { id: receipt.capabilityId } as never,
+          agent: agentSnapshot as never,
+          scope: receipt.scope,
+          scopeId: receipt.scopeId ?? undefined,
+          workItemPhase: receipt.phase ?? null,
+          developerPrompt: receipt.developerPrompt ?? undefined,
+          memoryPrompt: receipt.memoryPrompt ?? undefined,
+          prompt: receipt.userPrompt,
+          // Fresh session so replay is not contaminated by whatever the
+          // live session state currently is.
+          resetSession: true,
+          modelOverride,
+        });
+        const elapsedMs = Date.now() - started;
+
+        response.json({
+          receiptId: receipt.id,
+          original: {
+            model: receipt.model,
+            content: receipt.responseContent,
+            usage: receipt.responseUsage,
+            capturedAt: receipt.createdAt,
+          },
+          replay: {
+            model: replay.model,
+            content: replay.content,
+            usage: replay.usage,
+            elapsedMs,
+            modelOverride: modelOverride ?? null,
+          },
+        });
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
 };

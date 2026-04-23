@@ -91,6 +91,23 @@ const EXECUTOR_LEASE_MS = 30_000;
 const EXECUTOR_POLL_MS = 2_500;
 const executorId = `desktop-executor-${process.pid}-${randomUUID().slice(0, 8)}`;
 
+// User-level working directory — the single source of truth for this
+// machine's workspace root. Capability-level workspace paths are only
+// a fallback for shared / headless runners. Every desktop user puts
+// their own value in `.env.local`:
+//
+//   SINGULARITY_WORKING_DIRECTORY=/Users/alice/code
+//
+// If unset, `projectRoot` acts as a sensible default so a first-run
+// developer isn't blocked — they can still execute against the repo
+// they launched Singularity from.
+const desktopWorkingDirectory = (() => {
+  const raw = String(process.env.SINGULARITY_WORKING_DIRECTORY || '').trim();
+  if (raw) return raw;
+  const root = String(projectRoot || '').trim();
+  return root || undefined;
+})();
+
 let activeActorContext: ActorContext | null = null;
 let executorHeartbeatAt: string | undefined;
 let executorHeartbeatStatus: ExecutorHeartbeatStatus = 'OFFLINE';
@@ -216,6 +233,9 @@ const syncExecutorRegistration = async () => {
     actorContext: activeActorContext,
     body: {
       runtimeSummary: await buildRuntimeSummary(),
+      // Resend on every heartbeat so a config change picked up from
+      // `.env.local` reaches the control plane within one poll cycle.
+      workingDirectory: desktopWorkingDirectory,
     },
   }).catch(async () =>
     controlPlaneRequest<{
@@ -230,6 +250,7 @@ const syncExecutorRegistration = async () => {
       body: {
         executorId,
         runtimeSummary: await buildRuntimeSummary(),
+        workingDirectory: desktopWorkingDirectory,
       },
     }),
   );

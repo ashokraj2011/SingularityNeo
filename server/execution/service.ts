@@ -92,6 +92,7 @@ import {
   type ContextSource,
 } from "./contextBudget";
 import { estimateTokens, normalizeProviderForEstimate } from "./tokenEstimate";
+import { persistPromptReceipt } from "./promptReceipts";
 import {
   queueExperienceDistillationRefresh,
   queueSingleAgentLearningRefresh,
@@ -2362,6 +2363,43 @@ const requestStepDecision = async ({
       );
     }
   }
+
+  // Time-travel debugging for AI decisions: persist the receipt so the
+  // replay endpoint can rehydrate the exact context and re-invoke any
+  // model. Fire-and-forget — inference never blocks on durable audit.
+  void persistPromptReceipt({
+    runStepId: runStep.id,
+    runId: runId ?? null,
+    workItemId: workItem.id ?? null,
+    capability,
+    agent,
+    scope: workItem.id ? "WORK_ITEM" : "TASK",
+    scopeId: workItem.id || runStep.id,
+    phase: step.phase || workItem.phase || null,
+    model: response.model || routedModel || agent.model || null,
+    providerKey: resolveAgentProviderKey(agent) || null,
+    userPrompt: budgeted.assembled,
+    memoryPrompt: memoryContext.prompt || null,
+    developerPrompt:
+      "You are an execution engine inside a capability workflow. Return JSON only with no markdown.",
+    responseContent: response.content,
+    responseUsage: response.usage
+      ? (response.usage as unknown as Record<string, unknown>)
+      : null,
+    fragments: budgeted.receipt.included.map(entry => ({
+      source: String(entry.source),
+      tokens: Number(entry.estimatedTokens || 0),
+      meta: entry.meta ?? undefined,
+    })),
+    evicted: budgeted.receipt.evicted.map(entry => ({
+      source: String(entry.source),
+      tokens: Number(entry.estimatedTokens || 0),
+      reason: String(entry.reason || ""),
+    })),
+    totalEstimatedTokens: budgeted.receipt.totalEstimatedTokens,
+    maxInputTokens: budgeted.receipt.maxInputTokens,
+    reservedOutputTokens: budgeted.receipt.reservedOutputTokens,
+  }).catch(() => undefined);
 
   try {
     const parsed = extractJsonObject(response.content) as Record<string, any>;

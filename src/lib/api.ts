@@ -3250,3 +3250,109 @@ export const fetchSentinelMissions = async (
   requestJson<SentinelMissionStatus[]>(
     `/api/sentinel/missions${capabilityId ? `?capabilityId=${encodeURIComponent(capabilityId)}` : ""}`,
   );
+
+// ────────────────────────────────────────────────────────────────────
+// Time-travel debugging — persisted prompt receipts.
+//
+// Every main-model LLM call inside the execution engine is persisted.
+// These calls feed the "Replay" UI that lets operators rerun any
+// receipt against an alternate model without re-driving the whole step.
+// ────────────────────────────────────────────────────────────────────
+
+export interface PersistedPromptReceiptFragment {
+  source: string;
+  tokens: number;
+  meta?: Record<string, unknown>;
+}
+
+export interface PersistedPromptReceiptEviction {
+  source: string;
+  tokens: number;
+  reason: string;
+}
+
+export interface PersistedPromptReceipt {
+  id: string;
+  runStepId: string;
+  runId: string | null;
+  workItemId: string | null;
+  capabilityId: string;
+  agentId: string | null;
+  agentSnapshot: {
+    id?: string;
+    name?: string;
+    model?: string;
+    providerKey?: string;
+  };
+  scope: "GENERAL_CHAT" | "WORK_ITEM" | "TASK";
+  scopeId: string | null;
+  phase: string | null;
+  model: string | null;
+  providerKey: string | null;
+  userPrompt: string;
+  memoryPrompt: string | null;
+  developerPrompt: string | null;
+  responseContent: string;
+  responseUsage: Record<string, unknown> | null;
+  fragments: PersistedPromptReceiptFragment[];
+  evicted: PersistedPromptReceiptEviction[];
+  totalEstimatedTokens: number;
+  maxInputTokens: number;
+  reservedOutputTokens: number;
+  createdAt: string;
+}
+
+export interface PromptReceiptReplayResponse {
+  receiptId: string;
+  original: {
+    model: string | null;
+    content: string;
+    usage: Record<string, unknown> | null;
+    capturedAt: string;
+  };
+  replay: {
+    model: string | null;
+    content: string;
+    usage: Record<string, unknown> | null;
+    elapsedMs: number;
+    modelOverride: string | null;
+  };
+}
+
+export const fetchPromptReceiptsForRun = async (
+  capabilityId: string,
+  runId: string,
+): Promise<PersistedPromptReceipt[]> =>
+  requestJson<PersistedPromptReceipt[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/prompt-receipts`,
+  );
+
+export const fetchPromptReceiptsForRunStep = async (
+  capabilityId: string,
+  runStepId: string,
+): Promise<PersistedPromptReceipt[]> =>
+  requestJson<PersistedPromptReceipt[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/run-steps/${encodeURIComponent(runStepId)}/prompt-receipts`,
+  );
+
+export const fetchPromptReceipt = async (
+  capabilityId: string,
+  receiptId: string,
+): Promise<PersistedPromptReceipt> =>
+  requestJson<PersistedPromptReceipt>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/prompt-receipts/${encodeURIComponent(receiptId)}`,
+  );
+
+export const replayPromptReceipt = async (
+  capabilityId: string,
+  receiptId: string,
+  options?: { model?: string },
+): Promise<PromptReceiptReplayResponse> =>
+  requestJson<PromptReceiptReplayResponse>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/prompt-receipts/${encodeURIComponent(receiptId)}/replay`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ model: options?.model }),
+    },
+  );

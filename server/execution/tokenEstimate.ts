@@ -1,16 +1,22 @@
 /**
- * Cheap provider-agnostic token estimator.
+ * Hybrid token estimator for the Context Budgeter (Phase 2, Lever 5).
  *
- * We deliberately avoid pulling in tiktoken / anthropic-tokenizer — those
- * are large binary deps, version-skewed per provider, and require network
- * to stay accurate as model vocabularies evolve. For the Context Budgeter
- * (Phase 2, Lever 5) we only need a rough-but-stable estimate so eviction
- * order is sensible. Off-by-20% is fine; off-by-100x is not.
+ * Two paths:
+ *   1. Exact BPE via js-tiktoken for OpenAI-family models
+ *      (gpt-4o, gpt-4.1, o1/o3/o4 → o200k_base;
+ *       gpt-4-turbo, gpt-4-32k, bare gpt-4, gpt-3.5-* → cl100k_base).
+ *      Encoders are loaded lazily and cached per-encoding.
+ *   2. Char-divisor heuristic for everything else (Anthropic, unknown,
+ *      provider-without-model-hint). English-ish prose ≈ 4 chars/token
+ *      on OpenAI / ~3.8 on Anthropic; code / JSON trends denser
+ *      (~3.2 chars/token) because of punctuation and identifiers.
  *
- * Heuristic: English-ish text is ~4 chars/token on OpenAI, ~3.8 on
- * Anthropic. Code / JSON trends denser (~3.2 chars/token) because of
- * punctuation and identifiers. We pick the right divisor based on the
- * provider key and a `kind` hint from the caller.
+ * Off-by-5% is fine on the openai-exact path; off-by-20% is fine on the
+ * heuristic path — what matters is that eviction order in the budgeter
+ * is sensible, not that the count is perfect.
+ *
+ * If js-tiktoken fails to load (WASM unavailable), we silently fall
+ * through to the heuristic so the service keeps running.
  */
 import { getEncoding, type Tiktoken } from 'js-tiktoken';
 
@@ -37,8 +43,6 @@ const DIVISORS_BY_PROVIDER: Record<TokenEstimateProvider, ProviderDivisors> = {
   unknown: { prose: 3.8, code: 3.1, json: 2.9 }, // conservative: assume denser
 };
 
-type TokenEstimateFamily = 'openai-exact' | 'heuristic';
-
 // Per-encoding lazy singletons. Two encodings are in play:
 //   o200k_base — GPT-4o, GPT-4.1, o1, o3, o4 families
 //   cl100k_base — GPT-4-turbo, GPT-4-32k, GPT-3.5-turbo (legacy)
@@ -55,8 +59,10 @@ const normalizeModelForEstimate = (model: string | null | undefined) => {
   return normalized.includes('/') ? normalized.split('/').pop() || normalized : normalized;
 };
 
-const isOpenAiFamilyModel = (model: string | null | undefined) => {
-  const normalized = normalizeModelForEstimate(model);
+// Works on an already-normalized model string. Internal helpers use this
+// form so `estimateTokens` can normalize once and reuse the result across
+// family detection AND encoding selection on the hot path.
+const isOpenAiFamilyNormalized = (normalized: string): boolean => {
   if (!normalized) return false;
   if (normalized.includes('claude') || normalized.includes('anthropic')) {
     return false;
@@ -70,15 +76,20 @@ const isOpenAiFamilyModel = (model: string | null | undefined) => {
   );
 };
 
+const isOpenAiFamilyModel = (model: string | null | undefined): boolean =>
+  isOpenAiFamilyNormalized(normalizeModelForEstimate(model));
+
 /**
  * GPT-4o / GPT-4.1 / o-series use o200k_base.
  * Older GPT-4 variants (gpt-4-turbo, gpt-4-32k, gpt-4 itself) and all
  * GPT-3.5 models use cl100k_base.
+ *
+ * Note: `gpt-4.1` (dot) is distinct from `gpt-4-` (hyphen) — the former
+ * is a modern o200k_base model, the latter is a legacy cl100k_base family.
  */
-const resolveEncoding = (
-  model: string | null | undefined,
+const resolveEncodingFromNormalized = (
+  normalized: string,
 ): 'o200k_base' | 'cl100k_base' => {
-  const normalized = normalizeModelForEstimate(model);
   if (
     normalized.startsWith('gpt-3.5') ||
     normalized === 'gpt-4' ||
@@ -88,10 +99,6 @@ const resolveEncoding = (
   }
   return 'o200k_base';
 };
-
-// resolveEstimateFamily: single rule — GPT-family → exact BPE, everything else → heuristic.
-const resolveEstimateFamily = (model?: string | null): TokenEstimateFamily =>
-  isOpenAiFamilyModel(model) ? 'openai-exact' : 'heuristic';
 
 const getEncoder = (encoding: 'o200k_base' | 'cl100k_base'): Tiktoken | null => {
   if (encoderUnavailable) return null;
@@ -118,10 +125,11 @@ export const estimateTokens = (
   if (!text) return 0;
   const provider = opts.provider || 'unknown';
   const kind = opts.kind || 'prose';
-  const family = resolveEstimateFamily(opts.model);
+  // Normalize once and reuse for both family detection and encoding selection.
+  const normalizedModel = normalizeModelForEstimate(opts.model);
 
-  if (family === 'openai-exact') {
-    const encoder = getEncoder(resolveEncoding(opts.model));
+  if (isOpenAiFamilyNormalized(normalizedModel)) {
+    const encoder = getEncoder(resolveEncodingFromNormalized(normalizedModel));
     if (encoder) {
       try {
         return Math.max(1, encoder.encode(text).length);

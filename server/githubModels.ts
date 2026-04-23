@@ -2318,22 +2318,54 @@ export const invokeBudgetModelSummary = async ({
   }
 
   const providerKey = resolveAgentProviderKey(agent);
-  const { models } = await listAvailableRuntimeModels().catch(() => ({
-    models: getStaticRuntimeModels(),
-    fromRuntime: false,
-  }));
-  // For local-openai agents, restrict to locally-served models so we never
-  // request a Copilot/GitHub model ID against the local endpoint. The local
-  // model list is a fresh fetch (cheap — already cached inside the helper).
-  const isLocalAgent = normalizeProviderKey(providerKey) === LOCAL_OPENAI_PROVIDER_KEY;
-  const candidates = isLocalAgent
-    ? await listLocalOpenAIModels().catch(() => models)
-    : models;
-  const cheapest = pickLowestCostRuntimeModel(candidates.length > 0 ? candidates : models);
-  const chosenModel = cheapest?.apiModelId || normalizeModel('gpt-4o-mini');
+  const isLocalAgent = providerKey === LOCAL_OPENAI_PROVIDER_KEY;
 
+  // Pick the cheapest model accessible to the agent's provider.
+  //
+  // For local-openai agents, the model list MUST come from the local
+  // endpoint — if we picked a Copilot model ID and sent it to a local
+  // server (ollama / LM Studio / etc.), the request would fail. If the
+  // local list is empty (endpoint misconfigured), fall back directly to
+  // the default budget model ID and let the local server produce a clear
+  // error rather than leaking Copilot model IDs into a local call.
+  //
+  // For Copilot agents, use the merged runtime list (which already
+  // includes locally-discovered models via `listAvailableRuntimeModels`).
+  let chosenModel: string;
+  if (isLocalAgent) {
+    const localModels = await listLocalOpenAIModels().catch(
+      () => [] as RuntimeModelOption[],
+    );
+    const cheapest = pickLowestCostRuntimeModel(localModels);
+    chosenModel = cheapest?.apiModelId || normalizeModel('gpt-4o-mini');
+  } else {
+    const { models } = await listAvailableRuntimeModels().catch(() => ({
+      models: getStaticRuntimeModels(),
+      fromRuntime: false,
+    }));
+    const cheapest = pickLowestCostRuntimeModel(models);
+    chosenModel = cheapest?.apiModelId || normalizeModel('gpt-4o-mini');
+  }
+
+  // Cap per-turn content before joining so one pathological turn (a large
+  // file dump, a multi-page test failure, an enormous diff) can't push the
+  // transcript past the budget model's own context window. The rollup is
+  // meant to compress long histories — having it blow its own context
+  // because one turn was huge defeats the purpose. 2 KiB/turn keeps the
+  // signal (role, intent, first/last lines of output) while bounding total
+  // transcript size: with keepLastN=6 and typical threshold growth to ~20
+  // older turns per rollup, worst case is ~40 KiB of prompt body, well
+  // within any modern budget model's input limit.
+  const MAX_TURN_CHARS = 2048;
+  const capturedSuffix = '…[turn truncated for rollup]';
   const transcript = newTurns
-    .map(turn => `${turn.role.toUpperCase()}: ${turn.content}`)
+    .map(turn => {
+      const content =
+        turn.content.length > MAX_TURN_CHARS
+          ? `${turn.content.slice(0, MAX_TURN_CHARS)}${capturedSuffix}`
+          : turn.content;
+      return `${turn.role.toUpperCase()}: ${content}`;
+    })
     .join('\n\n');
 
   // Structured output (Phase 2 / Lever 8): request a JSON state note
@@ -2371,36 +2403,87 @@ export const invokeBudgetModelSummary = async ({
     timeoutMs,
   });
 
-  // Validate that the budget model actually returned a JSON object as instructed.
-  // A malformed response (prose, markdown fences, partial JSON) would corrupt
-  // the synthetic prefix turn that rollupToolHistory embeds into the main prompt.
-  // On any parse failure we fall back to the prior summary so the main model
-  // continues with a known-good state note rather than garbage.
+  // Validate the budget model actually returned the requested JSON shape.
+  // A malformed response (prose, markdown fences, partial JSON, wrong keys)
+  // would corrupt the synthetic prefix turn that rollupToolHistory embeds
+  // into the main model's prompt. The contract: must be a JSON object with
+  // at minimum a string `currentGoal` key. We re-serialize on success so
+  // the stored summary is canonical.
   const rawContent = (result.content || '').trim();
-  let validatedSummary: string;
-  try {
-    const parsed: unknown = JSON.parse(rawContent);
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      // Re-serialize to canonical form: no leading/trailing whitespace or fences.
-      validatedSummary = JSON.stringify(parsed);
-    } else {
-      // Valid JSON but wrong shape (array, primitive). Budget model ignored prompt.
-      console.warn('[invokeBudgetModelSummary] unexpected JSON shape from budget model; keeping prior summary');
-      validatedSummary = priorSummary;
+  const validatedSummary = validateBudgetSummaryJson(rawContent);
+
+  if (!validatedSummary) {
+    // On validation failure with no prior summary to retain, throw.
+    // rollupToolHistory has a try/catch (historyRollup.ts:108-135) that
+    // falls back to a truncated raw tail — that's the right behavior
+    // when the rollup itself is unreliable. Returning garbage here would
+    // silently poison every subsequent main-model call.
+    if (!priorSummary) {
+      throw new Error(
+        '[invokeBudgetModelSummary] budget model returned unparseable output on first rollup; caller must fall back',
+      );
     }
-  } catch {
-    // Not valid JSON — model may have returned prose or markdown fences.
-    console.warn('[invokeBudgetModelSummary] non-JSON response from budget model; keeping prior summary');
-    validatedSummary = priorSummary;
+    // We have a prior summary from a previous successful rollup. Keep it
+    // rather than let a single bad call erase accumulated state.
+    console.warn(
+      '[invokeBudgetModelSummary] malformed budget model output; retaining prior summary',
+    );
+    return {
+      summary: priorSummary,
+      model: result.model || chosenModel,
+      usage: result.usage ?? null,
+    };
   }
 
   return {
-    // Last resort: if both validated and prior are empty, store raw content
-    // so the caller at least has something to work with.
-    summary: validatedSummary || rawContent,
+    summary: validatedSummary,
     model: result.model || chosenModel,
     usage: result.usage ?? null,
   };
+};
+
+/**
+ * Strip common markdown-fenced-code wrappers. Budget models routinely
+ * emit ```json\n{...}\n``` despite the prompt instructing them not to.
+ * Stripping fences pre-parse catches a whole class of formatting drift
+ * that would otherwise trigger the truncated-tail fallback and waste
+ * subsequent budget-model calls until the model happens to get the
+ * format right. No-op when no fence is present.
+ */
+const stripBudgetResponseFences = (raw: string): string =>
+  raw
+    .replace(/^```(?:json)?\s*\n?/i, '')
+    .replace(/\n?```\s*$/i, '')
+    .trim();
+
+/**
+ * Validate a budget model response. Returns a canonical JSON string on
+ * success, or empty string on any failure (unparseable, wrong top-level
+ * type, or missing required `currentGoal` key). Callers treat '' as
+ * "validation failed — use fallback."
+ */
+const validateBudgetSummaryJson = (raw: string): string => {
+  if (!raw) return '';
+  const unfenced = stripBudgetResponseFences(raw);
+  if (!unfenced) return '';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(unfenced);
+  } catch {
+    return '';
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return '';
+  }
+  const record = parsed as Record<string, unknown>;
+  // Minimum required shape: currentGoal is a non-empty string. Other keys
+  // from the requested schema (lastSuccessfulAction, currentBlocker,
+  // filesInPlay, pendingDecision, evidenceGenerated) are not required —
+  // the budget model may legitimately omit fields it has no signal for.
+  if (typeof record.currentGoal !== 'string' || record.currentGoal.trim().length === 0) {
+    return '';
+  }
+  return JSON.stringify(record);
 };
 
 export const requestGitHubModel = async ({

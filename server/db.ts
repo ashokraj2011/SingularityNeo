@@ -355,6 +355,7 @@ export const schemaStatements = [
       owned_capability_ids TEXT[] NOT NULL DEFAULT '{}',
       approved_workspace_roots JSONB NOT NULL DEFAULT '{}'::jsonb,
       runtime_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+      working_directory TEXT,
       heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1404,6 +1405,7 @@ export const schemaStatements = [
       freshness TEXT,
       metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
       content_preview TEXT NOT NULL,
+      is_global BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
@@ -1746,9 +1748,101 @@ export const schemaStatements = [
     CREATE INDEX IF NOT EXISTS idx_agent_pull_requests_work_item
       ON agent_pull_requests (capability_id, work_item_id, state)
   `,
+  // Time-travel debugging for AI decisions (Phase 2 / Lever 7 durable).
+  // Every main-model LLM call inside the execution engine persists a
+  // "prompt receipt" — enough context to replay the decision against
+  // any model. This is the flight recorder. Operators can answer
+  // "why did the agent decide X" by viewing the exact fragments the
+  // model saw, and "what if we had used a different model" by hitting
+  // the replay endpoint.
+  `
+    CREATE TABLE IF NOT EXISTS run_step_prompt_receipts (
+      id TEXT PRIMARY KEY,
+      run_step_id TEXT NOT NULL,
+      run_id TEXT,
+      work_item_id TEXT,
+      capability_id TEXT NOT NULL,
+      agent_id TEXT,
+      agent_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+      scope TEXT NOT NULL,
+      scope_id TEXT,
+      phase TEXT,
+      model TEXT,
+      provider_key TEXT,
+      user_prompt TEXT NOT NULL,
+      memory_prompt TEXT,
+      developer_prompt TEXT,
+      response_content TEXT NOT NULL DEFAULT '',
+      response_usage JSONB,
+      fragments JSONB NOT NULL DEFAULT '[]'::jsonb,
+      evicted JSONB NOT NULL DEFAULT '[]'::jsonb,
+      total_estimated_tokens INTEGER NOT NULL DEFAULT 0,
+      max_input_tokens INTEGER NOT NULL DEFAULT 0,
+      reserved_output_tokens INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_prompt_receipts_run_step
+      ON run_step_prompt_receipts (run_step_id, created_at)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_prompt_receipts_run
+      ON run_step_prompt_receipts (run_id, created_at)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_prompt_receipts_work_item
+      ON run_step_prompt_receipts (capability_id, work_item_id, created_at DESC)
+  `,
 ];
 
 export const migrationStatements = [
+  // Column backfills for tables that predate fields the code now reads.
+  // All use `ADD COLUMN IF NOT EXISTS` so they're safe on any DB,
+  // fresh or aged.
+  //
+  // desktop_executor_registrations.working_directory: user-level
+  // workspace root captured at registration time (plan section A).
+  // Without it, desktop:runtime:execution:claim crashes with
+  // "column \"working_directory\" ... does not exist".
+  `
+    ALTER TABLE desktop_executor_registrations
+    ADD COLUMN IF NOT EXISTS working_directory TEXT
+  `,
+  // capability_memory_documents.is_global: per-workspace "global memory"
+  // flag consumed by the memory retrieval and learning workers. Without
+  // it the learning.worker tick fails and no jobs process.
+  `
+    ALTER TABLE capability_memory_documents
+    ADD COLUMN IF NOT EXISTS is_global BOOLEAN NOT NULL DEFAULT FALSE
+  `,
+  // Fallback CREATE TABLE for capability_agent_learning_jobs. The
+  // table is already declared in schemaStatements, but on databases
+  // that came up when an earlier schemaStatement failed, everything
+  // downstream of the failure got silently skipped. Asserting it here
+  // guarantees the learning worker has its home even after such a
+  // partial init.
+  `
+    CREATE TABLE IF NOT EXISTS capability_agent_learning_jobs (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      request_reason TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_expires_at TIMESTAMPTZ,
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, agent_id)
+        REFERENCES capability_agents(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
   `
     ALTER TABLE capability_code_symbols
     ADD COLUMN IF NOT EXISTS symbol_id TEXT
@@ -3198,15 +3292,43 @@ export const transaction = async <T>(fn: (client: PoolClient) => Promise<T>) =>
     }
   });
 
+// Runs a single DDL statement, logging a compact preview + full error
+// when it fails. Without this, a broken statement deep in the schema
+// list shows up as "column X does not exist" at runtime and you have
+// to bisect by hand to find which CREATE/ALTER actually failed.
+const runDdl = async (
+  client: PoolClient,
+  phase: 'schema' | 'migration',
+  index: number,
+  statement: string,
+) => {
+  try {
+    await client.query(statement);
+  } catch (error) {
+    // First meaningful line is almost always enough to identify the
+    // statement — either the CREATE TABLE header or the ALTER TABLE line.
+    const preview =
+      statement
+        .split('\n')
+        .map(line => line.trim())
+        .find(line => line && !line.startsWith('--')) || '(empty)';
+    console.error(
+      `[db.init] ${phase} statement #${index} failed: ${preview}\n` +
+        (error instanceof Error ? error.message : String(error)),
+    );
+    throw error;
+  }
+};
+
 export const initializeDatabase = async () => {
   try {
     await withClient(async client => {
       await detectOptionalPlatformExtensions(client);
-      for (const statement of schemaStatements) {
-        await client.query(statement);
+      for (let i = 0; i < schemaStatements.length; i += 1) {
+        await runDdl(client, 'schema', i, schemaStatements[i]);
       }
-      for (const statement of migrationStatements) {
-        await client.query(statement);
+      for (let i = 0; i < migrationStatements.length; i += 1) {
+        await runDdl(client, 'migration', i, migrationStatements[i]);
       }
       await ensureOptionalVectorSchema(client);
       // Slice 2 — governance controls catalog is owned by the seed module.

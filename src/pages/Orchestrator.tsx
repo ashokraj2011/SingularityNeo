@@ -6241,7 +6241,11 @@ const Orchestrator = () => {
                         liveStreamingText,
                         recentlyChangedFiles,
                       }}
-                      receiptsProps={{ selectedRunEvents }}
+                      receiptsProps={{
+                        selectedRunEvents,
+                        capabilityId: activeCapability.id,
+                        runId: currentRun?.id ?? null,
+                      }}
                       failureRecoveryProps={{
                         selectedWorkItem,
                         currentRun,
