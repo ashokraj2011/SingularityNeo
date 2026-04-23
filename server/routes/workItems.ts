@@ -1,19 +1,39 @@
-import type express from 'express';
+import fs from "node:fs";
+import path from "node:path";
+import type express from "express";
 import type {
   Capability,
   WorkItem,
   WorkItemAttachmentUpload,
   WorkItemCheckoutSession,
   WorkItemPhase,
-} from '../../src/types';
-import { normalizeWorkItemPhaseStakeholders } from '../../src/lib/workItemStakeholders';
-import { normalizeWorkItemTaskType } from '../../src/lib/workItemTaskTypes';
-import { assertCapabilityPermission } from '../access';
-import { sendApiError } from '../api/errors';
-import { listActiveWorkItemClaims, listWorkItemPresence, listWorkflowRunsForWorkItem, releaseWorkItemClaim, upsertWorkItemClaim, upsertWorkItemPresence } from '../execution/repository';
-import { archiveWorkItemControl, cancelWorkItemControl, createWorkItemRecord, moveWorkItemToPhaseControl, restoreWorkItemControl, startWorkflowExecution } from '../execution/service';
-import { wakeExecutionWorker } from '../execution/worker';
-import { parseActorContext } from '../requestActor';
+} from "../../src/types";
+import { normalizeWorkItemPhaseStakeholders } from "../../src/lib/workItemStakeholders";
+import { normalizeWorkItemTaskType } from "../../src/lib/workItemTaskTypes";
+import { assertCapabilityPermission } from "../access";
+import { sendApiError } from "../api/errors";
+import {
+  requireValidDesktopWorkspaceResolution,
+  resolveDesktopWorkspace,
+} from "../desktopWorkspaces";
+import {
+  listActiveWorkItemClaims,
+  listWorkItemPresence,
+  listWorkflowRunsForWorkItem,
+  releaseWorkItemClaim,
+  upsertWorkItemClaim,
+  upsertWorkItemPresence,
+} from "../execution/repository";
+import {
+  archiveWorkItemControl,
+  cancelWorkItemControl,
+  createWorkItemRecord,
+  moveWorkItemToPhaseControl,
+  restoreWorkItemControl,
+  startWorkflowExecution,
+} from "../execution/service";
+import { wakeExecutionWorker } from "../execution/worker";
+import { parseActorContext } from "../requestActor";
 import {
   acceptWorkItemHandoffPacketRecord,
   createWorkItemHandoffPacketRecord,
@@ -26,12 +46,8 @@ import {
   updateWorkItemBranchRecord,
   upsertWorkItemCheckoutSessionRecord,
   upsertWorkItemCodeClaimRecord,
-} from '../repository';
-import {
-  getCapabilityWorkspaceRoots,
-  isWorkspacePathApproved,
-  normalizeDirectoryPath,
-} from '../workspacePaths';
+} from "../repository";
+import { isPathInsideWorkspaceRoot } from "../workspacePaths";
 
 type CodeWorkspaceStatus = {
   path: string;
@@ -46,7 +62,9 @@ type CodeWorkspaceStatus = {
 type WorkItemRouteDeps = {
   applyManualBranchPolicy: (args: {
     capability: Capability;
-    permissionSet: Awaited<ReturnType<typeof assertCapabilityPermission>>['permissionSet'];
+    permissionSet: Awaited<
+      ReturnType<typeof assertCapabilityPermission>
+    >["permissionSet"];
     workspacePath: string;
     branchName: string;
   }) => Promise<{
@@ -72,123 +90,396 @@ export const registerWorkItemRoutes = (
     runGitCommand,
   }: WorkItemRouteDeps,
 ) => {
-  app.post('/api/capabilities/:capabilityId/work-items', async (request, response) => {
-    const title = String(request.body?.title || '').trim();
-    const workflowId = String(request.body?.workflowId || '').trim();
-    const description = String(request.body?.description || '').trim();
-    const rawTaskType = String(request.body?.taskType || '').trim();
-    const taskType = rawTaskType ? normalizeWorkItemTaskType(rawTaskType) : undefined;
-    const priority = String(request.body?.priority || 'Med') as WorkItem['priority'];
-    const tags = Array.isArray(request.body?.tags)
-      ? request.body.tags.map((tag: unknown) => String(tag).trim()).filter(Boolean)
-      : [];
-    const phaseStakeholders = normalizeWorkItemPhaseStakeholders(
-      Array.isArray(request.body?.phaseStakeholders) ? request.body.phaseStakeholders : [],
+  const resolveRequiredDesktopWorkspace = async ({
+    capabilityId,
+    executorId,
+    actorUserId,
+    repositoryId,
+  }: {
+    capabilityId: string;
+    executorId: string;
+    actorUserId?: string;
+    repositoryId?: string;
+  }) => {
+    if (!executorId) {
+      throw new Error("executorId is required.");
+    }
+    if (!actorUserId) {
+      throw new Error("Choose an operator before using desktop workspaces.");
+    }
+
+    return requireValidDesktopWorkspaceResolution(
+      await resolveDesktopWorkspace({
+        executorId,
+        userId: actorUserId,
+        capabilityId,
+        repositoryId,
+      }),
     );
-    const attachments = Array.isArray(request.body?.attachments)
-      ? request.body.attachments
-          .map((attachment: Partial<WorkItemAttachmentUpload>) => ({
-            fileName: String(attachment?.fileName || '').trim(),
-            mimeType: String(attachment?.mimeType || '').trim() || undefined,
-            contentText: String(attachment?.contentText || ''),
-            sizeBytes:
-              typeof attachment?.sizeBytes === 'number' && Number.isFinite(attachment.sizeBytes)
-                ? attachment.sizeBytes
-                : undefined,
-          }))
-          .filter(attachment => attachment.fileName && attachment.contentText.trim().length > 0)
-      : [];
+  };
 
-    if (!title || !workflowId) {
-      response.status(400).json({
-        error: 'Both title and workflowId are required.',
-      });
-      return;
-    }
+  const cloneRepositoryIntoWorkingDirectory = async ({
+    repositoryUrl,
+    checkoutPath,
+    baseBranch,
+  }: {
+    repositoryUrl: string;
+    checkoutPath: string;
+    baseBranch: string;
+  }) => {
+    const normalizedCheckoutPath = path.resolve(checkoutPath);
+    const parentDirectory = path.dirname(normalizedCheckoutPath);
+    fs.mkdirSync(parentDirectory, { recursive: true });
 
     try {
-      assertCapabilitySupportsExecution(
-        (await getCapabilityBundle(request.params.capabilityId)).capability,
+      await runGitCommand(parentDirectory, [
+        "clone",
+        "--branch",
+        baseBranch,
+        "--single-branch",
+        repositoryUrl,
+        normalizedCheckoutPath,
+      ]);
+    } catch {
+      await runGitCommand(parentDirectory, [
+        "clone",
+        repositoryUrl,
+        normalizedCheckoutPath,
+      ]);
+    }
+  };
+
+  const ensureRepositoryCheckoutReady = async ({
+    desktopWorkspace,
+    repository,
+    baseBranch,
+  }: {
+    desktopWorkspace: Awaited<
+      ReturnType<typeof resolveRequiredDesktopWorkspace>
+    >;
+    repository: Capability["repositories"][number];
+    baseBranch: string;
+  }) => {
+    const checkoutPath = desktopWorkspace.workingDirectoryPath;
+    if (
+      !isPathInsideWorkspaceRoot(checkoutPath, desktopWorkspace.localRootPath)
+    ) {
+      throw new Error(
+        `Working directory ${checkoutPath} must stay inside mapped root ${desktopWorkspace.localRootPath}.`,
       );
-      const actor = parseActorContext(
-        request,
-        parseActor(request.body?.guidedBy, 'Capability Owner'),
+    }
+
+    const workspaceStatus = await inspectCodeWorkspace(checkoutPath);
+    if (workspaceStatus.exists && workspaceStatus.isGitRepository) {
+      return {
+        workspacePath: checkoutPath,
+        workspaceStatus,
+        cloned: false,
+      };
+    }
+
+    if (workspaceStatus.exists) {
+      const stats = fs.statSync(checkoutPath);
+      if (!stats.isDirectory()) {
+        throw new Error(
+          `Working directory ${checkoutPath} exists but is not a directory.`,
+        );
+      }
+
+      const entries = fs
+        .readdirSync(checkoutPath)
+        .filter((entry) => entry !== ".DS_Store");
+      if (entries.length > 0) {
+        throw new Error(
+          `Working directory ${checkoutPath} exists but is not a Git repository. Empty the directory or point the mapping at a clean checkout target.`,
+        );
+      }
+    }
+
+    await cloneRepositoryIntoWorkingDirectory({
+      repositoryUrl: repository.url,
+      checkoutPath,
+      baseBranch,
+    });
+
+    const clonedWorkspace = await inspectCodeWorkspace(checkoutPath);
+    if (!clonedWorkspace.exists || !clonedWorkspace.isGitRepository) {
+      throw new Error(
+        clonedWorkspace.error ||
+          `Repository ${repository.url} could not be initialized in ${checkoutPath}.`,
       );
-      await assertCapabilityPermission({
-        capabilityId: request.params.capabilityId,
-        actor,
-        action: 'workitem.create',
+    }
+
+    return {
+      workspacePath: checkoutPath,
+      workspaceStatus: clonedWorkspace,
+      cloned: true,
+    };
+  };
+
+  const ensureWorkItemSharedBranchReady = async ({
+    capabilityId,
+    workItemId,
+    actorUserId,
+    executorId,
+    permissionContext,
+  }: {
+    capabilityId: string;
+    workItemId: string;
+    actorUserId: string;
+    executorId: string;
+    permissionContext: Awaited<ReturnType<typeof assertCapabilityPermission>>;
+  }) => {
+    const context = await initializeWorkItemExecutionContextRecord({
+      capabilityId,
+      workItemId,
+      actorUserId,
+    });
+    if (!context.branch || !context.primaryRepositoryId) {
+      throw new Error(
+        "Work item execution context did not resolve a primary repository.",
+      );
+    }
+
+    const bundle = await getCapabilityBundle(capabilityId);
+    const repository = (bundle.capability.repositories || []).find(
+      (item) => item.id === context.primaryRepositoryId,
+    );
+    if (!repository) {
+      throw new Error(
+        `Primary repository ${context.primaryRepositoryId} was not found for ${workItemId}.`,
+      );
+    }
+
+    const desktopWorkspace = await resolveRequiredDesktopWorkspace({
+      capabilityId,
+      executorId,
+      actorUserId,
+      repositoryId: context.primaryRepositoryId,
+    });
+    const branchName = context.branch.sharedBranch;
+    const baseBranch =
+      context.branch.baseBranch || repository.defaultBranch || "main";
+    const { workspacePath, workspaceStatus } =
+      await ensureRepositoryCheckoutReady({
+        desktopWorkspace,
+        repository,
+        baseBranch,
       });
-      response.status(201).json(
-        await createWorkItemRecord({
-          capabilityId: request.params.capabilityId,
-          title,
-          description,
-          workflowId,
-          taskType,
-          phaseStakeholders,
-          attachments,
-          priority,
-          tags,
-          actor,
-        }),
-      );
-    } catch (error) {
-      sendApiError(response, error);
-    }
-  });
 
-  app.post('/api/capabilities/:capabilityId/work-items/:workItemId/move', async (request, response) => {
-    const targetPhase = String(request.body?.targetPhase || '').trim() as WorkItemPhase;
-    const note = String(request.body?.note || '').trim();
-    const cancelRunIfPresent = Boolean(request.body?.cancelRunIfPresent);
+    const { policyDecision, blocked } = await applyManualBranchPolicy({
+      capability: permissionContext.capability,
+      permissionSet: permissionContext.permissionSet,
+      workspacePath,
+      branchName,
+    });
 
-    if (!targetPhase) {
-      response.status(400).json({ error: 'A targetPhase is required.' });
-      return;
+    if (blocked) {
+      return {
+        blocked: true as const,
+        policyDecision,
+      };
     }
 
-    try {
-      const actor = parseActorContext(request, 'Capability Owner');
-      await assertCapabilityPermission({
-        capabilityId: request.params.capabilityId,
-        actor,
-        action: 'workitem.control',
-      });
-      response.json(
-        await moveWorkItemToPhaseControl({
-          capabilityId: request.params.capabilityId,
-          workItemId: request.params.workItemId,
-          targetPhase,
-          note: note || undefined,
-          cancelRunIfPresent,
-          actor,
-        }),
-      );
-    } catch (error) {
-      sendApiError(response, error);
+    const existingBranch = await runGitCommand(workspacePath, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `refs/heads/${branchName}`,
+    ]).catch(() => "");
+
+    if (existingBranch) {
+      await runGitCommand(workspacePath, ["switch", branchName]);
+    } else {
+      try {
+        await runGitCommand(workspacePath, [
+          "switch",
+          "-c",
+          branchName,
+          baseBranch,
+        ]);
+      } catch {
+        await runGitCommand(workspacePath, ["switch", "-c", branchName]);
+      }
     }
-  });
+
+    const headSha = await runGitCommand(workspacePath, [
+      "rev-parse",
+      "HEAD",
+    ]).catch(() => "");
+    const nextContext = await updateWorkItemBranchRecord({
+      capabilityId,
+      workItemId,
+      branch: {
+        ...context.branch,
+        createdByUserId: actorUserId || context.branch.createdByUserId,
+        headSha: headSha || context.branch.headSha,
+        status: "ACTIVE",
+      },
+    });
+
+    await upsertWorkItemCheckoutSessionRecord({
+      capabilityId,
+      session: {
+        executorId,
+        workItemId,
+        userId: actorUserId,
+        repositoryId: context.primaryRepositoryId,
+        localPath: workspacePath,
+        workingDirectoryPath: desktopWorkspace.workingDirectoryPath,
+        branch: branchName,
+        lastSeenHeadSha: headSha || undefined,
+        lastSyncedAt: new Date().toISOString(),
+      },
+    });
+
+    return {
+      blocked: false as const,
+      context: nextContext,
+      repository,
+      desktopWorkspace,
+      workspace: workspaceStatus,
+      policyDecision,
+    };
+  };
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/cancel',
+    "/api/capabilities/:capabilityId/work-items",
+    async (request, response) => {
+      const title = String(request.body?.title || "").trim();
+      const workflowId = String(request.body?.workflowId || "").trim();
+      const description = String(request.body?.description || "").trim();
+      const rawTaskType = String(request.body?.taskType || "").trim();
+      const taskType = rawTaskType
+        ? normalizeWorkItemTaskType(rawTaskType)
+        : undefined;
+      const priority = String(
+        request.body?.priority || "Med",
+      ) as WorkItem["priority"];
+      const tags = Array.isArray(request.body?.tags)
+        ? request.body.tags
+            .map((tag: unknown) => String(tag).trim())
+            .filter(Boolean)
+        : [];
+      const phaseStakeholders = normalizeWorkItemPhaseStakeholders(
+        Array.isArray(request.body?.phaseStakeholders)
+          ? request.body.phaseStakeholders
+          : [],
+      );
+      const attachments = Array.isArray(request.body?.attachments)
+        ? request.body.attachments
+            .map((attachment: Partial<WorkItemAttachmentUpload>) => ({
+              fileName: String(attachment?.fileName || "").trim(),
+              mimeType: String(attachment?.mimeType || "").trim() || undefined,
+              contentText: String(attachment?.contentText || ""),
+              sizeBytes:
+                typeof attachment?.sizeBytes === "number" &&
+                Number.isFinite(attachment.sizeBytes)
+                  ? attachment.sizeBytes
+                  : undefined,
+            }))
+            .filter(
+              (attachment) =>
+                attachment.fileName && attachment.contentText.trim().length > 0,
+            )
+        : [];
+
+      if (!title || !workflowId) {
+        response.status(400).json({
+          error: "Both title and workflowId are required.",
+        });
+        return;
+      }
+
+      try {
+        assertCapabilitySupportsExecution(
+          (await getCapabilityBundle(request.params.capabilityId)).capability,
+        );
+        const actor = parseActorContext(
+          request,
+          parseActor(request.body?.guidedBy, "Capability Owner"),
+        );
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.create",
+        });
+        response.status(201).json(
+          await createWorkItemRecord({
+            capabilityId: request.params.capabilityId,
+            title,
+            description,
+            workflowId,
+            taskType,
+            phaseStakeholders,
+            attachments,
+            priority,
+            tags,
+            actor,
+          }),
+        );
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/move",
+    async (request, response) => {
+      const targetPhase = String(
+        request.body?.targetPhase || "",
+      ).trim() as WorkItemPhase;
+      const note = String(request.body?.note || "").trim();
+      const cancelRunIfPresent = Boolean(request.body?.cancelRunIfPresent);
+
+      if (!targetPhase) {
+        response.status(400).json({ error: "A targetPhase is required." });
+        return;
+      }
+
+      try {
+        const actor = parseActorContext(request, "Capability Owner");
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.control",
+        });
+        response.json(
+          await moveWorkItemToPhaseControl({
+            capabilityId: request.params.capabilityId,
+            workItemId: request.params.workItemId,
+            targetPhase,
+            note: note || undefined,
+            cancelRunIfPresent,
+            actor,
+          }),
+        );
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/cancel",
     async (request, response) => {
       try {
         const bundle = await getCapabilityBundle(request.params.capabilityId);
         assertCapabilitySupportsExecution(bundle.capability);
 
-        const actor = parseActorContext(request, 'Workspace Operator');
+        const actor = parseActorContext(request, "Workspace Operator");
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
 
         response.json(
           await cancelWorkItemControl({
             capabilityId: request.params.capabilityId,
             workItemId: request.params.workItemId,
-            note: String(request.body?.note || '').trim() || undefined,
+            note: String(request.body?.note || "").trim() || undefined,
             actor,
           }),
         );
@@ -199,24 +490,24 @@ export const registerWorkItemRoutes = (
   );
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/archive',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/archive",
     async (request, response) => {
       try {
         const bundle = await getCapabilityBundle(request.params.capabilityId);
         assertCapabilitySupportsExecution(bundle.capability);
 
-        const actor = parseActorContext(request, 'Workspace Operator');
+        const actor = parseActorContext(request, "Workspace Operator");
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
 
         response.json(
           await archiveWorkItemControl({
             capabilityId: request.params.capabilityId,
             workItemId: request.params.workItemId,
-            note: String(request.body?.note || '').trim() || undefined,
+            note: String(request.body?.note || "").trim() || undefined,
             actor,
           }),
         );
@@ -227,24 +518,24 @@ export const registerWorkItemRoutes = (
   );
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/restore',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/restore",
     async (request, response) => {
       try {
         const bundle = await getCapabilityBundle(request.params.capabilityId);
         assertCapabilitySupportsExecution(bundle.capability);
 
-        const actor = parseActorContext(request, 'Workspace Operator');
+        const actor = parseActorContext(request, "Workspace Operator");
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
 
         response.json(
           await restoreWorkItemControl({
             capabilityId: request.params.capabilityId,
             workItemId: request.params.workItemId,
-            note: String(request.body?.note || '').trim() || undefined,
+            note: String(request.body?.note || "").trim() || undefined,
             actor,
           }),
         );
@@ -255,17 +546,23 @@ export const registerWorkItemRoutes = (
   );
 
   app.get(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/collaboration',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/collaboration",
     async (request, response) => {
       try {
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
-          actor: parseActorContext(request, 'Workspace Operator'),
-          action: 'workitem.read',
+          actor: parseActorContext(request, "Workspace Operator"),
+          action: "workitem.read",
         });
         const [claims, presence] = await Promise.all([
-          listActiveWorkItemClaims(request.params.capabilityId, request.params.workItemId),
-          listWorkItemPresence(request.params.capabilityId, request.params.workItemId),
+          listActiveWorkItemClaims(
+            request.params.capabilityId,
+            request.params.workItemId,
+          ),
+          listWorkItemPresence(
+            request.params.capabilityId,
+            request.params.workItemId,
+          ),
         ]);
         response.json({ claims, presence });
       } catch (error) {
@@ -275,13 +572,13 @@ export const registerWorkItemRoutes = (
   );
 
   app.get(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/execution-context',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/execution-context",
     async (request, response) => {
       try {
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
-          actor: parseActorContext(request, 'Workspace Operator'),
-          action: 'workitem.read',
+          actor: parseActorContext(request, "Workspace Operator"),
+          action: "workitem.read",
         });
         const [context, handoffs] = await Promise.all([
           getWorkItemExecutionContextRecord({
@@ -301,14 +598,14 @@ export const registerWorkItemRoutes = (
   );
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/execution-context/initialize',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/execution-context/initialize",
     async (request, response) => {
       try {
-        const actor = parseActorContext(request, 'Capability Owner');
+        const actor = parseActorContext(request, "Capability Owner");
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
         const context = await initializeWorkItemExecutionContextRecord({
           capabilityId: request.params.capabilityId,
@@ -323,117 +620,49 @@ export const registerWorkItemRoutes = (
   );
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/branch/create',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/branch/create",
     async (request, response) => {
       try {
-        const actor = parseActorContext(request, 'Capability Owner');
-        const permissionContext = await assertCapabilityPermission({
-          capabilityId: request.params.capabilityId,
-          actor,
-          action: 'workitem.control',
-        });
-        const context = await initializeWorkItemExecutionContextRecord({
-          capabilityId: request.params.capabilityId,
-          workItemId: request.params.workItemId,
-          actorUserId: actor.userId,
-        });
-        if (!context.branch || !context.primaryRepositoryId) {
-          throw new Error('Work item execution context did not resolve a primary repository.');
+        const executorId = String(request.body?.executorId || "").trim();
+        if (!executorId) {
+          response.status(400).json({ error: "executorId is required." });
+          return;
         }
-
-        const bundle = await getCapabilityBundle(request.params.capabilityId);
-        const repository = (bundle.capability.repositories || []).find(
-          item => item.id === context.primaryRepositoryId,
-        );
-        const workspaceRoot = normalizeDirectoryPath(repository?.localRootHint || '');
-        if (!workspaceRoot) {
-          throw new Error(
-            'This repository does not have a local root hint yet, so Singulairy cannot create the shared Git branch.',
-          );
-        }
-
-        const approvedPaths = getCapabilityWorkspaceRoots(bundle.capability);
-        if (!isWorkspacePathApproved(workspaceRoot, approvedPaths)) {
-          throw new Error(
-            'The repository local root is not inside an approved capability workspace path.',
-          );
-        }
-
-        const workspaceStatus = await inspectCodeWorkspace(workspaceRoot);
-        if (!workspaceStatus.exists || !workspaceStatus.isGitRepository) {
-          throw new Error(
-            workspaceStatus.error ||
-              'The repository local root exists but is not a Git repository.',
-          );
-        }
-
-        const branchName = context.branch.sharedBranch;
-        const baseBranch = context.branch.baseBranch || repository?.defaultBranch || 'main';
-        const { policyDecision, blocked } = await applyManualBranchPolicy({
-          capability: permissionContext.capability,
-          permissionSet: permissionContext.permissionSet,
-          workspacePath: workspaceRoot,
-          branchName,
-        });
-        if (blocked) {
-          response.status(403).json({
-            error: (policyDecision as { reason?: string }).reason,
-            requiresApproval: true,
-            policyDecision,
+        const actor = parseActorContext(request, "Capability Owner");
+        if (!actor.userId) {
+          response.status(400).json({
+            error:
+              "Choose an operator before creating a shared work-item branch.",
           });
           return;
         }
-        const existingBranch = await runGitCommand(workspaceRoot, [
-          'rev-parse',
-          '--verify',
-          '--quiet',
-          `refs/heads/${branchName}`,
-        ]).catch(() => '');
-
-        if (existingBranch) {
-          await runGitCommand(workspaceRoot, ['switch', branchName]);
-        } else {
-          try {
-            await runGitCommand(workspaceRoot, ['switch', '-c', branchName, baseBranch]);
-          } catch {
-            await runGitCommand(workspaceRoot, ['switch', '-c', branchName]);
-          }
-        }
-
-        const headSha = await runGitCommand(workspaceRoot, ['rev-parse', 'HEAD']).catch(
-          () => '',
-        );
-        const nextContext = await updateWorkItemBranchRecord({
+        const permissionContext = await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.control",
+        });
+        const result = await ensureWorkItemSharedBranchReady({
           capabilityId: request.params.capabilityId,
           workItemId: request.params.workItemId,
-          branch: {
-            ...context.branch,
-            createdByUserId: actor.userId || context.branch.createdByUserId,
-            headSha: headSha || context.branch.headSha,
-            status: 'ACTIVE',
-          },
+          actorUserId: actor.userId,
+          executorId,
+          permissionContext,
         });
-
-        if (actor.userId) {
-          await upsertWorkItemCheckoutSessionRecord({
-            capabilityId: request.params.capabilityId,
-            session: {
-              workItemId: request.params.workItemId,
-              userId: actor.userId,
-              repositoryId: context.primaryRepositoryId,
-              localPath: workspaceRoot,
-              branch: branchName,
-              lastSeenHeadSha: headSha || undefined,
-              lastSyncedAt: new Date().toISOString(),
-            },
+        if (result.blocked) {
+          response.status(403).json({
+            error: (result.policyDecision as { reason?: string }).reason,
+            requiresApproval: true,
+            policyDecision: result.policyDecision,
           });
+          return;
         }
 
         response.status(201).json({
-          context: nextContext,
-          workspace: await inspectCodeWorkspace(workspaceRoot),
-          repository,
-          policyDecision,
+          context: result.context,
+          workspace: result.workspace,
+          repository: result.repository,
+          desktopWorkspace: result.desktopWorkspace,
+          policyDecision: result.policyDecision,
         });
       } catch (error) {
         sendApiError(response, error);
@@ -442,11 +671,13 @@ export const registerWorkItemRoutes = (
   );
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/claim/write',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/claim/write",
     async (request, response) => {
-      const actor = parseActorContext(request, 'Capability Owner');
+      const actor = parseActorContext(request, "Capability Owner");
       if (!actor.userId) {
-        response.status(400).json({ error: 'Choose an operator before taking write control.' });
+        response
+          .status(400)
+          .json({ error: "Choose an operator before taking write control." });
         return;
       }
 
@@ -454,7 +685,7 @@ export const registerWorkItemRoutes = (
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
         await initializeWorkItemExecutionContextRecord({
           capabilityId: request.params.capabilityId,
@@ -466,8 +697,8 @@ export const registerWorkItemRoutes = (
           workItemId: request.params.workItemId,
           userId: actor.userId,
           teamId: actor.teamIds[0],
-          claimType: 'WRITE',
-          status: 'ACTIVE',
+          claimType: "WRITE",
+          status: "ACTIVE",
           expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
         });
         const context = await getWorkItemExecutionContextRecord({
@@ -482,11 +713,13 @@ export const registerWorkItemRoutes = (
   );
 
   app.delete(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/claim/write',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/claim/write",
     async (request, response) => {
-      const actor = parseActorContext(request, 'Capability Owner');
+      const actor = parseActorContext(request, "Capability Owner");
       if (!actor.userId) {
-        response.status(400).json({ error: 'Choose an operator before releasing write control.' });
+        response.status(400).json({
+          error: "Choose an operator before releasing write control.",
+        });
         return;
       }
 
@@ -494,12 +727,12 @@ export const registerWorkItemRoutes = (
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
         await releaseWorkItemCodeClaimRecord({
           capabilityId: request.params.capabilityId,
           workItemId: request.params.workItemId,
-          claimType: 'WRITE',
+          claimType: "WRITE",
           userId: actor.userId,
         });
         response.status(204).end();
@@ -510,13 +743,13 @@ export const registerWorkItemRoutes = (
   );
 
   app.get(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/handoff',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/handoff",
     async (request, response) => {
       try {
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
-          actor: parseActorContext(request, 'Workspace Operator'),
-          action: 'workitem.read',
+          actor: parseActorContext(request, "Workspace Operator"),
+          action: "workitem.read",
         });
         response.json(
           await listWorkItemHandoffPacketsRecord({
@@ -531,12 +764,12 @@ export const registerWorkItemRoutes = (
   );
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/handoff',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/handoff",
     async (request, response) => {
-      const actor = parseActorContext(request, 'Capability Owner');
-      const summary = String(request.body?.summary || '').trim();
+      const actor = parseActorContext(request, "Capability Owner");
+      const summary = String(request.body?.summary || "").trim();
       if (!summary) {
-        response.status(400).json({ error: 'A handoff summary is required.' });
+        response.status(400).json({ error: "A handoff summary is required." });
         return;
       }
 
@@ -544,38 +777,41 @@ export const registerWorkItemRoutes = (
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
         const packet = await createWorkItemHandoffPacketRecord({
           capabilityId: request.params.capabilityId,
           packet: {
-            id: createRuntimeId('HANDOFF'),
+            id: createRuntimeId("HANDOFF"),
             workItemId: request.params.workItemId,
             fromUserId: actor.userId,
-            toUserId: String(request.body?.toUserId || '').trim() || undefined,
+            toUserId: String(request.body?.toUserId || "").trim() || undefined,
             fromTeamId: actor.teamIds[0],
-            toTeamId: String(request.body?.toTeamId || '').trim() || undefined,
+            toTeamId: String(request.body?.toTeamId || "").trim() || undefined,
             summary,
             openQuestions: Array.isArray(request.body?.openQuestions)
               ? request.body.openQuestions
-                  .map((value: unknown) => String(value || '').trim())
+                  .map((value: unknown) => String(value || "").trim())
                   .filter(Boolean)
               : [],
-            blockingDependencies: Array.isArray(request.body?.blockingDependencies)
+            blockingDependencies: Array.isArray(
+              request.body?.blockingDependencies,
+            )
               ? request.body.blockingDependencies
-                  .map((value: unknown) => String(value || '').trim())
+                  .map((value: unknown) => String(value || "").trim())
                   .filter(Boolean)
               : [],
             recommendedNextStep:
-              String(request.body?.recommendedNextStep || '').trim() || undefined,
+              String(request.body?.recommendedNextStep || "").trim() ||
+              undefined,
             artifactIds: Array.isArray(request.body?.artifactIds)
               ? request.body.artifactIds
-                  .map((value: unknown) => String(value || '').trim())
+                  .map((value: unknown) => String(value || "").trim())
                   .filter(Boolean)
               : [],
             traceIds: Array.isArray(request.body?.traceIds)
               ? request.body.traceIds
-                  .map((value: unknown) => String(value || '').trim())
+                  .map((value: unknown) => String(value || "").trim())
                   .filter(Boolean)
               : [],
             createdAt: new Date().toISOString(),
@@ -589,14 +825,14 @@ export const registerWorkItemRoutes = (
   );
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/handoff/:packetId/accept',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/handoff/:packetId/accept",
     async (request, response) => {
-      const actor = parseActorContext(request, 'Capability Owner');
+      const actor = parseActorContext(request, "Capability Owner");
       try {
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
         const packet = await acceptWorkItemHandoffPacketRecord({
           capabilityId: request.params.capabilityId,
@@ -608,8 +844,8 @@ export const registerWorkItemRoutes = (
             workItemId: request.params.workItemId,
             userId: actor.userId,
             teamId: actor.teamIds[0],
-            claimType: 'WRITE',
-            status: 'ACTIVE',
+            claimType: "WRITE",
+            status: "ACTIVE",
             expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
           });
         }
@@ -625,12 +861,17 @@ export const registerWorkItemRoutes = (
   );
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/checkout/register',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/checkout/register",
     async (request, response) => {
-      const actor = parseActorContext(request, 'Capability Owner');
-      const userId = actor.userId || String(request.body?.userId || '').trim();
-      if (!userId) {
-        response.status(400).json({ error: 'A user id is required to register a checkout.' });
+      const actor = parseActorContext(request, "Capability Owner");
+      const executorId = String(request.body?.executorId || "").trim();
+      const userId = actor.userId || String(request.body?.userId || "").trim();
+      const repositoryId = String(request.body?.repositoryId || "").trim();
+      if (!executorId || !userId || !repositoryId) {
+        response.status(400).json({
+          error:
+            "executorId, userId, and repositoryId are required to register a checkout.",
+        });
         return;
       }
 
@@ -638,20 +879,53 @@ export const registerWorkItemRoutes = (
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
+        const desktopWorkspace = await resolveRequiredDesktopWorkspace({
+          capabilityId: request.params.capabilityId,
+          executorId,
+          actorUserId: userId,
+          repositoryId,
+        });
+        const localPath =
+          String(request.body?.localPath || "").trim() ||
+          desktopWorkspace.workingDirectoryPath;
+        const workingDirectoryPath =
+          String(request.body?.workingDirectoryPath || "").trim() ||
+          desktopWorkspace.workingDirectoryPath;
+
+        if (
+          !isPathInsideWorkspaceRoot(localPath, desktopWorkspace.localRootPath)
+        ) {
+          throw new Error(
+            `Local path ${localPath} must stay inside mapped root ${desktopWorkspace.localRootPath}.`,
+          );
+        }
+        if (
+          !isPathInsideWorkspaceRoot(
+            workingDirectoryPath,
+            desktopWorkspace.localRootPath,
+          )
+        ) {
+          throw new Error(
+            `Working directory ${workingDirectoryPath} must stay inside mapped root ${desktopWorkspace.localRootPath}.`,
+          );
+        }
         const session = await upsertWorkItemCheckoutSessionRecord({
           capabilityId: request.params.capabilityId,
           session: {
+            executorId,
             workItemId: request.params.workItemId,
             userId,
-            repositoryId: String(request.body?.repositoryId || '').trim(),
-            localPath: String(request.body?.localPath || '').trim() || undefined,
-            branch: String(request.body?.branch || '').trim(),
+            repositoryId,
+            localPath,
+            workingDirectoryPath,
+            branch: request.params.workItemId,
             lastSeenHeadSha:
-              String(request.body?.lastSeenHeadSha || '').trim() || undefined,
+              String(request.body?.lastSeenHeadSha || "").trim() || undefined,
             lastSyncedAt:
-              String(request.body?.lastSyncedAt || '').trim() || new Date().toISOString(),
+              String(request.body?.lastSyncedAt || "").trim() ||
+              new Date().toISOString(),
           } satisfies WorkItemCheckoutSession,
         });
         response.status(201).json(session);
@@ -662,11 +936,13 @@ export const registerWorkItemRoutes = (
   );
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/claim',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/claim",
     async (request, response) => {
-      const actor = parseActorContext(request, 'Capability Owner');
+      const actor = parseActorContext(request, "Capability Owner");
       if (!actor.userId) {
-        response.status(400).json({ error: 'Choose an operator before taking control.' });
+        response
+          .status(400)
+          .json({ error: "Choose an operator before taking control." });
         return;
       }
 
@@ -674,14 +950,16 @@ export const registerWorkItemRoutes = (
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
         const bundle = await getCapabilityBundle(request.params.capabilityId);
         const workItem = bundle.workspace.workItems.find(
-          item => item.id === request.params.workItemId,
+          (item) => item.id === request.params.workItemId,
         );
         if (!workItem) {
-          throw new Error(`Work item ${request.params.workItemId} was not found.`);
+          throw new Error(
+            `Work item ${request.params.workItemId} was not found.`,
+          );
         }
 
         const claim = await upsertWorkItemClaim({
@@ -689,7 +967,7 @@ export const registerWorkItemRoutes = (
           workItemId: request.params.workItemId,
           userId: actor.userId,
           teamId: actor.teamIds[0],
-          status: 'ACTIVE',
+          status: "ACTIVE",
           claimedAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
         });
@@ -703,18 +981,21 @@ export const registerWorkItemRoutes = (
               id: `HIST-${Math.random().toString(36).slice(2, 10).toUpperCase()}`,
               timestamp: new Date().toISOString(),
               actor: actor.displayName,
-              action: 'Work item claimed',
+              action: "Work item claimed",
               detail: `${actor.displayName} took active operator control of this work item.`,
               phase: workItem.phase,
               status: workItem.status,
             },
           ],
         };
-        await replaceCapabilityWorkspaceContentRecord(request.params.capabilityId, {
-          workItems: bundle.workspace.workItems.map(item =>
-            item.id === nextWorkItem.id ? nextWorkItem : item,
-          ),
-        });
+        await replaceCapabilityWorkspaceContentRecord(
+          request.params.capabilityId,
+          {
+            workItems: bundle.workspace.workItems.map((item) =>
+              item.id === nextWorkItem.id ? nextWorkItem : item,
+            ),
+          },
+        );
         response.status(201).json({ claim, workItem: nextWorkItem });
       } catch (error) {
         sendApiError(response, error);
@@ -723,11 +1004,13 @@ export const registerWorkItemRoutes = (
   );
 
   app.delete(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/claim',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/claim",
     async (request, response) => {
-      const actor = parseActorContext(request, 'Capability Owner');
+      const actor = parseActorContext(request, "Capability Owner");
       if (!actor.userId) {
-        response.status(400).json({ error: 'Choose an operator before releasing control.' });
+        response
+          .status(400)
+          .json({ error: "Choose an operator before releasing control." });
         return;
       }
 
@@ -735,7 +1018,7 @@ export const registerWorkItemRoutes = (
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.control',
+          action: "workitem.control",
         });
         await releaseWorkItemClaim({
           capabilityId: request.params.capabilityId,
@@ -743,8 +1026,9 @@ export const registerWorkItemRoutes = (
           userId: actor.userId,
         });
         const bundle = await getCapabilityBundle(request.params.capabilityId);
-        const nextWorkItems = bundle.workspace.workItems.map(item =>
-          item.id === request.params.workItemId && item.claimOwnerUserId === actor.userId
+        const nextWorkItems = bundle.workspace.workItems.map((item) =>
+          item.id === request.params.workItemId &&
+          item.claimOwnerUserId === actor.userId
             ? {
                 ...item,
                 claimOwnerUserId: undefined,
@@ -752,9 +1036,12 @@ export const registerWorkItemRoutes = (
               }
             : item,
         );
-        await replaceCapabilityWorkspaceContentRecord(request.params.capabilityId, {
-          workItems: nextWorkItems,
-        });
+        await replaceCapabilityWorkspaceContentRecord(
+          request.params.capabilityId,
+          {
+            workItems: nextWorkItems,
+          },
+        );
         response.status(204).end();
       } catch (error) {
         sendApiError(response, error);
@@ -763,11 +1050,13 @@ export const registerWorkItemRoutes = (
   );
 
   app.post(
-    '/api/capabilities/:capabilityId/work-items/:workItemId/presence',
+    "/api/capabilities/:capabilityId/work-items/:workItemId/presence",
     async (request, response) => {
-      const actor = parseActorContext(request, 'Capability Owner');
+      const actor = parseActorContext(request, "Capability Owner");
       if (!actor.userId) {
-        response.status(400).json({ error: 'Choose an operator before updating presence.' });
+        response
+          .status(400)
+          .json({ error: "Choose an operator before updating presence." });
         return;
       }
 
@@ -775,14 +1064,15 @@ export const registerWorkItemRoutes = (
         await assertCapabilityPermission({
           capabilityId: request.params.capabilityId,
           actor,
-          action: 'workitem.read',
+          action: "workitem.read",
         });
         const presence = await upsertWorkItemPresence({
           capabilityId: request.params.capabilityId,
           workItemId: request.params.workItemId,
           userId: actor.userId,
           teamId: actor.teamIds[0],
-          viewContext: String(request.body?.viewContext || '').trim() || undefined,
+          viewContext:
+            String(request.body?.viewContext || "").trim() || undefined,
           lastSeenAt: new Date().toISOString(),
         });
         response.status(201).json(presence);
@@ -792,55 +1082,81 @@ export const registerWorkItemRoutes = (
     },
   );
 
-  app.post('/api/capabilities/:capabilityId/work-items/:workItemId/runs', async (request, response) => {
-    try {
-      assertCapabilitySupportsExecution(
-        (await getCapabilityBundle(request.params.capabilityId)).capability,
-      );
-      const actor = parseActorContext(
-        request,
-        parseActor(request.body?.guidedBy, 'Capability Owner'),
-      );
-      await assertCapabilityPermission({
-        capabilityId: request.params.capabilityId,
-        actor,
-        action: 'workitem.control',
-      });
-      await initializeWorkItemExecutionContextRecord({
-        capabilityId: request.params.capabilityId,
-        workItemId: request.params.workItemId,
-        actorUserId: actor.userId,
-      }).catch(() => null);
-      const detail = await startWorkflowExecution({
-        capabilityId: request.params.capabilityId,
-        workItemId: request.params.workItemId,
-        restartFromPhase: request.body?.restartFromPhase as WorkItemPhase | undefined,
-        guidance: String(request.body?.guidance || '').trim() || undefined,
-        guidedBy: actor.displayName,
-        actor,
-      });
-      wakeExecutionWorker();
-      response.status(201).json(detail);
-    } catch (error) {
-      sendApiError(response, error);
-    }
-  });
+  app.post(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/runs",
+    async (request, response) => {
+      try {
+        assertCapabilitySupportsExecution(
+          (await getCapabilityBundle(request.params.capabilityId)).capability,
+        );
+        const actor = parseActorContext(
+          request,
+          parseActor(request.body?.guidedBy, "Capability Owner"),
+        );
+        const permissionContext = await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.control",
+        });
+        const executorId = String(request.body?.executorId || "").trim();
+        const context = await initializeWorkItemExecutionContextRecord({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          actorUserId: actor.userId,
+        }).catch(() => null);
+        if (executorId && actor.userId && context?.primaryRepositoryId) {
+          const result = await ensureWorkItemSharedBranchReady({
+            capabilityId: request.params.capabilityId,
+            workItemId: request.params.workItemId,
+            actorUserId: actor.userId,
+            executorId,
+            permissionContext,
+          });
+          if (result.blocked) {
+            response.status(403).json({
+              error: (result.policyDecision as { reason?: string }).reason,
+              requiresApproval: true,
+              policyDecision: result.policyDecision,
+            });
+            return;
+          }
+        }
+        const detail = await startWorkflowExecution({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          restartFromPhase: request.body?.restartFromPhase as
+            | WorkItemPhase
+            | undefined,
+          guidance: String(request.body?.guidance || "").trim() || undefined,
+          guidedBy: actor.displayName,
+          actor,
+        });
+        wakeExecutionWorker();
+        response.status(201).json(detail);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
 
-  app.get('/api/capabilities/:capabilityId/work-items/:workItemId/runs', async (request, response) => {
-    try {
-      await assertCapabilityPermission({
-        capabilityId: request.params.capabilityId,
-        actor: parseActorContext(request, 'Workspace Operator'),
-        action: 'workitem.read',
-      });
-      response.json(
-        await listWorkflowRunsForWorkItem(
-          request.params.capabilityId,
-          request.params.workItemId,
-        ),
-      );
-    } catch (error) {
-      sendApiError(response, error);
-    }
-  });
+  app.get(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/runs",
+    async (request, response) => {
+      try {
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor: parseActorContext(request, "Workspace Operator"),
+          action: "workitem.read",
+        });
+        response.json(
+          await listWorkflowRunsForWorkItem(
+            request.params.capabilityId,
+            request.params.workItemId,
+          ),
+        );
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
 };

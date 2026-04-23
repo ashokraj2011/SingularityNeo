@@ -106,7 +106,9 @@ import {
   ProveNoTouchInput,
   ProveNoTouchResult,
   ProvenanceCoverageWindow,
+  BlastRadiusSymbolGraph,
   GovernancePostureSnapshot,
+  GovernanceCostAllocationSnapshot,
   EvidencePacketSummary,
   ExecutorRegistryEntry,
   ExecutorRegistrySummary,
@@ -122,42 +124,57 @@ import {
   IncidentSource,
   IncidentSourceConfig,
   ModelRiskMonitoringSummary,
+  PlanningGenerationRequest,
   ApprovalPolicy,
   ApprovalAssignment,
   AgentSessionScope,
+  StoryProposalBatch,
+  StoryProposalBatchSummary,
+  StoryProposalPromotionResult,
+  StoryProposalItem,
+  MemoryRetrievalMode,
   WorkspaceDatabaseRuntimeInfo,
   WorkspaceWriteLock,
-} from '../types';
-import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from './desktop';
+  DesktopWorkspaceMapping,
+} from "../types";
+import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from "./desktop";
 
 export interface RuntimeStatus {
   configured: boolean;
   provider: string;
-  providerKey?: 'github-copilot' | 'local-openai';
-  embeddingProviderKey?: 'local-openai' | 'deterministic-hash';
+  providerKey?: "github-copilot" | "local-openai";
+  embeddingProviderKey?: "local-openai" | "deterministic-hash";
   embeddingConfigured?: boolean;
+  retrievalMode?: MemoryRetrievalMode;
+  fallbackReason?: string | null;
   availableProviders?: Array<{
-    key: 'github-copilot' | 'local-openai';
+    key: "github-copilot" | "local-openai";
     label: string;
     configured: boolean;
   }>;
   endpoint: string;
-  runtimeOwner?: 'DESKTOP' | 'SERVER';
-  executionRuntimeOwner?: 'DESKTOP' | 'SERVER';
+  runtimeOwner?: "DESKTOP" | "SERVER";
+  executionRuntimeOwner?: "DESKTOP" | "SERVER";
   tokenSource: string | null;
   defaultModel: string;
-  modelCatalogSource?: 'runtime' | 'fallback';
-  runtimeAccessMode?: 'copilot-session' | 'headless-cli' | 'http-fallback' | 'unconfigured';
+  modelCatalogSource?: "runtime" | "fallback";
+  runtimeAccessMode?:
+    | "copilot-session"
+    | "headless-cli"
+    | "http-fallback"
+    | "unconfigured";
   httpFallbackEnabled?: boolean;
   databaseRuntime?: WorkspaceDatabaseRuntimeInfo;
   activeDatabaseProfileId?: string | null;
   activeDatabaseProfileLabel?: string | null;
   executorId?: string;
   executorHeartbeatAt?: string;
-  executorHeartbeatStatus?: 'FRESH' | 'STALE' | 'OFFLINE';
+  executorHeartbeatStatus?: "FRESH" | "STALE" | "OFFLINE";
   actorUserId?: string;
   actorDisplayName?: string;
   ownedCapabilityIds?: string[];
+  /** User-level working directory for the active desktop executor (if set). */
+  workingDirectory?: string;
   lastRuntimeError?: string | null;
   streaming?: boolean;
   githubIdentity?: {
@@ -196,13 +213,13 @@ export interface CapabilityChatResponse {
   createdAt: string;
   traceId?: string;
   sessionId?: string;
-  sessionScope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  sessionScope?: "GENERAL_CHAT" | "WORK_ITEM" | "TASK";
   sessionScopeId?: string;
   isNewSession?: boolean;
 }
 
 export interface CapabilityChatStreamResult {
-  termination: 'complete' | 'recovered' | 'interrupted' | 'empty';
+  termination: "complete" | "recovered" | "interrupted" | "empty";
   draftContent: string;
   completeEvent: ChatStreamEvent | null;
   error?: string;
@@ -236,9 +253,12 @@ export interface CapabilityBundle {
   workspace: CapabilityWorkspace;
 }
 
-export type CreateCapabilityInput = Omit<Capability, 'id'> & { id?: string };
+export type CreateCapabilityInput = Omit<Capability, "id"> & { id?: string };
 
-export type CreateCapabilityAgentInput = Omit<CapabilityAgent, 'capabilityId' | 'id'> & {
+export type CreateCapabilityAgentInput = Omit<
+  CapabilityAgent,
+  "capabilityId" | "id"
+> & {
   id?: string;
 };
 
@@ -255,13 +275,13 @@ export interface CodeWorkspaceStatus {
 export type WorkspaceContentUpdate = Partial<
   Pick<
     CapabilityWorkspace,
-    | 'workflows'
-    | 'artifacts'
-    | 'tasks'
-    | 'executionLogs'
-    | 'learningUpdates'
-    | 'workItems'
-    | 'activeChatAgentId'
+    | "workflows"
+    | "artifacts"
+    | "tasks"
+    | "executionLogs"
+    | "learningUpdates"
+    | "workItems"
+    | "activeChatAgentId"
   >
 >;
 
@@ -270,10 +290,10 @@ interface CapabilityChatRequest {
   agent: CapabilityAgent;
   history: CapabilityChatMessage[];
   message: string;
-  sessionMode?: 'resume' | 'fresh';
-  sessionScope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  sessionMode?: "resume" | "fresh";
+  sessionScope?: "GENERAL_CHAT" | "WORK_ITEM" | "TASK";
   sessionScopeId?: string;
-  contextMode?: 'GENERAL' | 'WORK_ITEM_STAGE';
+  contextMode?: "GENERAL" | "WORK_ITEM_STAGE";
   workItemId?: string;
   runId?: string;
   workflowStepId?: string;
@@ -289,7 +309,7 @@ const getError = async (response: Response) => {
 };
 
 const jsonHeaders = {
-  'Content-Type': 'application/json',
+  "Content-Type": "application/json",
 };
 
 let currentActorContext: ActorContext | null = null;
@@ -298,20 +318,23 @@ const withActorHeaders = (headers?: HeadersInit): HeadersInit => {
   const nextHeaders = new Headers(headers || {});
 
   if (currentActorContext?.userId) {
-    nextHeaders.set('x-singularity-actor-user-id', currentActorContext.userId);
+    nextHeaders.set("x-singularity-actor-user-id", currentActorContext.userId);
   }
   if (currentActorContext?.displayName) {
-    nextHeaders.set('x-singularity-actor-display-name', currentActorContext.displayName);
+    nextHeaders.set(
+      "x-singularity-actor-display-name",
+      currentActorContext.displayName,
+    );
   }
   if (currentActorContext?.teamIds?.length) {
     nextHeaders.set(
-      'x-singularity-actor-team-ids',
+      "x-singularity-actor-team-ids",
       JSON.stringify(currentActorContext.teamIds),
     );
   }
   if (currentActorContext?.actedOnBehalfOfStakeholderIds?.length) {
     nextHeaders.set(
-      'x-singularity-actor-stakeholder-ids',
+      "x-singularity-actor-stakeholder-ids",
       JSON.stringify(currentActorContext.actedOnBehalfOfStakeholderIds),
     );
   }
@@ -319,7 +342,10 @@ const withActorHeaders = (headers?: HeadersInit): HeadersInit => {
   return nextHeaders;
 };
 
-const requestJson = async <T>(input: string, init?: RequestInit): Promise<T> => {
+const requestJson = async <T>(
+  input: string,
+  init?: RequestInit,
+): Promise<T> => {
   const response = await fetch(resolveApiUrl(input), {
     ...init,
     headers: withActorHeaders(init?.headers),
@@ -335,7 +361,10 @@ const requestJson = async <T>(input: string, init?: RequestInit): Promise<T> => 
   return response.json() as Promise<T>;
 };
 
-const requestText = async (input: string, init?: RequestInit): Promise<string> => {
+const requestText = async (
+  input: string,
+  init?: RequestInit,
+): Promise<string> => {
   const response = await fetch(resolveApiUrl(input), {
     ...init,
     headers: withActorHeaders(init?.headers),
@@ -360,7 +389,7 @@ export const fetchRuntimeStatus = async (): Promise<RuntimeStatus> => {
     return desktop.getRuntimeStatus() as Promise<RuntimeStatus>;
   }
 
-  return requestJson<RuntimeStatus>('/api/runtime/status');
+  return requestJson<RuntimeStatus>("/api/runtime/status");
 };
 
 export const fetchWorkspaceWriteLock = async (
@@ -380,8 +409,8 @@ export const updateRuntimeCredentials = async (
     return desktop.setRuntimeToken(token) as Promise<RuntimeStatus>;
   }
 
-  return requestJson<RuntimeStatus>('/api/runtime/credentials', {
-    method: 'POST',
+  return requestJson<RuntimeStatus>("/api/runtime/credentials", {
+    method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ token }),
   });
@@ -393,8 +422,8 @@ export const clearRuntimeCredentials = async (): Promise<RuntimeStatus> => {
     return desktop.clearRuntimeToken() as Promise<RuntimeStatus>;
   }
 
-  return requestJson<RuntimeStatus>('/api/runtime/credentials', {
-    method: 'DELETE',
+  return requestJson<RuntimeStatus>("/api/runtime/credentials", {
+    method: "DELETE",
   });
 };
 
@@ -417,7 +446,9 @@ export const claimCapabilityExecution = async ({
     }>;
   }
 
-  throw new Error('A desktop runtime is required to claim capability execution.');
+  throw new Error(
+    "A desktop runtime is required to claim capability execution.",
+  );
 };
 
 export const releaseCapabilityExecution = async ({
@@ -433,8 +464,84 @@ export const releaseCapabilityExecution = async ({
     return;
   }
 
-  throw new Error('A desktop runtime is required to release capability execution.');
+  throw new Error(
+    "A desktop runtime is required to release capability execution.",
+  );
 };
+
+export const fetchDesktopWorkspaceMappings = async ({
+  executorId,
+  userId,
+  capabilityId,
+}: {
+  executorId: string;
+  userId?: string;
+  capabilityId?: string;
+}): Promise<DesktopWorkspaceMapping[]> => {
+  const params = new URLSearchParams();
+  if (userId) {
+    params.set("userId", userId);
+  }
+  if (capabilityId) {
+    params.set("capabilityId", capabilityId);
+  }
+
+  const payload = await requestJson<{ mappings: DesktopWorkspaceMapping[] }>(
+    `/api/runtime/executors/${encodeURIComponent(executorId)}/workspace-mappings${
+      params.size ? `?${params.toString()}` : ""
+    }`,
+  );
+  return payload.mappings || [];
+};
+
+export const createDesktopWorkspaceMapping = async (
+  executorId: string,
+  payload: {
+    userId?: string;
+    capabilityId: string;
+    repositoryId?: string;
+    localRootPath?: string;
+    workingDirectoryPath?: string;
+  },
+): Promise<DesktopWorkspaceMapping> =>
+  requestJson<DesktopWorkspaceMapping>(
+    `/api/runtime/executors/${encodeURIComponent(executorId)}/workspace-mappings`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const updateDesktopWorkspaceMapping = async (
+  executorId: string,
+  mappingId: string,
+  payload: Partial<{
+    capabilityId: string;
+    repositoryId?: string;
+    localRootPath?: string;
+    workingDirectoryPath?: string;
+  }>,
+): Promise<DesktopWorkspaceMapping> =>
+  requestJson<DesktopWorkspaceMapping>(
+    `/api/runtime/executors/${encodeURIComponent(executorId)}/workspace-mappings/${encodeURIComponent(mappingId)}`,
+    {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const deleteDesktopWorkspaceMapping = async (
+  executorId: string,
+  mappingId: string,
+): Promise<void> =>
+  requestJson<void>(
+    `/api/runtime/executors/${encodeURIComponent(executorId)}/workspace-mappings/${encodeURIComponent(mappingId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 
 export const sendCapabilityChat = async (
   payload: CapabilityChatRequest,
@@ -447,23 +554,24 @@ export const sendCapabilityChat = async (
     }) as Promise<CapabilityChatResponse>;
   }
 
-  return requestJson<CapabilityChatResponse>('/api/runtime/chat', {
-    method: 'POST',
+  return requestJson<CapabilityChatResponse>("/api/runtime/chat", {
+    method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(payload),
   });
 };
 
-const createCapabilityChatStreamAccumulator = (): CapabilityChatStreamAccumulator => ({
-  draftContent: '',
-  completeEvent: null,
-  sawDelta: false,
-  sawComplete: false,
-  sawError: false,
-  streamError: '',
-  retryAfterMs: undefined,
-  memoryReferences: [],
-});
+const createCapabilityChatStreamAccumulator =
+  (): CapabilityChatStreamAccumulator => ({
+    draftContent: "",
+    completeEvent: null,
+    sawDelta: false,
+    sawComplete: false,
+    sawError: false,
+    streamError: "",
+    retryAfterMs: undefined,
+    memoryReferences: [],
+  });
 
 const processCapabilityChatStreamEvent = ({
   event,
@@ -476,22 +584,22 @@ const processCapabilityChatStreamEvent = ({
   };
   state: CapabilityChatStreamAccumulator;
 }) => {
-  if (event.type === 'memory') {
+  if (event.type === "memory") {
     state.memoryReferences = event.memoryReferences || [];
   }
-  if (event.type === 'delta' && event.content) {
+  if (event.type === "delta" && event.content) {
     state.sawDelta = true;
     state.draftContent += event.content;
   }
-  if (event.type === 'complete') {
+  if (event.type === "complete") {
     state.sawComplete = true;
     state.completeEvent = event;
     state.draftContent = event.content || state.draftContent;
     state.memoryReferences = event.memoryReferences || state.memoryReferences;
   }
-  if (event.type === 'error') {
+  if (event.type === "error") {
     state.sawError = true;
-    state.streamError = event.error || 'The runtime ended this stream early.';
+    state.streamError = event.error || "The runtime ended this stream early.";
     state.retryAfterMs = event.retryAfterMs;
   }
 
@@ -507,12 +615,12 @@ const finalizeCapabilityChatStream = ({
 }): CapabilityChatStreamResult => {
   const trimmedDraft = state.draftContent.trim();
   const termination = state.sawComplete
-    ? 'complete'
+    ? "complete"
     : trimmedDraft
       ? state.sawError || aborted
-        ? 'interrupted'
-        : 'recovered'
-      : 'empty';
+        ? "interrupted"
+        : "recovered"
+      : "empty";
 
   return {
     termination,
@@ -520,7 +628,9 @@ const finalizeCapabilityChatStream = ({
     completeEvent: state.completeEvent,
     error:
       state.streamError ||
-      (aborted ? 'Streaming response was stopped before completion.' : undefined),
+      (aborted
+        ? "Streaming response was stopped before completion."
+        : undefined),
     retryAfterMs: state.retryAfterMs,
     memoryReferences: state.memoryReferences,
     sawDelta: state.sawDelta,
@@ -530,28 +640,30 @@ const finalizeCapabilityChatStream = ({
 };
 
 export const fetchAppState = async (): Promise<AppState> =>
-  requestJson<AppState>('/api/state');
+  requestJson<AppState>("/api/state");
 
-export const fetchWorkspaceOrganization = async (): Promise<WorkspaceOrganization> =>
-  requestJson<WorkspaceOrganization>('/api/workspace/organization');
+export const fetchWorkspaceOrganization =
+  async (): Promise<WorkspaceOrganization> =>
+    requestJson<WorkspaceOrganization>("/api/workspace/organization");
 
 export const updateWorkspaceOrganizationRecord = async (
   updates: Partial<WorkspaceOrganization>,
 ): Promise<WorkspaceOrganization> =>
-  requestJson<WorkspaceOrganization>('/api/workspace/organization', {
-    method: 'PATCH',
+  requestJson<WorkspaceOrganization>("/api/workspace/organization", {
+    method: "PATCH",
     headers: jsonHeaders,
     body: JSON.stringify(updates),
   });
 
-export const fetchWorkspaceAccessSnapshot = async (): Promise<WorkspaceAccessSnapshot> =>
-  requestJson<WorkspaceAccessSnapshot>('/api/workspace/access');
+export const fetchWorkspaceAccessSnapshot =
+  async (): Promise<WorkspaceAccessSnapshot> =>
+    requestJson<WorkspaceAccessSnapshot>("/api/workspace/access");
 
 export const updateWorkspaceAccessSnapshot = async (
   updates: Partial<WorkspaceOrganization>,
 ): Promise<WorkspaceAccessSnapshot> =>
-  requestJson<WorkspaceAccessSnapshot>('/api/workspace/access', {
-    method: 'PATCH',
+  requestJson<WorkspaceAccessSnapshot>("/api/workspace/access", {
+    method: "PATCH",
     headers: jsonHeaders,
     body: JSON.stringify(updates),
   });
@@ -560,28 +672,37 @@ export const updateWorkspaceUserPreferenceRecord = async (
   userId: string,
   updates: Partial<UserPreference>,
 ): Promise<UserPreference> =>
-  requestJson<UserPreference>(`/api/workspace/users/${encodeURIComponent(userId)}/preferences`, {
-    method: 'PUT',
-    headers: jsonHeaders,
-    body: JSON.stringify(updates),
-  });
+  requestJson<UserPreference>(
+    `/api/workspace/users/${encodeURIComponent(userId)}/preferences`,
+    {
+      method: "PUT",
+      headers: jsonHeaders,
+      body: JSON.stringify(updates),
+    },
+  );
 
-export const fetchDatabaseBootstrapStatus = async (): Promise<WorkspaceDatabaseBootstrapStatus> =>
-  requestJson<WorkspaceDatabaseBootstrapStatus>('/api/bootstrap/database/status');
+export const fetchDatabaseBootstrapStatus =
+  async (): Promise<WorkspaceDatabaseBootstrapStatus> =>
+    requestJson<WorkspaceDatabaseBootstrapStatus>(
+      "/api/bootstrap/database/status",
+    );
 
 export const setupDatabaseBootstrap = async (
   payload: WorkspaceDatabaseBootstrapConfig,
 ): Promise<WorkspaceDatabaseBootstrapResult> =>
-  requestJson<WorkspaceDatabaseBootstrapResult>('/api/bootstrap/database/setup', {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify(payload),
-  });
+  requestJson<WorkspaceDatabaseBootstrapResult>(
+    "/api/bootstrap/database/setup",
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
 
 export const fetchDatabaseBootstrapProfiles =
   async (): Promise<WorkspaceDatabaseBootstrapProfileSnapshot> =>
     requestJson<WorkspaceDatabaseBootstrapProfileSnapshot>(
-      '/api/bootstrap/database/profiles',
+      "/api/bootstrap/database/profiles",
     );
 
 export const activateDatabaseBootstrapProfile = async (
@@ -590,44 +711,47 @@ export const activateDatabaseBootstrapProfile = async (
   requestJson<WorkspaceDatabaseBootstrapResult>(
     `/api/bootstrap/database/profiles/${encodeURIComponent(profileId)}/activate`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
     },
   );
 
 export const fetchWorkspaceSettings = async (): Promise<WorkspaceSettings> =>
-  requestJson<WorkspaceSettings>('/api/workspace/settings');
+  requestJson<WorkspaceSettings>("/api/workspace/settings");
 
 export const updateWorkspaceSettingsRecord = async (
   updates: Partial<WorkspaceSettings>,
 ): Promise<WorkspaceSettings> =>
-  requestJson<WorkspaceSettings>('/api/workspace/settings', {
-    method: 'PATCH',
+  requestJson<WorkspaceSettings>("/api/workspace/settings", {
+    method: "PATCH",
     headers: jsonHeaders,
     body: JSON.stringify(updates),
   });
 
-export const fetchWorkspaceConnectors = async (): Promise<WorkspaceConnectorSettings> =>
-  requestJson<WorkspaceConnectorSettings>('/api/workspace/connectors');
+export const fetchWorkspaceConnectors =
+  async (): Promise<WorkspaceConnectorSettings> =>
+    requestJson<WorkspaceConnectorSettings>("/api/workspace/connectors");
 
 export const updateWorkspaceConnectors = async (
   updates: Partial<WorkspaceConnectorSettings>,
 ): Promise<WorkspaceConnectorSettings> =>
-  requestJson<WorkspaceConnectorSettings>('/api/workspace/connectors', {
-    method: 'PATCH',
+  requestJson<WorkspaceConnectorSettings>("/api/workspace/connectors", {
+    method: "PATCH",
     headers: jsonHeaders,
     body: JSON.stringify(updates),
   });
 
-export const fetchWorkspaceCatalogSnapshot = async (): Promise<WorkspaceCatalogSnapshot> =>
-  requestJson<WorkspaceCatalogSnapshot>('/api/workspace/catalog');
+export const fetchWorkspaceCatalogSnapshot =
+  async (): Promise<WorkspaceCatalogSnapshot> =>
+    requestJson<WorkspaceCatalogSnapshot>("/api/workspace/catalog");
 
-export const initializeWorkspaceFoundationCatalog = async (): Promise<WorkspaceCatalogSnapshot> =>
-  requestJson<WorkspaceCatalogSnapshot>('/api/workspace/catalog/initialize', {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify({}),
-  });
+export const initializeWorkspaceFoundationCatalog =
+  async (): Promise<WorkspaceCatalogSnapshot> =>
+    requestJson<WorkspaceCatalogSnapshot>("/api/workspace/catalog/initialize", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
 
 export const fetchCapabilityBundle = async (
   capabilityId: string,
@@ -650,7 +774,7 @@ export const updateCapabilityRepositories = async (
   requestJson<CapabilityRepository[]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/repositories`,
     {
-      method: 'PATCH',
+      method: "PATCH",
       headers: jsonHeaders,
       body: JSON.stringify({ repositories }),
     },
@@ -679,7 +803,7 @@ export const refreshCapabilityCopilotGuidance = async (
   requestJson<CapabilityCopilotGuidancePack>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/copilot-guidance/refresh`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -704,7 +828,7 @@ export const distillAgentChatSession = async (
   requestJson<ChatDistillationResult>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/chat-sessions/${encodeURIComponent(sessionId)}/distill`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -734,7 +858,7 @@ export const refreshCapabilityCodeIndex = async (
   requestJson<CapabilityCodeIndexSnapshot>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/code-index/refresh`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -751,11 +875,11 @@ export const searchCapabilityCodeSymbols = async (
   options: { limit?: number; kind?: CapabilityCodeSymbolKind } = {},
 ): Promise<CapabilityCodeSymbol[]> => {
   const params = new URLSearchParams();
-  const trimmed = (query || '').trim();
+  const trimmed = (query || "").trim();
   if (!trimmed) return [];
-  params.set('q', trimmed);
-  if (options.limit) params.set('limit', String(options.limit));
-  if (options.kind) params.set('kind', options.kind);
+  params.set("q", trimmed);
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.kind) params.set("kind", options.kind);
   return requestJson<CapabilityCodeSymbol[]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/code-index/symbols?${params.toString()}`,
   );
@@ -783,7 +907,7 @@ export const validateCapabilityPatch = async (
   requestJson<CodePatchPayload>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/patches/validate`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -818,7 +942,7 @@ export const startAgentBranchSession = async (
   requestJson<{ session: AgentBranchSession; reused: boolean }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/agent-git/start-session`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -837,7 +961,7 @@ export const commitAgentSessionPatch = async (
   requestJson<AgentBranchCommitResult>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agent-git/sessions/${encodeURIComponent(sessionId)}/commit-patch`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -851,7 +975,7 @@ export const openAgentSessionPullRequest = async (
   requestJson<{ session: AgentBranchSession; pullRequest: AgentPullRequest }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agent-git/sessions/${encodeURIComponent(sessionId)}/open-pr`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -864,7 +988,7 @@ export const closeAgentSession = async (
   requestJson<{ session: AgentBranchSession }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agent-git/sessions/${encodeURIComponent(sessionId)}/close`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -875,19 +999,22 @@ export const validateOnboardingConnectors = async (payload: {
   jiraBoardLink?: string;
   confluenceLink?: string;
 }): Promise<ConnectorValidationResult> =>
-  requestJson<ConnectorValidationResult>('/api/onboarding/validate-connectors', {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify(payload),
-  });
+  requestJson<ConnectorValidationResult>(
+    "/api/onboarding/validate-connectors",
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
 
 export const validateOnboardingWorkspacePath = async (payload: {
   path: string;
 }): Promise<WorkspacePathValidationResult> =>
   requestJson<WorkspacePathValidationResult>(
-    '/api/onboarding/validate-workspace-path',
+    "/api/onboarding/validate-workspace-path",
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -898,9 +1025,9 @@ export const detectOnboardingWorkspaceProfile = async (payload: {
   approvedWorkspacePaths?: string[];
 }): Promise<WorkspaceDetectionResult> =>
   requestJson<WorkspaceDetectionResult>(
-    '/api/onboarding/detect-workspace-profile',
+    "/api/onboarding/detect-workspace-profile",
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -916,7 +1043,7 @@ export const detectCapabilityWorkspaceProfile = async (
   requestJson<WorkspaceDetectionResult>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/detect-workspace-profile`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -928,9 +1055,9 @@ export const validateOnboardingCommandTemplate = async (payload: {
   allowedWorkspacePaths?: string[];
 }): Promise<CommandTemplateValidationResult> =>
   requestJson<CommandTemplateValidationResult>(
-    '/api/onboarding/validate-command-template',
+    "/api/onboarding/validate-command-template",
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -942,9 +1069,9 @@ export const validateOnboardingDeploymentTarget = async (payload: {
   allowedWorkspacePaths?: string[];
 }): Promise<DeploymentTargetValidationResult> =>
   requestJson<DeploymentTargetValidationResult>(
-    '/api/onboarding/validate-deployment-target',
+    "/api/onboarding/validate-deployment-target",
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -981,7 +1108,7 @@ export const fetchWorkItemFlightRecorder = async (
 
 export const getCapabilityFlightRecorderDownloadUrl = (
   capabilityId: string,
-  format: 'json' | 'markdown',
+  format: "json" | "markdown",
 ) =>
   resolveApiUrl(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/flight-recorder/download?format=${format}`,
@@ -990,7 +1117,7 @@ export const getCapabilityFlightRecorderDownloadUrl = (
 export const getWorkItemFlightRecorderDownloadUrl = (
   capabilityId: string,
   workItemId: string,
-  format: 'json' | 'markdown',
+  format: "json" | "markdown",
 ) =>
   resolveApiUrl(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/flight-recorder/download?format=${format}`,
@@ -1019,7 +1146,7 @@ export const generateWorkItemReviewPacket = async (
   requestJson<ReviewPacketArtifactSummary>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/review-packet`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -1041,7 +1168,7 @@ export const fetchCapabilityInteractionFeed = async ({
 }): Promise<CapabilityInteractionFeed> =>
   requestJson<CapabilityInteractionFeed>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/interaction-feed${
-      workItemId ? `?workItemId=${encodeURIComponent(workItemId)}` : ''
+      workItemId ? `?workItemId=${encodeURIComponent(workItemId)}` : ""
     }`,
   );
 
@@ -1052,14 +1179,18 @@ export const createEvidencePacketForWorkItem = async (
   requestJson<EvidencePacketSummary>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/evidence-packets`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
   );
 
-export const fetchEvidencePacket = async (bundleId: string): Promise<EvidencePacket> =>
-  requestJson<EvidencePacket>(`/api/evidence-packets/${encodeURIComponent(bundleId)}`);
+export const fetchEvidencePacket = async (
+  bundleId: string,
+): Promise<EvidencePacket> =>
+  requestJson<EvidencePacket>(
+    `/api/evidence-packets/${encodeURIComponent(bundleId)}`,
+  );
 
 export const verifyEvidencePacket = async (
   bundleId: string,
@@ -1076,7 +1207,7 @@ export const fetchAttestationChain = async (
   );
 
 export const fetchSignerStatus = async (): Promise<SignerStatus> =>
-  requestJson<SignerStatus>('/api/governance/signer/status');
+  requestJson<SignerStatus>("/api/governance/signer/status");
 
 // Slice 2 — governance controls catalog.
 export const listGovernanceControls = async (filter?: {
@@ -1086,13 +1217,14 @@ export const listGovernanceControls = async (filter?: {
   capabilityScope?: string;
 }): Promise<GovernanceControlsListResponse> => {
   const search = new URLSearchParams();
-  if (filter?.framework) search.set('framework', filter.framework);
-  if (filter?.severity) search.set('severity', filter.severity);
-  if (filter?.status) search.set('status', filter.status);
-  if (filter?.capabilityScope) search.set('capabilityScope', filter.capabilityScope);
+  if (filter?.framework) search.set("framework", filter.framework);
+  if (filter?.severity) search.set("severity", filter.severity);
+  if (filter?.status) search.set("status", filter.status);
+  if (filter?.capabilityScope)
+    search.set("capabilityScope", filter.capabilityScope);
   const query = search.toString();
   return requestJson<GovernanceControlsListResponse>(
-    `/api/governance/controls${query ? `?${query}` : ''}`,
+    `/api/governance/controls${query ? `?${query}` : ""}`,
   );
 };
 
@@ -1101,10 +1233,10 @@ export const getGovernanceControl = async (
   capabilityScope?: string,
 ): Promise<GovernanceControlWithBindings> => {
   const search = new URLSearchParams();
-  if (capabilityScope) search.set('capabilityScope', capabilityScope);
+  if (capabilityScope) search.set("capabilityScope", capabilityScope);
   const query = search.toString();
   return requestJson<GovernanceControlWithBindings>(
-    `/api/governance/controls/${encodeURIComponent(controlId)}${query ? `?${query}` : ''}`,
+    `/api/governance/controls/${encodeURIComponent(controlId)}${query ? `?${query}` : ""}`,
   );
 };
 
@@ -1115,8 +1247,8 @@ export const createGovernanceControlBinding = async (
   requestJson<GovernanceControlBinding>(
     `/api/governance/controls/${encodeURIComponent(controlId)}/bindings`,
     {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     },
   );
@@ -1128,15 +1260,17 @@ export const listGovernanceExceptions = async (filter?: {
   status?: GovernanceExceptionStatus | GovernanceExceptionStatus[];
 }): Promise<GovernanceExceptionsListResponse> => {
   const search = new URLSearchParams();
-  if (filter?.capabilityId) search.set('capabilityId', filter.capabilityId);
-  if (filter?.controlId) search.set('controlId', filter.controlId);
+  if (filter?.capabilityId) search.set("capabilityId", filter.capabilityId);
+  if (filter?.controlId) search.set("controlId", filter.controlId);
   if (filter?.status) {
-    const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
-    for (const status of statuses) search.append('status', status);
+    const statuses = Array.isArray(filter.status)
+      ? filter.status
+      : [filter.status];
+    for (const status of statuses) search.append("status", status);
   }
   const query = search.toString();
   return requestJson<GovernanceExceptionsListResponse>(
-    `/api/governance/exceptions${query ? `?${query}` : ''}`,
+    `/api/governance/exceptions${query ? `?${query}` : ""}`,
   );
 };
 
@@ -1161,8 +1295,8 @@ export const requestGovernanceException = async (
   input: GovernanceExceptionRequestInput,
 ): Promise<GovernanceExceptionWithEvents> =>
   requestJson<GovernanceExceptionWithEvents>(`/api/governance/exceptions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
 
@@ -1173,8 +1307,8 @@ export const decideGovernanceException = async (
   requestJson<GovernanceExceptionWithEvents>(
     `/api/governance/exceptions/${encodeURIComponent(exceptionId)}/decide`,
     {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(decision),
     },
   );
@@ -1186,8 +1320,8 @@ export const revokeGovernanceException = async (
   requestJson<GovernanceExceptionWithEvents>(
     `/api/governance/exceptions/${encodeURIComponent(exceptionId)}/revoke`,
     {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ comment }),
     },
   );
@@ -1199,9 +1333,9 @@ export const revokeGovernanceException = async (
 export const proveNoTouch = async (
   input: ProveNoTouchInput,
 ): Promise<ProveNoTouchResult> =>
-  requestJson<ProveNoTouchResult>('/api/governance/provenance/prove-no-touch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  requestJson<ProveNoTouchResult>("/api/governance/provenance/prove-no-touch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
 
@@ -1216,8 +1350,9 @@ export const listProvenanceCoverage = async (
 // Slice 5 — governance posture snapshot.
 // ──────────────────────────────────────────────────────────────────────────
 
-export const fetchGovernancePosture = async (): Promise<GovernancePostureSnapshot> =>
-  requestJson<GovernancePostureSnapshot>('/api/governance/posture');
+export const fetchGovernancePosture =
+  async (): Promise<GovernancePostureSnapshot> =>
+    requestJson<GovernancePostureSnapshot>("/api/governance/posture");
 
 export const listIncidents = async (params?: {
   capabilityId?: string;
@@ -1226,20 +1361,24 @@ export const listIncidents = async (params?: {
 }): Promise<CapabilityIncident[]> => {
   const search = new URLSearchParams();
   if (params?.capabilityId) {
-    search.set('capabilityId', params.capabilityId);
+    search.set("capabilityId", params.capabilityId);
   }
   if (params?.severity) {
-    search.set('severity', params.severity);
+    search.set("severity", params.severity);
   }
   if (params?.status) {
-    search.set('status', params.status);
+    search.set("status", params.status);
   }
-  const suffix = search.toString() ? `?${search.toString()}` : '';
+  const suffix = search.toString() ? `?${search.toString()}` : "";
   return requestJson<CapabilityIncident[]>(`/api/incidents${suffix}`);
 };
 
-export const fetchIncident = async (incidentId: string): Promise<CapabilityIncident> =>
-  requestJson<CapabilityIncident>(`/api/incidents/${encodeURIComponent(incidentId)}`);
+export const fetchIncident = async (
+  incidentId: string,
+): Promise<CapabilityIncident> =>
+  requestJson<CapabilityIncident>(
+    `/api/incidents/${encodeURIComponent(incidentId)}`,
+  );
 
 export const createIncidentRecord = async (payload: {
   capabilityId?: string;
@@ -1253,8 +1392,8 @@ export const createIncidentRecord = async (payload: {
   postmortemUrl?: string;
   initialPacketBundleId?: string;
 }): Promise<CapabilityIncident> =>
-  requestJson<CapabilityIncident>('/api/incidents', {
-    method: 'POST',
+  requestJson<CapabilityIncident>("/api/incidents", {
+    method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(payload),
   });
@@ -1268,11 +1407,14 @@ export const linkIncidentPacket = async (
     correlationReasons?: string[];
   },
 ): Promise<IncidentPacketLink> =>
-  requestJson<IncidentPacketLink>(`/api/incidents/${encodeURIComponent(incidentId)}/links`, {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify(payload),
-  });
+  requestJson<IncidentPacketLink>(
+    `/api/incidents/${encodeURIComponent(incidentId)}/links`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
 
 export const updateIncidentPacketLink = async (
   incidentId: string,
@@ -1286,17 +1428,20 @@ export const updateIncidentPacketLink = async (
   requestJson<IncidentPacketLink>(
     `/api/incidents/${encodeURIComponent(incidentId)}/links/${encodeURIComponent(bundleId)}`,
     {
-      method: 'PATCH',
+      method: "PATCH",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
   );
 
-export const deleteIncidentPacketLink = async (incidentId: string, bundleId: string) =>
-  requestJson<{ status: 'deleted' }>(
+export const deleteIncidentPacketLink = async (
+  incidentId: string,
+  bundleId: string,
+) =>
+  requestJson<{ status: "deleted" }>(
     `/api/incidents/${encodeURIComponent(incidentId)}/links/${encodeURIComponent(bundleId)}`,
     {
-      method: 'DELETE',
+      method: "DELETE",
     },
   );
 
@@ -1307,21 +1452,27 @@ export const fetchPacketIncidentLinks = async (
     `/api/incidents/packets/${encodeURIComponent(bundleId)}/links`,
   );
 
-export const correlateIncidentPackets = async (incidentId: string): Promise<{
+export const correlateIncidentPackets = async (
+  incidentId: string,
+): Promise<{
   incident: CapabilityIncident;
   candidates: IncidentCorrelationCandidate[];
   persisted: IncidentCorrelationCandidate[];
 }> =>
   requestJson(`/api/incidents/${encodeURIComponent(incidentId)}/correlate`, {
-    method: 'POST',
+    method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({}),
   });
 
-export const fetchIncidentPostmortemMarkdown = async (incidentId: string): Promise<string> =>
+export const fetchIncidentPostmortemMarkdown = async (
+  incidentId: string,
+): Promise<string> =>
   requestText(`/api/incidents/${encodeURIComponent(incidentId)}/postmortem.md`);
 
-export const fetchIncidentAlibiMarkdown = async (incidentId: string): Promise<string> =>
+export const fetchIncidentAlibiMarkdown = async (
+  incidentId: string,
+): Promise<string> =>
   requestText(`/api/incidents/${encodeURIComponent(incidentId)}/alibi.md`);
 
 export const requestIncidentGuardrailPromotion = async (
@@ -1336,33 +1487,39 @@ export const requestIncidentGuardrailPromotion = async (
   requestJson(
     `/api/incidents/${encodeURIComponent(incidentId)}/links/${encodeURIComponent(bundleId)}/promote-guardrail`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({ concernText }),
     },
   );
 
-export const listIncidentSourceConfigs = async (): Promise<IncidentSourceConfig[]> =>
-  requestJson<IncidentSourceConfig[]>('/api/incidents/config/sources');
+export const listIncidentSourceConfigs = async (): Promise<
+  IncidentSourceConfig[]
+> => requestJson<IncidentSourceConfig[]>("/api/incidents/config/sources");
 
 export const updateIncidentSourceConfig = async (
   source: IncidentSource,
   config: Partial<IncidentSourceConfig>,
 ): Promise<IncidentSourceConfig> =>
-  requestJson<IncidentSourceConfig>(`/api/incidents/config/sources/${encodeURIComponent(source)}`, {
-    method: 'PUT',
-    headers: jsonHeaders,
-    body: JSON.stringify(config),
-  });
-
-export const deleteIncidentSourceConfig = async (source: IncidentSource) =>
-  requestJson<{ status: 'deleted' }>(
+  requestJson<IncidentSourceConfig>(
     `/api/incidents/config/sources/${encodeURIComponent(source)}`,
-    { method: 'DELETE' },
+    {
+      method: "PUT",
+      headers: jsonHeaders,
+      body: JSON.stringify(config),
+    },
   );
 
-export const listIncidentServiceCapabilityMaps = async (): Promise<IncidentServiceCapabilityMap[]> =>
-  requestJson<IncidentServiceCapabilityMap[]>('/api/incidents/config/services');
+export const deleteIncidentSourceConfig = async (source: IncidentSource) =>
+  requestJson<{ status: "deleted" }>(
+    `/api/incidents/config/sources/${encodeURIComponent(source)}`,
+    { method: "DELETE" },
+  );
+
+export const listIncidentServiceCapabilityMaps = async (): Promise<
+  IncidentServiceCapabilityMap[]
+> =>
+  requestJson<IncidentServiceCapabilityMap[]>("/api/incidents/config/services");
 
 export const updateIncidentServiceCapabilityMap = async (
   serviceName: string,
@@ -1375,20 +1532,22 @@ export const updateIncidentServiceCapabilityMap = async (
   requestJson<IncidentServiceCapabilityMap>(
     `/api/incidents/config/services/${encodeURIComponent(serviceName)}`,
     {
-      method: 'PUT',
+      method: "PUT",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
   );
 
 export const deleteIncidentServiceCapabilityMap = async (serviceName: string) =>
-  requestJson<{ status: 'deleted' }>(
+  requestJson<{ status: "deleted" }>(
     `/api/incidents/config/services/${encodeURIComponent(serviceName)}`,
-    { method: 'DELETE' },
+    { method: "DELETE" },
   );
 
-export const listIncidentExportTargetConfigs = async (): Promise<IncidentExportTargetConfig[]> =>
-  requestJson<IncidentExportTargetConfig[]>('/api/incidents/exports/targets');
+export const listIncidentExportTargetConfigs = async (): Promise<
+  IncidentExportTargetConfig[]
+> =>
+  requestJson<IncidentExportTargetConfig[]>("/api/incidents/exports/targets");
 
 export const updateIncidentExportTargetConfig = async (
   target: IncidentExportTarget,
@@ -1397,7 +1556,7 @@ export const updateIncidentExportTargetConfig = async (
   requestJson<IncidentExportTargetConfig>(
     `/api/incidents/exports/targets/${encodeURIComponent(target)}`,
     {
-      method: 'PUT',
+      method: "PUT",
       headers: jsonHeaders,
       body: JSON.stringify(config),
     },
@@ -1411,19 +1570,21 @@ export const listIncidentExportDeliveries = async (params?: {
 }): Promise<IncidentExportDelivery[]> => {
   const search = new URLSearchParams();
   if (params?.incidentId) {
-    search.set('incidentId', params.incidentId);
+    search.set("incidentId", params.incidentId);
   }
   if (params?.capabilityId) {
-    search.set('capabilityId', params.capabilityId);
+    search.set("capabilityId", params.capabilityId);
   }
   if (params?.target) {
-    search.set('target', params.target);
+    search.set("target", params.target);
   }
   if (params?.limit) {
-    search.set('limit', String(params.limit));
+    search.set("limit", String(params.limit));
   }
-  const suffix = search.toString() ? `?${search.toString()}` : '';
-  return requestJson<IncidentExportDelivery[]>(`/api/incidents/exports/deliveries${suffix}`);
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<IncidentExportDelivery[]>(
+    `/api/incidents/exports/deliveries${suffix}`,
+  );
 };
 
 export const exportIncidentToTarget = async (
@@ -1433,7 +1594,7 @@ export const exportIncidentToTarget = async (
   requestJson<IncidentExportDelivery>(
     `/api/incidents/${encodeURIComponent(incidentId)}/export/${encodeURIComponent(target)}`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -1445,31 +1606,31 @@ export const fetchModelRiskMonitoringSummary = async (params?: {
 }): Promise<ModelRiskMonitoringSummary> => {
   const search = new URLSearchParams();
   if (params?.capabilityId) {
-    search.set('capabilityId', params.capabilityId);
+    search.set("capabilityId", params.capabilityId);
   }
   if (params?.windowDays) {
-    search.set('windowDays', String(params.windowDays));
+    search.set("windowDays", String(params.windowDays));
   }
-  const suffix = search.toString() ? `?${search.toString()}` : '';
+  const suffix = search.toString() ? `?${search.toString()}` : "";
   return requestJson<ModelRiskMonitoringSummary>(`/api/mrm/summary${suffix}`);
 };
 
 export const fetchModelRiskMonitoringExport = async (params?: {
   capabilityId?: string;
   windowDays?: number;
-  format?: 'markdown' | 'json';
+  format?: "markdown" | "json";
 }): Promise<string> => {
   const search = new URLSearchParams();
   if (params?.capabilityId) {
-    search.set('capabilityId', params.capabilityId);
+    search.set("capabilityId", params.capabilityId);
   }
   if (params?.windowDays) {
-    search.set('windowDays', String(params.windowDays));
+    search.set("windowDays", String(params.windowDays));
   }
   if (params?.format) {
-    search.set('format', params.format);
+    search.set("format", params.format);
   }
-  const suffix = search.toString() ? `?${search.toString()}` : '';
+  const suffix = search.toString() ? `?${search.toString()}` : "";
   return requestText(`/api/mrm/export${suffix}`);
 };
 
@@ -1482,14 +1643,17 @@ export const exportModelRiskMonitoringToTarget = async ({
   capabilityId?: string;
   windowDays?: number;
 }): Promise<IncidentExportDelivery> =>
-  requestJson<IncidentExportDelivery>(`/api/mrm/export/${encodeURIComponent(target)}`, {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify({
-      capabilityId,
-      windowDays,
-    }),
-  });
+  requestJson<IncidentExportDelivery>(
+    `/api/mrm/export/${encodeURIComponent(target)}`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        capabilityId,
+        windowDays,
+      }),
+    },
+  );
 
 export const fetchCapabilityConnectorContext = async (
   capabilityId: string,
@@ -1498,25 +1662,21 @@ export const fetchCapabilityConnectorContext = async (
     `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors`,
   );
 
-export const syncCapabilityGithubConnector = async (
-  capabilityId: string,
-) =>
-  requestJson<CapabilityConnectorContext['github']>(
+export const syncCapabilityGithubConnector = async (capabilityId: string) =>
+  requestJson<CapabilityConnectorContext["github"]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors/github/sync`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
   );
 
-export const syncCapabilityJiraConnector = async (
-  capabilityId: string,
-) =>
-  requestJson<CapabilityConnectorContext['jira']>(
+export const syncCapabilityJiraConnector = async (capabilityId: string) =>
+  requestJson<CapabilityConnectorContext["jira"]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors/jira/sync`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -1526,22 +1686,20 @@ export const transitionCapabilityJiraIssue = async (
   capabilityId: string,
   payload: { issueKey: string; transitionId: string },
 ) =>
-  requestJson<{ status: 'READY'; message: string }>(
+  requestJson<{ status: "READY"; message: string }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors/jira/transition`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
   );
 
-export const syncCapabilityConfluenceConnector = async (
-  capabilityId: string,
-) =>
-  requestJson<CapabilityConnectorContext['confluence']>(
+export const syncCapabilityConfluenceConnector = async (capabilityId: string) =>
+  requestJson<CapabilityConnectorContext["confluence"]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors/confluence/sync`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -1551,10 +1709,15 @@ export const publishCapabilityArtifactToConfluence = async (
   capabilityId: string,
   payload: { artifactId: string; title?: string; parentPageId?: string },
 ) =>
-  requestJson<{ status: 'READY'; message: string; url?: string; pageId?: string }>(
+  requestJson<{
+    status: "READY";
+    message: string;
+    url?: string;
+    pageId?: string;
+  }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/connectors/confluence/publish`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -1568,7 +1731,10 @@ export const fetchArtifactContent = async (
     `/api/capabilities/${encodeURIComponent(capabilityId)}/artifacts/${encodeURIComponent(artifactId)}/content`,
   );
 
-export const getArtifactDownloadUrl = (capabilityId: string, artifactId: string) =>
+export const getArtifactDownloadUrl = (
+  capabilityId: string,
+  artifactId: string,
+) =>
   resolveApiUrl(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
   );
@@ -1580,7 +1746,7 @@ export const getArtifactBlobUrl = (
 ) =>
   resolveApiUrl(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/artifacts/${encodeURIComponent(artifactId)}/blob${
-      options?.inline ? '?inline=1' : ''
+      options?.inline ? "?inline=1" : ""
     }`,
   );
 
@@ -1590,8 +1756,8 @@ export const uploadCapabilityWorkItemFiles = async (
   files: File[],
 ): Promise<Artifact[]> => {
   const formData = new FormData();
-  files.forEach(file => {
-    formData.append('files', file);
+  files.forEach((file) => {
+    formData.append("files", file);
   });
 
   const response = await fetch(
@@ -1599,7 +1765,7 @@ export const uploadCapabilityWorkItemFiles = async (
       `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/uploads`,
     ),
     {
-      method: 'POST',
+      method: "POST",
       headers: withActorHeaders(),
       body: formData,
     },
@@ -1624,8 +1790,8 @@ export const getWorkItemEvidenceBundleDownloadUrl = (
 export const createCapabilityRecord = async (
   capability: CreateCapabilityInput,
 ): Promise<CapabilityBundle> =>
-  requestJson<CapabilityBundle>('/api/capabilities', {
-    method: 'POST',
+  requestJson<CapabilityBundle>("/api/capabilities", {
+    method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(capability),
   });
@@ -1637,7 +1803,7 @@ export const updateCapabilityRecord = async (
   requestJson<CapabilityBundle>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}`,
     {
-      method: 'PATCH',
+      method: "PATCH",
       headers: jsonHeaders,
       body: JSON.stringify(updates),
     },
@@ -1664,7 +1830,7 @@ export const updateCapabilityAccessSnapshot = async (
   requestJson<CapabilityAccessSnapshot>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/access`,
     {
-      method: 'PATCH',
+      method: "PATCH",
       headers: jsonHeaders,
       body: JSON.stringify(updates),
     },
@@ -1684,8 +1850,8 @@ export const evaluateCapabilityPermission = async (
     action: PermissionAction;
     allowed: boolean;
     permissionSet: EffectivePermissionSet;
-  }>('/api/permissions/evaluate', {
-    method: 'POST',
+  }>("/api/permissions/evaluate", {
+    method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ capabilityId, action }),
   });
@@ -1693,14 +1859,14 @@ export const evaluateCapabilityPermission = async (
 export const publishCapabilityContract = async (
   capabilityId: string,
 ): Promise<{ capability: Capability; snapshot: CapabilityPublishedSnapshot }> =>
-  requestJson<{ capability: Capability; snapshot: CapabilityPublishedSnapshot }>(
-    `/api/capabilities/${encodeURIComponent(capabilityId)}/publish-contract`,
-    {
-      method: 'POST',
-      headers: jsonHeaders,
-      body: JSON.stringify({}),
-    },
-  );
+  requestJson<{
+    capability: Capability;
+    snapshot: CapabilityPublishedSnapshot;
+  }>(`/api/capabilities/${encodeURIComponent(capabilityId)}/publish-contract`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({}),
+  });
 
 export const fetchCapabilityAlmExport = async (
   capabilityId: string,
@@ -1716,7 +1882,7 @@ export const addCapabilitySkillRecord = async (
   requestJson<CapabilityBundle>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/skills`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(skill),
     },
@@ -1729,7 +1895,7 @@ export const removeCapabilitySkillRecord = async (
   requestJson<CapabilityBundle>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/skills/${encodeURIComponent(skillId)}`,
     {
-      method: 'DELETE',
+      method: "DELETE",
     },
   );
 
@@ -1740,7 +1906,7 @@ export const addCapabilityAgentRecord = async (
   requestJson<CapabilityBundle>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agents`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(agent),
     },
@@ -1754,7 +1920,7 @@ export const updateCapabilityAgentRecord = async (
   requestJson<CapabilityBundle>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}`,
     {
-      method: 'PATCH',
+      method: "PATCH",
       headers: jsonHeaders,
       body: JSON.stringify(updates),
     },
@@ -1767,7 +1933,7 @@ export const updateCapabilityAgentModelsRecord = async (
   requestJson<CapabilityBundle>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/bulk-model`,
     {
-      method: 'PATCH',
+      method: "PATCH",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -1775,12 +1941,12 @@ export const updateCapabilityAgentModelsRecord = async (
 
 export const appendCapabilityMessageRecord = async (
   capabilityId: string,
-  message: Omit<CapabilityChatMessage, 'capabilityId'>,
+  message: Omit<CapabilityChatMessage, "capabilityId">,
 ): Promise<CapabilityWorkspace> =>
   requestJson<CapabilityWorkspace>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/messages`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(message),
     },
@@ -1797,7 +1963,7 @@ export const clearCapabilityMessageHistoryRecord = async (
   requestJson<CapabilityWorkspace>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/messages`,
     {
-      method: 'DELETE',
+      method: "DELETE",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -1810,7 +1976,7 @@ export const setActiveChatAgentRecord = async (
   requestJson<CapabilityWorkspace>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/chat-agent`,
     {
-      method: 'PATCH',
+      method: "PATCH",
       headers: jsonHeaders,
       body: JSON.stringify({ agentId }),
     },
@@ -1823,7 +1989,7 @@ export const replaceCapabilityWorkspaceContentRecord = async (
   requestJson<CapabilityWorkspace>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/workspace`,
     {
-      method: 'PATCH',
+      method: "PATCH",
       headers: jsonHeaders,
       body: JSON.stringify(updates),
     },
@@ -1831,19 +1997,22 @@ export const replaceCapabilityWorkspaceContentRecord = async (
 
 export const fetchCapabilityCodeWorkspaces = async (
   capabilityId: string,
+  executorId?: string,
 ): Promise<CodeWorkspaceStatus[]> =>
   requestJson<CodeWorkspaceStatus[]>(
-    `/api/capabilities/${encodeURIComponent(capabilityId)}/code-workspaces`,
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/code-workspaces${
+      executorId ? `?executorId=${encodeURIComponent(executorId)}` : ""
+    }`,
   );
 
 export const createCapabilityCodeBranch = async (
   capabilityId: string,
-  payload: { path: string; branchName: string },
+  payload: { path: string; branchName: string; executorId?: string },
 ): Promise<CodeWorkspaceStatus> =>
   requestJson<CodeWorkspaceStatus>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/code-workspaces/branch`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -1855,31 +2024,125 @@ export const createCapabilityWorkItem = async (
     title: string;
     description?: string;
     workflowId: string;
-    taskType?: WorkItem['taskType'];
+    taskType?: WorkItem["taskType"];
     phaseStakeholders?: WorkItemPhaseStakeholderAssignment[];
     attachments?: WorkItemAttachmentUpload[];
-    priority: WorkItem['priority'];
+    priority: WorkItem["priority"];
     tags: string[];
   },
 ): Promise<WorkItem> =>
   requestJson<WorkItem>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
+    },
+  );
+
+export const listStoryProposalBatches = async (
+  capabilityId: string,
+): Promise<StoryProposalBatchSummary[]> =>
+  requestJson<StoryProposalBatchSummary[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/story-proposals`,
+  );
+
+export const createStoryProposalBatch = async (
+  capabilityId: string,
+  payload: PlanningGenerationRequest,
+): Promise<StoryProposalBatch> =>
+  requestJson<StoryProposalBatch>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/story-proposals`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const fetchStoryProposalBatch = async (
+  capabilityId: string,
+  batchId: string,
+): Promise<StoryProposalBatch> =>
+  requestJson<StoryProposalBatch>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/story-proposals/${encodeURIComponent(batchId)}`,
+  );
+
+export const updateStoryProposalItem = async (
+  capabilityId: string,
+  batchId: string,
+  itemId: string,
+  payload: Partial<
+    Pick<
+      StoryProposalItem,
+      | "title"
+      | "description"
+      | "businessOutcome"
+      | "acceptanceCriteria"
+      | "dependencies"
+      | "risks"
+      | "recommendedWorkflowId"
+      | "recommendedTaskType"
+      | "storyPoints"
+      | "tShirtSize"
+      | "sizingConfidence"
+      | "sizingRationale"
+      | "implementationNotes"
+      | "tags"
+      | "reviewState"
+    >
+  >,
+): Promise<StoryProposalBatch> =>
+  requestJson<StoryProposalBatch>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/story-proposals/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}`,
+    {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const regenerateStoryProposalBatch = async (
+  capabilityId: string,
+  batchId: string,
+  payload: PlanningGenerationRequest,
+): Promise<StoryProposalBatch> =>
+  requestJson<StoryProposalBatch>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/story-proposals/${encodeURIComponent(batchId)}/regenerate`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const promoteStoryProposalBatch = async (
+  capabilityId: string,
+  batchId: string,
+  payload?: { itemIds?: string[] },
+): Promise<StoryProposalPromotionResult> =>
+  requestJson<StoryProposalPromotionResult>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/story-proposals/${encodeURIComponent(batchId)}/promote`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
     },
   );
 
 export const moveCapabilityWorkItem = async (
   capabilityId: string,
   workItemId: string,
-  payload: { targetPhase: WorkItemPhase; note?: string; cancelRunIfPresent?: boolean },
+  payload: {
+    targetPhase: WorkItemPhase;
+    note?: string;
+    cancelRunIfPresent?: boolean;
+  },
 ): Promise<WorkItem> =>
   requestJson<WorkItem>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/move`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -1893,7 +2156,7 @@ export const cancelCapabilityWorkItem = async (
   requestJson<WorkItem>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/cancel`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -1907,7 +2170,7 @@ export const archiveCapabilityWorkItem = async (
   requestJson<WorkItem>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/archive`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -1921,7 +2184,7 @@ export const restoreCapabilityWorkItem = async (
   requestJson<WorkItem>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/restore`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -1938,8 +2201,14 @@ export const fetchCapabilityWorkItemCollaboration = async (
 export const fetchCapabilityWorkItemExecutionContext = async (
   capabilityId: string,
   workItemId: string,
-): Promise<{ context: WorkItemExecutionContext | null; handoffs: WorkItemHandoffPacket[] }> =>
-  requestJson<{ context: WorkItemExecutionContext | null; handoffs: WorkItemHandoffPacket[] }>(
+): Promise<{
+  context: WorkItemExecutionContext | null;
+  handoffs: WorkItemHandoffPacket[];
+}> =>
+  requestJson<{
+    context: WorkItemExecutionContext | null;
+    handoffs: WorkItemHandoffPacket[];
+  }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/execution-context`,
   );
 
@@ -1950,7 +2219,7 @@ export const initializeCapabilityWorkItemExecutionContext = async (
   requestJson<WorkItemExecutionContext>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/execution-context/initialize`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -1959,6 +2228,9 @@ export const initializeCapabilityWorkItemExecutionContext = async (
 export const createCapabilityWorkItemSharedBranch = async (
   capabilityId: string,
   workItemId: string,
+  payload?: {
+    executorId?: string;
+  },
 ): Promise<{
   context: WorkItemExecutionContext;
   repository?: CapabilityRepository;
@@ -1971,20 +2243,26 @@ export const createCapabilityWorkItemSharedBranch = async (
   }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/branch/create`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({}),
+      body: JSON.stringify(payload || {}),
     },
   );
 
 export const claimCapabilityWorkItemWriteControl = async (
   capabilityId: string,
   workItemId: string,
-): Promise<{ claim: WorkItemCodeClaim; context: WorkItemExecutionContext | null }> =>
-  requestJson<{ claim: WorkItemCodeClaim; context: WorkItemExecutionContext | null }>(
+): Promise<{
+  claim: WorkItemCodeClaim;
+  context: WorkItemExecutionContext | null;
+}> =>
+  requestJson<{
+    claim: WorkItemCodeClaim;
+    context: WorkItemExecutionContext | null;
+  }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/claim/write`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -1997,7 +2275,7 @@ export const releaseCapabilityWorkItemWriteControl = async (
   requestJson<void>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/claim/write`,
     {
-      method: 'DELETE',
+      method: "DELETE",
     },
   );
 
@@ -2012,12 +2290,15 @@ export const listCapabilityWorkItemHandoffs = async (
 export const createCapabilityWorkItemHandoff = async (
   capabilityId: string,
   workItemId: string,
-  payload: Omit<WorkItemHandoffPacket, 'id' | 'workItemId' | 'createdAt' | 'acceptedAt'>,
+  payload: Omit<
+    WorkItemHandoffPacket,
+    "id" | "workItemId" | "createdAt" | "acceptedAt"
+  >,
 ): Promise<WorkItemHandoffPacket> =>
   requestJson<WorkItemHandoffPacket>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/handoff`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -2027,11 +2308,17 @@ export const acceptCapabilityWorkItemHandoff = async (
   capabilityId: string,
   workItemId: string,
   packetId: string,
-): Promise<{ packet: WorkItemHandoffPacket; context: WorkItemExecutionContext | null }> =>
-  requestJson<{ packet: WorkItemHandoffPacket; context: WorkItemExecutionContext | null }>(
+): Promise<{
+  packet: WorkItemHandoffPacket;
+  context: WorkItemExecutionContext | null;
+}> =>
+  requestJson<{
+    packet: WorkItemHandoffPacket;
+    context: WorkItemExecutionContext | null;
+  }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/handoff/${encodeURIComponent(packetId)}/accept`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -2045,7 +2332,7 @@ export const registerCapabilityWorkItemCheckout = async (
   requestJson<WorkItemCheckoutSession>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/checkout/register`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -2058,7 +2345,7 @@ export const claimCapabilityWorkItemControl = async (
   requestJson<{ claim: WorkItemClaim; workItem: WorkItem }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/claim`,
     {
-      method: 'POST',
+      method: "POST",
     },
   );
 
@@ -2069,7 +2356,7 @@ export const releaseCapabilityWorkItemControl = async (
   requestJson<void>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/claim`,
     {
-      method: 'DELETE',
+      method: "DELETE",
     },
   );
 
@@ -2081,7 +2368,7 @@ export const updateCapabilityWorkItemPresence = async (
   requestJson<WorkItemPresence>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/presence`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -2094,12 +2381,13 @@ export const startCapabilityWorkflowRun = async (
     restartFromPhase?: WorkItemPhase;
     guidance?: string;
     guidedBy?: string;
+    executorId?: string;
   },
 ): Promise<WorkflowRunDetail> =>
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/runs`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -2137,7 +2425,7 @@ export const approveCapabilityWorkflowRun = async (
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/approve`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -2151,7 +2439,7 @@ export const requestCapabilityWorkflowRunChanges = async (
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/request-changes`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -2174,7 +2462,7 @@ export const refreshApprovalWorkspacePacket = async (
   requestJson<ApprovalStructuredPacket>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(waitId)}/refresh-packet`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -2194,7 +2482,7 @@ export const sendBackApprovalForClarification = async (
   requestJson<ApprovalWorkspaceContext>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(waitId)}/send-back`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -2208,7 +2496,7 @@ export const provideCapabilityWorkflowRunInput = async (
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/provide-input`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -2222,7 +2510,7 @@ export const resolveCapabilityWorkflowRunConflict = async (
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/resolve-conflict`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -2236,7 +2524,7 @@ export const cancelCapabilityWorkflowRun = async (
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/cancel`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -2250,7 +2538,7 @@ export const pauseCapabilityWorkflowRun = async (
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/pause`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -2264,7 +2552,7 @@ export const resumeCapabilityWorkflowRun = async (
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/resume`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -2282,7 +2570,7 @@ export const restartCapabilityWorkflowRun = async (
   requestJson<WorkflowRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/restart`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
     },
@@ -2297,10 +2585,11 @@ export const fetchRunConsoleSnapshot = async (
 
 export const fetchOperationsDashboardSnapshot =
   async (): Promise<OperationsDashboardSnapshot> =>
-    requestJson<OperationsDashboardSnapshot>('/api/reports/operations');
+    requestJson<OperationsDashboardSnapshot>("/api/reports/operations");
 
-export const fetchExecutorRegistry = async (): Promise<ExecutorRegistrySummary> =>
-  requestJson<ExecutorRegistrySummary>('/api/runtime/executors');
+export const fetchExecutorRegistry =
+  async (): Promise<ExecutorRegistrySummary> =>
+    requestJson<ExecutorRegistrySummary>("/api/runtime/executors");
 
 export const fetchExecutorRegistryEntry = async (
   executorId: string,
@@ -2309,10 +2598,15 @@ export const fetchExecutorRegistryEntry = async (
     `/api/runtime/executors/${encodeURIComponent(executorId)}`,
   );
 
-export const removeDesktopExecutor = async (executorId: string): Promise<void> => {
-  await requestJson<void>(`/api/runtime/executors/${encodeURIComponent(executorId)}`, {
-    method: 'DELETE',
-  });
+export const removeDesktopExecutor = async (
+  executorId: string,
+): Promise<void> => {
+  await requestJson<void>(
+    `/api/runtime/executors/${encodeURIComponent(executorId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 };
 
 export const fetchCapabilityTasks = async (
@@ -2353,10 +2647,18 @@ export const fetchCollectionRollupSnapshot = async (
 
 export const fetchExecutiveSummarySnapshot =
   async (): Promise<ExecutiveSummarySnapshot> =>
-    requestJson<ExecutiveSummarySnapshot>('/api/reports/executive');
+    requestJson<ExecutiveSummarySnapshot>("/api/reports/executive");
 
-export const fetchAuditReportSnapshot = async (): Promise<AuditReportSnapshot> =>
-  requestJson<AuditReportSnapshot>('/api/reports/audit');
+export const fetchAuditReportSnapshot =
+  async (): Promise<AuditReportSnapshot> =>
+    requestJson<AuditReportSnapshot>("/api/reports/audit");
+
+export const fetchGovernanceCostAllocationSnapshot = async (
+  days = 7,
+): Promise<GovernanceCostAllocationSnapshot> =>
+  requestJson<GovernanceCostAllocationSnapshot>(
+    `/api/reports/governance-cost-allocation?days=${encodeURIComponent(String(days))}`,
+  );
 
 export const fetchWorkItemEfficiencySnapshot = async (
   capabilityId: string,
@@ -2366,7 +2668,7 @@ export const fetchWorkItemEfficiencySnapshot = async (
   );
 
 export const fetchReportExportPayload = async (
-  reportType: ReportExportPayload['reportType'],
+  reportType: ReportExportPayload["reportType"],
   params?: {
     capabilityId?: string;
     teamId?: string;
@@ -2374,12 +2676,12 @@ export const fetchReportExportPayload = async (
 ): Promise<ReportExportPayload> => {
   const search = new URLSearchParams();
   if (params?.capabilityId) {
-    search.set('capabilityId', params.capabilityId);
+    search.set("capabilityId", params.capabilityId);
   }
   if (params?.teamId) {
-    search.set('teamId', params.teamId);
+    search.set("teamId", params.teamId);
   }
-  const suffix = search.toString() ? `?${search.toString()}` : '';
+  const suffix = search.toString() ? `?${search.toString()}` : "";
   return requestJson<ReportExportPayload>(
     `/api/reports/export/${encodeURIComponent(reportType)}${suffix}`,
   );
@@ -2414,7 +2716,7 @@ export const fetchMemoryDocuments = async (
 ): Promise<MemoryDocument[]> =>
   requestJson<MemoryDocument[]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/documents${
-      agentId ? `?agentId=${encodeURIComponent(agentId)}` : ''
+      agentId ? `?agentId=${encodeURIComponent(agentId)}` : ""
     }`,
   );
 
@@ -2426,7 +2728,7 @@ export const searchCapabilityMemory = async (
 ): Promise<MemorySearchResult[]> =>
   requestJson<MemorySearchResult[]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/search?q=${encodeURIComponent(queryText)}&limit=${limit}${
-      agentId ? `&agentId=${encodeURIComponent(agentId)}` : ''
+      agentId ? `&agentId=${encodeURIComponent(agentId)}` : ""
     }`,
   );
 
@@ -2436,7 +2738,7 @@ export const refreshCapabilityMemoryIndex = async (
   requestJson<MemoryDocument[]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/refresh`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -2457,7 +2759,7 @@ export const refreshAgentLearningProfile = async (
   requestJson<AgentLearningProfileDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning/refresh`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -2475,7 +2777,7 @@ export const submitAgentLearningCorrection = async (
   requestJson<AgentLearningProfileDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning/corrections`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -2492,13 +2794,13 @@ export const fetchAgentLearningProfileVersions = async (
   options: { limit?: number; offset?: number } = {},
 ): Promise<{ versions: AgentLearningProfileVersion[] }> => {
   const query = new URLSearchParams();
-  if (typeof options.limit === 'number') {
-    query.set('limit', String(options.limit));
+  if (typeof options.limit === "number") {
+    query.set("limit", String(options.limit));
   }
-  if (typeof options.offset === 'number') {
-    query.set('offset', String(options.offset));
+  if (typeof options.offset === "number") {
+    query.set("offset", String(options.offset));
   }
-  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const suffix = query.toString() ? `?${query.toString()}` : "";
   return requestJson<{ versions: AgentLearningProfileVersion[] }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning/versions${suffix}`,
   );
@@ -2531,7 +2833,7 @@ export const activateAgentLearningProfileVersion = async (
   requestJson<AgentLearningProfileDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/learning/versions/${encodeURIComponent(versionId)}/activate`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -2578,7 +2880,7 @@ export const runCapabilityEvalSuite = async (
   requestJson<EvalRunDetail>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/evals/suites/${encodeURIComponent(suiteId)}/run`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({}),
     },
@@ -2596,7 +2898,7 @@ export const streamCapabilityChat = async (
   if (isDesktopRuntime()) {
     const desktop = getDesktopBridge();
     if (!desktop) {
-      throw new Error('Desktop runtime bridge is not available.');
+      throw new Error("Desktop runtime bridge is not available.");
     }
 
     const streamId = `desktop-chat-${Date.now().toString(36)}-${Math.random()
@@ -2610,7 +2912,7 @@ export const streamCapabilityChat = async (
       void desktop.cancelRuntimeChatStream(streamId).catch(() => undefined);
     };
 
-    options?.signal?.addEventListener('abort', abortHandler, { once: true });
+    options?.signal?.addEventListener("abort", abortHandler, { once: true });
 
     try {
       await desktop.streamRuntimeChat(
@@ -2619,7 +2921,7 @@ export const streamCapabilityChat = async (
           streamId,
           actorContext: currentActorContext,
         },
-        event => {
+        (event) => {
           if (aborted) {
             return;
           }
@@ -2641,7 +2943,7 @@ export const streamCapabilityChat = async (
 
       throw error;
     } finally {
-      options?.signal?.removeEventListener('abort', abortHandler);
+      options?.signal?.removeEventListener("abort", abortHandler);
     }
 
     return finalizeCapabilityChatStream({
@@ -2652,19 +2954,19 @@ export const streamCapabilityChat = async (
 
   let response: Response;
   try {
-    response = await fetch(resolveApiUrl('/api/runtime/chat/stream'), {
-      method: 'POST',
+    response = await fetch(resolveApiUrl("/api/runtime/chat/stream"), {
+      method: "POST",
       headers: withActorHeaders(jsonHeaders),
       body: JSON.stringify(payload),
       signal: options?.signal,
     });
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
+    if (error instanceof DOMException && error.name === "AbortError") {
       return {
-        termination: 'empty',
-        draftContent: '',
+        termination: "empty",
+        draftContent: "",
         completeEvent: null,
-        error: 'Streaming response was stopped before completion.',
+        error: "Streaming response was stopped before completion.",
         memoryReferences: [],
         sawDelta: false,
         sawComplete: false,
@@ -2680,12 +2982,12 @@ export const streamCapabilityChat = async (
   }
 
   if (!response.body) {
-    throw new Error('Streaming response body was not available.');
+    throw new Error("Streaming response body was not available.");
   }
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let buffered = '';
+  let buffered = "";
   const state = createCapabilityChatStreamAccumulator();
   let aborted = false;
 
@@ -2697,15 +2999,15 @@ export const streamCapabilityChat = async (
 
     const eventType =
       trimmedFrame
-        .split('\n')
-        .find(line => line.startsWith('event:'))
-        ?.replace(/^event:\s*/, '')
-        .trim() || 'message';
+        .split("\n")
+        .find((line) => line.startsWith("event:"))
+        ?.replace(/^event:\s*/, "")
+        .trim() || "message";
     const data = trimmedFrame
-      .split('\n')
-      .filter(line => line.startsWith('data:'))
-      .map(line => line.replace(/^data:\s*/, ''))
-      .join('\n');
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.replace(/^data:\s*/, ""))
+      .join("\n");
 
     if (!data) {
       return;
@@ -2716,7 +3018,7 @@ export const streamCapabilityChat = async (
       processCapabilityChatStreamEvent({
         event: {
           ...streamEvent,
-          type: streamEvent.type || (eventType as ChatStreamEvent['type']),
+          type: streamEvent.type || (eventType as ChatStreamEvent["type"]),
         },
         handlers,
         state,
@@ -2731,8 +3033,8 @@ export const streamCapabilityChat = async (
       const { done, value } = await reader.read();
       buffered += decoder.decode(value, { stream: !done });
 
-      const frames = buffered.split('\n\n');
-      const trailingFrame = done ? '' : frames.pop() || '';
+      const frames = buffered.split("\n\n");
+      const trailingFrame = done ? "" : frames.pop() || "";
 
       for (const frame of frames) {
         processFrame(frame);
@@ -2748,7 +3050,7 @@ export const streamCapabilityChat = async (
       buffered = trailingFrame;
     }
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
+    if (error instanceof DOMException && error.name === "AbortError") {
       aborted = true;
     } else {
       throw error;
@@ -2767,7 +3069,7 @@ export const continueCapabilityWorkItemStageControl = async (
   payload: {
     agentId?: string;
     conversation: Array<{
-      role: 'user' | 'agent';
+      role: "user" | "agent";
       content: string;
       timestamp?: string;
     }>;
@@ -2778,7 +3080,7 @@ export const continueCapabilityWorkItemStageControl = async (
   requestJson<StageControlContinueResponse>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/stage-control/continue`,
     {
-      method: 'POST',
+      method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),
     },
@@ -2790,14 +3092,14 @@ export const continueCapabilityWorkItemStageControl = async (
 
 export interface ReleasePassportApproval {
   role: string;
-  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'REQUEST_CHANGES';
+  status: "PENDING" | "APPROVED" | "REJECTED" | "REQUEST_CHANGES";
   resolvedBy?: string;
   resolvedAt?: string;
 }
 
 export interface ReleasePassportData {
   documentId: string;
-  recommendation: 'APPROVE' | 'HOLD' | 'REJECT';
+  recommendation: "APPROVE" | "HOLD" | "REJECT";
   recommendationReason: string;
   workItem: {
     id: string;
@@ -2817,15 +3119,15 @@ export interface ReleasePassportData {
   };
   evidence: Array<{
     label: string;
-    kind: 'ANALYSIS' | 'COMMIT' | 'SIGNATURE' | 'TEST' | 'ARTIFACT';
-    status: 'VERIFIED' | 'PENDING' | 'MISSING';
+    kind: "ANALYSIS" | "COMMIT" | "SIGNATURE" | "TEST" | "ARTIFACT";
+    status: "VERIFIED" | "PENDING" | "MISSING";
     ref?: string;
   }>;
   governance: {
-    sensitivePaths: 'UNTOUCHED' | 'MODIFIED';
+    sensitivePaths: "UNTOUCHED" | "MODIFIED";
     policyExceptions: number;
     executionRole: string;
-    memoryDrift: 'ALIGNED' | 'DRIFTED' | 'UNKNOWN';
+    memoryDrift: "ALIGNED" | "DRIFTED" | "UNKNOWN";
   };
   approvals: ReleasePassportApproval[];
   generatedAt: string;
@@ -2843,7 +3145,7 @@ export const fetchReleasePassport = async (
 // Blast Radius
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type BlastImpactLevel = 'CRITICAL' | 'WARNING' | 'SAFE';
+export type BlastImpactLevel = "CRITICAL" | "WARNING" | "SAFE";
 
 export interface BlastNode {
   id: string;
@@ -2853,7 +3155,7 @@ export interface BlastNode {
   capabilityName?: string;
   impactLevel: BlastImpactLevel;
   reason: string;
-  couplingKind: 'DIRECT_IMPORT' | 'INDIRECT' | 'TYPE_ONLY';
+  couplingKind: "DIRECT_IMPORT" | "INDIRECT" | "TYPE_ONLY";
 }
 
 export interface BlastRadiusResult {
@@ -2876,18 +3178,47 @@ export const fetchBlastRadius = async (
     `/api/capabilities/${encodeURIComponent(capabilityId)}/blast-radius?filePath=${encodeURIComponent(filePath)}`,
   );
 
+export type { BlastRadiusSymbolGraph };
+
+export const fetchBlastRadiusSymbolGraph = async (
+  capabilityId: string,
+  options: {
+    filePath?: string;
+    symbolId?: string;
+    maxDepth?: number;
+    maxNodes?: number;
+  },
+): Promise<BlastRadiusSymbolGraph> => {
+  const search = new URLSearchParams();
+  if (options.filePath) {
+    search.set('filePath', options.filePath);
+  }
+  if (options.symbolId) {
+    search.set('symbolId', options.symbolId);
+  }
+  if (typeof options.maxDepth === 'number') {
+    search.set('maxDepth', String(options.maxDepth));
+  }
+  if (typeof options.maxNodes === 'number') {
+    search.set('maxNodes', String(options.maxNodes));
+  }
+  return requestJson<BlastRadiusSymbolGraph>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/code-index/blast-radius?${search.toString()}`,
+  );
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Sentinel Mode
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type SentinelAlertSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+export type SentinelAlertSeverity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
 
 export interface SentinelAlertPayload {
   cveId: string;
   description: string;
   severity: SentinelAlertSeverity;
   affectedFile?: string;
-  source?: 'sonarqube' | 'snyk' | 'github-security' | 'manual';
+  source?: "sonarqube" | "snyk" | "github-security" | "manual";
   capabilityId?: string;
   workflowId?: string;
 }
@@ -2907,8 +3238,8 @@ export interface SentinelMissionStatus {
 export const triggerSentinelAlert = async (
   payload: SentinelAlertPayload,
 ): Promise<SentinelMissionStatus> =>
-  requestJson<SentinelMissionStatus>('/api/sentinel/alert', {
-    method: 'POST',
+  requestJson<SentinelMissionStatus>("/api/sentinel/alert", {
+    method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(payload),
   });
@@ -2917,5 +3248,5 @@ export const fetchSentinelMissions = async (
   capabilityId?: string,
 ): Promise<SentinelMissionStatus[]> =>
   requestJson<SentinelMissionStatus[]>(
-    `/api/sentinel/missions${capabilityId ? `?capabilityId=${encodeURIComponent(capabilityId)}` : ''}`,
+    `/api/sentinel/missions${capabilityId ? `?capabilityId=${encodeURIComponent(capabilityId)}` : ""}`,
   );

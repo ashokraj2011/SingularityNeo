@@ -38,6 +38,7 @@
     "clsx": "^2.1.1",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "js-tiktoken": "^1.0.12",
     "lucide-react": "^0.546.0",
     "monaco-editor": "^0.55.1",
     "motion": "^12.23.24",

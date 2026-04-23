@@ -49,7 +49,6 @@ import {
   extractChatWorkspaceReferenceId,
   resolveMentionedWorkItem,
 } from '../server/chatWorkspace';
-import { getCapabilityWorkspaceRoots } from '../server/workspacePaths';
 import { processWorkflowRun, reconcileWorkflowRunFailure } from '../server/execution/service';
 import { getWorkflowRunDetail } from '../server/execution/repository';
 import { runWithExecutionClientContext } from '../server/execution/runtimeClient';
@@ -182,15 +181,6 @@ const controlPlaneRequest = async <T>(
   return response.json() as Promise<T>;
 };
 
-const getLocalApprovedWorkspaceRoots = (capability: Capability): string[] =>
-  getCapabilityWorkspaceRoots(capability).filter(root => {
-    try {
-      return fs.existsSync(root);
-    } catch {
-      return false;
-    }
-  });
-
 const buildRuntimeSummary = async () => {
   const token = getConfiguredToken();
   const tokenSource = getConfiguredTokenSource();
@@ -225,7 +215,6 @@ const syncExecutorRegistration = async () => {
     method: 'POST',
     actorContext: activeActorContext,
     body: {
-      approvedWorkspaceRoots: executorApprovedWorkspaceRoots,
       runtimeSummary: await buildRuntimeSummary(),
     },
   }).catch(async () =>
@@ -240,7 +229,6 @@ const syncExecutorRegistration = async () => {
       actorContext: activeActorContext,
       body: {
         executorId,
-        approvedWorkspaceRoots: executorApprovedWorkspaceRoots,
         runtimeSummary: await buildRuntimeSummary(),
       },
     }),
@@ -991,24 +979,6 @@ reader.on('line', async line => {
       if (!activeActorContext?.userId) {
         throw new Error('Select a workspace operator before claiming desktop execution.');
       }
-
-      const bundle = await controlPlaneRequest<CapabilityBundleSnapshot>(
-        `/api/capabilities/${encodeURIComponent(capabilityId)}`,
-        {
-          actorContext: activeActorContext,
-        },
-      );
-      const approvedWorkspaceRoots = getLocalApprovedWorkspaceRoots(bundle.capability);
-      if (approvedWorkspaceRoots.length === 0) {
-        throw new Error(
-          'This desktop does not have any approved local workspace roots for the selected capability.',
-        );
-      }
-
-      executorApprovedWorkspaceRoots = {
-        ...executorApprovedWorkspaceRoots,
-        [capabilityId]: approvedWorkspaceRoots,
-      };
       await syncExecutorRegistration();
       ensureDesktopExecutorLoop();
 
@@ -1019,7 +989,6 @@ reader.on('line', async line => {
         actorContext: activeActorContext,
         body: {
           executorId,
-          approvedWorkspaceRoots,
           forceTakeover: Boolean(message.payload?.forceTakeover),
         },
       });

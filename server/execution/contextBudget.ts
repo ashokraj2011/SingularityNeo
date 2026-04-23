@@ -26,15 +26,21 @@ import type { WorkItemPhase } from '../../src/types';
 
 export type ContextSource =
   | 'SYSTEM_CORE'          // safety/contract — never evict
+  | 'DEVELOPER_PROMPT'     // route/operator developer framing
+  | 'LEARNING_CONTEXT'     // learned profile / context block
+  | 'REPO_GUIDANCE'        // cached repository-authored house rules
   | 'TOOL_DESCRIPTIONS'    // required for structured tool calls
   | 'PHASE_GUIDANCE'       // Lever 1 output
   | 'WORK_ITEM_BRIEFING'   // current intent + hand-off
   | 'RAW_TAIL_TURNS'       // last K raw tool turns
   | 'HISTORY_ROLLUP'       // Lever 3 summary
+  | 'CONVERSATION_HISTORY' // recent user/assistant transcript
+  | 'LATEST_USER_MESSAGE'  // newest user ask — never evict
   | 'CODE_HUNKS'           // Lever 2 symbol hunks (can appear N times)
   | 'MEMORY_HITS'          // retrieved memory references
   | 'OPERATOR_GUIDANCE'    // explicit operator overrides
   | 'PLAN_SUMMARY'         // compiled work-item plan summary
+  | 'APPROVAL_PACKET'      // compact approval synthesis context
   | 'STEP_CONTRACT';       // compiled step context (objective, inputs, etc.)
 
 export interface BudgetFragment {
@@ -84,6 +90,8 @@ export interface BudgetedPrompt {
 
 const NEVER_EVICT: ReadonlySet<ContextSource> = new Set([
   'SYSTEM_CORE',
+  'DEVELOPER_PROMPT',
+  'LATEST_USER_MESSAGE',
   'TOOL_DESCRIPTIONS',
 ]);
 
@@ -94,14 +102,20 @@ const NEVER_EVICT: ReadonlySet<ContextSource> = new Set([
  */
 const DEFAULT_PRIORITY: Record<ContextSource, number> = {
   SYSTEM_CORE: 1_000_000,
+  DEVELOPER_PROMPT: 950_000,
+  LATEST_USER_MESSAGE: 925_000,
   TOOL_DESCRIPTIONS: 900_000,
   STEP_CONTRACT: 800,
   WORK_ITEM_BRIEFING: 700,
+  LEARNING_CONTEXT: 675,
   OPERATOR_GUIDANCE: 650,
   PLAN_SUMMARY: 600,
   PHASE_GUIDANCE: 500,
+  REPO_GUIDANCE: 450,
   RAW_TAIL_TURNS: 400,
+  CONVERSATION_HISTORY: 350,
   HISTORY_ROLLUP: 300,
+  APPROVAL_PACKET: 250,
   CODE_HUNKS: 200,
   MEMORY_HITS: 100,
 };

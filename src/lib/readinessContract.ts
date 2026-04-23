@@ -1,5 +1,10 @@
-import type { Capability, CapabilityWorkspace, ReadinessContract, ReadinessGate } from '../types';
-import type { RuntimeStatus } from './api';
+import type {
+  Capability,
+  CapabilityWorkspace,
+  ReadinessContract,
+  ReadinessGate,
+} from "../types";
+import type { RuntimeStatus } from "./api";
 
 const hasText = (value?: string) => Boolean(value?.trim());
 
@@ -11,8 +16,8 @@ export const hasCapabilityOwnerAssigned = (capability: Capability) =>
 export const hasOutcomeContractComplete = (capability: Capability) =>
   hasText(capability.businessOutcome) ||
   hasText(capability.definitionOfDone) ||
-  capability.successMetrics.some(metric => hasText(metric)) ||
-  capability.requiredEvidenceKinds.some(kind => hasText(kind)) ||
+  capability.successMetrics.some((metric) => hasText(metric)) ||
+  capability.requiredEvidenceKinds.some((kind) => hasText(kind)) ||
   hasText(capability.operatingPolicySummary);
 
 export const hasSourceContextConnected = (capability: Capability) =>
@@ -22,17 +27,15 @@ export const hasSourceContextConnected = (capability: Capability) =>
   hasText(capability.confluenceLink) ||
   hasText(capability.documentationNotes);
 
-export const hasApprovedWorkspacePresent = (capability: Capability) =>
-  hasText(capability.executionConfig.defaultWorkspacePath) ||
-  capability.executionConfig.allowedWorkspacePaths.some(path => hasText(path)) ||
-  capability.localDirectories.some(path => hasText(path));
+export const hasApprovedWorkspacePresent = (_capability: Capability) => true;
 
 export const hasWorkflowValidAndPublished = (workspace: CapabilityWorkspace) =>
   workspace.workflows.some(
-    workflow =>
+    (workflow) =>
       !workflow.archivedAt &&
       workflow.steps.length > 0 &&
-      (workflow.publishState === 'VALIDATED' || workflow.publishState === 'PUBLISHED'),
+      (workflow.publishState === "VALIDATED" ||
+        workflow.publishState === "PUBLISHED"),
   );
 
 const createGate = ({
@@ -70,84 +73,87 @@ export const buildReadinessContractFromSignals = ({
 }): ReadinessContract => {
   const gates: ReadinessGate[] = [
     createGate({
-      id: 'OWNER_ASSIGNED',
-      label: 'Owner assigned',
+      id: "OWNER_ASSIGNED",
+      label: "Owner assigned",
       satisfied: hasCapabilityOwnerAssigned(capability),
-      summary: 'A real team or stakeholder must be accountable for this capability.',
-      blockingReason: 'Execution stays blocked until a capability owner or owning team is assigned.',
-      actionLabel: 'Assign owner',
-      path: '/capabilities/metadata',
-      nextRequiredAction: 'Add an owner team, stakeholder, or team assignment.',
-    }),
-    createGate({
-      id: 'OUTCOME_CONTRACT_COMPLETE',
-      label: 'Outcome contract complete',
-      satisfied: true,
       summary:
-        hasOutcomeContractComplete(capability)
-          ? 'Business outcome context is present and helps owners understand what this capability is for.'
-          : 'Business outcome, success metrics, evidence expectations, and definition of done are optional but helpful context for business owners.',
+        "A real team or stakeholder must be accountable for this capability.",
       blockingReason:
-        'This contract is now optional and does not block execution.',
-      actionLabel: 'Complete contract',
-      path: '/capabilities/metadata',
-      nextRequiredAction:
-        'Optionally add business outcome, definition of done, success metrics, required evidence, or a short operating policy summary.',
+        "Execution stays blocked until a capability owner or owning team is assigned.",
+      actionLabel: "Assign owner",
+      path: "/capabilities/metadata",
+      nextRequiredAction: "Add an owner team, stakeholder, or team assignment.",
     }),
     createGate({
-      id: 'SOURCE_CONTEXT_CONNECTED',
-      label: 'Source context connected',
+      id: "OUTCOME_CONTRACT_COMPLETE",
+      label: "Outcome contract complete",
+      satisfied: true,
+      summary: hasOutcomeContractComplete(capability)
+        ? "Business outcome context is present and helps owners understand what this capability is for."
+        : "Business outcome, success metrics, evidence expectations, and definition of done are optional but helpful context for business owners.",
+      blockingReason:
+        "This contract is now optional and does not block execution.",
+      actionLabel: "Complete contract",
+      path: "/capabilities/metadata",
+      nextRequiredAction:
+        "Optionally add business outcome, definition of done, success metrics, required evidence, or a short operating policy summary.",
+    }),
+    createGate({
+      id: "SOURCE_CONTEXT_CONNECTED",
+      label: "Source context connected",
       satisfied: hasSourceContextConnected(capability),
       summary:
-        'At least one repo or source system should ground delivery work before orchestration starts.',
+        "At least one repo or source system should ground delivery work before orchestration starts.",
       blockingReason:
-        'Execution stays blocked until the capability is linked to a repo, documentation system, or ALM context.',
-      actionLabel: 'Connect source',
-      path: '/capabilities/metadata',
-      nextRequiredAction: 'Link a repository or another source of truth for this capability.',
+        "Execution stays blocked until the capability is linked to a repo, documentation system, or ALM context.",
+      actionLabel: "Connect source",
+      path: "/capabilities/metadata",
+      nextRequiredAction:
+        "Link a repository or another source of truth for this capability.",
     }),
     createGate({
-      id: 'APPROVED_WORKSPACE_PRESENT',
-      label: 'Approved workspace present',
+      id: "APPROVED_WORKSPACE_PRESENT",
+      label: "Desktop workspace hints documented",
       satisfied: hasApprovedWorkspacePresent(capability),
       summary:
-        'A local approved workspace path is required so desktop-owned execution can operate safely.',
+        "Capability-level workspace hints are optional documentation now that local roots are stored per operator and per desktop.",
       blockingReason:
-        'Execution stays blocked until an approved workspace path is configured for this capability.',
-      actionLabel: 'Approve workspace',
-      path: '/capabilities/metadata',
+        "Desktop workspace mappings are managed from Operations and do not block metadata completion.",
+      actionLabel: "Review hints",
+      path: "/operations#desktop-workspaces",
       nextRequiredAction:
-        'Add a default or allowed workspace root that the desktop executor can use.',
+        "Optionally keep local root hints on the capability as migration suggestions for operators.",
     }),
     createGate({
-      id: 'WORKFLOW_VALID_AND_PUBLISHED',
-      label: 'Workflow valid and published',
+      id: "WORKFLOW_VALID_AND_PUBLISHED",
+      label: "Workflow valid and published",
       satisfied: hasWorkflowValidAndPublished(workspace),
       summary:
-        'The capability needs a non-archived workflow with steps and a validated or published state.',
+        "The capability needs a non-archived workflow with steps and a validated or published state.",
       blockingReason:
-        'Execution stays blocked until a workflow is validated or published for this capability.',
-      actionLabel: 'Publish workflow',
-      path: '/designer',
-      nextRequiredAction: 'Validate or publish a workflow before starting or restarting delivery.',
+        "Execution stays blocked until a workflow is validated or published for this capability.",
+      actionLabel: "Publish workflow",
+      path: "/designer",
+      nextRequiredAction:
+        "Validate or publish a workflow before starting or restarting delivery.",
     }),
     createGate({
-      id: 'EXECUTION_RUNTIME_READY',
-      label: 'Desktop execution ready',
+      id: "EXECUTION_RUNTIME_READY",
+      label: "Desktop execution ready",
       satisfied: executionRuntimeReady,
       summary:
         executionRuntimeSummary ||
-        'An eligible desktop executor must be online so work can move from queued to running.',
+        "An eligible desktop executor must be online so work can move from queued to running.",
       blockingReason:
-        'Execution stays blocked until desktop-owned execution is available for this capability.',
-      actionLabel: 'Open operations',
-      path: '/operations',
+        "Execution stays blocked until desktop-owned execution is available for this capability.",
+      actionLabel: "Open operations",
+      path: "/operations",
       nextRequiredAction:
-        'Bring a desktop executor online with an approved local root, then claim or verify execution ownership.',
+        "Bring a desktop executor online with an approved local root, then claim or verify execution ownership.",
     }),
   ];
 
-  const firstBlockedGate = gates.find(gate => !gate.satisfied);
+  const firstBlockedGate = gates.find((gate) => !gate.satisfied);
 
   return {
     capabilityId: capability.id,
@@ -155,7 +161,7 @@ export const buildReadinessContractFromSignals = ({
     allReady: !firstBlockedGate,
     summary: firstBlockedGate
       ? `${firstBlockedGate.label} is blocking new starts and restarts.`
-      : 'All six readiness gates are green. This capability can start or restart delivery.',
+      : "All six readiness gates are green. This capability can start or restart delivery.",
     nextRequiredAction: firstBlockedGate?.nextRequiredAction,
     gates,
   };
@@ -171,17 +177,17 @@ export const buildLocalReadinessContract = ({
   runtimeStatus?: RuntimeStatus | null;
 }) => {
   const executionRuntimeReady = runtimeStatus
-    ? runtimeStatus.executionRuntimeOwner === 'DESKTOP'
+    ? runtimeStatus.executionRuntimeOwner === "DESKTOP"
       ? Boolean(
           runtimeStatus.configured &&
-            ((runtimeStatus.executorHeartbeatStatus === 'FRESH' &&
-              (runtimeStatus.ownedCapabilityIds || []).includes(capability.id)) ||
-              workspace.executionDispatchState === 'ASSIGNED' ||
-              runtimeStatus.executorId),
+          ((runtimeStatus.executorHeartbeatStatus === "FRESH" &&
+            (runtimeStatus.ownedCapabilityIds || []).includes(capability.id)) ||
+            workspace.executionDispatchState === "ASSIGNED" ||
+            runtimeStatus.executorId),
         )
       : runtimeStatus.executionRuntimeOwner
-      ? false
-      : runtimeStatus.configured
+        ? false
+        : runtimeStatus.configured
     : false;
 
   return buildReadinessContractFromSignals({
@@ -189,9 +195,9 @@ export const buildLocalReadinessContract = ({
     workspace,
     executionRuntimeReady,
     executionRuntimeSummary: runtimeStatus
-      ? runtimeStatus.executorHeartbeatStatus === 'FRESH'
-        ? 'A fresh desktop runtime is connected for Copilot-backed execution.'
-        : 'Desktop execution is configured, but this capability still needs an eligible claimed executor.'
-      : 'Checking desktop execution readiness.',
+      ? runtimeStatus.executorHeartbeatStatus === "FRESH"
+        ? "A fresh desktop runtime is connected for Copilot-backed execution."
+        : "Desktop execution is configured, but this capability still needs an eligible claimed executor."
+      : "Checking desktop execution readiness.",
   });
 };

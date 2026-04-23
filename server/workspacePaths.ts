@@ -6,8 +6,24 @@ export const normalizeDirectoryPath = (value?: string | null) => {
   return trimmed ? path.resolve(trimmed) : '';
 };
 
-export const getCapabilityWorkspaceRoots = (capability?: Partial<Capability>) =>
-  Array.from(
+/**
+ * Returns the ordered set of approved local workspace root paths for a
+ * capability.
+ *
+ * When `desktopWorkingDirectory` is provided it takes priority over
+ * everything else — the user-level directory registered on
+ * `desktop_executor_registrations.working_directory` makes capability-level
+ * path config irrelevant for that machine.
+ */
+export const getCapabilityWorkspaceRoots = (
+  capability?: Partial<Capability>,
+  desktopWorkingDirectory?: string,
+): string[] => {
+  if (desktopWorkingDirectory) {
+    const normalized = normalizeDirectoryPath(desktopWorkingDirectory);
+    if (normalized) return [normalized];
+  }
+  return Array.from(
     new Set(
       [
         capability?.executionConfig?.defaultWorkspacePath,
@@ -21,6 +37,7 @@ export const getCapabilityWorkspaceRoots = (capability?: Partial<Capability>) =>
         .filter(Boolean),
     ),
   );
+};
 
 export const isPathInsideWorkspaceRoot = (
   candidatePath: string,

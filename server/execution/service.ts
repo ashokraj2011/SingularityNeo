@@ -1,4 +1,4 @@
-import type { PoolClient } from 'pg';
+import type { PoolClient } from "pg";
 import {
   ActorContext,
   ApprovalAssignment,
@@ -36,23 +36,29 @@ import {
   WorkItemPendingRequest,
   WorkItemStatus,
   WorkflowStep,
-} from '../../src/types';
-import { syncWorkflowManagedTasksForWorkItem } from '../../src/lib/workflowTaskAutomation';
+} from "../../src/types";
+import { syncWorkflowManagedTasksForWorkItem } from "../../src/lib/workflowTaskAutomation";
 import {
   compileStepContext,
   compileWorkItemPlan,
-} from '../../src/lib/workflowRuntime';
+} from "../../src/lib/workflowRuntime";
 import {
   buildCapabilityBriefing,
   buildCapabilityBriefingPrompt,
-} from '../../src/lib/capabilityBriefing';
-import { buildAgentKnowledgeLens, buildAgentKnowledgePrompt } from '../../src/lib/agentKnowledge';
-import { compileStepOwnership, resolveWorkItemPhaseOwnerTeamId } from '../../src/lib/capabilityOwnership';
+} from "../../src/lib/capabilityBriefing";
+import {
+  buildAgentKnowledgeLens,
+  buildAgentKnowledgePrompt,
+} from "../../src/lib/agentKnowledge";
+import {
+  compileStepOwnership,
+  resolveWorkItemPhaseOwnerTeamId,
+} from "../../src/lib/capabilityOwnership";
 import {
   getCapabilityBoardPhaseIds,
   getLifecyclePhaseLabel,
-} from '../../src/lib/capabilityLifecycle';
-import { isTestingWorkflowStep } from '../../src/lib/workflowStepSemantics';
+} from "../../src/lib/capabilityLifecycle";
+import { isTestingWorkflowStep } from "../../src/lib/workflowStepSemantics";
 import {
   findFirstExecutableNode,
   findFirstExecutableNodeForPhase,
@@ -64,37 +70,36 @@ import {
   getWorkflowNodes,
   isWorkflowControlNode,
   isVisibleWorkflowNode,
-} from '../../src/lib/workflowGraph';
+} from "../../src/lib/workflowGraph";
 import {
   getWorkItemTaskTypeLabel,
   normalizeWorkItemTaskType,
   resolveWorkItemEntryStep,
-} from '../../src/lib/workItemTaskTypes';
+} from "../../src/lib/workItemTaskTypes";
 import {
   buildWorkItemPhaseSignatureMarkdown,
   normalizeWorkItemPhaseStakeholders,
-} from '../../src/lib/workItemStakeholders';
-import { invokeScopedCapabilitySession } from '../githubModels';
-import { resolveAgentProviderKey } from '../providerRegistry';
-import {
-  rollupToolHistory,
-  type RollupCacheEntry,
-} from './historyRollup';
+} from "../../src/lib/workItemStakeholders";
+import { invokeScopedCapabilitySession } from "../githubModels";
+import { publishRunEvent } from "../eventBus";
+import { resolveAgentProviderKey } from "../providerRegistry";
+import { rollupToolHistory, type RollupCacheEntry } from "./historyRollup";
+import { resolveModelForTurn } from "./modelRouter";
 import {
   buildBudgetedPrompt,
   resolvePhaseBudget,
   type BudgetFragment,
   type ContextSource,
-} from './contextBudget';
-import { estimateTokens, normalizeProviderForEstimate } from './tokenEstimate';
+} from "./contextBudget";
+import { estimateTokens, normalizeProviderForEstimate } from "./tokenEstimate";
 import {
   queueExperienceDistillationRefresh,
   queueSingleAgentLearningRefresh,
-} from '../agentLearning/service';
-import { wakeAgentLearningWorker } from '../agentLearning/worker';
-import { buildMemoryContext, refreshCapabilityMemory } from '../memory';
-import { evaluateToolPolicy } from '../policy';
-import { transaction } from '../db';
+} from "../agentLearning/service";
+import { wakeAgentLearningWorker } from "../agentLearning/worker";
+import { buildMemoryContext, refreshCapabilityMemory } from "../memory";
+import { evaluateToolPolicy } from "../policy";
+import { transaction } from "../db";
 import {
   createApprovalAssignments,
   createApprovalDecision,
@@ -119,41 +124,47 @@ import {
   updateWorkflowRun,
   updateWorkflowRunControl,
   updateWorkflowRunStep,
-} from './repository';
+} from "./repository";
 import {
   classifyToolExecutionError,
   executeTool,
   listToolDescriptions,
   type ToolExecutionResult,
-} from './tools';
-import { captureCodeDiffReviewArtifact } from './codeDiff';
+} from "./tools";
+import { captureCodeDiffReviewArtifact } from "./codeDiff";
 import {
   createWorkItemHandoffPacketRecord,
   getCapabilityBundle,
   releaseWorkItemCodeClaimRecord,
   replaceCapabilityWorkspaceContentRecord,
-} from '../repository';
+} from "../repository";
 import {
   createTraceId,
   finishTelemetrySpan,
   recordUsageMetrics,
   startTelemetrySpan,
-} from '../telemetry';
-import { getCapabilityWorkspaceRoots } from '../workspacePaths';
+} from "../telemetry";
+import { getCapabilityWorkspaceRoots } from "../workspacePaths";
 import {
   buildWorkspaceProfilePromptLines,
   detectWorkspaceProfile,
-} from '../workspaceProfile';
-import { resolveQueuedRunDispatch } from '../executionOwnership';
-import { isRemoteExecutionClient } from './runtimeClient';
+} from "../workspaceProfile";
+import {
+  resolveQueuedRunDispatch,
+  getDesktopExecutorRegistration,
+} from "../executionOwnership";
+import { isRemoteExecutionClient } from "./runtimeClient";
 
 const MAX_AGENT_TOOL_LOOPS = 8;
-const TOOL_LOOP_EXHAUSTION_WAIT_REASON = 'TOOL_LOOP_EXHAUSTED';
+const TOOL_LOOP_EXHAUSTION_WAIT_REASON = "TOOL_LOOP_EXHAUSTED";
 const MAX_RESOLVED_TOOL_LOOP_EXHAUSTION_WAITS = 2;
 
-const createHistoryId = () => `HIST-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
-const createLogId = () => `LOG-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
-const createArtifactId = () => `ART-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+const createHistoryId = () =>
+  `HIST-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+const createLogId = () =>
+  `LOG-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+const createArtifactId = () =>
+  `ART-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createLearningUpdateId = () =>
   `LEARN-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createApprovalAssignmentId = () =>
@@ -163,7 +174,7 @@ const createApprovalDecisionId = () =>
 
 type ExecutionDecision =
   | {
-      action: 'invoke_tool';
+      action: "invoke_tool";
       reasoning: string;
       summary?: string;
       toolCall: {
@@ -172,12 +183,12 @@ type ExecutionDecision =
       };
     }
   | {
-      action: 'complete';
+      action: "complete";
       reasoning: string;
       summary: string;
     }
   | {
-      action: 'pause_for_input' | 'pause_for_approval' | 'pause_for_conflict';
+      action: "pause_for_input" | "pause_for_approval" | "pause_for_conflict";
       reasoning: string;
       summary?: string;
       wait: {
@@ -186,7 +197,7 @@ type ExecutionDecision =
       };
     }
   | {
-      action: 'fail';
+      action: "fail";
       reasoning: string;
       summary: string;
     };
@@ -211,88 +222,89 @@ type ProjectionContext = {
   workflow: Workflow;
 };
 
-const mapBundleWorkspace = (bundle: Awaited<ReturnType<typeof getCapabilityBundle>>) =>
-  bundle.workspace;
+const mapBundleWorkspace = (
+  bundle: Awaited<ReturnType<typeof getCapabilityBundle>>,
+) => bundle.workspace;
 
 const formatTaskTimestamp = () =>
   new Date().toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 
 const summarizeOutput = (value?: unknown) =>
-  String(value || '')
-    .replace(/\s+/g, ' ')
+  String(value || "")
+    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 280);
 
 const compactMarkdownSummary = (value?: unknown) =>
   summarizeOutput(
-    String(value || '')
-      .replace(/```[\s\S]*?```/g, match =>
+    String(value || "")
+      .replace(/```[\s\S]*?```/g, (match) =>
         match
-          .replace(/^```[\w-]*\n?/, '')
-          .replace(/```$/, '')
+          .replace(/^```[\w-]*\n?/, "")
+          .replace(/```$/, "")
           .trim(),
       )
-      .replace(/^#{1,6}\s+/gm, '')
-      .replace(/^>\s?/gm, '')
-      .replace(/\*\*([^*]+)\*\*/g, '$1')
-      .replace(/\*([^*]+)\*/g, '$1')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
-      .replace(/^\s*[-*]\s+/gm, '')
-      .replace(/^\s*\d+\.\s+/gm, '')
-      .replace(/\|/g, ' ')
-      .replace(/^-{3,}$/gm, '')
-      .replace(/\s+/g, ' ')
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/^>\s?/gm, "")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/\*([^*]+)\*/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
+      .replace(/^\s*[-*]\s+/gm, "")
+      .replace(/^\s*\d+\.\s+/gm, "")
+      .replace(/\|/g, " ")
+      .replace(/^-{3,}$/gm, "")
+      .replace(/\s+/g, " ")
       .trim(),
   );
 
 const formatToolLabel = (toolId: ToolAdapterId) =>
-  String(toolId || 'tool')
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, character => character.toUpperCase());
+  String(toolId || "tool")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
 
 const TOOL_ID_ALIASES: Record<string, ToolAdapterId> = {
-  workspace_list: 'workspace_list',
-  code_list: 'workspace_list',
-  file_list: 'workspace_list',
-  list_files: 'workspace_list',
-  workspace_read: 'workspace_read',
-  code_read: 'workspace_read',
-  file_read: 'workspace_read',
-  read_file: 'workspace_read',
-  workspace_search: 'workspace_search',
-  code_search: 'workspace_search',
-  file_search: 'workspace_search',
-  search_code: 'workspace_search',
-  workspace_write: 'workspace_write',
-  code_write: 'workspace_write',
-  file_write: 'workspace_write',
-  write_file: 'workspace_write',
-  edit_file: 'workspace_write',
-  workspace_replace_block: 'workspace_replace_block',
-  replace_block: 'workspace_replace_block',
-  replace_in_file: 'workspace_replace_block',
-  workspace_apply_patch: 'workspace_apply_patch',
-  apply_patch: 'workspace_apply_patch',
-  patch_file: 'workspace_apply_patch',
-  delegate_task: 'delegate_task',
-  delegate: 'delegate_task',
-  handoff_task: 'delegate_task',
-  git_status: 'git_status',
-  repo_status: 'git_status',
-  run_build: 'run_build',
-  build: 'run_build',
-  run_test: 'run_test',
-  test: 'run_test',
-  run_docs: 'run_docs',
-  docs: 'run_docs',
-  run_deploy: 'run_deploy',
-  deploy: 'run_deploy',
+  workspace_list: "workspace_list",
+  code_list: "workspace_list",
+  file_list: "workspace_list",
+  list_files: "workspace_list",
+  workspace_read: "workspace_read",
+  code_read: "workspace_read",
+  file_read: "workspace_read",
+  read_file: "workspace_read",
+  workspace_search: "workspace_search",
+  code_search: "workspace_search",
+  file_search: "workspace_search",
+  search_code: "workspace_search",
+  workspace_write: "workspace_write",
+  code_write: "workspace_write",
+  file_write: "workspace_write",
+  write_file: "workspace_write",
+  edit_file: "workspace_write",
+  workspace_replace_block: "workspace_replace_block",
+  replace_block: "workspace_replace_block",
+  replace_in_file: "workspace_replace_block",
+  workspace_apply_patch: "workspace_apply_patch",
+  apply_patch: "workspace_apply_patch",
+  patch_file: "workspace_apply_patch",
+  delegate_task: "delegate_task",
+  delegate: "delegate_task",
+  handoff_task: "delegate_task",
+  git_status: "git_status",
+  repo_status: "git_status",
+  run_build: "run_build",
+  build: "run_build",
+  run_test: "run_test",
+  test: "run_test",
+  run_docs: "run_docs",
+  docs: "run_docs",
+  run_deploy: "run_deploy",
+  deploy: "run_deploy",
 };
 
 const normalizeToolAdapterId = (value: unknown): ToolAdapterId | null => {
@@ -305,31 +317,31 @@ const normalizeToolAdapterId = (value: unknown): ToolAdapterId | null => {
 };
 
 const buildDecisionProgressMessage = (decision: ExecutionDecision) => {
-  if (decision.action === 'invoke_tool') {
+  if (decision.action === "invoke_tool") {
     return `Prepared ${formatToolLabel(decision.toolCall.toolId)} for the next execution move.`;
   }
 
-  if (decision.action === 'complete') {
-    return 'Prepared a completion update for this workflow step.';
+  if (decision.action === "complete") {
+    return "Prepared a completion update for this workflow step.";
   }
 
-  if (decision.action === 'pause_for_input') {
-    return 'Prepared a human input request for this workflow step.';
+  if (decision.action === "pause_for_input") {
+    return "Prepared a human input request for this workflow step.";
   }
 
-  if (decision.action === 'pause_for_approval') {
-    return 'Prepared an approval request for this workflow step.';
+  if (decision.action === "pause_for_approval") {
+    return "Prepared an approval request for this workflow step.";
   }
 
-  if (decision.action === 'pause_for_conflict') {
-    return 'Prepared a conflict-resolution wait for adversarial review.';
+  if (decision.action === "pause_for_conflict") {
+    return "Prepared a conflict-resolution wait for adversarial review.";
   }
 
-  return 'Prepared a failure outcome for this workflow step.';
+  return "Prepared a failure outcome for this workflow step.";
 };
 
 const normalizeDecisionSummary = (
-  action: ExecutionDecision['action'],
+  action: ExecutionDecision["action"],
   summary: unknown,
 ) => {
   const normalized = normalizeString(summary);
@@ -338,20 +350,20 @@ const normalizeDecisionSummary = (
   }
 
   switch (action) {
-    case 'invoke_tool':
-      return 'Prepared the next tool action for this workflow step.';
-    case 'complete':
-      return 'Completed the current workflow step.';
-    case 'pause_for_input':
-      return 'Paused the step for structured operator input.';
-    case 'pause_for_approval':
-      return 'Paused the step for human approval.';
-    case 'pause_for_conflict':
-      return 'Paused the step for conflict resolution.';
-    case 'fail':
-      return 'Failed the current workflow step.';
+    case "invoke_tool":
+      return "Prepared the next tool action for this workflow step.";
+    case "complete":
+      return "Completed the current workflow step.";
+    case "pause_for_input":
+      return "Paused the step for structured operator input.";
+    case "pause_for_approval":
+      return "Paused the step for human approval.";
+    case "pause_for_conflict":
+      return "Paused the step for conflict resolution.";
+    case "fail":
+      return "Failed the current workflow step.";
     default:
-      return 'Updated the workflow step state.';
+      return "Updated the workflow step state.";
   }
 };
 
@@ -360,16 +372,17 @@ export const normalizeExecutionDecision = (
 ): ExecutionDecision => {
   const action = normalizeString(value.action);
   const reasoning =
-    normalizeString(value.reasoning) || 'No reasoning was returned by the execution model.';
+    normalizeString(value.reasoning) ||
+    "No reasoning was returned by the execution model.";
 
-  if (action === 'invoke_tool') {
+  if (action === "invoke_tool") {
     const toolId = normalizeToolAdapterId(value.toolCall?.toolId);
     if (!toolId) {
       return {
-        action: 'fail',
+        action: "fail",
         reasoning,
         summary:
-          'Execution model requested a tool action without specifying a valid tool id.',
+          "Execution model requested a tool action without specifying a valid tool id.",
       };
     }
 
@@ -380,14 +393,14 @@ export const normalizeExecutionDecision = (
       toolCall: {
         toolId,
         args:
-          value.toolCall?.args && typeof value.toolCall.args === 'object'
+          value.toolCall?.args && typeof value.toolCall.args === "object"
             ? value.toolCall.args
             : {},
       },
     };
   }
 
-  if (action === 'complete' || action === 'fail') {
+  if (action === "complete" || action === "fail") {
     return {
       action,
       reasoning,
@@ -396,9 +409,9 @@ export const normalizeExecutionDecision = (
   }
 
   if (
-    action === 'pause_for_input' ||
-    action === 'pause_for_approval' ||
-    action === 'pause_for_conflict'
+    action === "pause_for_input" ||
+    action === "pause_for_approval" ||
+    action === "pause_for_conflict"
   ) {
     return {
       action,
@@ -408,46 +421,46 @@ export const normalizeExecutionDecision = (
         type: value.wait?.type,
         message:
           normalizeString(value.wait?.message) ||
-          'The workflow is waiting for operator action.',
+          "The workflow is waiting for operator action.",
       },
     };
   }
 
   return {
-    action: 'fail',
+    action: "fail",
     reasoning,
-    summary: normalizeDecisionSummary('fail', value.summary || value.action),
+    summary: normalizeDecisionSummary("fail", value.summary || value.action),
   };
 };
 
-export const getExecutionDecisionRepairReason = (value: Record<string, any>) => {
+export const getExecutionDecisionRepairReason = (
+  value: Record<string, any>,
+) => {
   const action = normalizeString(value.action);
 
-  if (action === 'invoke_tool' && !normalizeString(value.toolCall?.toolId)) {
-    return 'Tool action was missing toolCall.toolId.';
+  if (action === "invoke_tool" && !normalizeString(value.toolCall?.toolId)) {
+    return "Tool action was missing toolCall.toolId.";
   }
 
   if (
-    (action === 'pause_for_input' ||
-      action === 'pause_for_approval' ||
-      action === 'pause_for_conflict') &&
+    (action === "pause_for_input" ||
+      action === "pause_for_approval" ||
+      action === "pause_for_conflict") &&
     !normalizeString(value.wait?.type)
   ) {
-    return 'Wait action was missing wait.type.';
+    return "Wait action was missing wait.type.";
   }
 
   return null;
 };
 
-export const getRecoverableDecisionFeedback = (
-  decision: ExecutionDecision,
-) => {
+export const getRecoverableDecisionFeedback = (decision: ExecutionDecision) => {
   if (
-    decision.action === 'fail' &&
+    decision.action === "fail" &&
     decision.summary ===
-      'Execution model requested a tool action without specifying a valid tool id.'
+      "Execution model requested a tool action without specifying a valid tool id."
   ) {
-    return 'The previous response attempted a tool call without toolCall.toolId. Choose exactly one tool from the allowed list and return a complete invoke_tool decision with valid args.';
+    return "The previous response attempted a tool call without toolCall.toolId. Choose exactly one tool from the allowed list and return a complete invoke_tool decision with valid args.";
   }
 
   return null;
@@ -463,11 +476,11 @@ export const buildToolLoopExhaustedWaitMessage = ({
   attemptedTools: ToolAdapterId[];
 }) => {
   const attemptedSummary = attemptedTools.length
-    ? attemptedTools.map(formatToolLabel).join(', ')
-    : 'No tools were executed';
+    ? attemptedTools.map(formatToolLabel).join(", ")
+    : "No tools were executed";
   const inspectedSummary = inspectedPaths.length
-    ? inspectedPaths.join(', ')
-    : 'No specific files were inspected';
+    ? inspectedPaths.join(", ")
+    : "No specific files were inspected";
 
   return `${step.name} explored the workspace for too long without moving into a concrete implementation result. It already used: ${attemptedSummary}. Recent files or paths inspected: ${inspectedSummary}. Provide direct implementation guidance such as the exact files to edit, the change to make, or confirmation that it should start writing code now.`;
 };
@@ -482,11 +495,11 @@ const buildEscalatedToolLoopWaitMessage = ({
   attemptedTools: ToolAdapterId[];
 }) => {
   const attemptedSummary = attemptedTools.length
-    ? attemptedTools.map(formatToolLabel).join(', ')
-    : 'No tools were executed';
+    ? attemptedTools.map(formatToolLabel).join(", ")
+    : "No tools were executed";
   const inspectedSummary = inspectedPaths.length
-    ? inspectedPaths.join(', ')
-    : 'No specific files were inspected';
+    ? inspectedPaths.join(", ")
+    : "No specific files were inspected";
 
   return `${step.name} exhausted its tool loop again after prior operator guidance. It already used: ${attemptedSummary}. Recent files or paths inspected: ${inspectedSummary}. Do not answer with a general instruction. Specify the exact files to edit, the exact code change to make, and any build or test command the agent should run next.`;
 };
@@ -501,11 +514,11 @@ export const buildRepeatedToolLoopFailureMessage = ({
   attemptedTools: ToolAdapterId[];
 }) => {
   const attemptedSummary = attemptedTools.length
-    ? attemptedTools.map(formatToolLabel).join(', ')
-    : 'No tools were executed';
+    ? attemptedTools.map(formatToolLabel).join(", ")
+    : "No tools were executed";
   const inspectedSummary = inspectedPaths.length
-    ? inspectedPaths.join(', ')
-    : 'No specific files were inspected';
+    ? inspectedPaths.join(", ")
+    : "No specific files were inspected";
 
   return `${step.name} exhausted its tool loop repeatedly even after human guidance. It already used: ${attemptedSummary}. Recent files or paths inspected: ${inspectedSummary}. Stop retrying this step until the operator supplies an exact implementation plan with target files and any required build/test command.`;
 };
@@ -516,48 +529,46 @@ const buildToolLoopRequestedInputFields = ({
   escalated: boolean;
 }): CompiledRequiredInputField[] => [
   {
-    id: 'implementation-direction',
-    label: 'Implementation direction',
+    id: "implementation-direction",
+    label: "Implementation direction",
     description: escalated
       ? 'State the exact code change to make next. Generic replies like "go ahead" are not enough.'
-      : 'Tell the agent exactly what change it should make next.',
+      : "Tell the agent exactly what change it should make next.",
     required: true,
-    source: 'HUMAN_INPUT',
-    kind: 'MARKDOWN',
-    status: 'MISSING',
+    source: "HUMAN_INPUT",
+    kind: "MARKDOWN",
+    status: "MISSING",
   },
   {
-    id: 'target-files',
-    label: 'Target files',
+    id: "target-files",
+    label: "Target files",
     description:
-      'List the exact files to edit or create, for example src/main/java/.../Operator.java.',
+      "List the exact files to edit or create, for example src/main/java/.../Operator.java.",
     required: escalated,
-    source: 'HUMAN_INPUT',
-    kind: 'MARKDOWN',
-    status: 'MISSING',
+    source: "HUMAN_INPUT",
+    kind: "MARKDOWN",
+    status: "MISSING",
   },
   {
-    id: 'build-test-command',
-    label: 'Build/test command',
+    id: "build-test-command",
+    label: "Build/test command",
     description:
-      'If validation matters here, give the exact command to run, for example mvn test from the repo root.',
+      "If validation matters here, give the exact command to run, for example mvn test from the repo root.",
     required: false,
-    source: 'HUMAN_INPUT',
-    kind: 'MARKDOWN',
-    status: 'MISSING',
+    source: "HUMAN_INPUT",
+    kind: "MARKDOWN",
+    status: "MISSING",
   },
 ];
 
 const isToolLoopExhaustionWait = (
-  wait: Pick<RunWait, 'type' | 'message' | 'payload'>,
+  wait: Pick<RunWait, "type" | "message" | "payload">,
 ) =>
-  wait.type === 'INPUT' &&
-  (
-    wait.payload?.reason === TOOL_LOOP_EXHAUSTION_WAIT_REASON ||
+  wait.type === "INPUT" &&
+  (wait.payload?.reason === TOOL_LOOP_EXHAUSTION_WAIT_REASON ||
     wait.message.includes(
-      'explored the workspace for too long without moving into a concrete implementation result.',
-    )
-  );
+      "explored the workspace for too long without moving into a concrete implementation result.",
+    ));
 
 const countResolvedToolLoopExhaustionWaits = ({
   detail,
@@ -567,9 +578,9 @@ const countResolvedToolLoopExhaustionWaits = ({
   runStepId: string;
 }) =>
   detail.waits.filter(
-    wait =>
+    (wait) =>
       wait.runStepId === runStepId &&
-      wait.status === 'RESOLVED' &&
+      wait.status === "RESOLVED" &&
       isToolLoopExhaustionWait(wait),
   ).length;
 
@@ -605,8 +616,8 @@ const emitRunProgressEvent = async ({
   toolInvocationId,
   traceId,
   spanId,
-  type = 'STEP_PROGRESS',
-  level = 'INFO',
+  type = "STEP_PROGRESS",
+  level = "INFO",
   message,
   details,
 }: {
@@ -618,7 +629,7 @@ const emitRunProgressEvent = async ({
   traceId?: string;
   spanId?: string;
   type?: string;
-  level?: RunEvent['level'];
+  level?: RunEvent["level"];
   message: string;
   details?: Record<string, unknown>;
 }) => {
@@ -639,7 +650,7 @@ const emitRunProgressEvent = async ({
       }),
     );
   } catch (error) {
-    console.warn('Failed to emit workflow progress event.', error);
+    console.warn("Failed to emit workflow progress event.", error);
   }
 };
 
@@ -664,7 +675,7 @@ const createExecutionLog = ({
   taskId,
   agentId,
   message,
-  level = 'INFO',
+  level = "INFO",
   metadata,
   runId,
   runStepId,
@@ -677,7 +688,7 @@ const createExecutionLog = ({
   taskId: string;
   agentId: string;
   message: string;
-  level?: ExecutionLog['level'];
+  level?: ExecutionLog["level"];
   metadata?: Record<string, unknown>;
   runId?: string;
   runStepId?: string;
@@ -704,11 +715,17 @@ const createExecutionLog = ({
 
 const getActorDisplayName = (
   actor?: ActorContext | null,
-  fallback = 'Capability Owner',
+  fallback = "Capability Owner",
 ) => normalizeString(actor?.displayName) || fallback;
 
 const getActorTeamIds = (actor?: ActorContext | null) =>
-  Array.from(new Set((actor?.teamIds || []).map(teamId => normalizeString(teamId)).filter(Boolean)));
+  Array.from(
+    new Set(
+      (actor?.teamIds || [])
+        .map((teamId) => normalizeString(teamId))
+        .filter(Boolean),
+    ),
+  );
 
 const canActorOperateWorkItem = ({
   actor,
@@ -721,15 +738,19 @@ const canActorOperateWorkItem = ({
     return true;
   }
 
-  if (actor?.userId && workItem.claimOwnerUserId && actor.userId === workItem.claimOwnerUserId) {
+  if (
+    actor?.userId &&
+    workItem.claimOwnerUserId &&
+    actor.userId === workItem.claimOwnerUserId
+  ) {
     return true;
   }
 
   const actorTeamIds = getActorTeamIds(actor);
   return Boolean(
     actorTeamIds.length > 0 &&
-      workItem.phaseOwnerTeamId &&
-      actorTeamIds.includes(workItem.phaseOwnerTeamId),
+    workItem.phaseOwnerTeamId &&
+    actorTeamIds.includes(workItem.phaseOwnerTeamId),
   );
 };
 
@@ -748,19 +769,22 @@ const canActorApproveWait = ({
 
   const actorTeamIds = getActorTeamIds(actor);
   const pendingAssignments = (wait.approvalAssignments || []).filter(
-    assignment => assignment.status === 'PENDING',
+    (assignment) => assignment.status === "PENDING",
   );
 
   if (pendingAssignments.length === 0) {
-    const ownershipTeams = wait.payload?.compiledStepContext?.ownership?.approvalTeamIds || [];
+    const ownershipTeams =
+      wait.payload?.compiledStepContext?.ownership?.approvalTeamIds || [];
     return Boolean(
-      actorTeamIds.some(teamId => ownershipTeams.includes(teamId)) ||
-        (workItem.phaseOwnerTeamId && actorTeamIds.includes(workItem.phaseOwnerTeamId)),
+      actorTeamIds.some((teamId) => ownershipTeams.includes(teamId)) ||
+      (workItem.phaseOwnerTeamId &&
+        actorTeamIds.includes(workItem.phaseOwnerTeamId)),
     );
   }
 
   const hasOnlyImplicitTeamAssignments = pendingAssignments.every(
-    assignment => assignment.targetType === 'TEAM' && !assignment.approvalPolicyId,
+    (assignment) =>
+      assignment.targetType === "TEAM" && !assignment.approvalPolicyId,
   );
   if (
     hasOnlyImplicitTeamAssignments &&
@@ -771,12 +795,15 @@ const canActorApproveWait = ({
     return true;
   }
 
-  return pendingAssignments.some(assignment => {
-    if (assignment.targetType === 'USER') {
-      return Boolean(actor.userId) && (assignment.assignedUserId || assignment.targetId) === actor.userId;
+  return pendingAssignments.some((assignment) => {
+    if (assignment.targetType === "USER") {
+      return (
+        Boolean(actor.userId) &&
+        (assignment.assignedUserId || assignment.targetId) === actor.userId
+      );
     }
 
-    if (assignment.targetType === 'TEAM') {
+    if (assignment.targetType === "TEAM") {
       const teamId = assignment.assignedTeamId || assignment.targetId;
       return actorTeamIds.includes(teamId);
     }
@@ -811,31 +838,33 @@ const buildApprovalAssignmentsForWait = ({
     ownership.approvalTeamIds.length > 0
       ? ownership.approvalTeamIds
       : workItem.phaseOwnerTeamId
-      ? [workItem.phaseOwnerTeamId]
-      : [];
+        ? [workItem.phaseOwnerTeamId]
+        : [];
 
   const targets =
     policy?.targets && policy.targets.length > 0
       ? policy.targets
       : step.approverRoles && step.approverRoles.length > 0
-      ? step.approverRoles.map(role => ({
-          targetType: 'CAPABILITY_ROLE' as const,
-          targetId: role,
-          label: role,
-        }))
-      : fallbackTeamIds.map(teamId => ({
-          targetType: 'TEAM' as const,
-          targetId: teamId,
-          label: teamId,
-        }));
+        ? step.approverRoles.map((role) => ({
+            targetType: "CAPABILITY_ROLE" as const,
+            targetId: role,
+            label: role,
+          }))
+        : fallbackTeamIds.map((teamId) => ({
+            targetType: "TEAM" as const,
+            targetId: teamId,
+            label: teamId,
+          }));
 
   const dueAt =
     policy?.dueAt ||
     (policy?.escalationAfterMinutes
-      ? new Date(Date.now() + policy.escalationAfterMinutes * 60_000).toISOString()
+      ? new Date(
+          Date.now() + policy.escalationAfterMinutes * 60_000,
+        ).toISOString()
       : undefined);
 
-  return targets.map(target => ({
+  return targets.map((target) => ({
     id: createApprovalAssignmentId(),
     capabilityId: capability.id,
     runId,
@@ -843,11 +872,11 @@ const buildApprovalAssignmentsForWait = ({
     phase: step.phase,
     stepName: step.name,
     approvalPolicyId: policy?.id,
-    status: 'PENDING' as const,
+    status: "PENDING" as const,
     targetType: target.targetType,
     targetId: target.targetId,
-    assignedUserId: target.targetType === 'USER' ? target.targetId : undefined,
-    assignedTeamId: target.targetType === 'TEAM' ? target.targetId : undefined,
+    assignedUserId: target.targetType === "USER" ? target.targetId : undefined,
+    assignedTeamId: target.targetType === "TEAM" ? target.targetId : undefined,
     dueAt,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -857,18 +886,18 @@ const buildApprovalAssignmentsForWait = ({
 const toFileSlug = (value: string) =>
   value
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 80) || 'artifact';
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "artifact";
 
 const buildMarkdownArtifact = (sections: Array<[string, string | undefined]>) =>
   sections
     .filter(([, value]) => Boolean(value))
     .map(([heading, value]) => `## ${heading}\n${value}`)
-    .join('\n\n');
+    .join("\n\n");
 
 const summarizeText = (value: string, limit = 240) => {
-  const trimmed = value.replace(/\s+/g, ' ').trim();
+  const trimmed = value.replace(/\s+/g, " ").trim();
   if (trimmed.length <= limit) {
     return trimmed;
   }
@@ -877,24 +906,26 @@ const summarizeText = (value: string, limit = 240) => {
 
 const inferAttachmentContentFormat = (
   attachment: WorkItemAttachmentUpload,
-): Artifact['contentFormat'] => {
+): Artifact["contentFormat"] => {
   const lowerName = attachment.fileName.toLowerCase();
-  const lowerMime = String(attachment.mimeType || '').toLowerCase();
-  if (lowerName.endsWith('.md') || lowerMime.includes('markdown')) {
-    return 'MARKDOWN';
+  const lowerMime = String(attachment.mimeType || "").toLowerCase();
+  if (lowerName.endsWith(".md") || lowerMime.includes("markdown")) {
+    return "MARKDOWN";
   }
-  return 'TEXT';
+  return "TEXT";
 };
 
 const formatMarkdownList = (items: string[]) =>
-  items.length > 0 ? items.map(item => `- ${item}`).join('\n') : 'None captured.';
+  items.length > 0
+    ? items.map((item) => `- ${item}`).join("\n")
+    : "None captured.";
 
 const normalizeString = (value: unknown) =>
-  typeof value === 'string' ? value.trim() : '';
+  typeof value === "string" ? value.trim() : "";
 
 const normalizeStringArray = (value: unknown) => {
   if (Array.isArray(value)) {
-    return value.map(item => normalizeString(item)).filter(Boolean);
+    return value.map((item) => normalizeString(item)).filter(Boolean);
   }
 
   const normalized = normalizeString(value);
@@ -903,47 +934,47 @@ const normalizeStringArray = (value: unknown) => {
 
 const normalizeContrarianSeverity = (
   value: unknown,
-): ContrarianConflictReview['severity'] => {
+): ContrarianConflictReview["severity"] => {
   const normalized = normalizeString(value).toUpperCase();
-  return normalized === 'LOW' ||
-    normalized === 'MEDIUM' ||
-    normalized === 'HIGH' ||
-    normalized === 'CRITICAL'
+  return normalized === "LOW" ||
+    normalized === "MEDIUM" ||
+    normalized === "HIGH" ||
+    normalized === "CRITICAL"
     ? normalized
-    : 'MEDIUM';
+    : "MEDIUM";
 };
 
 const normalizeContrarianRecommendation = (
   value: unknown,
-): ContrarianConflictReview['recommendation'] => {
-  const normalized = normalizeString(value).toUpperCase().replace(/\s+/g, '_');
-  return normalized === 'CONTINUE' ||
-    normalized === 'REVISE_RESOLUTION' ||
-    normalized === 'ESCALATE' ||
-    normalized === 'STOP'
+): ContrarianConflictReview["recommendation"] => {
+  const normalized = normalizeString(value).toUpperCase().replace(/\s+/g, "_");
+  return normalized === "CONTINUE" ||
+    normalized === "REVISE_RESOLUTION" ||
+    normalized === "ESCALATE" ||
+    normalized === "STOP"
     ? normalized
-    : 'ESCALATE';
+    : "ESCALATE";
 };
 
 const findContrarianReviewerAgent = (agents: CapabilityAgent[]) =>
   agents.find(
-    agent =>
-      agent.role === 'Contrarian Reviewer' ||
-      agent.name === 'Contrarian Reviewer' ||
-      agent.id.includes('CONTRARIAN-REVIEWER'),
+    (agent) =>
+      agent.role === "Contrarian Reviewer" ||
+      agent.name === "Contrarian Reviewer" ||
+      agent.id.includes("CONTRARIAN-REVIEWER"),
   ) ||
-  agents.find(agent => agent.isOwner) ||
+  agents.find((agent) => agent.isOwner) ||
   agents[0];
 
 const createPendingContrarianReview = (
   reviewerAgentId: string,
 ): ContrarianConflictReview => ({
-  status: 'PENDING',
+  status: "PENDING",
   reviewerAgentId,
   generatedAt: new Date().toISOString(),
-  severity: 'MEDIUM',
-  recommendation: 'ESCALATE',
-  summary: 'Contrarian review is being generated for this conflict wait.',
+  severity: "MEDIUM",
+  recommendation: "ESCALATE",
+  summary: "Contrarian review is being generated for this conflict wait.",
   challengedAssumptions: [],
   risks: [],
   missingEvidence: [],
@@ -962,16 +993,16 @@ const createErroredContrarianReview = ({
   const message =
     error instanceof Error
       ? error.message
-      : 'Contrarian review could not be generated.';
+      : "Contrarian review could not be generated.";
 
   return {
-    status: 'ERROR',
+    status: "ERROR",
     reviewerAgentId,
     generatedAt: new Date().toISOString(),
-    severity: 'MEDIUM',
-    recommendation: 'ESCALATE',
+    severity: "MEDIUM",
+    recommendation: "ESCALATE",
     summary:
-      'Contrarian review was unavailable. The operator can still resolve this advisory wait manually.',
+      "Contrarian review was unavailable. The operator can still resolve this advisory wait manually.",
     challengedAssumptions: [],
     risks: [],
     missingEvidence: [],
@@ -984,20 +1015,23 @@ const createErroredContrarianReview = ({
 
 const formatContrarianReviewMarkdown = (review: ContrarianConflictReview) =>
   buildMarkdownArtifact([
-    ['Status', review.status],
-    ['Severity', review.severity],
-    ['Recommendation', review.recommendation.replace(/_/g, ' ')],
-    ['Summary', review.summary],
-    ['Challenged Assumptions', formatMarkdownList(review.challengedAssumptions)],
-    ['Risks', formatMarkdownList(review.risks)],
-    ['Missing Evidence', formatMarkdownList(review.missingEvidence)],
-    ['Alternative Paths', formatMarkdownList(review.alternativePaths)],
-    ['Suggested Resolution', review.suggestedResolution],
-    ['Last Error', review.lastError],
+    ["Status", review.status],
+    ["Severity", review.severity],
+    ["Recommendation", review.recommendation.replace(/_/g, " ")],
+    ["Summary", review.summary],
+    [
+      "Challenged Assumptions",
+      formatMarkdownList(review.challengedAssumptions),
+    ],
+    ["Risks", formatMarkdownList(review.risks)],
+    ["Missing Evidence", formatMarkdownList(review.missingEvidence)],
+    ["Alternative Paths", formatMarkdownList(review.alternativePaths)],
+    ["Suggested Resolution", review.suggestedResolution],
+    ["Last Error", review.lastError],
   ]);
 
 const getStepStatus = (step?: WorkflowStep): WorkItemStatus =>
-  step?.stepType === 'HUMAN_APPROVAL' ? 'PENDING_APPROVAL' : 'ACTIVE';
+  step?.stepType === "HUMAN_APPROVAL" ? "PENDING_APPROVAL" : "ACTIVE";
 
 const buildPendingRequest = (
   step: WorkflowStep | undefined,
@@ -1023,24 +1057,27 @@ const buildBlocker = (
     return undefined;
   }
 
-  if (wait.type === 'APPROVAL') {
+  if (wait.type === "APPROVAL") {
     return undefined;
   }
 
   return {
-    type: wait.type === 'CONFLICT_RESOLUTION' ? 'CONFLICT_RESOLUTION' : 'HUMAN_INPUT',
+    type:
+      wait.type === "CONFLICT_RESOLUTION"
+        ? "CONFLICT_RESOLUTION"
+        : "HUMAN_INPUT",
     message: wait.message,
     requestedBy: step.agentId,
     timestamp: new Date().toISOString(),
-    status: 'OPEN',
+    status: "OPEN",
   };
 };
 
 const replaceWorkItem = (items: WorkItem[], next: WorkItem) =>
-  items.map(item => (item.id === next.id ? next : item));
+  items.map((item) => (item.id === next.id ? next : item));
 
 const replaceTask = (items: AgentTask[], next: AgentTask) => {
-  const existingIndex = items.findIndex(task => task.id === next.id);
+  const existingIndex = items.findIndex((task) => task.id === next.id);
   if (existingIndex === -1) {
     return [next, ...items];
   }
@@ -1050,16 +1087,14 @@ const replaceTask = (items: AgentTask[], next: AgentTask) => {
 
 const replaceArtifact = (items: Artifact[], next: Artifact) => {
   const existingIndex = items.findIndex(
-    artifact =>
+    (artifact) =>
       artifact.id === next.id ||
-      (
-        artifact.artifactKind === next.artifactKind &&
+      (artifact.artifactKind === next.artifactKind &&
         (artifact.sourceWaitId || null) === (next.sourceWaitId || null) &&
         (artifact.runId || artifact.sourceRunId || null) ===
           (next.runId || next.sourceRunId || null) &&
         (artifact.runStepId || artifact.sourceRunStepId || null) ===
-          (next.runStepId || next.sourceRunStepId || null)
-      ),
+          (next.runStepId || next.sourceRunStepId || null)),
   );
 
   if (existingIndex === -1) {
@@ -1072,7 +1107,10 @@ const replaceArtifact = (items: Artifact[], next: Artifact) => {
 };
 
 const replaceArtifacts = (items: Artifact[], nextArtifacts: Artifact[]) =>
-  nextArtifacts.reduce((current, artifact) => replaceArtifact(current, artifact), items);
+  nextArtifacts.reduce(
+    (current, artifact) => replaceArtifact(current, artifact),
+    items,
+  );
 
 const executeDelegatedTask = async ({
   projection,
@@ -1104,39 +1142,45 @@ const executeDelegatedTask = async ({
   recommendedNextStep?: string;
 }): Promise<ToolExecutionResult & { retryable: boolean }> => {
   if (!delegatedAgentId.trim()) {
-    throw new Error('delegate_task requires delegatedAgentId.');
+    throw new Error("delegate_task requires delegatedAgentId.");
   }
   if (!prompt.trim()) {
-    throw new Error('delegate_task requires a non-empty prompt.');
+    throw new Error("delegate_task requires a non-empty prompt.");
   }
   const delegatedAgent =
-    projection.workspace.agents.find(candidate => candidate.id === delegatedAgentId) || null;
+    projection.workspace.agents.find(
+      (candidate) => candidate.id === delegatedAgentId,
+    ) || null;
   if (!delegatedAgent) {
-    throw new Error(`Delegated agent ${delegatedAgentId} was not found in this capability.`);
+    throw new Error(
+      `Delegated agent ${delegatedAgentId} was not found in this capability.`,
+    );
   }
 
   const childTaskId = `TASK-DELEGATE-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
   const childTask: AgentTask = {
     id: childTaskId,
-    title: title.trim() || `${projection.workItem.title} · Delegated Specialist Review`,
+    title:
+      title.trim() ||
+      `${projection.workItem.title} · Delegated Specialist Review`,
     agent: delegatedAgent.name,
     capabilityId: projection.capability.id,
-    taskSubtype: 'DELEGATED_RUN',
+    taskSubtype: "DELEGATED_RUN",
     workItemId: projection.workItem.id,
     workflowId: detail.run.workflowId,
     workflowStepId: step.id,
     managedByWorkflow: false,
-    taskType: 'DELIVERY',
+    taskType: "DELIVERY",
     phase: step.phase,
     priority: projection.workItem.priority,
-    status: 'PROCESSING',
+    status: "PROCESSING",
     timestamp: formatTaskTimestamp(),
     prompt,
     executionNotes: `Delegated by ${parentAgent.name} during ${step.name}.`,
     runId: detail.run.id,
-    runStepId: detail.steps.find(item => item.status === 'RUNNING')?.id,
+    runStepId: detail.steps.find((item) => item.status === "RUNNING")?.id,
     parentRunId: detail.run.id,
-    parentRunStepId: detail.steps.find(item => item.status === 'RUNNING')?.id,
+    parentRunStepId: detail.steps.find((item) => item.status === "RUNNING")?.id,
     delegatedAgentId: delegatedAgent.id,
     toolInvocationId,
     linkedArtifacts: [],
@@ -1160,8 +1204,14 @@ const executeDelegatedTask = async ({
     },
   });
 
-  projection.workspace.tasks = replaceTask(projection.workspace.tasks, childTask);
-  projection.workspace.executionLogs = [...projection.workspace.executionLogs, queuedLog];
+  projection.workspace.tasks = replaceTask(
+    projection.workspace.tasks,
+    childTask,
+  );
+  projection.workspace.executionLogs = [
+    ...projection.workspace.executionLogs,
+    queuedLog,
+  ];
   await replaceCapabilityWorkspaceContentRecord(projection.capability.id, {
     tasks: projection.workspace.tasks,
     executionLogs: projection.workspace.executionLogs,
@@ -1180,7 +1230,7 @@ const executeDelegatedTask = async ({
         step.action,
       ]
         .filter(Boolean)
-        .join('\n'),
+        .join("\n"),
       limit: 5,
     });
 
@@ -1191,20 +1241,20 @@ const executeDelegatedTask = async ({
       `Work item: ${projection.workItem.title} (${projection.workItem.id}).`,
       `Workflow step: ${step.name} (${step.phase}).`,
       `Task title: ${childTask.title}`,
-      '',
-      'Return concise markdown with these sections:',
-      '1. Summary',
-      '2. Findings',
-      '3. Recommended next step',
-      '4. Open questions',
-      '',
+      "",
+      "Return concise markdown with these sections:",
+      "1. Summary",
+      "2. Findings",
+      "3. Recommended next step",
+      "4. Open questions",
+      "",
       `Delegated prompt:\n${prompt}`,
-    ].join('\n');
+    ].join("\n");
 
     const response = await invokeScopedCapabilitySession({
       capability: projection.capability,
       agent: delegatedAgent,
-      scope: 'TASK',
+      scope: "TASK",
       scopeId: childTask.id,
       prompt,
       initialPrompt,
@@ -1217,36 +1267,47 @@ const executeDelegatedTask = async ({
       id: createArtifactId(),
       name: `${delegatedAgent.name} Delegation Result`,
       capabilityId: projection.capability.id,
-      type: 'Delegation Result',
+      type: "Delegation Result",
       version: `run-${detail.run.attemptNumber}`,
       agent: delegatedAgent.id,
       connectedAgentId: parentAgent.id,
       created: new Date().toISOString(),
-      direction: 'OUTPUT',
+      direction: "OUTPUT",
       sourceWorkflowId: detail.run.workflowId,
       runId: detail.run.id,
       runStepId: childTask.runStepId,
       summary: compactMarkdownSummary(response.content),
-      artifactKind: 'DELEGATION_RESULT',
+      artifactKind: "DELEGATION_RESULT",
       phase: step.phase,
       workItemId: projection.workItem.id,
       sourceRunId: detail.run.id,
       sourceRunStepId: childTask.runStepId,
       handoffFromAgentId: parentAgent.id,
       handoffToAgentId: delegatedAgent.id,
-      contentFormat: 'MARKDOWN',
-      mimeType: 'text/markdown',
+      contentFormat: "MARKDOWN",
+      mimeType: "text/markdown",
       fileName: `${toFileSlug(projection.workItem.id)}-${toFileSlug(step.name)}-${toFileSlug(delegatedAgent.name)}-delegation.md`,
-      contentText: `# ${delegatedAgent.name} Delegation Result\n\n${buildMarkdownArtifact([
-        ['Work Item', `${projection.workItem.title} (${projection.workItem.id})`],
-        ['Phase', getLifecyclePhaseLabel(projection.capability.lifecycle, step.phase)],
-        ['Parent Agent', `${parentAgent.name} (${parentAgent.role})`],
-        ['Delegated Agent', `${delegatedAgent.name} (${delegatedAgent.role})`],
-        ['Delegated Task', childTask.title],
-        ['Prompt', prompt],
-        ['Result Summary', compactMarkdownSummary(response.content)],
-      ])}\n\n## Full Result\n\n${response.content}`,
-      retrievalReferences: memoryContext.results.map(item => item.reference),
+      contentText: `# ${delegatedAgent.name} Delegation Result\n\n${buildMarkdownArtifact(
+        [
+          [
+            "Work Item",
+            `${projection.workItem.title} (${projection.workItem.id})`,
+          ],
+          [
+            "Phase",
+            getLifecyclePhaseLabel(projection.capability.lifecycle, step.phase),
+          ],
+          ["Parent Agent", `${parentAgent.name} (${parentAgent.role})`],
+          [
+            "Delegated Agent",
+            `${delegatedAgent.name} (${delegatedAgent.role})`,
+          ],
+          ["Delegated Task", childTask.title],
+          ["Prompt", prompt],
+          ["Result Summary", compactMarkdownSummary(response.content)],
+        ],
+      )}\n\n## Full Result\n\n${response.content}`,
+      retrievalReferences: memoryContext.results.map((item) => item.reference),
     };
 
     let handoffPacketId: string | undefined;
@@ -1260,7 +1321,8 @@ const executeDelegatedTask = async ({
           openQuestions: openQuestions || [],
           blockingDependencies: blockingDependencies || [],
           recommendedNextStep:
-            recommendedNextStep || 'Review the delegated result artifact and continue the parent run.',
+            recommendedNextStep ||
+            "Review the delegated result artifact and continue the parent run.",
           artifactIds: [artifact.id],
           traceIds: traceId ? [traceId] : [],
           delegationOriginTaskId: childTask.id,
@@ -1273,20 +1335,20 @@ const executeDelegatedTask = async ({
 
     const completedTask: AgentTask = {
       ...childTask,
-      status: 'COMPLETED',
+      status: "COMPLETED",
       timestamp: formatTaskTimestamp(),
       executionNotes: compactMarkdownSummary(response.content),
       linkedArtifacts: [
         {
           name: artifact.name,
           size: artifact.version,
-          type: 'file',
+          type: "file",
         },
       ],
       producedOutputs: [
         {
           name: artifact.name,
-          status: 'completed',
+          status: "completed",
           artifactId: artifact.id,
           runId: detail.run.id,
           runStepId: childTask.runStepId,
@@ -1313,21 +1375,32 @@ const executeDelegatedTask = async ({
       latencyMs: undefined,
     });
 
-    projection.workspace.tasks = replaceTask(projection.workspace.tasks, completedTask);
-    projection.workspace.artifacts = replaceArtifact(projection.workspace.artifacts, artifact);
-    projection.workspace.executionLogs = [...projection.workspace.executionLogs, completionLog];
+    projection.workspace.tasks = replaceTask(
+      projection.workspace.tasks,
+      completedTask,
+    );
+    projection.workspace.artifacts = replaceArtifact(
+      projection.workspace.artifacts,
+      artifact,
+    );
+    projection.workspace.executionLogs = [
+      ...projection.workspace.executionLogs,
+      completionLog,
+    ];
 
     await replaceCapabilityWorkspaceContentRecord(projection.capability.id, {
       tasks: projection.workspace.tasks,
       artifacts: projection.workspace.artifacts,
       executionLogs: projection.workspace.executionLogs,
     });
-    await refreshCapabilityMemory(projection.capability.id).catch(() => undefined);
+    await refreshCapabilityMemory(projection.capability.id).catch(
+      () => undefined,
+    );
     await queueTargetedLearningRefresh({
       workspace: projection.workspace,
       capabilityId: projection.capability.id,
       focusedAgentId: delegatedAgent.id,
-      triggerType: 'MANUAL_REFRESH',
+      triggerType: "MANUAL_REFRESH",
     });
 
     return {
@@ -1346,25 +1419,35 @@ const executeDelegatedTask = async ({
   } catch (error) {
     const failedTask: AgentTask = {
       ...childTask,
-      status: 'ALERT',
+      status: "ALERT",
       timestamp: formatTaskTimestamp(),
       executionNotes:
-        error instanceof Error ? error.message : 'Delegated specialist task failed unexpectedly.',
+        error instanceof Error
+          ? error.message
+          : "Delegated specialist task failed unexpectedly.",
     };
     const failureLog = createExecutionLog({
       capabilityId: projection.capability.id,
       taskId: childTask.id,
       agentId: delegatedAgent.id,
-      level: 'ERROR',
+      level: "ERROR",
       message:
-        error instanceof Error ? error.message : 'Delegated specialist task failed unexpectedly.',
+        error instanceof Error
+          ? error.message
+          : "Delegated specialist task failed unexpectedly.",
       runId: detail.run.id,
       runStepId: childTask.runStepId,
       toolInvocationId,
       traceId,
     });
-    projection.workspace.tasks = replaceTask(projection.workspace.tasks, failedTask);
-    projection.workspace.executionLogs = [...projection.workspace.executionLogs, failureLog];
+    projection.workspace.tasks = replaceTask(
+      projection.workspace.tasks,
+      failedTask,
+    );
+    projection.workspace.executionLogs = [
+      ...projection.workspace.executionLogs,
+      failureLog,
+    ];
     await replaceCapabilityWorkspaceContentRecord(projection.capability.id, {
       tasks: projection.workspace.tasks,
       executionLogs: projection.workspace.executionLogs,
@@ -1389,12 +1472,12 @@ const updateTasksForCurrentStep = ({
   step: WorkflowStep;
   run: WorkflowRun;
   runStep: WorkflowRunStep;
-  status: AgentTask['status'];
+  status: AgentTask["status"];
   executionNotes?: string;
-  producedOutputs?: NonNullable<AgentTask['producedOutputs']>;
+  producedOutputs?: NonNullable<AgentTask["producedOutputs"]>;
   toolInvocationId?: string;
 }) =>
-  tasks.map(task => {
+  tasks.map((task) => {
     if (task.workItemId !== workItem.id || task.workflowStepId !== step.id) {
       return task;
     }
@@ -1418,14 +1501,14 @@ const resolveProjectionContext = async (
 ): Promise<ProjectionContext> => {
   const bundle = await getCapabilityBundle(capabilityId);
   const workspace = mapBundleWorkspace(bundle);
-  const workItem = workspace.workItems.find(item => item.id === workItemId);
+  const workItem = workspace.workItems.find((item) => item.id === workItemId);
   if (!workItem) {
     throw new Error(`Work item ${workItemId} was not found.`);
   }
 
   const workflow =
     workflowOverride ||
-    workspace.workflows.find(item => item.id === workItem.workflowId) ||
+    workspace.workflows.find((item) => item.id === workItem.workflowId) ||
     null;
 
   if (!workflow) {
@@ -1451,7 +1534,7 @@ const persistProjection = async ({
   taskMutator,
 }: {
   capabilityId: string;
-  workspace: ProjectionContext['workspace'];
+  workspace: ProjectionContext["workspace"];
   workItem: WorkItem;
   workflow: Workflow;
   logsToAppend?: ExecutionLog[];
@@ -1486,24 +1569,25 @@ const buildTargetedLearningUpdates = ({
   relatedRunId,
   sourceLogIds = [],
 }: {
-  workspace: ProjectionContext['workspace'];
+  workspace: ProjectionContext["workspace"];
   capabilityId: string;
   focusedAgentId?: string;
   insight: string;
-  triggerType: NonNullable<LearningUpdate['triggerType']>;
+  triggerType: NonNullable<LearningUpdate["triggerType"]>;
   relatedWorkItemId?: string;
   relatedRunId?: string;
   sourceLogIds?: string[];
 }) => {
-  const ownerAgentId = workspace.agents.find(agent => agent.isOwner)?.id;
+  const ownerAgentId = workspace.agents.find((agent) => agent.isOwner)?.id;
   const executionAgentId = workspace.agents.find(
-    agent => agent.standardTemplateKey === 'EXECUTION-OPS',
+    (agent) => agent.standardTemplateKey === "EXECUTION-OPS",
   )?.id;
-  const targetAgentIds = [...new Set([focusedAgentId, ownerAgentId, executionAgentId])]
-    .filter((value): value is string => Boolean(value));
+  const targetAgentIds = [
+    ...new Set([focusedAgentId, ownerAgentId, executionAgentId]),
+  ].filter((value): value is string => Boolean(value));
 
   const nextUpdates = targetAgentIds.map(
-    agentId =>
+    (agentId) =>
       ({
         id: createLearningUpdateId(),
         capabilityId,
@@ -1526,20 +1610,21 @@ const queueTargetedLearningRefresh = async ({
   focusedAgentId,
   triggerType,
 }: {
-  workspace: ProjectionContext['workspace'];
+  workspace: ProjectionContext["workspace"];
   capabilityId: string;
   focusedAgentId?: string;
-  triggerType: NonNullable<LearningUpdate['triggerType']>;
+  triggerType: NonNullable<LearningUpdate["triggerType"]>;
 }) => {
-  const ownerAgentId = workspace.agents.find(agent => agent.isOwner)?.id;
+  const ownerAgentId = workspace.agents.find((agent) => agent.isOwner)?.id;
   const executionAgentId = workspace.agents.find(
-    agent => agent.standardTemplateKey === 'EXECUTION-OPS',
+    (agent) => agent.standardTemplateKey === "EXECUTION-OPS",
   )?.id;
-  const targetAgentIds = [...new Set([focusedAgentId, ownerAgentId, executionAgentId])]
-    .filter((value): value is string => Boolean(value));
+  const targetAgentIds = [
+    ...new Set([focusedAgentId, ownerAgentId, executionAgentId]),
+  ].filter((value): value is string => Boolean(value));
 
   await Promise.all(
-    targetAgentIds.map(agentId =>
+    targetAgentIds.map((agentId) =>
       queueSingleAgentLearningRefresh(
         capabilityId,
         agentId,
@@ -1563,7 +1648,7 @@ const extractBalancedJsonCandidates = (value: string) => {
     const character = value[index];
 
     if (startIndex === -1) {
-      if (character === '{') {
+      if (character === "{") {
         startIndex = index;
         depth = 1;
         inString = false;
@@ -1577,7 +1662,7 @@ const extractBalancedJsonCandidates = (value: string) => {
       continue;
     }
 
-    if (character === '\\' && inString) {
+    if (character === "\\" && inString) {
       escaping = true;
       continue;
     }
@@ -1591,12 +1676,12 @@ const extractBalancedJsonCandidates = (value: string) => {
       continue;
     }
 
-    if (character === '{') {
+    if (character === "{") {
       depth += 1;
       continue;
     }
 
-    if (character === '}') {
+    if (character === "}") {
       depth -= 1;
       if (depth === 0) {
         candidates.push(value.slice(startIndex, index + 1));
@@ -1609,14 +1694,14 @@ const extractBalancedJsonCandidates = (value: string) => {
 };
 
 const tryParseJsonObject = (value?: string | null) => {
-  const trimmed = String(value || '').trim();
+  const trimmed = String(value || "").trim();
   if (!trimmed) {
     return null;
   }
 
   try {
     const parsed = JSON.parse(trimmed);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as Record<string, any>)
       : null;
   } catch {
@@ -1631,7 +1716,7 @@ export const extractJsonObject = (value: string) => {
     trimmed.match(/```json\s*([\s\S]*?)```/i)?.[1],
     trimmed.match(/```\s*([\s\S]*?)```/i)?.[1],
     ...extractBalancedJsonCandidates(trimmed),
-    trimmed.slice(trimmed.indexOf('{'), trimmed.lastIndexOf('}') + 1),
+    trimmed.slice(trimmed.indexOf("{"), trimmed.lastIndexOf("}") + 1),
   ].filter(Boolean) as string[];
 
   for (const candidate of candidates) {
@@ -1641,35 +1726,38 @@ export const extractJsonObject = (value: string) => {
     }
   }
 
-  throw new Error('Model response did not contain valid JSON.');
+  throw new Error("Model response did not contain valid JSON.");
 };
 
 const combineUsage = (
-  left: DecisionEnvelope['usage'],
-  right: DecisionEnvelope['usage'],
-): DecisionEnvelope['usage'] => ({
+  left: DecisionEnvelope["usage"],
+  right: DecisionEnvelope["usage"],
+): DecisionEnvelope["usage"] => ({
   promptTokens: left.promptTokens + right.promptTokens,
   completionTokens: left.completionTokens + right.completionTokens,
   totalTokens: left.totalTokens + right.totalTokens,
-  estimatedCostUsd: Number((left.estimatedCostUsd + right.estimatedCostUsd).toFixed(4)),
+  estimatedCostUsd: Number(
+    (left.estimatedCostUsd + right.estimatedCostUsd).toFixed(4),
+  ),
 });
 
 export const buildExecutionFailureRecoveryMessage = (
   step: WorkflowStep,
   message: string,
 ) => {
-  const normalizedMessage = String(message || '').trim();
+  const normalizedMessage = String(message || "").trim();
   const appendFailureDetail = (base: string) => {
     if (!normalizedMessage) {
       return base;
     }
 
-    const condensed = normalizedMessage.replace(/\s+/g, ' ').trim();
+    const condensed = normalizedMessage.replace(/\s+/g, " ").trim();
     if (!condensed) {
       return base;
     }
 
-    const detail = condensed.length > 240 ? `${condensed.slice(0, 237)}...` : condensed;
+    const detail =
+      condensed.length > 240 ? `${condensed.slice(0, 237)}...` : condensed;
     return `${base} Actual failure: ${detail}`;
   };
 
@@ -1719,11 +1807,11 @@ const repairMalformedExecutionDecision = async ({
   const repaired = await invokeScopedCapabilitySession({
     capability,
     agent,
-    scope: workItem.id ? 'WORK_ITEM' : 'TASK',
+    scope: workItem.id ? "WORK_ITEM" : "TASK",
     scopeId: workItem.id || runStep.id,
     workItemPhase: step.phase,
     developerPrompt:
-      'You repair malformed workflow execution responses. Return one valid JSON object only with no markdown.',
+      "You repair malformed workflow execution responses. Return one valid JSON object only with no markdown.",
     prompt: [
       `Workflow: ${workflow.name}`,
       `Step: ${step.name}`,
@@ -1731,10 +1819,10 @@ const repairMalformedExecutionDecision = async ({
       `Attempt: ${runStep.attemptCount}`,
       repairReason
         ? `The previous assistant response for this step was incomplete or invalid: ${repairReason}`
-        : 'The previous assistant response for this step was malformed and could not be parsed as JSON.',
-      'Repair it into exactly one valid JSON object without adding commentary.',
-      'If the intent is ambiguous after reading the malformed response, choose pause_for_input and ask for the smallest missing clarification.',
-      'Allowed shapes:',
+        : "The previous assistant response for this step was malformed and could not be parsed as JSON.",
+      "Repair it into exactly one valid JSON object without adding commentary.",
+      "If the intent is ambiguous after reading the malformed response, choose pause_for_input and ask for the smallest missing clarification.",
+      "Allowed shapes:",
       '1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"README.md"}}}',
       '2. {"action":"complete","reasoning":"...","summary":"..."}',
       '3. {"action":"pause_for_input","reasoning":"...","wait":{"type":"INPUT","message":"..."}}',
@@ -1742,12 +1830,15 @@ const repairMalformedExecutionDecision = async ({
       '5. {"action":"pause_for_conflict","reasoning":"...","wait":{"type":"CONFLICT_RESOLUTION","message":"..."}}',
       '6. {"action":"fail","reasoning":"...","summary":"..."}',
       `Malformed response:\n${malformedResponse}`,
-    ].join('\n\n'),
+    ].join("\n\n"),
     timeoutMs: 45_000,
     resetSession: true,
   });
 
-  const repairedObject = extractJsonObject(repaired.content) as Record<string, any>;
+  const repairedObject = extractJsonObject(repaired.content) as Record<
+    string,
+    any
+  >;
 
   return {
     decision: normalizeExecutionDecision(repairedObject),
@@ -1779,7 +1870,7 @@ const requestContrarianConflictReview = async ({
   resolvedWaitContext?: string;
 }): Promise<{
   review: ContrarianConflictReview;
-  usage: DecisionEnvelope['usage'];
+  usage: DecisionEnvelope["usage"];
   latencyMs: number;
   retrievalReferences: MemoryReference[];
 }> => {
@@ -1798,53 +1889,56 @@ const requestContrarianConflictReview = async ({
       resolvedWaitContext,
     ]
       .filter(Boolean)
-      .join('\n'),
+      .join("\n"),
     limit: 8,
   });
 
   const response = await invokeScopedCapabilitySession({
     capability,
     agent: reviewer,
-    scope: 'WORK_ITEM',
+    scope: "WORK_ITEM",
     scopeId: workItem.id,
     workItemPhase: step.phase,
     developerPrompt:
-      'You are an adversarial workflow reviewer. Return JSON only with no markdown.',
+      "You are an adversarial workflow reviewer. Return JSON only with no markdown.",
     memoryPrompt: memoryContext.prompt || undefined,
     prompt: [
       `Capability: ${capability.name}`,
       `Workflow: ${workflow.name}`,
       `Work item: ${workItem.title}`,
-      `Work item request:\n${workItem.description || 'None'}`,
+      `Work item request:\n${workItem.description || "None"}`,
       `Current phase: ${workItem.phase}`,
       `Current step: ${step.name}`,
       `Step objective: ${step.action}`,
-      `Step guidance: ${step.description || 'None'}`,
+      `Step guidance: ${step.description || "None"}`,
       `Current run step attempt: ${runStep.attemptCount}`,
       `Conflict wait message:\n${wait.message}`,
-      `Prior hand-offs:\n${handoffContext || 'None'}`,
-      `Resolved input/conflict context:\n${resolvedWaitContext || 'None'}`,
-      'Challenge the proposed continuation path. Identify unsafe assumptions, missing evidence, contradictory handoffs, policy ambiguity, downstream risks, and alternative paths. Do not resolve the conflict yourself; advise the human operator.',
-      'Return JSON with this exact shape:',
+      `Prior hand-offs:\n${handoffContext || "None"}`,
+      `Resolved input/conflict context:\n${resolvedWaitContext || "None"}`,
+      "Challenge the proposed continuation path. Identify unsafe assumptions, missing evidence, contradictory handoffs, policy ambiguity, downstream risks, and alternative paths. Do not resolve the conflict yourself; advise the human operator.",
+      "Return JSON with this exact shape:",
       '{"severity":"LOW|MEDIUM|HIGH|CRITICAL","recommendation":"CONTINUE|REVISE_RESOLUTION|ESCALATE|STOP","summary":"...","challengedAssumptions":["..."],"risks":["..."],"missingEvidence":["..."],"alternativePaths":["..."],"suggestedResolution":"optional operator-ready resolution text"}',
-    ].join('\n\n'),
+    ].join("\n\n"),
   });
 
   const parsed = extractJsonObject(response.content);
   const sourceDocumentIds = Array.from(
-    new Set(memoryContext.results.map(result => result.document.id)),
+    new Set(memoryContext.results.map((result) => result.document.id)),
   );
   const sourceArtifactIds = Array.from(
     new Set(
       memoryContext.results
-        .map(result => {
+        .map((result) => {
           const metadataArtifactId = result.document.metadata?.artifactId;
-          if (typeof metadataArtifactId === 'string' && metadataArtifactId.trim()) {
+          if (
+            typeof metadataArtifactId === "string" &&
+            metadataArtifactId.trim()
+          ) {
             return metadataArtifactId.trim();
           }
 
           if (
-            ['ARTIFACT', 'HANDOFF', 'HUMAN_INTERACTION'].includes(
+            ["ARTIFACT", "HANDOFF", "HUMAN_INTERACTION"].includes(
               result.document.sourceType,
             ) &&
             result.document.sourceId
@@ -1861,14 +1955,14 @@ const requestContrarianConflictReview = async ({
 
   return {
     review: {
-      status: 'READY',
+      status: "READY",
       reviewerAgentId: reviewer.id,
       generatedAt: new Date().toISOString(),
       severity: normalizeContrarianSeverity(parsed.severity),
       recommendation: normalizeContrarianRecommendation(parsed.recommendation),
       summary:
         normalizeString(parsed.summary) ||
-        'Contrarian review completed without a summary.',
+        "Contrarian review completed without a summary.",
       challengedAssumptions: normalizeStringArray(parsed.challengedAssumptions),
       risks: normalizeStringArray(parsed.risks),
       missingEvidence: normalizeStringArray(parsed.missingEvidence),
@@ -1879,7 +1973,9 @@ const requestContrarianConflictReview = async ({
     },
     usage: response.usage,
     latencyMs: Date.now() - startedAt,
-    retrievalReferences: memoryContext.results.map(result => result.reference),
+    retrievalReferences: memoryContext.results.map(
+      (result) => result.reference,
+    ),
   };
 };
 
@@ -1900,6 +1996,8 @@ const requestStepDecision = async ({
   runId,
   traceId,
   spanId,
+  onLlmDelta,
+  lastToolName,
 }: {
   capability: Capability;
   workItem: WorkItem;
@@ -1911,7 +2009,7 @@ const requestStepDecision = async ({
   artifacts: Artifact[];
   compiledStepContext: CompiledStepContext;
   compiledWorkItemPlan: CompiledWorkItemPlan;
-  toolHistory: Array<{ role: 'assistant' | 'user'; content: string }>;
+  toolHistory: Array<{ role: "assistant" | "user"; content: string }>;
   operatorGuidanceContext?: string;
   /**
    * Mutable carrier so the outer iteration loop can share the rollup
@@ -1921,6 +2019,19 @@ const requestStepDecision = async ({
   runId?: string;
   traceId?: string;
   spanId?: string;
+  /**
+   * SSE-only streaming callback for LLM token deltas (Fix 4).
+   * Each token published here is forwarded to SSE subscribers via
+   * publishRunEvent so operators see the agent reasoning in real time.
+   * Not persisted to the DB — ephemeral per-turn telemetry only.
+   */
+  onLlmDelta?: (delta: string) => void;
+  /**
+   * The toolId of the tool that was just called (Fix 2 — model routing).
+   * Null on the very first turn. Used by resolveModelForTurn to select a
+   * cheaper model for subsequent trivial read turns.
+   */
+  lastToolName?: string | null;
 }): Promise<DecisionEnvelope> => {
   // History rollup (Lever 3): when toolHistory is long, collapse the oldest
   // prefix into a single summary turn produced by the cheapest model on the
@@ -1935,10 +2046,13 @@ const requestStepDecision = async ({
   // tool error, a phase change, or a wait/approval just resolved.
   // These are moments the main model benefits from a fresh condensed
   // snapshot rather than replaying noise.
-  const lastTurnContent = toolHistory[toolHistory.length - 1]?.content ?? '';
+  const lastTurnContent = toolHistory[toolHistory.length - 1]?.content ?? "";
   const forceRollup =
-    /recoverable|write[_ ]control lock|lock held|policy[_ ]denied/i.test(lastTurnContent) ||
-    (runStep.metadata as Record<string, unknown> | undefined)?.phaseTransitioned === true;
+    /recoverable|write[_ ]control lock|lock held|policy[_ ]denied/i.test(
+      lastTurnContent,
+    ) ||
+    (runStep.metadata as Record<string, unknown> | undefined)
+      ?.phaseTransitioned === true;
   if (rollupEnabled && toolHistory.length > 0) {
     try {
       const { rolled, nextCache } = await rollupToolHistory({
@@ -1960,10 +2074,10 @@ const requestStepDecision = async ({
           runStepId: runStep.id,
           traceId,
           spanId,
-          type: 'HISTORY_ROLLUP',
-          message: `Condensed ${rolled.summarizedTurnCount} older tool turn${rolled.summarizedTurnCount === 1 ? '' : 's'} via budget model${rolled.usedModel ? ` (${rolled.usedModel})` : ''}.`,
+          type: "HISTORY_ROLLUP",
+          message: `Condensed ${rolled.summarizedTurnCount} older tool turn${rolled.summarizedTurnCount === 1 ? "" : "s"} via budget model${rolled.usedModel ? ` (${rolled.usedModel})` : ""}.`,
           details: {
-            stage: 'HISTORY_ROLLUP',
+            stage: "HISTORY_ROLLUP",
             summarizedTurns: rolled.summarizedTurnCount,
             retainedTurns: rolled.retainedTurnCount,
             usedModel: rolled.usedModel,
@@ -1972,14 +2086,17 @@ const requestStepDecision = async ({
         });
       }
     } catch (error) {
-      console.warn('[requestStepDecision] history rollup failed; passing raw toolHistory', error);
+      console.warn(
+        "[requestStepDecision] history rollup failed; passing raw toolHistory",
+        error,
+      );
       effectiveToolHistory = toolHistory;
     }
   }
   const allowedToolIds = compiledStepContext.executionBoundary.allowedToolIds;
   const toolDescriptions = allowedToolIds.length
-    ? listToolDescriptions(allowedToolIds).join('\n')
-    : 'No tools are allowed for this step.';
+    ? listToolDescriptions(allowedToolIds).join("\n")
+    : "No tools are allowed for this step.";
   const approvedWorkspacePaths = getCapabilityWorkspaceRoots(capability);
   const workspaceProfile = detectWorkspaceProfile({
     defaultWorkspacePath: capability.executionConfig.defaultWorkspacePath,
@@ -1993,39 +2110,40 @@ const requestStepDecision = async ({
         workItem.executionContext?.primaryRepositoryId
           ? `Primary work-item repository: ${
               capability.repositories?.find(
-                repository => repository.id === workItem.executionContext?.primaryRepositoryId,
-              )?.label ||
-              workItem.executionContext.primaryRepositoryId
+                (repository) =>
+                  repository.id ===
+                  workItem.executionContext?.primaryRepositoryId,
+              )?.label || workItem.executionContext.primaryRepositoryId
             }`
           : null,
         capability.executionConfig.defaultWorkspacePath
           ? `Default approved workspace path: ${capability.executionConfig.defaultWorkspacePath}`
           : null,
-        `Approved workspace paths: ${approvedWorkspacePaths.join(', ')}`,
+        `Approved workspace paths: ${approvedWorkspacePaths.join(", ")}`,
         ...buildWorkspaceProfilePromptLines(workspaceProfile),
-        'When using workspace tools, prefer relative file paths and omit workspacePath unless you intentionally need a non-default approved workspace or approved subfolder.',
-        'If you do provide workspacePath, it must be the approved root or a child folder inside one approved workspace root. Do not use sibling paths or parent traversal.',
+        "When using workspace tools, prefer relative file paths and omit workspacePath unless you intentionally need a non-default approved workspace or approved subfolder.",
+        "If you do provide workspacePath, it must be the approved root or a child folder inside one approved workspace root. Do not use sibling paths or parent traversal.",
       ]
         .filter(Boolean)
-        .join('\n')
-    : 'No approved workspace paths are configured for this capability.';
+        .join("\n")
+    : "No approved workspace paths are configured for this capability.";
   const startedAt = Date.now();
   const workItemInputArtifacts = artifacts
     .filter(
-      artifact =>
+      (artifact) =>
         artifact.workItemId === workItem.id &&
-        artifact.direction === 'INPUT' &&
+        artifact.direction === "INPUT" &&
         Boolean(artifact.contentText || artifact.summary),
     )
     .slice(0, 4);
   const workItemInputArtifactPrompt = workItemInputArtifacts.length
     ? workItemInputArtifacts
         .map(
-          artifact =>
-            `- ${artifact.name}${artifact.mimeType ? ` (${artifact.mimeType})` : ''}\n${summarizeText(artifact.contentText || artifact.summary || '', 1200)}`,
+          (artifact) =>
+            `- ${artifact.name}${artifact.mimeType ? ` (${artifact.mimeType})` : ""}\n${summarizeText(artifact.contentText || artifact.summary || "", 1200)}`,
         )
-        .join('\n\n')
-    : 'No uploaded work item input files were attached.';
+        .join("\n\n")
+    : "No uploaded work item input files were attached.";
   const memoryContext = await buildMemoryContext({
     capabilityId: capability.id || workItem.capabilityId,
     agentId: agent.id,
@@ -2034,10 +2152,10 @@ const requestStepDecision = async ({
       workItem.description,
       step.action,
       step.name,
-      ...workItemInputArtifacts.map(artifact => artifact.name),
+      ...workItemInputArtifacts.map((artifact) => artifact.name),
     ]
       .filter(Boolean)
-      .join('\n'),
+      .join("\n"),
   });
   const capabilityBriefingPrompt = buildCapabilityBriefingPrompt(
     buildCapabilityBriefing(capability),
@@ -2058,36 +2176,37 @@ const requestStepDecision = async ({
   // flat .join('\n\n'): fragments emit in input order, nothing evicted.
   const providerForEstimate = normalizeProviderForEstimate(
     resolveAgentProviderKey(agent),
+    agent.model,
   );
-  const tok = (text: string, kind: 'prose' | 'code' | 'json' = 'prose') =>
-    estimateTokens(text, { provider: providerForEstimate, kind });
+  const tok = (text: string, kind: "prose" | "code" | "json" = "prose") =>
+    estimateTokens(text, { provider: providerForEstimate, model: agent.model, kind });
 
   const historyText = effectiveToolHistory.length
     ? `Prior tool loop transcript:\n${effectiveToolHistory
-        .map(item => `${item.role.toUpperCase()}: ${item.content}`)
-        .join('\n\n')}`
-    : '';
+        .map((item) => `${item.role.toUpperCase()}: ${item.content}`)
+        .join("\n\n")}`
+    : "";
   const historySource: ContextSource = rollupCacheRef?.current?.summary
-    ? 'HISTORY_ROLLUP'
-    : 'RAW_TAIL_TURNS';
+    ? "HISTORY_ROLLUP"
+    : "RAW_TAIL_TURNS";
 
   const systemCoreText = [
-    'Treat the compiled step contract as authoritative. Stay inside the execution boundary, use the required inputs and artifact checklist as the operating contract, and never invent orchestration outside this single step.',
-    'Use prior-step hand-offs, retrieved memory, and resolved human inputs as authoritative downstream context. Do not ask for information that is already present in those sections. If you truly need more input, explain exactly what new gap remains and why the existing context is insufficient.',
-    'If explicit operator guidance says to skip build, test, or docs execution for this attempt because the command template is unavailable or intentionally waived, do not keep retrying that tool. Complete the step with a clear note about the skipped validation, or pause for input only if the operator instruction is genuinely ambiguous.',
-    'Return JSON with one of these shapes:',
+    "Treat the compiled step contract as authoritative. Stay inside the execution boundary, use the required inputs and artifact checklist as the operating contract, and never invent orchestration outside this single step.",
+    "Use prior-step hand-offs, retrieved memory, and resolved human inputs as authoritative downstream context. Do not ask for information that is already present in those sections. If you truly need more input, explain exactly what new gap remains and why the existing context is insufficient.",
+    "If explicit operator guidance says to skip build, test, or docs execution for this attempt because the command template is unavailable or intentionally waived, do not keep retrying that tool. Complete the step with a clear note about the skipped validation, or pause for input only if the operator instruction is genuinely ambiguous.",
+    "Return JSON with one of these shapes:",
     '1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"workspace_read","args":{"path":"README.md"}}}',
     '2. {"action":"complete","reasoning":"...","summary":"..."}',
     '3. {"action":"pause_for_input","reasoning":"...","wait":{"type":"INPUT","message":"..."}}',
     '4. {"action":"pause_for_approval","reasoning":"...","wait":{"type":"APPROVAL","message":"..."}}',
     '5. {"action":"pause_for_conflict","reasoning":"...","wait":{"type":"CONFLICT_RESOLUTION","message":"..."}}',
     '6. {"action":"fail","reasoning":"...","summary":"..."}',
-    'Only choose tool ids from the allowed list. If no tools are allowed, either complete, pause, or fail.',
-    'Use pause_for_conflict when competing requirements, unsafe assumptions, policy disagreement, or contradictory evidence need an explicit operator decision before continuation.',
+    "Only choose tool ids from the allowed list. If no tools are allowed, either complete, pause, or fail.",
+    "Use pause_for_conflict when competing requirements, unsafe assumptions, policy disagreement, or contradictory evidence need an explicit operator decision before continuation.",
     `Story title: ${workItem.title}`,
     `Story request: ${workItem.description}`,
-    'Decide the next execution action for this workflow step.',
-  ].join('\n\n');
+    "Decide the next execution action for this workflow step.",
+  ].join("\n\n");
 
   const briefingText = [
     `Capability briefing:\n${capabilityBriefingPrompt}`,
@@ -2096,77 +2215,77 @@ const requestStepDecision = async ({
     `Current step: ${step.name}`,
     `Current phase: ${workItem.phase}`,
     `Current step attempt: ${runStep.attemptCount}`,
-  ].join('\n\n');
+  ].join("\n\n");
 
   const stepContractJson = JSON.stringify(compiledStepContext, null, 2);
   const stepContractText = [
     `Step contract:\n${stepContractJson}`,
     `Step objective: ${compiledStepContext.objective}`,
-    `Step guidance: ${compiledStepContext.description || 'None'}`,
-    `Execution notes: ${compiledStepContext.executionNotes || 'None'}`,
-    `Workflow hand-off context from prior completed steps:\n${compiledStepContext.handoffContext || 'None'}`,
-    `Resolved human input/conflict context for this step:\n${compiledStepContext.resolvedWaitContext || 'None'}`,
-  ].join('\n\n');
+    `Step guidance: ${compiledStepContext.description || "None"}`,
+    `Execution notes: ${compiledStepContext.executionNotes || "None"}`,
+    `Workflow hand-off context from prior completed steps:\n${compiledStepContext.handoffContext || "None"}`,
+    `Resolved human input/conflict context for this step:\n${compiledStepContext.resolvedWaitContext || "None"}`,
+  ].join("\n\n");
 
   const memoryHitsText = `Attached work item input files:\n${workItemInputArtifactPrompt}`;
 
   const toolDescriptionsText = [
     `Allowed tools:\n${toolDescriptions}`,
     `Workspace policy:\n${workspaceGuidance}`,
-  ].join('\n\n');
+  ].join("\n\n");
 
   const planSummaryText = `Execution plan summary: ${compiledWorkItemPlan.planSummary}`;
   const operatorGuidanceText = `Explicit operator guidance and override context:\n${
-    operatorGuidanceContext || 'None'
+    operatorGuidanceContext || "None"
   }`;
 
   const fragments: BudgetFragment[] = [
     {
-      source: 'SYSTEM_CORE',
+      source: "SYSTEM_CORE",
       text: systemCoreText,
-      estimatedTokens: tok(systemCoreText, 'prose'),
+      estimatedTokens: tok(systemCoreText, "prose"),
     },
     {
-      source: 'TOOL_DESCRIPTIONS',
+      source: "TOOL_DESCRIPTIONS",
       text: toolDescriptionsText,
-      estimatedTokens: tok(toolDescriptionsText, 'prose'),
+      estimatedTokens: tok(toolDescriptionsText, "prose"),
     },
     {
-      source: 'STEP_CONTRACT',
+      source: "STEP_CONTRACT",
       text: stepContractText,
-      estimatedTokens: tok(stepContractText, 'json'),
+      estimatedTokens: tok(stepContractText, "json"),
       meta: { stepName: step.name, attempt: runStep.attemptCount },
     },
     {
-      source: 'WORK_ITEM_BRIEFING',
+      source: "WORK_ITEM_BRIEFING",
       text: briefingText,
-      estimatedTokens: tok(briefingText, 'prose'),
+      estimatedTokens: tok(briefingText, "prose"),
       meta: { workflow: workflow.name, phase: workItem.phase },
     },
     {
-      source: 'OPERATOR_GUIDANCE',
+      source: "OPERATOR_GUIDANCE",
       text: operatorGuidanceText,
-      estimatedTokens: tok(operatorGuidanceText, 'prose'),
+      estimatedTokens: tok(operatorGuidanceText, "prose"),
     },
     {
-      source: 'PLAN_SUMMARY',
+      source: "PLAN_SUMMARY",
       text: planSummaryText,
-      estimatedTokens: tok(planSummaryText, 'prose'),
+      estimatedTokens: tok(planSummaryText, "prose"),
     },
     {
-      source: 'MEMORY_HITS',
+      source: "MEMORY_HITS",
       text: memoryHitsText,
-      estimatedTokens: tok(memoryHitsText, 'prose'),
+      estimatedTokens: tok(memoryHitsText, "prose"),
     },
     ...(historyText
       ? [
           {
             source: historySource,
             text: historyText,
-            estimatedTokens: tok(historyText, 'prose'),
+            estimatedTokens: tok(historyText, "prose"),
             meta: {
               turnCount: effectiveToolHistory.length,
-              rolledUp: historySource === 'HISTORY_ROLLUP',
+              rolledUp: historySource === "HISTORY_ROLLUP",
             },
           } as BudgetFragment,
         ]
@@ -2180,16 +2299,30 @@ const requestStepDecision = async ({
     reservedOutputTokens: phaseBudget.reservedOutputTokens,
   });
 
+  // Dynamic model routing (Fix 2): choose a cheaper model for trivial tool
+  // turns so the expensive primary model is reserved for decision turns and
+  // write operations. Falls back to agent.model when routing is disabled.
+  const routedModel = resolveModelForTurn(
+    agent,
+    lastToolName ?? null,
+    capability.executionConfig?.agentModelRouting ?? null,
+  );
+
   const response = await invokeScopedCapabilitySession({
     capability,
     agent,
-    scope: workItem.id ? 'WORK_ITEM' : 'TASK',
+    scope: workItem.id ? "WORK_ITEM" : "TASK",
     scopeId: workItem.id || runStep.id,
     workItemPhase: step.phase || workItem.phase,
     developerPrompt:
-      'You are an execution engine inside a capability workflow. Return JSON only with no markdown.',
+      "You are an execution engine inside a capability workflow. Return JSON only with no markdown.",
     memoryPrompt: memoryContext.prompt || undefined,
     prompt: budgeted.assembled,
+    // Real-time LLM token streaming (Fix 4): forward deltas to SSE so
+    // operators see the agent reasoning as it happens.
+    onDelta: onLlmDelta,
+    // Dynamic model routing (Fix 2): override model for this turn.
+    modelOverride: routedModel !== agent.model ? routedModel : undefined,
   });
 
   // Emit a Prompt Receipt (Phase 2 / Lever 7): per-call record of which
@@ -2205,13 +2338,13 @@ const requestStepDecision = async ({
         runStepId: runStep.id,
         traceId,
         spanId,
-        type: 'PROMPT_RECEIPT',
+        type: "PROMPT_RECEIPT",
         message:
           budgeted.receipt.evicted.length > 0
-            ? `Prompt fit under ${phaseBudget.maxInputTokens}-token budget after evicting ${budgeted.receipt.evicted.length} fragment${budgeted.receipt.evicted.length === 1 ? '' : 's'}.`
+            ? `Prompt fit under ${phaseBudget.maxInputTokens}-token budget after evicting ${budgeted.receipt.evicted.length} fragment${budgeted.receipt.evicted.length === 1 ? "" : "s"}.`
             : `Prompt assembled: ${budgeted.receipt.totalEstimatedTokens} / ${phaseBudget.maxInputTokens} estimated tokens across ${budgeted.receipt.included.length} fragments.`,
         details: {
-          stage: 'PROMPT_RECEIPT',
+          stage: "PROMPT_RECEIPT",
           included: budgeted.receipt.included,
           evicted: budgeted.receipt.evicted,
           totalEstimatedTokens: budgeted.receipt.totalEstimatedTokens,
@@ -2223,7 +2356,10 @@ const requestStepDecision = async ({
         },
       });
     } catch (error) {
-      console.warn('[requestStepDecision] failed to emit PROMPT_RECEIPT event', error);
+      console.warn(
+        "[requestStepDecision] failed to emit PROMPT_RECEIPT event",
+        error,
+      );
     }
   }
 
@@ -2247,7 +2383,9 @@ const requestStepDecision = async ({
         model: repaired.model,
         usage: combineUsage(response.usage, repaired.usage),
         latencyMs: Date.now() - startedAt,
-        retrievalReferences: memoryContext.results.map(result => result.reference),
+        retrievalReferences: memoryContext.results.map(
+          (result) => result.reference,
+        ),
       } as DecisionEnvelope;
     }
 
@@ -2256,7 +2394,9 @@ const requestStepDecision = async ({
       model: response.model,
       usage: response.usage,
       latencyMs: Date.now() - startedAt,
-      retrievalReferences: memoryContext.results.map(result => result.reference),
+      retrievalReferences: memoryContext.results.map(
+        (result) => result.reference,
+      ),
     } as DecisionEnvelope;
   } catch (error) {
     if (!(error instanceof Error) || !/valid JSON/i.test(error.message)) {
@@ -2267,19 +2407,21 @@ const requestStepDecision = async ({
       capability,
       workItem,
       workflow,
-        step,
-        runStep,
-        agent,
-        malformedResponse: response.content,
-        repairReason: 'The response did not contain valid JSON.',
-      });
+      step,
+      runStep,
+      agent,
+      malformedResponse: response.content,
+      repairReason: "The response did not contain valid JSON.",
+    });
 
     return {
       decision: repaired.decision,
       model: repaired.model,
       usage: combineUsage(response.usage, repaired.usage),
       latencyMs: Date.now() - startedAt,
-      retrievalReferences: memoryContext.results.map(result => result.reference),
+      retrievalReferences: memoryContext.results.map(
+        (result) => result.reference,
+      ),
     } as DecisionEnvelope;
   }
 };
@@ -2287,7 +2429,9 @@ const requestStepDecision = async ({
 const getNormalizedWorkflowSnapshot = (detail: WorkflowRunDetail) =>
   detail.run.workflowSnapshot;
 
-const getRunBranchState = (detail: WorkflowRunDetail): WorkflowRunBranchState => ({
+const getRunBranchState = (
+  detail: WorkflowRunDetail,
+): WorkflowRunBranchState => ({
   pendingNodeIds: detail.run.branchState?.pendingNodeIds || [],
   completedNodeIds: detail.run.branchState?.completedNodeIds || [],
   activeNodeIds: detail.run.branchState?.activeNodeIds || [],
@@ -2309,10 +2453,12 @@ const getCurrentWorkflowNode = (detail: WorkflowRunDetail) => {
 const getCurrentRunStep = (detail: WorkflowRunDetail) => {
   const currentNode = getCurrentWorkflowNode(detail);
   const runStep = detail.steps.find(
-    item => item.workflowNodeId === currentNode.id,
+    (item) => item.workflowNodeId === currentNode.id,
   );
   if (!runStep) {
-    throw new Error(`Run ${detail.run.id} is missing its current run-step record.`);
+    throw new Error(
+      `Run ${detail.run.id} is missing its current run-step record.`,
+    );
   }
   return runStep;
 };
@@ -2320,7 +2466,8 @@ const getCurrentRunStep = (detail: WorkflowRunDetail) => {
 const getCurrentWorkflowStep = (detail: WorkflowRunDetail) => {
   const workflow = getNormalizedWorkflowSnapshot(detail);
   const step = workflow.steps.find(
-    item => item.id === (detail.run.currentStepId || detail.run.currentNodeId),
+    (item) =>
+      item.id === (detail.run.currentStepId || detail.run.currentNodeId),
   );
   if (!step) {
     throw new Error(`Run ${detail.run.id} has no current workflow step.`);
@@ -2330,8 +2477,8 @@ const getCurrentWorkflowStep = (detail: WorkflowRunDetail) => {
 
 const getNodeTypeFromRunStep = (runStep: WorkflowRunStep, workflow: Workflow) =>
   getWorkflowNode(workflow, runStep.workflowNodeId)?.type ||
-  (runStep.metadata?.nodeType as WorkflowNode['type'] | undefined) ||
-  'DELIVERY';
+  (runStep.metadata?.nodeType as WorkflowNode["type"] | undefined) ||
+  "DELIVERY";
 
 const pickDecisionEdge = ({
   workflow,
@@ -2348,26 +2495,40 @@ const pickDecisionEdge = ({
   }
 
   const latestCompletedStep = detail.steps
-    .filter(step => step.status === 'COMPLETED')
+    .filter((step) => step.status === "COMPLETED")
     .slice()
     .reverse()
-    .find(step => step.workflowNodeId !== node.id);
-  const lastSummary = `${latestCompletedStep?.outputSummary || ''} ${latestCompletedStep?.evidenceSummary || ''}`.toLowerCase();
-  const failureSignals = /(fail|defect|error|rework|retry|blocked|issue)/.test(lastSummary);
-  const successSignals = /(pass|approved|ready|complete|successful|done)/.test(lastSummary);
+    .find((step) => step.workflowNodeId !== node.id);
+  const lastSummary =
+    `${latestCompletedStep?.outputSummary || ""} ${latestCompletedStep?.evidenceSummary || ""}`.toLowerCase();
+  const failureSignals = /(fail|defect|error|rework|retry|blocked|issue)/.test(
+    lastSummary,
+  );
+  const successSignals = /(pass|approved|ready|complete|successful|done)/.test(
+    lastSummary,
+  );
 
   const matchingByCondition = (conditionType: WorkflowEdgeConditionType) =>
-    outgoingEdges.find(edge => edge.conditionType === conditionType);
+    outgoingEdges.find((edge) => edge.conditionType === conditionType);
 
   if (failureSignals) {
-    return matchingByCondition('FAILURE') || matchingByCondition('REJECTED') || outgoingEdges[0];
+    return (
+      matchingByCondition("FAILURE") ||
+      matchingByCondition("REJECTED") ||
+      outgoingEdges[0]
+    );
   }
 
   if (successSignals) {
-    return matchingByCondition('SUCCESS') || matchingByCondition('APPROVED') || matchingByCondition('DEFAULT') || outgoingEdges[0];
+    return (
+      matchingByCondition("SUCCESS") ||
+      matchingByCondition("APPROVED") ||
+      matchingByCondition("DEFAULT") ||
+      outgoingEdges[0]
+    );
   }
 
-  return matchingByCondition('DEFAULT') || outgoingEdges[0];
+  return matchingByCondition("DEFAULT") || outgoingEdges[0];
 };
 
 const resolveGraphTransition = async ({
@@ -2389,9 +2550,15 @@ const resolveGraphTransition = async ({
   const nodes = getWorkflowNodes(workflow);
   const branchState = getRunBranchState(detail);
   const nextBranchState: WorkflowRunBranchState = {
-    pendingNodeIds: branchState.pendingNodeIds.filter(nodeId => nodeId !== completedNode.id),
-    activeNodeIds: branchState.activeNodeIds.filter(nodeId => nodeId !== completedNode.id),
-    completedNodeIds: Array.from(new Set([...branchState.completedNodeIds, completedNode.id])),
+    pendingNodeIds: branchState.pendingNodeIds.filter(
+      (nodeId) => nodeId !== completedNode.id,
+    ),
+    activeNodeIds: branchState.activeNodeIds.filter(
+      (nodeId) => nodeId !== completedNode.id,
+    ),
+    completedNodeIds: Array.from(
+      new Set([...branchState.completedNodeIds, completedNode.id]),
+    ),
     joinState: { ...(branchState.joinState || {}) },
     visitCount: (branchState.visitCount || 0) + 1,
   };
@@ -2402,16 +2569,19 @@ const resolveGraphTransition = async ({
       return;
     }
 
-    if (node.type === 'PARALLEL_JOIN') {
-      const inboundNodeIds = getIncomingWorkflowEdges(workflow, node.id).map(edge => edge.fromNodeId);
-      const completedInboundNodeIds = inboundNodeIds.filter(inboundId =>
+    if (node.type === "PARALLEL_JOIN") {
+      const inboundNodeIds = getIncomingWorkflowEdges(workflow, node.id).map(
+        (edge) => edge.fromNodeId,
+      );
+      const completedInboundNodeIds = inboundNodeIds.filter((inboundId) =>
         nextBranchState.completedNodeIds.includes(inboundId),
       );
       nextBranchState.joinState = {
         ...(nextBranchState.joinState || {}),
         [node.id]: {
           waitingOnNodeIds: inboundNodeIds.filter(
-            inboundId => !nextBranchState.completedNodeIds.includes(inboundId),
+            (inboundId) =>
+              !nextBranchState.completedNodeIds.includes(inboundId),
           ),
           completedInboundNodeIds,
         },
@@ -2432,21 +2602,26 @@ const resolveGraphTransition = async ({
 
   const selectEdgesForNode = (node: WorkflowNode): WorkflowEdge[] => {
     const outgoingEdges = getOutgoingWorkflowEdges(workflow, node.id);
-    if (node.type === 'DECISION') {
+    if (node.type === "DECISION") {
       const chosenEdge = pickDecisionEdge({ workflow, node, detail });
       return chosenEdge ? [chosenEdge] : [];
     }
-    if (node.type === 'PARALLEL_SPLIT') {
+    if (node.type === "PARALLEL_SPLIT") {
       return outgoingEdges;
     }
     return outgoingEdges.length > 0 ? [outgoingEdges[0]] : [];
   };
 
-  selectEdgesForNode(completedNode).forEach(edge => enqueueNode(edge.toNodeId));
+  selectEdgesForNode(completedNode).forEach((edge) =>
+    enqueueNode(edge.toNodeId),
+  );
 
   let nextCurrentNode: WorkflowNode | undefined;
   let safetyCounter = 0;
-  while (nextBranchState.pendingNodeIds.length > 0 && safetyCounter < Math.max(nodes.length * 3, 12)) {
+  while (
+    nextBranchState.pendingNodeIds.length > 0 &&
+    safetyCounter < Math.max(nodes.length * 3, 12)
+  ) {
     safetyCounter += 1;
     nextBranchState.pendingNodeIds = nextBranchState.pendingNodeIds
       .slice()
@@ -2454,28 +2629,37 @@ const resolveGraphTransition = async ({
         const leftNode = getWorkflowNode(workflow, left);
         const rightNode = getWorkflowNode(workflow, right);
         const orderedIds = getWorkflowNodeOrder(workflow);
-        return orderedIds.indexOf(leftNode?.id || '') - orderedIds.indexOf(rightNode?.id || '');
+        return (
+          orderedIds.indexOf(leftNode?.id || "") -
+          orderedIds.indexOf(rightNode?.id || "")
+        );
       });
 
     const candidateId = nextBranchState.pendingNodeIds[0];
     const candidateNode = getWorkflowNode(workflow, candidateId);
     if (!candidateNode) {
       nextBranchState.pendingNodeIds.shift();
-      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(nodeId => nodeId !== candidateId);
+      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(
+        (nodeId) => nodeId !== candidateId,
+      );
       continue;
     }
 
-    if (candidateNode.type === 'END') {
+    if (candidateNode.type === "END") {
       nextBranchState.pendingNodeIds.shift();
-      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(nodeId => nodeId !== candidateId);
+      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(
+        (nodeId) => nodeId !== candidateId,
+      );
       nextBranchState.completedNodeIds = Array.from(
         new Set([...nextBranchState.completedNodeIds, candidateNode.id]),
       );
-      const endRunStep = detail.steps.find(step => step.workflowNodeId === candidateNode.id);
-      if (endRunStep && endRunStep.status !== 'COMPLETED') {
+      const endRunStep = detail.steps.find(
+        (step) => step.workflowNodeId === candidateNode.id,
+      );
+      if (endRunStep && endRunStep.status !== "COMPLETED") {
         await updateWorkflowRunStep({
           ...endRunStep,
-          status: 'COMPLETED',
+          status: "COMPLETED",
           completedAt: new Date().toISOString(),
           outputSummary: summary,
           evidenceSummary: summary,
@@ -2486,15 +2670,19 @@ const resolveGraphTransition = async ({
 
     if (isWorkflowControlNode(candidateNode.type)) {
       nextBranchState.pendingNodeIds.shift();
-      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(nodeId => nodeId !== candidateNode.id);
+      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(
+        (nodeId) => nodeId !== candidateNode.id,
+      );
       nextBranchState.completedNodeIds = Array.from(
         new Set([...nextBranchState.completedNodeIds, candidateNode.id]),
       );
-      const controlRunStep = detail.steps.find(step => step.workflowNodeId === candidateNode.id);
-      if (controlRunStep && controlRunStep.status !== 'COMPLETED') {
+      const controlRunStep = detail.steps.find(
+        (step) => step.workflowNodeId === candidateNode.id,
+      );
+      if (controlRunStep && controlRunStep.status !== "COMPLETED") {
         await updateWorkflowRunStep({
           ...controlRunStep,
-          status: 'COMPLETED',
+          status: "COMPLETED",
           completedAt: new Date().toISOString(),
           outputSummary: `${candidateNode.name} automatically advanced the workflow.`,
           evidenceSummary: `${candidateNode.type} control node processed.`,
@@ -2504,7 +2692,9 @@ const resolveGraphTransition = async ({
           },
         });
       }
-      selectEdgesForNode(candidateNode).forEach(edge => enqueueNode(edge.toNodeId));
+      selectEdgesForNode(candidateNode).forEach((edge) =>
+        enqueueNode(edge.toNodeId),
+      );
       continue;
     }
 
@@ -2513,18 +2703,22 @@ const resolveGraphTransition = async ({
   }
 
   const nextStep = nextCurrentNode
-    ? workflow.steps.find(step => step.id === getDisplayStepIdForNode(workflow, nextCurrentNode?.id))
+    ? workflow.steps.find(
+        (step) =>
+          step.id === getDisplayStepIdForNode(workflow, nextCurrentNode?.id),
+      )
     : undefined;
   const nextRun = (
     await updateWorkflowRun({
       ...detail.run,
       workflowSnapshot: workflow,
-      status: nextCurrentNode ? 'RUNNING' : 'COMPLETED',
+      status: nextCurrentNode ? "RUNNING" : "COMPLETED",
       currentNodeId: nextCurrentNode?.id,
       currentStepId: nextCurrentNode
-        ? getDisplayStepIdForNode(workflow, nextCurrentNode.id) || nextCurrentNode.id
+        ? getDisplayStepIdForNode(workflow, nextCurrentNode.id) ||
+          nextCurrentNode.id
         : undefined,
-      currentPhase: nextCurrentNode?.phase || 'DONE',
+      currentPhase: nextCurrentNode?.phase || "DONE",
       assignedAgentId: nextCurrentNode?.agentId,
       branchState: nextBranchState,
       pauseReason: undefined,
@@ -2559,7 +2753,7 @@ function buildQueuedRunForExternalAdvance({
     // approval advances the graph we must hand the next step back to the
     // executor dispatcher. Leaving the run in RUNNING here strands the
     // workflow on the next step with no active worker holding the lease.
-    status: 'QUEUED',
+    status: "QUEUED",
     queueReason: queuedDispatch.queueReason,
     assignedExecutorId: queuedDispatch.assignedExecutorId,
     pauseReason: undefined,
@@ -2583,61 +2777,72 @@ const buildWorkflowHandoffContext = ({
   const currentStepIndex = getCurrentRunStep(detail).stepIndex;
   const priorCompletedSteps = detail.steps
     .filter(
-      step =>
-        step.status === 'COMPLETED' &&
-        !isWorkflowControlNode(getNodeTypeFromRunStep(step, detail.run.workflowSnapshot)) &&
+      (step) =>
+        step.status === "COMPLETED" &&
+        !isWorkflowControlNode(
+          getNodeTypeFromRunStep(step, detail.run.workflowSnapshot),
+        ) &&
         (currentStepIndex === -1 || step.stepIndex < currentStepIndex),
     )
     .sort((left, right) => left.stepIndex - right.stepIndex);
 
-  const priorStepLines = priorCompletedSteps.map(step => {
+  const priorStepLines = priorCompletedSteps.map((step) => {
     const artifactSummaries = artifacts
-      .filter(artifact => artifact.runId === detail.run.id && artifact.runStepId === step.id)
-      .map(artifact =>
-        artifact.summary ? `${artifact.name}: ${artifact.summary}` : artifact.name,
+      .filter(
+        (artifact) =>
+          artifact.runId === detail.run.id && artifact.runStepId === step.id,
+      )
+      .map((artifact) =>
+        artifact.summary
+          ? `${artifact.name}: ${artifact.summary}`
+          : artifact.name,
       );
     const resolvedInputs = detail.waits
-      .filter(wait => wait.runStepId === step.id && wait.status === 'RESOLVED')
-      .map(wait =>
-        `${wait.type.toLowerCase().replace(/_/g, ' ')} resolved: ${wait.resolution || 'resolved'}`,
+      .filter(
+        (wait) => wait.runStepId === step.id && wait.status === "RESOLVED",
+      )
+      .map(
+        (wait) =>
+          `${wait.type.toLowerCase().replace(/_/g, " ")} resolved: ${wait.resolution || "resolved"}`,
       );
 
     return [
-      `${step.name}: ${step.outputSummary || step.evidenceSummary || 'Completed.'}`,
+      `${step.name}: ${step.outputSummary || step.evidenceSummary || "Completed."}`,
       resolvedInputs.length > 0
-        ? `Resolved inputs: ${resolvedInputs.join(' | ')}`
+        ? `Resolved inputs: ${resolvedInputs.join(" | ")}`
         : null,
       artifactSummaries.length > 0
-        ? `Artifacts: ${artifactSummaries.join(' | ')}`
+        ? `Artifacts: ${artifactSummaries.join(" | ")}`
         : null,
     ]
       .filter(Boolean)
-      .join('\n');
+      .join("\n");
   });
 
   const recentHistory = workItem.history
     .slice(-6)
-    .map(entry => `${entry.action}: ${entry.detail}`);
+    .map((entry) => `${entry.action}: ${entry.detail}`);
 
   const runWideResolvedInputs = detail.waits
-    .filter(wait => wait.status === 'RESOLVED')
-    .map(wait =>
-      `${wait.type.toLowerCase().replace(/_/g, ' ')} by ${wait.resolvedBy || 'unknown'}: ${wait.resolution || 'resolved'}`,
+    .filter((wait) => wait.status === "RESOLVED")
+    .map(
+      (wait) =>
+        `${wait.type.toLowerCase().replace(/_/g, " ")} by ${wait.resolvedBy || "unknown"}: ${wait.resolution || "resolved"}`,
     );
 
   const sections = [
     priorStepLines.length > 0
-      ? `Completed prior-step hand-offs:\n${priorStepLines.join('\n\n')}`
+      ? `Completed prior-step hand-offs:\n${priorStepLines.join("\n\n")}`
       : null,
     runWideResolvedInputs.length > 0
-      ? `Resolved human inputs and decisions:\n${runWideResolvedInputs.join('\n')}`
+      ? `Resolved human inputs and decisions:\n${runWideResolvedInputs.join("\n")}`
       : null,
     recentHistory.length > 0
-      ? `Recent workflow history:\n${recentHistory.join('\n')}`
+      ? `Recent workflow history:\n${recentHistory.join("\n")}`
       : null,
   ].filter(Boolean) as string[];
 
-  return sections.length > 0 ? sections.join('\n\n') : undefined;
+  return sections.length > 0 ? sections.join("\n\n") : undefined;
 };
 
 const buildResolvedWaitContext = ({
@@ -2648,20 +2853,22 @@ const buildResolvedWaitContext = ({
   runStep: WorkflowRunStep;
 }) => {
   const stepWaits = detail.waits
-    .filter(wait => wait.runStepId === runStep.id && wait.status === 'RESOLVED')
-    .map(wait =>
+    .filter(
+      (wait) => wait.runStepId === runStep.id && wait.status === "RESOLVED",
+    )
+    .map((wait) =>
       [
-        `Resolved ${wait.type.toLowerCase().replace(/_/g, ' ')}`,
+        `Resolved ${wait.type.toLowerCase().replace(/_/g, " ")}`,
         `requested by ${wait.requestedBy}`,
         wait.resolvedBy ? `resolved by ${wait.resolvedBy}` : null,
         wait.resolution ? `details: ${wait.resolution}` : null,
       ]
         .filter(Boolean)
-        .join(' | '),
+        .join(" | "),
     );
 
   const lastResolution =
-    typeof runStep.metadata?.lastResolution === 'string'
+    typeof runStep.metadata?.lastResolution === "string"
       ? runStep.metadata.lastResolution
       : null;
 
@@ -2670,7 +2877,7 @@ const buildResolvedWaitContext = ({
     lastResolution ? `Latest provided detail: ${lastResolution}` : null,
   ].filter(Boolean) as string[];
 
-  return lines.length > 0 ? lines.join('\n') : undefined;
+  return lines.length > 0 ? lines.join("\n") : undefined;
 };
 
 const buildOperatorGuidanceContext = ({
@@ -2681,68 +2888,67 @@ const buildOperatorGuidanceContext = ({
   artifacts: Artifact[];
 }) => {
   const guidanceHistory = workItem.history
-    .filter(entry =>
+    .filter((entry) =>
       [
-        'Agent guidance added',
-        'Stage control session completed',
-        'Changes requested',
-        'Conflict resolved',
-        'Human input provided',
+        "Agent guidance added",
+        "Stage control session completed",
+        "Changes requested",
+        "Conflict resolved",
+        "Human input provided",
       ].includes(entry.action),
     )
     .slice(-6)
-    .map(entry => `${entry.action}: ${entry.detail}`);
+    .map((entry) => `${entry.action}: ${entry.detail}`);
 
   const guidanceArtifacts = artifacts
     .filter(
-      artifact =>
+      (artifact) =>
         artifact.workItemId === workItem.id &&
-        (
-          artifact.artifactKind === 'INPUT_NOTE' ||
-          artifact.artifactKind === 'STAGE_CONTROL_NOTE' ||
-          artifact.artifactKind === 'CONFLICT_RESOLUTION' ||
-          artifact.artifactKind === 'APPROVAL_RECORD'
-        ),
+        (artifact.artifactKind === "INPUT_NOTE" ||
+          artifact.artifactKind === "STAGE_CONTROL_NOTE" ||
+          artifact.artifactKind === "CONFLICT_RESOLUTION" ||
+          artifact.artifactKind === "APPROVAL_RECORD"),
     )
     .slice()
     .sort(
       (left, right) =>
-        new Date(right.created || 0).getTime() - new Date(left.created || 0).getTime(),
+        new Date(right.created || 0).getTime() -
+        new Date(left.created || 0).getTime(),
     )
     .slice(0, 4)
     .reverse()
     .map(
-      artifact =>
-        `${artifact.name}: ${artifact.summary || compactMarkdownSummary(artifact.contentText || '')}`,
+      (artifact) =>
+        `${artifact.name}: ${artifact.summary || compactMarkdownSummary(artifact.contentText || "")}`,
     );
 
   const sections = [
     guidanceHistory.length > 0
-      ? `Recent operator guidance history:\n${guidanceHistory.join('\n')}`
+      ? `Recent operator guidance history:\n${guidanceHistory.join("\n")}`
       : null,
     guidanceArtifacts.length > 0
-      ? `Latest operator guidance artifacts:\n${guidanceArtifacts.join('\n')}`
+      ? `Latest operator guidance artifacts:\n${guidanceArtifacts.join("\n")}`
       : null,
   ].filter(Boolean) as string[];
 
-  return sections.length > 0 ? sections.join('\n\n') : undefined;
+  return sections.length > 0 ? sections.join("\n\n") : undefined;
 };
 
 const buildStructuredInputWaitMessage = (
   step: WorkflowStep,
   missingInputs: CompiledRequiredInputField[],
 ) => {
-  const labels = missingInputs.map(input => input.label);
+  const labels = missingInputs.map((input) => input.label);
 
   if (labels.length === 1) {
     return `${step.name} needs one more structured input before execution can continue: ${labels[0]}.`;
   }
 
   if (labels.length === 2) {
-    return `${step.name} needs two structured inputs before execution can continue: ${labels.join(' and ')}.`;
+    return `${step.name} needs two structured inputs before execution can continue: ${labels.join(" and ")}.`;
   }
 
-  return `${step.name} is waiting for ${labels.length} structured inputs before execution can continue: ${labels.join(', ')}.`;
+  return `${step.name} is waiting for ${labels.length} structured inputs before execution can continue: ${labels.join(", ")}.`;
 };
 
 const buildExecutionPlanArtifact = ({
@@ -2759,47 +2965,47 @@ const buildExecutionPlanArtifact = ({
   id: createArtifactId(),
   name: `${step.name} Execution Plan`,
   capabilityId: detail.run.capabilityId,
-  type: 'Execution Plan',
+  type: "Execution Plan",
   version: `run-${detail.run.attemptNumber}`,
   agent: step.agentId,
   created: plan.compiledAt,
-  direction: 'OUTPUT',
+  direction: "OUTPUT",
   connectedAgentId: step.agentId,
   sourceWorkflowId: detail.run.workflowId,
   runId: detail.run.id,
   runStepId: runStep.id,
   summary: compactMarkdownSummary(plan.planSummary),
-  artifactKind: 'EXECUTION_PLAN',
+  artifactKind: "EXECUTION_PLAN",
   phase: step.phase,
   workItemId: detail.run.workItemId,
   sourceRunId: detail.run.id,
   sourceRunStepId: runStep.id,
-  contentFormat: 'MARKDOWN',
-  mimeType: 'text/markdown',
+  contentFormat: "MARKDOWN",
+  mimeType: "text/markdown",
   fileName: `${toFileSlug(detail.run.workItemId)}-${toFileSlug(step.name)}-execution-plan.md`,
   contentText: `# ${step.name} Execution Plan\n\n${buildMarkdownArtifact([
-    ['Work Item', detail.run.workItemId],
-    ['Workflow', detail.run.workflowSnapshot.name],
-    ['Phase', getLifecyclePhaseLabel(undefined, step.phase)],
-    ['Current Step', step.name],
-    ['Plan Summary', plan.planSummary],
+    ["Work Item", detail.run.workItemId],
+    ["Workflow", detail.run.workflowSnapshot.name],
+    ["Phase", getLifecyclePhaseLabel(undefined, step.phase)],
+    ["Current Step", step.name],
+    ["Plan Summary", plan.planSummary],
     [
-      'Required Inputs',
+      "Required Inputs",
       plan.currentStep.requiredInputs
-        .map(input => `${input.label} (${input.status})`)
-        .join(', '),
+        .map((input) => `${input.label} (${input.status})`)
+        .join(", "),
     ],
     [
-      'Completion Checklist',
+      "Completion Checklist",
       plan.currentStep.completionChecklist.length > 0
-        ? plan.currentStep.completionChecklist.join('\n')
-        : 'Complete the step when the current objective and evidence contract are satisfied.',
+        ? plan.currentStep.completionChecklist.join("\n")
+        : "Complete the step when the current objective and evidence contract are satisfied.",
     ],
     [
-      'Allowed Tools',
+      "Allowed Tools",
       plan.currentStep.executionBoundary.allowedToolIds.length > 0
-        ? plan.currentStep.executionBoundary.allowedToolIds.join(', ')
-        : 'No tools allowed',
+        ? plan.currentStep.executionBoundary.allowedToolIds.join(", ")
+        : "No tools allowed",
     ],
   ])}`,
   contentJson: plan,
@@ -2818,7 +3024,11 @@ const syncRunningProjection = async ({
   agent: CapabilityAgent;
   historyMessage: string;
 }) => {
-  const projection = await resolveProjectionContext(detail.run.capabilityId, detail.run.workItemId, detail.run.workflowSnapshot);
+  const projection = await resolveProjectionContext(
+    detail.run.capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
   const currentStep = getCurrentWorkflowStep(detail);
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
@@ -2830,14 +3040,20 @@ const syncRunningProjection = async ({
     }),
     currentStepId: currentStep.id,
     assignedAgentId: currentStep.agentId,
-    status: 'ACTIVE',
+    status: "ACTIVE",
     pendingRequest: undefined,
     blocker: undefined,
     activeRunId: detail.run.id,
     lastRunId: detail.run.id,
     history: [
       ...projection.workItem.history,
-      createHistoryEntry(agent.name, 'Execution running', historyMessage, currentStep.phase, 'ACTIVE'),
+      createHistoryEntry(
+        agent.name,
+        "Execution running",
+        historyMessage,
+        currentStep.phase,
+        "ACTIVE",
+      ),
     ],
   };
 
@@ -2871,13 +3087,17 @@ const syncWaitingProjection = async ({
   waitMessage: string;
   artifacts?: Artifact[];
 }) => {
-  const projection = await resolveProjectionContext(detail.run.capabilityId, detail.run.workItemId, detail.run.workflowSnapshot);
+  const projection = await resolveProjectionContext(
+    detail.run.capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
   const currentStep = getCurrentWorkflowStep(detail);
   const nextArtifacts = artifacts
     ? replaceArtifacts(projection.workspace.artifacts, artifacts)
     : undefined;
   const nextStatus: WorkItemStatus =
-    waitType === 'APPROVAL' ? 'PENDING_APPROVAL' : 'BLOCKED';
+    waitType === "APPROVAL" ? "PENDING_APPROVAL" : "BLOCKED";
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     phase: currentStep.phase,
@@ -2902,8 +3122,8 @@ const syncWaitingProjection = async ({
     history: [
       ...projection.workItem.history,
       createHistoryEntry(
-        'System',
-        waitType === 'APPROVAL' ? 'Approval requested' : 'Execution paused',
+        "System",
+        waitType === "APPROVAL" ? "Approval requested" : "Execution paused",
         waitMessage,
         currentStep.phase,
         nextStatus,
@@ -2948,9 +3168,14 @@ const syncCompletedProjection = async ({
   artifacts: Artifact[];
   toolInvocationId?: string;
 }) => {
-  const projection = await resolveProjectionContext(detail.run.capabilityId, detail.run.workItemId, detail.run.workflowSnapshot);
+  const projection = await resolveProjectionContext(
+    detail.run.capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
   const primaryArtifact =
-    artifacts.find(artifact => artifact.artifactKind === 'PHASE_OUTPUT') || artifacts[0];
+    artifacts.find((artifact) => artifact.artifactKind === "PHASE_OUTPUT") ||
+    artifacts[0];
   const nextWorkItem: WorkItem = nextStep
     ? {
         ...projection.workItem,
@@ -2971,7 +3196,7 @@ const syncCompletedProjection = async ({
           ...projection.workItem.history,
           createHistoryEntry(
             completedStep.agentId,
-            'Execution completed',
+            "Execution completed",
             `${completedStep.name} completed. ${summary}`,
             nextStep.phase,
             getStepStatus(nextStep),
@@ -2980,10 +3205,10 @@ const syncCompletedProjection = async ({
       }
     : {
         ...projection.workItem,
-        phase: 'DONE',
+        phase: "DONE",
         currentStepId: undefined,
         assignedAgentId: undefined,
-        status: 'COMPLETED',
+        status: "COMPLETED",
         pendingRequest: undefined,
         blocker: undefined,
         activeRunId: undefined,
@@ -2992,34 +3217,37 @@ const syncCompletedProjection = async ({
           ...projection.workItem.history,
           createHistoryEntry(
             completedStep.agentId,
-            'Story completed',
+            "Story completed",
             summary,
-            'DONE',
-            'COMPLETED',
+            "DONE",
+            "COMPLETED",
           ),
         ],
       };
 
-  const nextArtifacts = replaceArtifacts(projection.workspace.artifacts, artifacts);
+  const nextArtifacts = replaceArtifacts(
+    projection.workspace.artifacts,
+    artifacts,
+  );
   await persistProjection({
     capabilityId: detail.run.capabilityId,
     workspace: projection.workspace,
     workItem: nextWorkItem,
     workflow: detail.run.workflowSnapshot,
     artifacts: nextArtifacts,
-    taskMutator: tasks =>
+    taskMutator: (tasks) =>
       updateTasksForCurrentStep({
         tasks,
         workItem: nextWorkItem,
         step: completedStep,
         run: detail.run,
         runStep: completedRunStep,
-        status: 'COMPLETED',
+        status: "COMPLETED",
         executionNotes: `${completedStep.name} completed. ${summary}`,
         producedOutputs: [
           {
             name: primaryArtifact?.name || `${completedStep.name} Output`,
-            status: 'completed',
+            status: "completed",
             artifactId: primaryArtifact?.id,
             runId: detail.run.id,
             runStepId: completedRunStep.id,
@@ -3043,7 +3271,7 @@ const syncCompletedProjection = async ({
           outputSummary: summary,
           outputTitle: primaryArtifact?.name || `${completedStep.name} Output`,
           artifactId: primaryArtifact?.id,
-          outputStatus: 'completed',
+          outputStatus: "completed",
         },
       }),
     ],
@@ -3051,7 +3279,7 @@ const syncCompletedProjection = async ({
   await queueExperienceDistillationRefresh({
     capabilityId: detail.run.capabilityId,
     agentId: completedStep.agentId,
-    outcome: 'COMPLETED',
+    outcome: "COMPLETED",
     workItemId: projection.workItem.id,
     runId: detail.run.id,
   }).catch(() => undefined);
@@ -3067,10 +3295,17 @@ const syncFailedProjection = async ({
   detail: WorkflowRunDetail;
   message: string;
 }) => {
-  const projection = await resolveProjectionContext(detail.run.capabilityId, detail.run.workItemId, detail.run.workflowSnapshot);
+  const projection = await resolveProjectionContext(
+    detail.run.capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
   const currentStep = getCurrentWorkflowStep(detail);
   const runStep = getCurrentRunStep(detail);
-  const recoveryMessage = buildExecutionFailureRecoveryMessage(currentStep, message);
+  const recoveryMessage = buildExecutionFailureRecoveryMessage(
+    currentStep,
+    message,
+  );
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     phase: currentStep.phase,
@@ -3081,31 +3316,37 @@ const syncFailedProjection = async ({
     }),
     currentStepId: currentStep.id,
     assignedAgentId: currentStep.agentId,
-    status: 'BLOCKED',
+    status: "BLOCKED",
     pendingRequest: {
-      type: 'INPUT',
+      type: "INPUT",
       message: recoveryMessage,
       requestedBy: currentStep.agentId,
       timestamp: new Date().toISOString(),
     },
     blocker: {
-      type: 'HUMAN_INPUT',
+      type: "HUMAN_INPUT",
       message: recoveryMessage,
       requestedBy: currentStep.agentId,
       timestamp: new Date().toISOString(),
-      status: 'OPEN',
+      status: "OPEN",
     },
     activeRunId: undefined,
     lastRunId: detail.run.id,
     history: [
       ...projection.workItem.history,
-      createHistoryEntry('System', 'Execution failed', message, currentStep.phase, 'BLOCKED'),
       createHistoryEntry(
-        'System',
-        'Guidance requested',
+        "System",
+        "Execution failed",
+        message,
+        currentStep.phase,
+        "BLOCKED",
+      ),
+      createHistoryEntry(
+        "System",
+        "Guidance requested",
         recoveryMessage,
         currentStep.phase,
-        'BLOCKED',
+        "BLOCKED",
       ),
     ],
   };
@@ -3115,14 +3356,14 @@ const syncFailedProjection = async ({
     workspace: projection.workspace,
     workItem: nextWorkItem,
     workflow: detail.run.workflowSnapshot,
-    taskMutator: tasks =>
+    taskMutator: (tasks) =>
       updateTasksForCurrentStep({
         tasks,
         workItem: nextWorkItem,
         step: currentStep,
         run: detail.run,
         runStep,
-        status: 'ALERT',
+        status: "ALERT",
         executionNotes: message,
       }),
     logsToAppend: [
@@ -3131,7 +3372,7 @@ const syncFailedProjection = async ({
         taskId: projection.workItem.id,
         agentId: currentStep.agentId,
         message,
-        level: 'ERROR',
+        level: "ERROR",
         runId: detail.run.id,
         runStepId: runStep.id,
         traceId: detail.run.traceId,
@@ -3141,7 +3382,7 @@ const syncFailedProjection = async ({
   await queueExperienceDistillationRefresh({
     capabilityId: detail.run.capabilityId,
     agentId: currentStep.agentId,
-    outcome: 'FAILED',
+    outcome: "FAILED",
     workItemId: projection.workItem.id,
     runId: detail.run.id,
   }).catch(() => undefined);
@@ -3170,35 +3411,34 @@ const buildArtifactFromStepCompletion = ({
   id: createArtifactId(),
   name: `${step.name} Output`,
   capabilityId: detail.run.capabilityId,
-  type:
-    isTestingWorkflowStep(step)
-      ? 'Test Evidence'
-      : step.stepType === 'GOVERNANCE_GATE'
-      ? 'Governance Evidence'
-      : 'Execution Output',
+  type: isTestingWorkflowStep(step)
+    ? "Test Evidence"
+    : step.stepType === "GOVERNANCE_GATE"
+      ? "Governance Evidence"
+      : "Execution Output",
   version: `run-${detail.run.attemptNumber}`,
   agent: step.agentId,
   created: new Date().toISOString(),
-  direction: 'OUTPUT',
+  direction: "OUTPUT",
   connectedAgentId: step.agentId,
   sourceWorkflowId: detail.run.workflowId,
   runId: detail.run.id,
   runStepId: getCurrentRunStep(detail).id,
   toolInvocationId,
   summary: compactMarkdownSummary(summary),
-  artifactKind: 'PHASE_OUTPUT',
+  artifactKind: "PHASE_OUTPUT",
   phase: step.phase,
   workItemId: detail.run.workItemId,
   sourceRunId: detail.run.id,
   sourceRunStepId: getCurrentRunStep(detail).id,
-  contentFormat: 'MARKDOWN',
-  mimeType: 'text/markdown',
+  contentFormat: "MARKDOWN",
+  mimeType: "text/markdown",
   fileName: `${toFileSlug(detail.run.workItemId)}-${toFileSlug(step.name)}-output.md`,
   contentText: `# ${step.name} Output\n\n${buildMarkdownArtifact([
-    ['Work Item', `${detail.run.workItemId}`],
-    ['Phase', getLifecyclePhaseLabel(undefined, step.phase)],
-    ['Agent', step.agentId],
-    ['Summary', summary],
+    ["Work Item", `${detail.run.workItemId}`],
+    ["Phase", getLifecyclePhaseLabel(undefined, step.phase)],
+    ["Agent", step.agentId],
+    ["Summary", summary],
   ])}`,
   downloadable: true,
   traceId: detail.run.traceId,
@@ -3218,7 +3458,7 @@ const buildHandoffArtifact = ({
 }: {
   detail: WorkflowRunDetail;
   workItem?: WorkItem;
-  lifecycle?: Capability['lifecycle'];
+  lifecycle?: Capability["lifecycle"];
   step: WorkflowStep;
   nextStep: WorkflowStep;
   runStep: WorkflowRunStep;
@@ -3227,11 +3467,11 @@ const buildHandoffArtifact = ({
   id: createArtifactId(),
   name: `${step.name} to ${nextStep.name} Handoff`,
   capabilityId: detail.run.capabilityId,
-  type: 'Handoff Packet',
+  type: "Handoff Packet",
   version: `run-${detail.run.attemptNumber}`,
   agent: step.agentId,
   created: new Date().toISOString(),
-  direction: 'OUTPUT',
+  direction: "OUTPUT",
   connectedAgentId: nextStep.agentId,
   sourceWorkflowId: detail.run.workflowId,
   runId: detail.run.id,
@@ -3239,32 +3479,34 @@ const buildHandoffArtifact = ({
   summary: compactMarkdownSummary(
     `Handoff from ${step.name} to ${nextStep.name}. ${summary}`,
   ),
-  artifactKind: 'HANDOFF_PACKET',
+  artifactKind: "HANDOFF_PACKET",
   phase: nextStep.phase,
   workItemId: detail.run.workItemId,
   sourceRunId: detail.run.id,
   sourceRunStepId: runStep.id,
   handoffFromAgentId: step.agentId,
   handoffToAgentId: nextStep.agentId,
-  contentFormat: 'MARKDOWN',
-  mimeType: 'text/markdown',
+  contentFormat: "MARKDOWN",
+  mimeType: "text/markdown",
   fileName: `${toFileSlug(detail.run.workItemId)}-${toFileSlug(step.name)}-handoff.md`,
-  contentText: `# ${step.name} to ${nextStep.name} Handoff\n\n${buildMarkdownArtifact([
-    ['Work Item', detail.run.workItemId],
-    ['Source Phase', getLifecyclePhaseLabel(lifecycle, step.phase)],
-    ['Target Phase', getLifecyclePhaseLabel(lifecycle, nextStep.phase)],
-    ['Source Agent', step.agentId],
-    ['Target Agent', nextStep.agentId],
-    ['Carry Forward Summary', summary],
+  contentText: `# ${step.name} to ${nextStep.name} Handoff\n\n${buildMarkdownArtifact(
     [
-      'Signed On Behalf Of',
-      buildWorkItemPhaseSignatureMarkdown({
-        workItem,
-        source: lifecycle,
-        phaseId: nextStep.phase,
-      }),
+      ["Work Item", detail.run.workItemId],
+      ["Source Phase", getLifecyclePhaseLabel(lifecycle, step.phase)],
+      ["Target Phase", getLifecyclePhaseLabel(lifecycle, nextStep.phase)],
+      ["Source Agent", step.agentId],
+      ["Target Agent", nextStep.agentId],
+      ["Carry Forward Summary", summary],
+      [
+        "Signed On Behalf Of",
+        buildWorkItemPhaseSignatureMarkdown({
+          workItem,
+          source: lifecycle,
+          phaseId: nextStep.phase,
+        }),
+      ],
     ],
-  ])}`,
+  )}`,
   downloadable: true,
   traceId: detail.run.traceId,
 });
@@ -3281,7 +3523,7 @@ const buildHumanInteractionArtifact = ({
 }: {
   detail: WorkflowRunDetail;
   workItem?: WorkItem;
-  lifecycle?: Capability['lifecycle'];
+  lifecycle?: Capability["lifecycle"];
   step: WorkflowStep;
   runStep: WorkflowRunStep;
   wait: RunWait;
@@ -3289,44 +3531,48 @@ const buildHumanInteractionArtifact = ({
   resolvedBy: string;
 }): Artifact => {
   const contrarianReview =
-    wait.type === 'CONFLICT_RESOLUTION' ? wait.payload?.contrarianReview : undefined;
+    wait.type === "CONFLICT_RESOLUTION"
+      ? wait.payload?.contrarianReview
+      : undefined;
   const requestedInputFields = Array.isArray(wait.payload?.requestedInputFields)
     ? (wait.payload?.requestedInputFields as CompiledRequiredInputField[])
     : [];
   const codeDiffArtifactId =
-    wait.type === 'APPROVAL' && typeof wait.payload?.codeDiffArtifactId === 'string'
+    wait.type === "APPROVAL" &&
+    typeof wait.payload?.codeDiffArtifactId === "string"
       ? wait.payload.codeDiffArtifactId
       : undefined;
   const codeDiffSummary =
-    wait.type === 'APPROVAL' && typeof wait.payload?.codeDiffSummary === 'string'
+    wait.type === "APPROVAL" &&
+    typeof wait.payload?.codeDiffSummary === "string"
       ? wait.payload.codeDiffSummary
       : undefined;
   const isCodeDiffApproval = Boolean(codeDiffArtifactId);
   const artifactKind =
-    wait.type === 'APPROVAL'
-      ? 'APPROVAL_RECORD'
-      : wait.type === 'CONFLICT_RESOLUTION'
-      ? 'CONFLICT_RESOLUTION'
-      : 'INPUT_NOTE';
+    wait.type === "APPROVAL"
+      ? "APPROVAL_RECORD"
+      : wait.type === "CONFLICT_RESOLUTION"
+        ? "CONFLICT_RESOLUTION"
+        : "INPUT_NOTE";
 
   const artifactName =
-    wait.type === 'APPROVAL' && isCodeDiffApproval
+    wait.type === "APPROVAL" && isCodeDiffApproval
       ? `${step.name} Code Review Approval`
-      : wait.type === 'APPROVAL'
-      ? `${step.name} Approval Record`
-      : wait.type === 'CONFLICT_RESOLUTION'
-      ? `${step.name} Conflict Resolution`
-      : `${step.name} Human Input Note`;
+      : wait.type === "APPROVAL"
+        ? `${step.name} Approval Record`
+        : wait.type === "CONFLICT_RESOLUTION"
+          ? `${step.name} Conflict Resolution`
+          : `${step.name} Human Input Note`;
 
   return {
     id: createArtifactId(),
     name: artifactName,
     capabilityId: detail.run.capabilityId,
-    type: 'Human Interaction',
+    type: "Human Interaction",
     version: `run-${detail.run.attemptNumber}`,
     agent: wait.requestedBy,
     created: wait.resolvedAt || new Date().toISOString(),
-    direction: 'OUTPUT',
+    direction: "OUTPUT",
     connectedAgentId: step.agentId,
     sourceWorkflowId: detail.run.workflowId,
     runId: detail.run.id,
@@ -3338,39 +3584,47 @@ const buildHumanInteractionArtifact = ({
     sourceRunId: detail.run.id,
     sourceRunStepId: runStep.id,
     sourceWaitId: wait.id,
-    contentFormat: 'MARKDOWN',
-    mimeType: 'text/markdown',
+    contentFormat: "MARKDOWN",
+    mimeType: "text/markdown",
     fileName: `${toFileSlug(detail.run.workItemId)}-${toFileSlug(wait.type)}-${toFileSlug(step.name)}.md`,
     contentText: `# ${artifactName}\n\n${buildMarkdownArtifact([
-      ['Work Item', detail.run.workItemId],
-      ['Phase', getLifecyclePhaseLabel(lifecycle, step.phase)],
-      ['Requested By', wait.requestedBy],
-      ['Request', wait.message],
+      ["Work Item", detail.run.workItemId],
+      ["Phase", getLifecyclePhaseLabel(lifecycle, step.phase)],
+      ["Requested By", wait.requestedBy],
+      ["Request", wait.message],
       requestedInputFields.length > 0
         ? [
-            'Requested Inputs',
+            "Requested Inputs",
             requestedInputFields
-              .map(field => `${field.label}${field.description ? ` - ${field.description}` : ''}`)
-              .join('\n'),
+              .map(
+                (field) =>
+                  `${field.label}${field.description ? ` - ${field.description}` : ""}`,
+              )
+              .join("\n"),
           ]
-        : ['Requested Inputs', undefined],
-      ['Resolved By', resolvedBy],
-      ['Resolution', resolution],
+        : ["Requested Inputs", undefined],
+      ["Resolved By", resolvedBy],
+      ["Resolution", resolution],
       [
-        'Signed On Behalf Of',
+        "Signed On Behalf Of",
         buildWorkItemPhaseSignatureMarkdown({
           workItem,
           source: lifecycle,
           phaseId: step.phase,
         }),
       ],
-      isCodeDiffApproval ? ['Code Diff Summary', codeDiffSummary] : ['Code Diff Summary', undefined],
       isCodeDiffApproval
-        ? ['Linked Code Diff Artifact', codeDiffArtifactId]
-        : ['Linked Code Diff Artifact', undefined],
+        ? ["Code Diff Summary", codeDiffSummary]
+        : ["Code Diff Summary", undefined],
+      isCodeDiffApproval
+        ? ["Linked Code Diff Artifact", codeDiffArtifactId]
+        : ["Linked Code Diff Artifact", undefined],
       contrarianReview
-        ? ['Contrarian Review', formatContrarianReviewMarkdown(contrarianReview)]
-        : ['Contrarian Review', undefined],
+        ? [
+            "Contrarian Review",
+            formatContrarianReviewMarkdown(contrarianReview),
+          ]
+        : ["Contrarian Review", undefined],
     ])}`,
     downloadable: true,
     traceId: detail.run.traceId,
@@ -3387,7 +3641,7 @@ const buildOperatorGuidanceArtifact = ({
 }: {
   capabilityId: string;
   workItem: WorkItem;
-  lifecycle?: Capability['lifecycle'];
+  lifecycle?: Capability["lifecycle"];
   workflow: Workflow;
   guidance: string;
   guidedBy: string;
@@ -3395,28 +3649,28 @@ const buildOperatorGuidanceArtifact = ({
   id: createArtifactId(),
   name: `${workItem.title} Agent Guidance`,
   capabilityId,
-  type: 'Human Interaction',
+  type: "Human Interaction",
   version: `phase-${toFileSlug(workItem.phase)}`,
   agent: guidedBy,
   created: new Date().toISOString(),
-  direction: 'OUTPUT',
+  direction: "OUTPUT",
   connectedAgentId: workItem.assignedAgentId,
   sourceWorkflowId: workflow.id,
   summary: compactMarkdownSummary(guidance),
-  artifactKind: 'INPUT_NOTE',
+  artifactKind: "INPUT_NOTE",
   phase: workItem.phase,
   workItemId: workItem.id,
-  contentFormat: 'MARKDOWN',
-  mimeType: 'text/markdown',
+  contentFormat: "MARKDOWN",
+  mimeType: "text/markdown",
   fileName: `${toFileSlug(workItem.id)}-agent-guidance.md`,
   contentText: `# Agent Guidance\n\n${buildMarkdownArtifact([
-    ['Work Item', workItem.id],
-    ['Phase', getLifecyclePhaseLabel(lifecycle, workItem.phase)],
-    ['Guided By', guidedBy],
-    ['Current Status', workItem.status],
-    ['Guidance', guidance],
+    ["Work Item", workItem.id],
+    ["Phase", getLifecyclePhaseLabel(lifecycle, workItem.phase)],
+    ["Guided By", guidedBy],
+    ["Current Status", workItem.status],
+    ["Guidance", guidance],
     [
-      'Signed On Behalf Of',
+      "Signed On Behalf Of",
       buildWorkItemPhaseSignatureMarkdown({
         workItem,
         source: lifecycle,
@@ -3446,35 +3700,41 @@ const buildWorkItemAttachmentArtifact = ({
     id: createArtifactId(),
     name: artifactName,
     capabilityId: capability.id,
-    type: 'Reference Document',
+    type: "Reference Document",
     version: `phase-${toFileSlug(workItem.phase)}`,
-    agent: 'User Upload',
+    agent: "User Upload",
     created: new Date().toISOString(),
-    direction: 'INPUT',
+    direction: "INPUT",
     connectedAgentId: workItem.assignedAgentId,
     sourceWorkflowId: workflow.id,
     summary: compactMarkdownSummary(
       `Uploaded work item reference file ${attachment.fileName}. ${preview}`,
     ),
-    artifactKind: 'INPUT_NOTE',
+    artifactKind: "INPUT_NOTE",
     phase: workItem.phase,
     workItemId: workItem.id,
     contentFormat,
-    mimeType: attachment.mimeType || 'text/plain',
+    mimeType: attachment.mimeType || "text/plain",
     fileName: attachment.fileName,
     contentText:
-      contentFormat === 'MARKDOWN'
+      contentFormat === "MARKDOWN"
         ? `# ${attachment.fileName}\n\n${buildMarkdownArtifact([
-            ['Work Item', workItem.id],
-            ['Phase', getLifecyclePhaseLabel(capability.lifecycle, workItem.phase)],
-            ['Uploaded For', workItem.title],
-            ['Summary', preview],
+            ["Work Item", workItem.id],
+            [
+              "Phase",
+              getLifecyclePhaseLabel(capability.lifecycle, workItem.phase),
+            ],
+            ["Uploaded For", workItem.title],
+            ["Summary", preview],
           ])}\n\n## Source Content\n\n${attachment.contentText}`
         : `# ${attachment.fileName}\n\n${buildMarkdownArtifact([
-            ['Work Item', workItem.id],
-            ['Phase', getLifecyclePhaseLabel(capability.lifecycle, workItem.phase)],
-            ['Uploaded For', workItem.title],
-            ['Summary', preview],
+            ["Work Item", workItem.id],
+            [
+              "Phase",
+              getLifecyclePhaseLabel(capability.lifecycle, workItem.phase),
+            ],
+            ["Uploaded For", workItem.title],
+            ["Summary", preview],
           ])}\n\n## Source Content\n\n${attachment.contentText}`,
     downloadable: true,
   };
@@ -3503,7 +3763,7 @@ const recordOperatorGuidance = async ({
     workItemId,
     workflowOverride,
   );
-  const actor = guidedBy?.trim() || 'Capability Owner';
+  const actor = guidedBy?.trim() || "Capability Owner";
   const guidanceArtifact = buildOperatorGuidanceArtifact({
     capabilityId,
     workItem: projection.workItem,
@@ -3518,7 +3778,7 @@ const recordOperatorGuidance = async ({
       ...projection.workItem.history,
       createHistoryEntry(
         actor,
-        'Agent guidance added',
+        "Agent guidance added",
         trimmedGuidance,
         projection.workItem.phase,
         projection.workItem.status,
@@ -3531,10 +3791,10 @@ const recordOperatorGuidance = async ({
   const guidanceLog = createExecutionLog({
     capabilityId,
     taskId: projection.workItem.id,
-    agentId: projection.workItem.assignedAgentId || 'SYSTEM',
+    agentId: projection.workItem.assignedAgentId || "SYSTEM",
     message: trimmedGuidance,
     metadata: {
-      interactionType: 'AGENT_GUIDANCE',
+      interactionType: "AGENT_GUIDANCE",
       artifactId: guidanceArtifact.id,
       guidedBy: actor,
     },
@@ -3544,9 +3804,10 @@ const recordOperatorGuidance = async ({
     capabilityId,
     focusedAgentId: projection.workItem.assignedAgentId,
     insight: `Operator guidance was added for ${projection.workItem.title}: ${trimmedGuidance}`,
-    triggerType: 'GUIDANCE',
+    triggerType: "GUIDANCE",
     relatedWorkItemId: projection.workItem.id,
-    relatedRunId: projection.workItem.activeRunId || projection.workItem.lastRunId,
+    relatedRunId:
+      projection.workItem.activeRunId || projection.workItem.lastRunId,
     sourceLogIds: [guidanceLog.id],
   });
 
@@ -3564,7 +3825,7 @@ const recordOperatorGuidance = async ({
     workspace: projection.workspace,
     capabilityId,
     focusedAgentId: projection.workItem.assignedAgentId,
-    triggerType: 'GUIDANCE',
+    triggerType: "GUIDANCE",
   });
 
   return {
@@ -3579,7 +3840,7 @@ const recordOperatorGuidance = async ({
 };
 
 type StageControlConversationEntry = {
-  role: 'user' | 'agent';
+  role: "user" | "agent";
   content: string;
   timestamp?: string;
 };
@@ -3588,13 +3849,15 @@ const buildStageControlTranscriptMarkdown = (
   conversation: StageControlConversationEntry[],
 ) =>
   conversation
-    .filter(entry => entry.content?.trim())
-    .map(entry => {
-      const speaker = entry.role === 'agent' ? 'Agent' : 'Operator';
-      const timestamp = entry.timestamp?.trim() ? ` (${entry.timestamp.trim()})` : '';
+    .filter((entry) => entry.content?.trim())
+    .map((entry) => {
+      const speaker = entry.role === "agent" ? "Agent" : "Operator";
+      const timestamp = entry.timestamp?.trim()
+        ? ` (${entry.timestamp.trim()})`
+        : "";
       return `### ${speaker}${timestamp}\n\n${entry.content.trim()}`;
     })
-    .join('\n\n');
+    .join("\n\n");
 
 const buildStageControlCarryForwardNote = ({
   workItem,
@@ -3610,21 +3873,27 @@ const buildStageControlCarryForwardNote = ({
   const trimmedCarryForward = carryForwardNote?.trim();
   const latestOperatorMessage = [...conversation]
     .reverse()
-    .find(entry => entry.role === 'user' && entry.content?.trim())
+    .find((entry) => entry.role === "user" && entry.content?.trim())
     ?.content?.trim();
   const latestAgentMessage = [...conversation]
     .reverse()
-    .find(entry => entry.role === 'agent' && entry.content?.trim())
+    .find((entry) => entry.role === "agent" && entry.content?.trim())
     ?.content?.trim();
 
   return [
-    trimmedCarryForward ? `Operator continuation note: ${trimmedCarryForward}` : null,
-    latestOperatorMessage ? `Latest operator direction: ${latestOperatorMessage}` : null,
-    latestAgentMessage ? `Latest agent conclusion: ${latestAgentMessage}` : null,
-    `Continue ${workItem.title}${step ? ` at ${step.name}` : ''} using the stage-control conversation as authoritative operator context.`,
+    trimmedCarryForward
+      ? `Operator continuation note: ${trimmedCarryForward}`
+      : null,
+    latestOperatorMessage
+      ? `Latest operator direction: ${latestOperatorMessage}`
+      : null,
+    latestAgentMessage
+      ? `Latest agent conclusion: ${latestAgentMessage}`
+      : null,
+    `Continue ${workItem.title}${step ? ` at ${step.name}` : ""} using the stage-control conversation as authoritative operator context.`,
   ]
     .filter(Boolean)
-    .join('\n');
+    .join("\n");
 };
 
 const buildStageControlArtifact = ({
@@ -3641,7 +3910,7 @@ const buildStageControlArtifact = ({
 }: {
   capabilityId: string;
   workItem: WorkItem;
-  lifecycle?: Capability['lifecycle'];
+  lifecycle?: Capability["lifecycle"];
   workflow: Workflow;
   step?: WorkflowStep;
   run?: WorkflowRun | null;
@@ -3653,11 +3922,11 @@ const buildStageControlArtifact = ({
   id: createArtifactId(),
   name: `${workItem.title} Stage Control Note`,
   capabilityId,
-  type: 'Human Interaction',
+  type: "Human Interaction",
   version: `phase-${toFileSlug(workItem.phase)}`,
   agent: resolvedBy,
   created: new Date().toISOString(),
-  direction: 'OUTPUT',
+  direction: "OUTPUT",
   connectedAgentId: step?.agentId || workItem.assignedAgentId,
   sourceWorkflowId: workflow.id,
   runId: run?.id,
@@ -3670,28 +3939,28 @@ const buildStageControlArtifact = ({
       carryForwardNote,
     }),
   ),
-  artifactKind: 'STAGE_CONTROL_NOTE',
+  artifactKind: "STAGE_CONTROL_NOTE",
   phase: workItem.phase,
   workItemId: workItem.id,
-  contentFormat: 'MARKDOWN',
-  mimeType: 'text/markdown',
+  contentFormat: "MARKDOWN",
+  mimeType: "text/markdown",
   fileName: `${toFileSlug(workItem.id)}-stage-control-note.md`,
   contentText: `# Stage Control Note\n\n${buildMarkdownArtifact([
-    ['Work Item', workItem.id],
-    ['Phase', getLifecyclePhaseLabel(lifecycle, workItem.phase)],
-    ['Stage', step?.name],
-    ['Resolved By', resolvedBy],
-    ['Run', run?.id],
-    ['Carry Forward', carryForwardNote?.trim() || undefined],
+    ["Work Item", workItem.id],
+    ["Phase", getLifecyclePhaseLabel(lifecycle, workItem.phase)],
+    ["Stage", step?.name],
+    ["Resolved By", resolvedBy],
+    ["Run", run?.id],
+    ["Carry Forward", carryForwardNote?.trim() || undefined],
     [
-      'Signed On Behalf Of',
+      "Signed On Behalf Of",
       buildWorkItemPhaseSignatureMarkdown({
         workItem,
         source: lifecycle,
         phaseId: workItem.phase,
       }),
     ],
-  ])}\n\n## Conversation\n\n${buildStageControlTranscriptMarkdown(conversation) || 'No conversation transcript was captured.'}`,
+  ])}\n\n## Conversation\n\n${buildStageControlTranscriptMarkdown(conversation) || "No conversation transcript was captured."}`,
   downloadable: true,
 });
 
@@ -3710,15 +3979,20 @@ export const continueWorkflowStageControl = async ({
   resolvedBy: string;
   actor?: ActorContext;
 }) => {
-  const trimmedConversation = conversation.filter(entry => entry.content?.trim());
+  const trimmedConversation = conversation.filter((entry) =>
+    entry.content?.trim(),
+  );
   const trimmedCarryForward = carryForwardNote?.trim();
 
   if (trimmedConversation.length === 0 && !trimmedCarryForward) {
-    throw new Error('Add stage-control conversation or a carry-forward note before continuing.');
+    throw new Error(
+      "Add stage-control conversation or a carry-forward note before continuing.",
+    );
   }
 
   const projection = await resolveProjectionContext(capabilityId, workItemId);
-  const runId = projection.workItem.activeRunId || projection.workItem.lastRunId;
+  const runId =
+    projection.workItem.activeRunId || projection.workItem.lastRunId;
   const runDetail = runId
     ? await getWorkflowRunDetail(capabilityId, runId).catch(() => null)
     : null;
@@ -3734,9 +4008,13 @@ export const continueWorkflowStageControl = async ({
   const currentStep =
     (runDetail ? getCurrentWorkflowStep(runDetail) : null) ||
     (projection.workItem.currentStepId
-      ? projection.workflow.steps.find(step => step.id === projection.workItem.currentStepId)
+      ? projection.workflow.steps.find(
+          (step) => step.id === projection.workItem.currentStepId,
+        )
       : undefined) ||
-    projection.workflow.steps.find(step => step.phase === projection.workItem.phase) ||
+    projection.workflow.steps.find(
+      (step) => step.phase === projection.workItem.phase,
+    ) ||
     projection.workflow.steps[0];
   const carryForward = buildStageControlCarryForwardNote({
     workItem: projection.workItem,
@@ -3756,14 +4034,16 @@ export const continueWorkflowStageControl = async ({
     carryForwardNote: trimmedCarryForward,
     resolvedBy,
   });
-  const nextArtifacts = replaceArtifacts(projection.workspace.artifacts, [stageControlArtifact]);
+  const nextArtifacts = replaceArtifacts(projection.workspace.artifacts, [
+    stageControlArtifact,
+  ]);
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     history: [
       ...projection.workItem.history,
       createHistoryEntry(
         resolvedBy,
-        'Stage control session completed',
+        "Stage control session completed",
         trimmedCarryForward || carryForward,
         projection.workItem.phase,
         projection.workItem.status,
@@ -3773,13 +4053,14 @@ export const continueWorkflowStageControl = async ({
   const stageControlLog = createExecutionLog({
     capabilityId,
     taskId: projection.workItem.id,
-    agentId: currentStep?.agentId || projection.workItem.assignedAgentId || 'SYSTEM',
+    agentId:
+      currentStep?.agentId || projection.workItem.assignedAgentId || "SYSTEM",
     message: trimmedCarryForward || carryForward,
     runId: runDetail?.run.id,
     runStepId: currentRunStep?.id,
     traceId: runDetail?.run.traceId,
     metadata: {
-      interactionType: 'STAGE_CONTROL',
+      interactionType: "STAGE_CONTROL",
       artifactId: stageControlArtifact.id,
       resolvedBy,
       messageCount: trimmedConversation.length,
@@ -3790,7 +4071,7 @@ export const continueWorkflowStageControl = async ({
     capabilityId,
     focusedAgentId: currentStep?.agentId || projection.workItem.assignedAgentId,
     insight: `Stage control guidance was finalized for ${projection.workItem.title}: ${trimmedCarryForward || carryForward}`,
-    triggerType: 'STAGE_CONTROL',
+    triggerType: "STAGE_CONTROL",
     relatedWorkItemId: projection.workItem.id,
     relatedRunId: runDetail?.run.id,
     sourceLogIds: [stageControlLog.id],
@@ -3810,14 +4091,14 @@ export const continueWorkflowStageControl = async ({
     workspace: projection.workspace,
     capabilityId,
     focusedAgentId: currentStep?.agentId || projection.workItem.assignedAgentId,
-    triggerType: 'STAGE_CONTROL',
+    triggerType: "STAGE_CONTROL",
   });
 
   const openWait =
-    runDetail?.waits.find(wait => wait.status === 'OPEN') || null;
+    runDetail?.waits.find((wait) => wait.status === "OPEN") || null;
 
   if (runDetail && openWait) {
-    if (openWait.type === 'APPROVAL') {
+    if (openWait.type === "APPROVAL") {
       const detail = await approveWorkflowRun({
         capabilityId,
         runId: runDetail.run.id,
@@ -3826,14 +4107,14 @@ export const continueWorkflowStageControl = async ({
         actor,
       });
       return {
-        action: 'APPROVED_WAIT' as const,
+        action: "APPROVED_WAIT" as const,
         summary: `${projection.workItem.title} was approved from the stage-control session and can move to the next stage once the current output is accepted.`,
         artifactId: stageControlArtifact.id,
         run: detail.run,
       };
     }
 
-    if (openWait.type === 'INPUT') {
+    if (openWait.type === "INPUT") {
       const detail = await provideWorkflowRunInput({
         capabilityId,
         runId: runDetail.run.id,
@@ -3842,7 +4123,7 @@ export const continueWorkflowStageControl = async ({
         actor,
       });
       return {
-        action: 'PROVIDED_INPUT' as const,
+        action: "PROVIDED_INPUT" as const,
         summary: `${projection.workItem.title} received the missing stage guidance and resumed from the current stage.`,
         artifactId: stageControlArtifact.id,
         run: detail.run,
@@ -3857,14 +4138,14 @@ export const continueWorkflowStageControl = async ({
       actor,
     });
     return {
-      action: 'RESOLVED_CONFLICT' as const,
+      action: "RESOLVED_CONFLICT" as const,
       summary: `${projection.workItem.title} received an operator decision from stage control and resumed from the current stage.`,
       artifactId: stageControlArtifact.id,
       run: detail.run,
     };
   }
 
-  if (runDetail && ['QUEUED', 'RUNNING'].includes(runDetail.run.status)) {
+  if (runDetail && ["QUEUED", "RUNNING"].includes(runDetail.run.status)) {
     await cancelWorkflowRun({
       capabilityId,
       runId: runDetail.run.id,
@@ -3879,7 +4160,7 @@ export const continueWorkflowStageControl = async ({
       actor,
     });
     return {
-      action: 'CANCELLED_AND_RESTARTED' as const,
+      action: "CANCELLED_AND_RESTARTED" as const,
       summary: `${projection.workItem.title} was restarted from ${getLifecyclePhaseLabel(undefined, projection.workItem.phase)} with the stage-control guidance attached to the next attempt.`,
       artifactId: stageControlArtifact.id,
       run: detail.run,
@@ -3896,7 +4177,7 @@ export const continueWorkflowStageControl = async ({
       actor,
     });
     return {
-      action: 'RESTARTED' as const,
+      action: "RESTARTED" as const,
       summary: `${projection.workItem.title} was restarted from the current stage with the stage-control guidance attached to the next attempt.`,
       artifactId: stageControlArtifact.id,
       run: detail.run,
@@ -3912,7 +4193,7 @@ export const continueWorkflowStageControl = async ({
     actor,
   });
   return {
-    action: 'STARTED' as const,
+    action: "STARTED" as const,
     summary: `${projection.workItem.title} started from ${getLifecyclePhaseLabel(undefined, projection.workItem.phase)} with the stage-control guidance attached to the first attempt.`,
     artifactId: stageControlArtifact.id,
     run: detail.run,
@@ -3944,31 +4225,31 @@ const buildContrarianReviewArtifact = ({
     id: createArtifactId(),
     name: artifactName,
     capabilityId: detail.run.capabilityId,
-    type: 'Adversarial Review',
+    type: "Adversarial Review",
     version: `run-${detail.run.attemptNumber}`,
     agent: review.reviewerAgentId,
     created: review.generatedAt,
-    direction: 'OUTPUT',
+    direction: "OUTPUT",
     connectedAgentId: review.reviewerAgentId,
     sourceWorkflowId: detail.run.workflowId,
     runId: detail.run.id,
     runStepId: runStep.id,
     summary: compactMarkdownSummary(review.summary),
-    artifactKind: 'CONTRARIAN_REVIEW',
+    artifactKind: "CONTRARIAN_REVIEW",
     phase: step.phase,
     workItemId: detail.run.workItemId,
     sourceRunId: detail.run.id,
     sourceRunStepId: runStep.id,
     sourceWaitId: wait.id,
-    contentFormat: 'MARKDOWN',
-    mimeType: 'text/markdown',
+    contentFormat: "MARKDOWN",
+    mimeType: "text/markdown",
     fileName: `${toFileSlug(detail.run.workItemId)}-contrarian-review-${toFileSlug(step.name)}.md`,
     contentText: `# ${artifactName}\n\n${buildMarkdownArtifact([
-      ['Work Item', detail.run.workItemId],
-      ['Phase', getLifecyclePhaseLabel(undefined, step.phase)],
-      ['Conflict Wait', wait.message],
-      ['Reviewer Agent', review.reviewerAgentId],
-      ['Review', formatContrarianReviewMarkdown(review)],
+      ["Work Item", detail.run.workItemId],
+      ["Phase", getLifecyclePhaseLabel(undefined, step.phase)],
+      ["Conflict Wait", wait.message],
+      ["Reviewer Agent", review.reviewerAgentId],
+      ["Review", formatContrarianReviewMarkdown(review)],
     ])}`,
     contentJson: review,
     downloadable: true,
@@ -3990,17 +4271,31 @@ export const createWorkItemRecord = async ({
   priority,
   tags,
   actor,
+  claimOnCreate = true,
+  autoStartGitSession = true,
+  planningMetadata,
 }: {
   capabilityId: string;
   title: string;
   description?: string;
   workflowId: string;
-  taskType?: WorkItem['taskType'];
-  phaseStakeholders?: WorkItem['phaseStakeholders'];
+  taskType?: WorkItem["taskType"];
+  phaseStakeholders?: WorkItem["phaseStakeholders"];
   attachments?: WorkItemAttachmentUpload[];
-  priority: WorkItem['priority'];
+  priority: WorkItem["priority"];
   tags: string[];
   actor?: ActorContext;
+  claimOnCreate?: boolean;
+  autoStartGitSession?: boolean;
+  planningMetadata?: Pick<
+    WorkItem,
+    | "parentWorkItemId"
+    | "storyPoints"
+    | "tShirtSize"
+    | "sizingConfidence"
+    | "planningBatchId"
+    | "planningProposalItemId"
+  >;
 }) => {
   const bundle = await getCapabilityBundle(capabilityId);
   if (bundle.capability.isSystemCapability) {
@@ -4008,7 +4303,9 @@ export const createWorkItemRecord = async ({
       `${bundle.capability.name} is a system foundation capability and cannot accept work items.`,
     );
   }
-  const workflow = bundle.workspace.workflows.find(item => item.id === workflowId);
+  const workflow = bundle.workspace.workflows.find(
+    (item) => item.id === workflowId,
+  );
   if (!workflow) {
     throw new Error(`Workflow ${workflowId} was not found.`);
   }
@@ -4019,37 +4316,53 @@ export const createWorkItemRecord = async ({
     bundle.capability.lifecycle,
   );
   const normalizedAttachments = (attachments || [])
-    .map(attachment => ({
+    .map((attachment) => ({
       fileName: normalizeString(attachment.fileName),
       mimeType: normalizeString(attachment.mimeType) || undefined,
-      contentText: typeof attachment.contentText === 'string' ? attachment.contentText : '',
+      contentText:
+        typeof attachment.contentText === "string"
+          ? attachment.contentText
+          : "",
       sizeBytes:
-        typeof attachment.sizeBytes === 'number' && Number.isFinite(attachment.sizeBytes)
+        typeof attachment.sizeBytes === "number" &&
+        Number.isFinite(attachment.sizeBytes)
           ? attachment.sizeBytes
           : undefined,
     }))
-    .filter(attachment => attachment.fileName && attachment.contentText.trim().length > 0);
+    .filter(
+      (attachment) =>
+        attachment.fileName && attachment.contentText.trim().length > 0,
+    );
   const firstStep = resolveWorkItemEntryStep(
     workflow,
     normalizedTaskType,
     bundle.capability.lifecycle,
   );
   if (!firstStep) {
-    throw new Error(`Workflow ${workflow.name} does not define any executable nodes.`);
+    throw new Error(
+      `Workflow ${workflow.name} does not define any executable nodes.`,
+    );
   }
   const phaseOwnerTeamId = resolveWorkItemPhaseOwnerTeamId({
     capability: bundle.capability,
     phaseId: firstStep.phase,
     step: firstStep,
   });
-  const actorName = getActorDisplayName(actor, 'System');
-  const shouldClaim = Boolean(actor?.userId);
+  const actorName = getActorDisplayName(actor, "System");
+  const shouldClaim = Boolean(actor?.userId) && claimOnCreate;
 
   const nextWorkItem: WorkItem = {
     id: `WI-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
     title: title.trim(),
-    description: description?.trim() || `Delivery story for ${bundle.capability.name}.`,
+    description:
+      description?.trim() || `Delivery story for ${bundle.capability.name}.`,
     taskType: normalizedTaskType,
+    parentWorkItemId: planningMetadata?.parentWorkItemId,
+    storyPoints: planningMetadata?.storyPoints,
+    tShirtSize: planningMetadata?.tShirtSize,
+    sizingConfidence: planningMetadata?.sizingConfidence,
+    planningBatchId: planningMetadata?.planningBatchId,
+    planningProposalItemId: planningMetadata?.planningProposalItemId,
     phaseStakeholders: normalizedPhaseStakeholders,
     phase: firstStep.phase,
     phaseOwnerTeamId,
@@ -4066,8 +4379,8 @@ export const createWorkItemRecord = async ({
     history: [
       createHistoryEntry(
         actorName,
-        'Story created',
-        `${getWorkItemTaskTypeLabel(normalizedTaskType)} work entered ${firstStep.name} in ${workflow.name}.${normalizedPhaseStakeholders.length > 0 ? ` Stakeholder sign-off was configured for ${normalizedPhaseStakeholders.length} phases.` : ''}${normalizedAttachments.length > 0 ? ` ${normalizedAttachments.length} supporting file${normalizedAttachments.length === 1 ? '' : 's'} were attached for agent context.` : ''}`,
+        "Story created",
+        `${getWorkItemTaskTypeLabel(normalizedTaskType)} work entered ${firstStep.name} in ${workflow.name}.${normalizedPhaseStakeholders.length > 0 ? ` Stakeholder sign-off was configured for ${normalizedPhaseStakeholders.length} phases.` : ""}${normalizedAttachments.length > 0 ? ` ${normalizedAttachments.length} supporting file${normalizedAttachments.length === 1 ? "" : "s"} were attached for agent context.` : ""}`,
         firstStep.phase,
         getStepStatus(firstStep),
       ),
@@ -4075,7 +4388,7 @@ export const createWorkItemRecord = async ({
         ? [
             createHistoryEntry(
               actorName,
-              'Operator control claimed',
+              "Operator control claimed",
               `${actorName} automatically took initial operator control so execution can begin immediately. Release control to hand off to the phase owner team when ready.`,
               firstStep.phase,
               getStepStatus(firstStep),
@@ -4091,13 +4404,13 @@ export const createWorkItemRecord = async ({
       workItemId: nextWorkItem.id,
       userId: actor.userId,
       teamId: actor.teamIds?.[0],
-      status: 'ACTIVE',
+      status: "ACTIVE",
       claimedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
     });
   }
 
-  const attachmentArtifacts = normalizedAttachments.map(attachment =>
+  const attachmentArtifacts = normalizedAttachments.map((attachment) =>
     buildWorkItemAttachmentArtifact({
       capability: bundle.capability,
       workflow,
@@ -4126,7 +4439,7 @@ export const createWorkItemRecord = async ({
         capabilityId,
         taskId: nextWorkItem.id,
         agentId: firstStep.agentId,
-        message: `${nextWorkItem.title} entered ${firstStep.name} in ${workflow.name}.${normalizedAttachments.length > 0 ? ` ${normalizedAttachments.length} uploaded file${normalizedAttachments.length === 1 ? '' : 's'} were attached.` : ''}`,
+        message: `${nextWorkItem.title} entered ${firstStep.name} in ${workflow.name}.${normalizedAttachments.length > 0 ? ` ${normalizedAttachments.length} uploaded file${normalizedAttachments.length === 1 ? "" : "s"} were attached.` : ""}`,
         traceId: undefined,
       }),
     ],
@@ -4137,19 +4450,22 @@ export const createWorkItemRecord = async ({
   // import avoids a static cycle between execution/service → agentGit/*
   // modules, which themselves import from server/repository via agentGit.
   // The helper silently no-ops when the capability has no repo or token.
-  void (async () => {
-    try {
-      const { autoStartSessionForWorkItem } = await import('../agentGit/autoWire');
-      await autoStartSessionForWorkItem({
-        capabilityId,
-        workItem: { id: nextWorkItem.id, title: nextWorkItem.title },
-        repositories: bundle.capability.repositories || [],
-        workspaceRoots: getCapabilityWorkspaceRoots(bundle.capability),
-      });
-    } catch (error) {
-      console.error('[agentGit/autoWire] autoStart dispatch failed', error);
-    }
-  })();
+  if (autoStartGitSession) {
+    void (async () => {
+      try {
+        const { autoStartSessionForWorkItem } =
+          await import("../agentGit/autoWire");
+        await autoStartSessionForWorkItem({
+          capabilityId,
+          workItem: { id: nextWorkItem.id, title: nextWorkItem.title },
+          repositories: bundle.capability.repositories || [],
+          workspaceRoots: getCapabilityWorkspaceRoots(bundle.capability),
+        });
+      } catch (error) {
+        console.error("[agentGit/autoWire] autoStart dispatch failed", error);
+      }
+    })();
+  }
 
   return nextWorkItem;
 };
@@ -4170,7 +4486,9 @@ export const moveWorkItemToPhaseControl = async ({
   actor?: ActorContext;
 }) => {
   let projection = await resolveProjectionContext(capabilityId, workItemId);
-  if (!getCapabilityBoardPhaseIds(projection.capability).includes(targetPhase)) {
+  if (
+    !getCapabilityBoardPhaseIds(projection.capability).includes(targetPhase)
+  ) {
     throw new Error(
       `Phase ${targetPhase} is not part of ${projection.capability.name}'s lifecycle.`,
     );
@@ -4180,7 +4498,7 @@ export const moveWorkItemToPhaseControl = async ({
   if (activeRun) {
     if (!cancelRunIfPresent) {
       throw new Error(
-        'This work item already has an active or waiting run. Cancel or complete it before moving the board card.',
+        "This work item already has an active or waiting run. Cancel or complete it before moving the board card.",
       );
     }
 
@@ -4194,15 +4512,15 @@ export const moveWorkItemToPhaseControl = async ({
   }
 
   const targetNode =
-    targetPhase === 'BACKLOG' || targetPhase === 'DONE'
+    targetPhase === "BACKLOG" || targetPhase === "DONE"
       ? undefined
       : findFirstExecutableNodeForPhase(projection.workflow, targetPhase) ||
         findFirstExecutableNode(projection.workflow);
   const targetStep = targetNode
-    ? projection.workflow.steps.find(step => step.id === targetNode.id)
+    ? projection.workflow.steps.find((step) => step.id === targetNode.id)
     : undefined;
   const nextPhaseOwnerTeamId =
-    targetPhase === 'BACKLOG' || targetPhase === 'DONE'
+    targetPhase === "BACKLOG" || targetPhase === "DONE"
       ? resolveWorkItemPhaseOwnerTeamId({
           capability: projection.capability,
           phaseId: targetPhase,
@@ -4212,31 +4530,31 @@ export const moveWorkItemToPhaseControl = async ({
           phaseId: targetPhase,
           step: targetStep,
         });
-  const actorName = getActorDisplayName(actor, 'User');
+  const actorName = getActorDisplayName(actor, "User");
 
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     phase: targetPhase,
     phaseOwnerTeamId: nextPhaseOwnerTeamId,
     currentStepId:
-      targetPhase === 'BACKLOG' || targetPhase === 'DONE'
+      targetPhase === "BACKLOG" || targetPhase === "DONE"
         ? undefined
         : targetStep?.id,
     assignedAgentId:
-      targetPhase === 'BACKLOG' || targetPhase === 'DONE'
+      targetPhase === "BACKLOG" || targetPhase === "DONE"
         ? undefined
         : targetStep?.agentId,
     status:
-      targetPhase === 'DONE'
-        ? 'COMPLETED'
+      targetPhase === "DONE"
+        ? "COMPLETED"
         : targetStep
-        ? getStepStatus(targetStep)
-        : 'ACTIVE',
+          ? getStepStatus(targetStep)
+          : "ACTIVE",
     pendingRequest: undefined,
     blocker: undefined,
     activeRunId: undefined,
     claimOwnerUserId:
-      actor?.userId && targetPhase !== 'BACKLOG' && targetPhase !== 'DONE'
+      actor?.userId && targetPhase !== "BACKLOG" && targetPhase !== "DONE"
         ? actor.userId
         : undefined,
     recordVersion: (projection.workItem.recordVersion || 1) + 1,
@@ -4244,11 +4562,14 @@ export const moveWorkItemToPhaseControl = async ({
       ...projection.workItem.history,
       createHistoryEntry(
         actorName,
-        'Board stage updated',
-        note ||
-          `Story was moved to ${targetPhase} from the delivery board.`,
+        "Board stage updated",
+        note || `Story was moved to ${targetPhase} from the delivery board.`,
         targetPhase,
-        targetPhase === 'DONE' ? 'COMPLETED' : targetStep ? getStepStatus(targetStep) : 'ACTIVE',
+        targetPhase === "DONE"
+          ? "COMPLETED"
+          : targetStep
+            ? getStepStatus(targetStep)
+            : "ACTIVE",
       ),
     ],
   };
@@ -4262,8 +4583,12 @@ export const moveWorkItemToPhaseControl = async ({
       createExecutionLog({
         capabilityId,
         taskId: workItemId,
-        agentId: targetStep?.agentId || projection.capability.specialAgentId || 'SYSTEM',
-        message: note || `${projection.workItem.title} moved to ${targetPhase}.`,
+        agentId:
+          targetStep?.agentId ||
+          projection.capability.specialAgentId ||
+          "SYSTEM",
+        message:
+          note || `${projection.workItem.title} moved to ${targetPhase}.`,
       }),
     ],
   });
@@ -4287,7 +4612,10 @@ export const startWorkflowExecution = async ({
   guidedBy?: string;
   actor?: ActorContext;
 }) => {
-  const existingActiveRun = await getActiveRunForWorkItem(capabilityId, workItemId);
+  const existingActiveRun = await getActiveRunForWorkItem(
+    capabilityId,
+    workItemId,
+  );
   if (existingActiveRun) {
     throw new Error(
       `Work item ${workItemId} already has an active or waiting workflow run.`,
@@ -4304,7 +4632,10 @@ export const startWorkflowExecution = async ({
   // Starting execution is an operator action. If the work item is still unclaimed, implicitly
   // claim operator control for the starting actor so the flow "just works" in multi-team work.
   if (actor?.userId && !projection.workItem.claimOwnerUserId) {
-    const actorName = getActorDisplayName(actor, guidedBy || 'Capability Owner');
+    const actorName = getActorDisplayName(
+      actor,
+      guidedBy || "Capability Owner",
+    );
     const claimedAt = new Date().toISOString();
 
     await upsertWorkItemClaim({
@@ -4312,7 +4643,7 @@ export const startWorkflowExecution = async ({
       workItemId,
       userId: actor.userId,
       teamId: actor.teamIds?.[0],
-      status: 'ACTIVE',
+      status: "ACTIVE",
       claimedAt,
       expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
     });
@@ -4321,14 +4652,17 @@ export const startWorkflowExecution = async ({
       ...projection.workItem,
       claimOwnerUserId: actor.userId,
       watchedByUserIds: Array.from(
-        new Set([...(projection.workItem.watchedByUserIds || []), actor.userId]),
+        new Set([
+          ...(projection.workItem.watchedByUserIds || []),
+          actor.userId,
+        ]),
       ),
       recordVersion: (projection.workItem.recordVersion || 1) + 1,
       history: [
         ...projection.workItem.history,
         createHistoryEntry(
           actorName,
-          'Operator control claimed',
+          "Operator control claimed",
           `${actorName} claimed operator control while starting execution.`,
           projection.workItem.phase,
           projection.workItem.status,
@@ -4348,17 +4682,24 @@ export const startWorkflowExecution = async ({
       workItem: nextWorkItem,
       workspace: {
         ...projection.workspace,
-        workItems: replaceWorkItem(projection.workspace.workItems, nextWorkItem),
+        workItems: replaceWorkItem(
+          projection.workspace.workItems,
+          nextWorkItem,
+        ),
       },
     };
   }
 
   if (!canActorOperateWorkItem({ actor, workItem: projection.workItem })) {
-    throw new Error('Only the current phase owner can start or restart this phase.');
+    throw new Error(
+      "Only the current phase owner can start or restart this phase.",
+    );
   }
   if (
     restartFromPhase &&
-    !getCapabilityBoardPhaseIds(projection.capability).includes(restartFromPhase)
+    !getCapabilityBoardPhaseIds(projection.capability).includes(
+      restartFromPhase,
+    )
   ) {
     throw new Error(
       `Phase ${restartFromPhase} is not part of ${projection.capability.name}'s lifecycle.`,
@@ -4366,14 +4707,18 @@ export const startWorkflowExecution = async ({
   }
   const readinessContract = projection.workspace.readinessContract;
   if (readinessContract && !readinessContract.allReady) {
-    const firstBlockedGate = readinessContract.gates.find(gate => !gate.satisfied);
+    const firstBlockedGate = readinessContract.gates.find(
+      (gate) => !gate.satisfied,
+    );
     throw new Error(
       firstBlockedGate?.blockingReason ||
         readinessContract.summary ||
-        'This capability is not ready to start delivery yet.',
+        "This capability is not ready to start delivery yet.",
     );
   }
-  const detail = await (await import('./repository')).createWorkflowRun({
+  const detail = await (
+    await import("./repository")
+  ).createWorkflowRun({
     capabilityId,
     workItem: projection.workItem,
     workflow: projection.workflow,
@@ -4384,8 +4729,9 @@ export const startWorkflowExecution = async ({
     detail,
     capability: projection.capability,
     agent:
-      projection.workspace.agents.find(agent => agent.id === detail.run.assignedAgentId) ||
-      projection.workspace.agents[0],
+      projection.workspace.agents.find(
+        (agent) => agent.id === detail.run.assignedAgentId,
+      ) || projection.workspace.agents[0],
     historyMessage: `Workflow run ${detail.run.id} queued for execution.`,
   });
 
@@ -4398,7 +4744,7 @@ const resolveRunWaitAndQueue = async ({
   expectedType,
   resolution,
   resolvedBy,
-  approvalDisposition = 'APPROVE',
+  approvalDisposition = "APPROVE",
   actor,
 }: {
   capabilityId: string;
@@ -4406,39 +4752,49 @@ const resolveRunWaitAndQueue = async ({
   expectedType: RunWaitType;
   resolution: string;
   resolvedBy: string;
-  approvalDisposition?: 'APPROVE' | 'REQUEST_CHANGES';
+  approvalDisposition?: "APPROVE" | "REQUEST_CHANGES";
   actor?: ActorContext;
 }) => {
   const detail = await getWorkflowRunDetail(capabilityId, runId);
-  if (detail.run.status === 'PAUSED') {
-    throw new Error('Resume this run before resolving its wait.');
+  if (detail.run.status === "PAUSED") {
+    throw new Error("Resume this run before resolving its wait.");
   }
   const projection = await resolveProjectionContext(
     capabilityId,
     detail.run.workItemId,
     detail.run.workflowSnapshot,
   );
-  const openWait = [...detail.waits].reverse().find(wait => wait.status === 'OPEN');
+  const openWait = [...detail.waits]
+    .reverse()
+    .find((wait) => wait.status === "OPEN");
   if (!openWait) {
     throw new Error(`Run ${runId} does not have an open wait to resolve.`);
   }
   if (openWait.type !== expectedType) {
-    throw new Error(`Run ${runId} is waiting for ${openWait.type}, not ${expectedType}.`);
+    throw new Error(
+      `Run ${runId} is waiting for ${openWait.type}, not ${expectedType}.`,
+    );
   }
   if (
-    expectedType === 'APPROVAL' &&
-    !canActorApproveWait({ actor, workItem: projection.workItem, wait: openWait })
+    expectedType === "APPROVAL" &&
+    !canActorApproveWait({
+      actor,
+      workItem: projection.workItem,
+      wait: openWait,
+    })
   ) {
-    throw new Error('This approval is assigned to another user or team.');
+    throw new Error("This approval is assigned to another user or team.");
   }
   if (
-    expectedType !== 'APPROVAL' &&
+    expectedType !== "APPROVAL" &&
     !canActorOperateWorkItem({ actor, workItem: projection.workItem })
   ) {
-    throw new Error('Only the current phase owner can resolve this workflow wait.');
+    throw new Error(
+      "Only the current phase owner can resolve this workflow wait.",
+    );
   }
   if (
-    expectedType === 'INPUT' &&
+    expectedType === "INPUT" &&
     isToolLoopExhaustionWait(openWait) &&
     !hasConcreteImplementationGuidance(resolution)
   ) {
@@ -4455,28 +4811,30 @@ const resolveRunWaitAndQueue = async ({
     resolvedByActorUserId: actor?.userId,
     resolvedByActorTeamIds: getActorTeamIds(actor),
   });
-  if (expectedType === 'APPROVAL') {
+  if (expectedType === "APPROVAL") {
     await updateApprovalAssignmentsForWait({
       capabilityId,
       waitId: openWait.id,
       status:
-        approvalDisposition === 'REQUEST_CHANGES'
-          ? 'REQUEST_CHANGES'
-          : ('APPROVED' as const),
+        approvalDisposition === "REQUEST_CHANGES"
+          ? "REQUEST_CHANGES"
+          : ("APPROVED" as const),
     });
     await createApprovalDecision({
       id: createApprovalDecisionId(),
       capabilityId,
       runId,
       waitId: openWait.id,
-      assignmentId: (openWait.approvalAssignments || []).find(assignment => {
+      assignmentId: (openWait.approvalAssignments || []).find((assignment) => {
         if (!actor?.userId && getActorTeamIds(actor).length === 0) {
           return true;
         }
-        if (assignment.targetType === 'USER') {
-          return (assignment.assignedUserId || assignment.targetId) === actor?.userId;
+        if (assignment.targetType === "USER") {
+          return (
+            (assignment.assignedUserId || assignment.targetId) === actor?.userId
+          );
         }
-        if (assignment.targetType === 'TEAM') {
+        if (assignment.targetType === "TEAM") {
           const teamId = assignment.assignedTeamId || assignment.targetId;
           return getActorTeamIds(actor).includes(teamId);
         }
@@ -4494,16 +4852,14 @@ const resolveRunWaitAndQueue = async ({
   const currentStep = getCurrentWorkflowStep(detail);
   const currentRunStep = getCurrentRunStep(detail);
   const isRequestChangesApproval =
-    expectedType === 'APPROVAL' && approvalDisposition === 'REQUEST_CHANGES';
+    expectedType === "APPROVAL" && approvalDisposition === "REQUEST_CHANGES";
   const approvalAdvancesWorkflow =
-    expectedType === 'APPROVAL' &&
+    expectedType === "APPROVAL" &&
     !isRequestChangesApproval &&
-    (
-      currentStep.stepType === 'HUMAN_APPROVAL' ||
-      openWait.payload?.postStepApproval === true
-    );
+    (currentStep.stepType === "HUMAN_APPROVAL" ||
+      openWait.payload?.postStepApproval === true);
   const approvalCompletionSummary =
-    typeof openWait.payload?.completionSummary === 'string' &&
+    typeof openWait.payload?.completionSummary === "string" &&
     openWait.payload.completionSummary.trim()
       ? openWait.payload.completionSummary.trim()
       : resolution;
@@ -4514,7 +4870,7 @@ const resolveRunWaitAndQueue = async ({
   if (approvalAdvancesWorkflow) {
     nextRunStep = await updateWorkflowRunStep({
       ...currentRunStep,
-      status: 'COMPLETED',
+      status: "COMPLETED",
       completedAt: new Date().toISOString(),
       evidenceSummary: approvalCompletionSummary,
       outputSummary: approvalCompletionSummary,
@@ -4550,7 +4906,7 @@ const resolveRunWaitAndQueue = async ({
     const queuedDispatch = await resolveQueuedRunDispatch({ capabilityId });
     nextRunStep = await updateWorkflowRunStep({
       ...currentRunStep,
-      status: 'PENDING',
+      status: "PENDING",
       waitId: openWait.id,
       metadata: {
         ...(currentRunStep.metadata || {}),
@@ -4561,7 +4917,7 @@ const resolveRunWaitAndQueue = async ({
     nextRun = (
       await updateWorkflowRun({
         ...detail.run,
-        status: 'QUEUED',
+        status: "QUEUED",
         queueReason: queuedDispatch.queueReason,
         assignedExecutorId: queuedDispatch.assignedExecutorId,
         pauseReason: undefined,
@@ -4580,14 +4936,14 @@ const resolveRunWaitAndQueue = async ({
       runStepId: nextRunStep.id,
       traceId: detail.run.traceId,
       spanId: currentRunStep.spanId,
-      type: 'RUN_RESUMED',
-      level: 'INFO',
+      type: "RUN_RESUMED",
+      level: "INFO",
       message: resolution,
       details: {
         waitType: expectedType,
         resolvedBy,
         approvalDisposition:
-          expectedType === 'APPROVAL' ? approvalDisposition : undefined,
+          expectedType === "APPROVAL" ? approvalDisposition : undefined,
       },
     }),
   );
@@ -4613,11 +4969,11 @@ const resolveRunWaitAndQueue = async ({
         runStepId: nextRunStep.id,
         traceId: detail.run.traceId,
         spanId: currentRunStep.spanId,
-        type: 'STEP_COMPLETED',
-        level: 'INFO',
+        type: "STEP_COMPLETED",
+        level: "INFO",
         message: approvalCompletionSummary,
         details: {
-          stage: 'STEP_COMPLETED',
+          stage: "STEP_COMPLETED",
           stepName: currentStep.name,
           phase: currentStep.phase,
           approvedAfterWait: true,
@@ -4625,14 +4981,19 @@ const resolveRunWaitAndQueue = async ({
       }),
     );
 
-    const generatedArtifactIds = Array.isArray(openWait.payload?.generatedArtifactIds)
+    const generatedArtifactIds = Array.isArray(
+      openWait.payload?.generatedArtifactIds,
+    )
       ? openWait.payload.generatedArtifactIds.filter(
-          (value): value is string => typeof value === 'string' && value.trim().length > 0,
+          (value): value is string =>
+            typeof value === "string" && value.trim().length > 0,
         )
       : [];
     const generatedArtifacts = generatedArtifactIds
-      .map(artifactId =>
-        projection.workspace.artifacts.find(artifact => artifact.id === artifactId),
+      .map((artifactId) =>
+        projection.workspace.artifacts.find(
+          (artifact) => artifact.id === artifactId,
+        ),
       )
       .filter(Boolean) as Artifact[];
     const handoffArtifact = nextWorkflowStep
@@ -4648,8 +5009,12 @@ const resolveRunWaitAndQueue = async ({
       : null;
 
     const completionArtifacts = [
-      ...generatedArtifacts.filter(artifact => artifact.artifactKind === 'PHASE_OUTPUT'),
-      ...generatedArtifacts.filter(artifact => artifact.artifactKind !== 'PHASE_OUTPUT'),
+      ...generatedArtifacts.filter(
+        (artifact) => artifact.artifactKind === "PHASE_OUTPUT",
+      ),
+      ...generatedArtifacts.filter(
+        (artifact) => artifact.artifactKind !== "PHASE_OUTPUT",
+      ),
       interactionArtifact,
       ...(handoffArtifact ? [handoffArtifact] : []),
     ];
@@ -4666,12 +5031,14 @@ const resolveRunWaitAndQueue = async ({
     return nextDetail;
   }
 
-  const nextArtifacts = replaceArtifacts(projection.workspace.artifacts, [interactionArtifact]);
+  const nextArtifacts = replaceArtifacts(projection.workspace.artifacts, [
+    interactionArtifact,
+  ]);
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     pendingRequest: undefined,
     blocker: undefined,
-    status: 'ACTIVE',
+    status: "ACTIVE",
     activeRunId: nextRun.id,
     lastRunId: nextRun.id,
     history: [
@@ -4679,13 +5046,13 @@ const resolveRunWaitAndQueue = async ({
       createHistoryEntry(
         resolvedBy,
         isRequestChangesApproval
-          ? 'Changes requested'
-          : expectedType === 'CONFLICT_RESOLUTION'
-          ? 'Conflict resolved'
-          : 'Human input provided',
+          ? "Changes requested"
+          : expectedType === "CONFLICT_RESOLUTION"
+            ? "Conflict resolved"
+            : "Human input provided",
         resolution,
         projection.workItem.phase,
-        'ACTIVE',
+        "ACTIVE",
       ),
     ],
   };
@@ -4704,23 +5071,23 @@ const resolveRunWaitAndQueue = async ({
       actorUserId: actor?.userId,
       actorTeamIds: getActorTeamIds(actor),
       approvalDisposition:
-        expectedType === 'APPROVAL' ? approvalDisposition : undefined,
+        expectedType === "APPROVAL" ? approvalDisposition : undefined,
       artifactId: interactionArtifact.id,
     },
   });
   const learningTriggerType =
-    expectedType === 'CONFLICT_RESOLUTION'
-      ? ('CONFLICT_RESOLUTION' as const)
+    expectedType === "CONFLICT_RESOLUTION"
+      ? ("CONFLICT_RESOLUTION" as const)
       : isRequestChangesApproval
-      ? ('REQUEST_CHANGES' as const)
-      : null;
+        ? ("REQUEST_CHANGES" as const)
+        : null;
   const nextLearningUpdates = learningTriggerType
     ? buildTargetedLearningUpdates({
         workspace: projection.workspace,
         capabilityId,
         focusedAgentId: currentStep.agentId,
         insight:
-          learningTriggerType === 'REQUEST_CHANGES'
+          learningTriggerType === "REQUEST_CHANGES"
             ? `Changes were requested for ${projection.workItem.title}: ${resolution}`
             : `Conflict resolution was provided for ${projection.workItem.title}: ${resolution}`,
         triggerType: learningTriggerType,
@@ -4768,7 +5135,7 @@ export const approveWorkflowRun = async ({
   resolveRunWaitAndQueue({
     capabilityId,
     runId,
-    expectedType: 'APPROVAL',
+    expectedType: "APPROVAL",
     resolution,
     resolvedBy,
     actor,
@@ -4788,18 +5155,26 @@ export const requestChangesWorkflowRun = async ({
   actor?: ActorContext;
 }) => {
   const detail = await getWorkflowRunDetail(capabilityId, runId);
-  const openWait = [...detail.waits].reverse().find(wait => wait.status === 'OPEN');
-  if (!openWait || openWait.type !== 'APPROVAL' || openWait.payload?.postStepApproval !== true) {
-    throw new Error('Changes can only be requested for an open code diff approval wait.');
+  const openWait = [...detail.waits]
+    .reverse()
+    .find((wait) => wait.status === "OPEN");
+  if (
+    !openWait ||
+    openWait.type !== "APPROVAL" ||
+    openWait.payload?.postStepApproval !== true
+  ) {
+    throw new Error(
+      "Changes can only be requested for an open code diff approval wait.",
+    );
   }
 
   return resolveRunWaitAndQueue({
     capabilityId,
     runId,
-    expectedType: 'APPROVAL',
+    expectedType: "APPROVAL",
     resolution,
     resolvedBy,
-    approvalDisposition: 'REQUEST_CHANGES',
+    approvalDisposition: "REQUEST_CHANGES",
     actor,
   });
 };
@@ -4820,7 +5195,7 @@ export const provideWorkflowRunInput = async ({
   resolveRunWaitAndQueue({
     capabilityId,
     runId,
-    expectedType: 'INPUT',
+    expectedType: "INPUT",
     resolution,
     resolvedBy,
     actor,
@@ -4842,7 +5217,7 @@ export const resolveWorkflowRunConflict = async ({
   resolveRunWaitAndQueue({
     capabilityId,
     runId,
-    expectedType: 'CONFLICT_RESOLUTION',
+    expectedType: "CONFLICT_RESOLUTION",
     resolution,
     resolvedBy,
     actor,
@@ -4864,20 +5239,25 @@ export const cancelWorkflowRun = async ({
   ]);
   await updateWorkflowRunControl({
     ...detail.run,
-    status: 'CANCELLED',
+    status: "CANCELLED",
     leaseOwner: undefined,
     leaseExpiresAt: undefined,
-    terminalOutcome: note || 'Run cancelled by user.',
+    terminalOutcome: note || "Run cancelled by user.",
     completedAt: new Date().toISOString(),
     currentWaitId: undefined,
   });
   await releaseRunLease({ capabilityId, runId });
 
-  const projection = await resolveProjectionContext(capabilityId, detail.run.workItemId, detail.run.workflowSnapshot);
+  const projection = await resolveProjectionContext(
+    capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
   const nextWorkItemStatus: WorkItemStatus =
-    projection.workItem.status === 'COMPLETED' || projection.workItem.status === 'CANCELLED'
+    projection.workItem.status === "COMPLETED" ||
+    projection.workItem.status === "CANCELLED"
       ? projection.workItem.status
-      : 'ACTIVE';
+      : "ACTIVE";
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
     status: nextWorkItemStatus,
@@ -4888,9 +5268,9 @@ export const cancelWorkflowRun = async ({
     history: [
       ...projection.workItem.history,
       createHistoryEntry(
-        'User',
-        'Run cancelled',
-        note || 'Run cancelled by user.',
+        "User",
+        "Run cancelled",
+        note || "Run cancelled by user.",
         projection.workItem.phase,
         nextWorkItemStatus,
       ),
@@ -4906,9 +5286,9 @@ export const cancelWorkflowRun = async ({
       createExecutionLog({
         capabilityId,
         taskId: projection.workItem.id,
-        agentId: projection.workItem.assignedAgentId || 'SYSTEM',
-        message: note || 'Run cancelled by user.',
-        level: 'WARN',
+        agentId: projection.workItem.assignedAgentId || "SYSTEM",
+        message: note || "Run cancelled by user.",
+        level: "WARN",
         runId,
         traceId: detail.run.traceId,
       }),
@@ -4918,18 +5298,20 @@ export const cancelWorkflowRun = async ({
   return getWorkflowRunDetail(capabilityId, runId);
 };
 
-const getRunStatusForWaitType = (waitType: RunWaitType): WorkflowRun['status'] => {
-  if (waitType === 'APPROVAL') {
-    return 'WAITING_APPROVAL';
+const getRunStatusForWaitType = (
+  waitType: RunWaitType,
+): WorkflowRun["status"] => {
+  if (waitType === "APPROVAL") {
+    return "WAITING_APPROVAL";
   }
-  if (waitType === 'INPUT') {
-    return 'WAITING_INPUT';
+  if (waitType === "INPUT") {
+    return "WAITING_INPUT";
   }
-  return 'WAITING_CONFLICT';
+  return "WAITING_CONFLICT";
 };
 
 const getWorkItemStatusForWaitType = (waitType: RunWaitType): WorkItemStatus =>
-  waitType === 'APPROVAL' ? 'PENDING_APPROVAL' : 'BLOCKED';
+  waitType === "APPROVAL" ? "PENDING_APPROVAL" : "BLOCKED";
 
 export const pauseWorkflowRun = async ({
   capabilityId,
@@ -4944,22 +5326,22 @@ export const pauseWorkflowRun = async ({
 }) => {
   const detail = await getWorkflowRunDetail(capabilityId, runId);
   if (
-    detail.run.status === 'CANCELLED' ||
-    detail.run.status === 'COMPLETED' ||
-    detail.run.status === 'FAILED'
+    detail.run.status === "CANCELLED" ||
+    detail.run.status === "COMPLETED" ||
+    detail.run.status === "FAILED"
   ) {
     return detail;
   }
-  if (detail.run.status === 'PAUSED') {
+  if (detail.run.status === "PAUSED") {
     return detail;
   }
 
-  const actorName = getActorDisplayName(actor, 'User');
-  const pauseNote = note?.trim() || 'Execution paused by user.';
+  const actorName = getActorDisplayName(actor, "User");
+  const pauseNote = note?.trim() || "Execution paused by user.";
 
   await updateWorkflowRunControl({
     ...detail.run,
-    status: 'PAUSED',
+    status: "PAUSED",
     leaseOwner: undefined,
     leaseExpiresAt: undefined,
   });
@@ -4972,16 +5354,16 @@ export const pauseWorkflowRun = async ({
   );
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
-    status: 'PAUSED',
+    status: "PAUSED",
     recordVersion: (projection.workItem.recordVersion || 1) + 1,
     history: [
       ...projection.workItem.history,
       createHistoryEntry(
         actorName,
-        'Execution paused',
+        "Execution paused",
         pauseNote,
         projection.workItem.phase,
-        'PAUSED',
+        "PAUSED",
       ),
     ],
   };
@@ -4995,9 +5377,9 @@ export const pauseWorkflowRun = async ({
       createExecutionLog({
         capabilityId,
         taskId: projection.workItem.id,
-        agentId: projection.workItem.assignedAgentId || 'SYSTEM',
+        agentId: projection.workItem.assignedAgentId || "SYSTEM",
         message: pauseNote,
-        level: 'WARN',
+        level: "WARN",
         runId,
         traceId: detail.run.traceId,
       }),
@@ -5019,13 +5401,14 @@ export const resumeWorkflowRun = async ({
   actor?: ActorContext;
 }) => {
   const detail = await getWorkflowRunDetail(capabilityId, runId);
-  if (detail.run.status !== 'PAUSED') {
+  if (detail.run.status !== "PAUSED") {
     return detail;
   }
 
-  const actorName = getActorDisplayName(actor, 'User');
-  const resumeNote = note?.trim() || 'Execution resumed by user.';
-  const openWait = [...detail.waits].reverse().find(wait => wait.status === 'OPEN') || null;
+  const actorName = getActorDisplayName(actor, "User");
+  const resumeNote = note?.trim() || "Execution resumed by user.";
+  const openWait =
+    [...detail.waits].reverse().find((wait) => wait.status === "OPEN") || null;
 
   const projection = await resolveProjectionContext(
     capabilityId,
@@ -5055,7 +5438,7 @@ export const resumeWorkflowRun = async ({
         ...projection.workItem.history,
         createHistoryEntry(
           actorName,
-          'Execution resumed',
+          "Execution resumed",
           resumeNote,
           projection.workItem.phase,
           nextWorkItemStatus,
@@ -5072,9 +5455,9 @@ export const resumeWorkflowRun = async ({
         createExecutionLog({
           capabilityId,
           taskId: projection.workItem.id,
-          agentId: projection.workItem.assignedAgentId || 'SYSTEM',
+          agentId: projection.workItem.assignedAgentId || "SYSTEM",
           message: resumeNote,
-          level: 'INFO',
+          level: "INFO",
           runId,
           traceId: detail.run.traceId,
         }),
@@ -5087,7 +5470,7 @@ export const resumeWorkflowRun = async ({
   const queuedDispatch = await resolveQueuedRunDispatch({ capabilityId });
   await updateWorkflowRunControl({
     ...detail.run,
-    status: 'QUEUED',
+    status: "QUEUED",
     queueReason: queuedDispatch.queueReason,
     assignedExecutorId: queuedDispatch.assignedExecutorId,
     pauseReason: undefined,
@@ -5098,7 +5481,7 @@ export const resumeWorkflowRun = async ({
 
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
-    status: 'ACTIVE',
+    status: "ACTIVE",
     pendingRequest: undefined,
     blocker: undefined,
     recordVersion: (projection.workItem.recordVersion || 1) + 1,
@@ -5106,10 +5489,10 @@ export const resumeWorkflowRun = async ({
       ...projection.workItem.history,
       createHistoryEntry(
         actorName,
-        'Execution resumed',
+        "Execution resumed",
         resumeNote,
         projection.workItem.phase,
-        'ACTIVE',
+        "ACTIVE",
       ),
     ],
   };
@@ -5123,9 +5506,9 @@ export const resumeWorkflowRun = async ({
       createExecutionLog({
         capabilityId,
         taskId: projection.workItem.id,
-        agentId: projection.workItem.assignedAgentId || 'SYSTEM',
+        agentId: projection.workItem.assignedAgentId || "SYSTEM",
         message: resumeNote,
-        level: 'INFO',
+        level: "INFO",
         runId,
         traceId: detail.run.traceId,
       }),
@@ -5166,9 +5549,9 @@ const purgeWorkItemDataTx = async (
     ),
   ]);
 
-  const runIds = runsResult.rows.map(row => row.id);
-  const taskIds = tasksResult.rows.map(row => row.id);
-  const artifactIds = artifactsResult.rows.map(row => row.id);
+  const runIds = runsResult.rows.map((row) => row.id);
+  const taskIds = tasksResult.rows.map((row) => row.id);
+  const artifactIds = artifactsResult.rows.map((row) => row.id);
 
   if (artifactIds.length > 0) {
     await client.query(
@@ -5257,7 +5640,7 @@ const purgeWorkItemDataTx = async (
     ),
     client.query(
       `
-        DELETE FROM capability_work_item_checkout_sessions
+        DELETE FROM desktop_work_item_checkout_sessions
         WHERE capability_id = $1 AND work_item_id = $2
       `,
       [params.capabilityId, params.workItemId],
@@ -5353,7 +5736,9 @@ const buildEntryStepResetWorkItemState = ({
     capability.lifecycle,
   );
   if (!firstStep) {
-    throw new Error(`Workflow ${workflow.name} does not define any executable nodes.`);
+    throw new Error(
+      `Workflow ${workflow.name} does not define any executable nodes.`,
+    );
   }
 
   const phaseOwnerTeamId = resolveWorkItemPhaseOwnerTeamId({
@@ -5361,7 +5746,7 @@ const buildEntryStepResetWorkItemState = ({
     phaseId: firstStep.phase,
     step: firstStep,
   });
-  const actorName = getActorDisplayName(actor, 'User');
+  const actorName = getActorDisplayName(actor, "User");
   const shouldClaim = Boolean(actor?.userId);
   const nextStatus = getStepStatus(firstStep);
 
@@ -5384,12 +5769,18 @@ const buildEntryStepResetWorkItemState = ({
     executionContext: undefined,
     recordVersion: (workItem.recordVersion || 1) + 1,
     history: [
-      createHistoryEntry(actorName, actionTitle, note, firstStep.phase, nextStatus),
+      createHistoryEntry(
+        actorName,
+        actionTitle,
+        note,
+        firstStep.phase,
+        nextStatus,
+      ),
       ...(shouldClaim
         ? [
             createHistoryEntry(
               actorName,
-              'Operator control claimed',
+              "Operator control claimed",
               claimMessage,
               firstStep.phase,
               nextStatus,
@@ -5422,8 +5813,9 @@ export const cancelWorkItemControl = async ({
   note?: string;
   actor?: ActorContext;
 }) => {
-  const actorName = getActorDisplayName(actor, 'User');
-  const resetNote = note?.trim() || 'Work item reset to the workflow entry step by user.';
+  const actorName = getActorDisplayName(actor, "User");
+  const resetNote =
+    note?.trim() || "Work item reset to the workflow entry step by user.";
 
   const activeRun = await getActiveRunForWorkItem(capabilityId, workItemId);
   if (activeRun) {
@@ -5436,7 +5828,7 @@ export const cancelWorkItemControl = async ({
 
   const activeClaims = await listActiveWorkItemClaims(capabilityId, workItemId);
   await Promise.all(
-    activeClaims.map(claim =>
+    activeClaims.map((claim) =>
       releaseWorkItemClaim({
         capabilityId,
         workItemId: claim.workItemId,
@@ -5446,8 +5838,16 @@ export const cancelWorkItemControl = async ({
   );
 
   await Promise.all([
-    releaseWorkItemCodeClaimRecord({ capabilityId, workItemId, claimType: 'WRITE' }),
-    releaseWorkItemCodeClaimRecord({ capabilityId, workItemId, claimType: 'REVIEW' }),
+    releaseWorkItemCodeClaimRecord({
+      capabilityId,
+      workItemId,
+      claimType: "WRITE",
+    }),
+    releaseWorkItemCodeClaimRecord({
+      capabilityId,
+      workItemId,
+      claimType: "REVIEW",
+    }),
   ]);
 
   const projection = await resolveProjectionContext(capabilityId, workItemId);
@@ -5457,11 +5857,11 @@ export const cancelWorkItemControl = async ({
     workflow: projection.workflow,
     actor,
     note: resetNote,
-    actionTitle: 'Work item reset',
+    actionTitle: "Work item reset",
     claimMessage: `${actorName} claimed operator control while resetting the work item.`,
   });
 
-  await transaction(async client => {
+  await transaction(async (client) => {
     await purgeWorkItemDataTx(client, { capabilityId, workItemId });
 
     await client.query(
@@ -5506,7 +5906,7 @@ export const cancelWorkItemControl = async ({
       workItemId,
       userId: actor.userId,
       teamId: getActorTeamIds(actor)[0],
-      status: 'ACTIVE',
+      status: "ACTIVE",
       claimedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
     });
@@ -5528,8 +5928,8 @@ export const archiveWorkItemControl = async ({
   note?: string;
   actor?: ActorContext;
 }) => {
-  const actorName = getActorDisplayName(actor, 'User');
-  const archiveNote = note?.trim() || 'Work item archived by user.';
+  const actorName = getActorDisplayName(actor, "User");
+  const archiveNote = note?.trim() || "Work item archived by user.";
 
   const activeRun = await getActiveRunForWorkItem(capabilityId, workItemId);
   if (activeRun) {
@@ -5542,7 +5942,7 @@ export const archiveWorkItemControl = async ({
 
   const activeClaims = await listActiveWorkItemClaims(capabilityId, workItemId);
   await Promise.all(
-    activeClaims.map(claim =>
+    activeClaims.map((claim) =>
       releaseWorkItemClaim({
         capabilityId,
         workItemId: claim.workItemId,
@@ -5552,20 +5952,28 @@ export const archiveWorkItemControl = async ({
   );
 
   await Promise.all([
-    releaseWorkItemCodeClaimRecord({ capabilityId, workItemId, claimType: 'WRITE' }),
-    releaseWorkItemCodeClaimRecord({ capabilityId, workItemId, claimType: 'REVIEW' }),
+    releaseWorkItemCodeClaimRecord({
+      capabilityId,
+      workItemId,
+      claimType: "WRITE",
+    }),
+    releaseWorkItemCodeClaimRecord({
+      capabilityId,
+      workItemId,
+      claimType: "REVIEW",
+    }),
   ]);
 
   const projection = await resolveProjectionContext(capabilityId, workItemId);
   const archivedEntry = createHistoryEntry(
     actorName,
-    'Work item archived',
+    "Work item archived",
     archiveNote,
     projection.workItem.phase,
-    'ARCHIVED',
+    "ARCHIVED",
   );
 
-  await transaction(async client => {
+  await transaction(async (client) => {
     await purgeWorkItemDataTx(client, { capabilityId, workItemId });
 
     await client.query(
@@ -5588,7 +5996,7 @@ export const archiveWorkItemControl = async ({
           updated_at = NOW()
         WHERE capability_id = $1 AND id = $2
       `,
-      [capabilityId, workItemId, 'ARCHIVED', JSON.stringify([archivedEntry])],
+      [capabilityId, workItemId, "ARCHIVED", JSON.stringify([archivedEntry])],
     );
   });
 
@@ -5596,7 +6004,7 @@ export const archiveWorkItemControl = async ({
 
   return {
     ...projection.workItem,
-    status: 'ARCHIVED',
+    status: "ARCHIVED",
     phaseOwnerTeamId: undefined,
     claimOwnerUserId: undefined,
     watchedByUserIds: [],
@@ -5625,22 +6033,23 @@ export const restoreWorkItemControl = async ({
   actor?: ActorContext;
 }) => {
   const projection = await resolveProjectionContext(capabilityId, workItemId);
-  if (projection.workItem.status !== 'ARCHIVED') {
+  if (projection.workItem.status !== "ARCHIVED") {
     throw new Error(`Work item ${workItemId} is not archived.`);
   }
 
   const workflow = projection.workflow;
-  const restoreNote = note?.trim() || 'Work item restored from archive.';
-  const actorName = getActorDisplayName(actor, 'User');
-  const { nextWorkItem, firstStep, shouldClaim } = buildEntryStepResetWorkItemState({
-    workItem: projection.workItem,
-    capability: projection.capability,
-    workflow,
-    actor,
-    note: restoreNote,
-    actionTitle: 'Work item restored',
-    claimMessage: `${actorName} reclaimed operator control while restoring the work item.`,
-  });
+  const restoreNote = note?.trim() || "Work item restored from archive.";
+  const actorName = getActorDisplayName(actor, "User");
+  const { nextWorkItem, firstStep, shouldClaim } =
+    buildEntryStepResetWorkItemState({
+      workItem: projection.workItem,
+      capability: projection.capability,
+      workflow,
+      actor,
+      note: restoreNote,
+      actionTitle: "Work item restored",
+      claimMessage: `${actorName} reclaimed operator control while restoring the work item.`,
+    });
 
   if (shouldClaim && actor?.userId) {
     await upsertWorkItemClaim({
@@ -5648,7 +6057,7 @@ export const restoreWorkItemControl = async ({
       workItemId,
       userId: actor.userId,
       teamId: actor.teamIds?.[0],
-      status: 'ACTIVE',
+      status: "ACTIVE",
       claimedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
     });
@@ -5665,7 +6074,7 @@ export const restoreWorkItemControl = async ({
         taskId: workItemId,
         agentId: firstStep.agentId,
         message: restoreNote,
-        level: 'INFO',
+        level: "INFO",
       }),
     ],
   });
@@ -5694,7 +6103,9 @@ export const restartWorkflowRun = async ({
     capabilityId,
     workItemId: latest.run.workItemId,
     restartFromPhase:
-      restartFromPhase || latest.run.restartFromPhase || latest.run.currentPhase,
+      restartFromPhase ||
+      latest.run.restartFromPhase ||
+      latest.run.currentPhase,
     guidance,
     guidedBy,
     actor,
@@ -5716,8 +6127,11 @@ const completeRunWithWait = async ({
   artifacts?: Artifact[];
   runStepOverride?: WorkflowRunStep;
 }) => {
-  const waitRunStatus = await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id);
-  if (waitRunStatus === 'CANCELLED' || waitRunStatus === 'PAUSED') {
+  const waitRunStatus = await getWorkflowRunStatus(
+    detail.run.capabilityId,
+    detail.run.id,
+  );
+  if (waitRunStatus === "CANCELLED" || waitRunStatus === "PAUSED") {
     return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
   }
 
@@ -5738,7 +6152,7 @@ const completeRunWithWait = async ({
     traceId: detail.run.traceId,
     spanId: currentRunStep.spanId,
     type: waitType,
-    status: 'OPEN',
+    status: "OPEN",
     message: waitMessage,
     requestedBy: currentRunStep.agentId,
     approvalPolicyId: currentStep.approvalPolicy?.id,
@@ -5746,12 +6160,12 @@ const completeRunWithWait = async ({
       stepName: currentRunStep.name,
       ...(waitPayload || {}),
       contrarianReview:
-        waitType === 'CONFLICT_RESOLUTION' && contrarianReviewer
+        waitType === "CONFLICT_RESOLUTION" && contrarianReviewer
           ? createPendingContrarianReview(contrarianReviewer.id)
           : undefined,
     },
   });
-  if (waitType === 'APPROVAL') {
+  if (waitType === "APPROVAL") {
     const assignments = buildApprovalAssignmentsForWait({
       capability: projection.capability,
       workItem: projection.workItem,
@@ -5766,18 +6180,18 @@ const completeRunWithWait = async ({
   }
   const waitingRunStep = await updateWorkflowRunStep({
     ...currentRunStep,
-    status: 'WAITING',
+    status: "WAITING",
     waitId: wait.id,
   });
   const nextRun = (
     await updateWorkflowRun({
       ...detail.run,
       status:
-        waitType === 'APPROVAL'
-          ? 'WAITING_APPROVAL'
-          : waitType === 'INPUT'
-          ? 'WAITING_INPUT'
-          : 'WAITING_CONFLICT',
+        waitType === "APPROVAL"
+          ? "WAITING_APPROVAL"
+          : waitType === "INPUT"
+            ? "WAITING_INPUT"
+            : "WAITING_CONFLICT",
       pauseReason: waitType,
       currentWaitId: wait.id,
       leaseOwner: undefined,
@@ -5791,17 +6205,20 @@ const completeRunWithWait = async ({
     runStepId: currentRunStep.id,
     traceId: detail.run.traceId,
     spanId: currentRunStep.spanId,
-    type: 'STEP_WAITING',
-    level: waitType === 'CONFLICT_RESOLUTION' ? 'WARN' : 'INFO',
+    type: "STEP_WAITING",
+    level: waitType === "CONFLICT_RESOLUTION" ? "WARN" : "INFO",
     message: waitMessage,
     details: {
-      stage: 'STEP_WAITING',
+      stage: "STEP_WAITING",
       waitType,
       stepName: currentRunStep.name,
       phase: detail.run.currentPhase,
     },
   });
-  let nextDetail = await getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
+  let nextDetail = await getWorkflowRunDetail(
+    detail.run.capabilityId,
+    nextRun.id,
+  );
   await syncWaitingProjection({
     detail: nextDetail,
     waitType,
@@ -5809,7 +6226,7 @@ const completeRunWithWait = async ({
     artifacts,
   });
 
-  if (waitType === 'CONFLICT_RESOLUTION' && projection && contrarianReviewer) {
+  if (waitType === "CONFLICT_RESOLUTION" && projection && contrarianReviewer) {
     let review: ContrarianConflictReview;
     let retrievalReferences: MemoryReference[] = [];
     let latencyMs: number | undefined;
@@ -5844,7 +6261,7 @@ const completeRunWithWait = async ({
       await recordUsageMetrics({
         capabilityId: detail.run.capabilityId,
         traceId: detail.run.traceId,
-        scopeType: 'STEP',
+        scopeType: "STEP",
         scopeId: waitingRunStep.id,
         latencyMs: reviewEnvelope.latencyMs,
         totalTokens: reviewEnvelope.usage.totalTokens,
@@ -5852,7 +6269,7 @@ const completeRunWithWait = async ({
         tags: {
           phase: currentStep.phase,
           model: contrarianReviewer.model,
-          review: 'contrarian',
+          review: "contrarian",
         },
       });
     } catch (error) {
@@ -5872,7 +6289,7 @@ const completeRunWithWait = async ({
         },
       });
 
-      if (review.status === 'READY') {
+      if (review.status === "READY") {
         const reviewProjection = await resolveProjectionContext(
           detail.run.capabilityId,
           detail.run.workItemId,
@@ -5903,33 +6320,39 @@ const completeRunWithWait = async ({
         traceId: detail.run.traceId,
         spanId: waitingRunStep.spanId,
         type:
-          review.status === 'READY'
-            ? 'CONTRARIAN_REVIEW_READY'
-            : 'CONTRARIAN_REVIEW_FAILED',
+          review.status === "READY"
+            ? "CONTRARIAN_REVIEW_READY"
+            : "CONTRARIAN_REVIEW_FAILED",
         level:
-          review.status === 'ERROR' ||
-          review.severity === 'HIGH' ||
-          review.severity === 'CRITICAL'
-            ? 'WARN'
-            : 'INFO',
+          review.status === "ERROR" ||
+          review.severity === "HIGH" ||
+          review.severity === "CRITICAL"
+            ? "WARN"
+            : "INFO",
         message:
-          review.status === 'READY'
+          review.status === "READY"
             ? `Contrarian review completed with ${review.severity.toLowerCase()} severity.`
-            : 'Contrarian review was unavailable; conflict can still be resolved manually.',
+            : "Contrarian review was unavailable; conflict can still be resolved manually.",
         details: {
           stage:
-            review.status === 'READY'
-              ? 'CONTRARIAN_REVIEW_READY'
-              : 'CONTRARIAN_REVIEW_FAILED',
+            review.status === "READY"
+              ? "CONTRARIAN_REVIEW_READY"
+              : "CONTRARIAN_REVIEW_FAILED",
           waitId: wait.id,
           reviewerAgentId: review.reviewerAgentId,
           severity: review.severity,
           recommendation: review.recommendation,
         },
       });
-      nextDetail = await getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
+      nextDetail = await getWorkflowRunDetail(
+        detail.run.capabilityId,
+        nextRun.id,
+      );
     } catch (error) {
-      console.warn('Contrarian review persistence failed; leaving wait open.', error);
+      console.warn(
+        "Contrarian review persistence failed; leaving wait open.",
+        error,
+      );
     }
   }
 
@@ -5951,7 +6374,7 @@ const failRun = async ({
   const currentRunStep = getCurrentRunStep(detail);
   await updateWorkflowRunStep({
     ...currentRunStep,
-    status: 'FAILED',
+    status: "FAILED",
     completedAt: new Date().toISOString(),
     outputSummary: message,
     evidenceSummary: message,
@@ -5959,7 +6382,7 @@ const failRun = async ({
   const nextRun = (
     await updateWorkflowRun({
       ...detail.run,
-      status: 'FAILED',
+      status: "FAILED",
       terminalOutcome: message,
       completedAt: new Date().toISOString(),
       leaseOwner: undefined,
@@ -5974,16 +6397,19 @@ const failRun = async ({
     runStepId: currentRunStep.id,
     traceId: detail.run.traceId,
     spanId: currentRunStep.spanId,
-    type: 'STEP_FAILED',
-    level: 'ERROR',
+    type: "STEP_FAILED",
+    level: "ERROR",
     message,
     details: {
-      stage: 'STEP_FAILED',
+      stage: "STEP_FAILED",
       stepName: currentRunStep.name,
       phase: detail.run.currentPhase,
     },
   });
-  const nextDetail = await getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
+  const nextDetail = await getWorkflowRunDetail(
+    detail.run.capabilityId,
+    nextRun.id,
+  );
   await syncFailedProjection({
     detail: nextDetail,
     message,
@@ -6009,12 +6435,12 @@ export const reconcileWorkflowRunFailure = async ({
   const currentRunStep = getCurrentRunStep(detail);
 
   if (
-    currentRunStep.status !== 'FAILED' &&
-    currentRunStep.status !== 'COMPLETED'
+    currentRunStep.status !== "FAILED" &&
+    currentRunStep.status !== "COMPLETED"
   ) {
     await updateWorkflowRunStep({
       ...currentRunStep,
-      status: 'FAILED',
+      status: "FAILED",
       completedAt: currentRunStep.completedAt || new Date().toISOString(),
       outputSummary: message,
       evidenceSummary: message,
@@ -6024,7 +6450,7 @@ export const reconcileWorkflowRunFailure = async ({
   const nextRun = (
     await updateWorkflowRun({
       ...detail.run,
-      status: 'FAILED',
+      status: "FAILED",
       terminalOutcome: message,
       completedAt: detail.run.completedAt || new Date().toISOString(),
       leaseOwner: undefined,
@@ -6040,11 +6466,11 @@ export const reconcileWorkflowRunFailure = async ({
     runStepId: currentRunStep.id,
     traceId: detail.run.traceId,
     spanId: currentRunStep.spanId,
-    type: 'STEP_FAILED',
-    level: 'ERROR',
+    type: "STEP_FAILED",
+    level: "ERROR",
     message,
     details: {
-      stage: 'STEP_FAILED',
+      stage: "STEP_FAILED",
       stepName: currentRunStep.name,
       phase: detail.run.currentPhase,
     },
@@ -6067,28 +6493,48 @@ const executeAutomatedStep = async (
   detail: WorkflowRunDetail,
 ): Promise<WorkflowRunDetail> => {
   if (
-    ['CANCELLED', 'PAUSED'].includes(
+    ["CANCELLED", "PAUSED"].includes(
       await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
     )
   ) {
     return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
   }
 
-  const projection = await resolveProjectionContext(
+  const rawProjection = await resolveProjectionContext(
     detail.run.capabilityId,
     detail.run.workItemId,
     detail.run.workflowSnapshot,
   );
+  // Inject the executor's user-level working_directory (if set) into the
+  // capability's localDirectories so getCapabilityWorkspaceRoots returns it
+  // at every call site inside this step — independently of capability metadata.
+  const executorRegistration = detail.run.assignedExecutorId
+    ? await getDesktopExecutorRegistration(detail.run.assignedExecutorId).catch(() => null)
+    : null;
+  const projection =
+    executorRegistration?.workingDirectory
+      ? {
+          ...rawProjection,
+          capability: {
+            ...rawProjection.capability,
+            // Prepend so the user-level dir sorts first in the approved roots.
+            localDirectories: [
+              executorRegistration.workingDirectory,
+              ...(rawProjection.capability.localDirectories || []),
+            ],
+          },
+        }
+      : rawProjection;
   const step = getCurrentWorkflowStep(detail);
   const runStep = getCurrentRunStep(detail);
   const agent =
-    projection.workspace.agents.find(item => item.id === step.agentId) ||
+    projection.workspace.agents.find((item) => item.id === step.agentId) ||
     projection.workspace.agents[0];
   const traceId = detail.run.traceId || createTraceId();
 
   let currentRunStep = await updateWorkflowRunStep({
     ...runStep,
-    status: 'RUNNING',
+    status: "RUNNING",
     attemptCount: runStep.attemptCount + 1,
     startedAt: runStep.startedAt || new Date().toISOString(),
     spanId: runStep.spanId || createTraceId().slice(0, 16),
@@ -6096,7 +6542,7 @@ const executeAutomatedStep = async (
   const updatedRun = (
     await updateWorkflowRun({
       ...detail.run,
-      status: 'RUNNING',
+      status: "RUNNING",
       startedAt: detail.run.startedAt || new Date().toISOString(),
       currentStepId: step.id,
       currentPhase: step.phase,
@@ -6104,15 +6550,18 @@ const executeAutomatedStep = async (
       traceId,
     })
   ).run;
-  const runningDetail = await getWorkflowRunDetail(detail.run.capabilityId, updatedRun.id);
+  const runningDetail = await getWorkflowRunDetail(
+    detail.run.capabilityId,
+    updatedRun.id,
+  );
   const stepSpan = await startTelemetrySpan({
     capabilityId: detail.run.capabilityId,
     traceId,
     parentSpanId: undefined,
-    entityType: 'STEP',
+    entityType: "STEP",
     entityId: currentRunStep.id,
     name: `${step.name} execution`,
-    status: 'RUNNING',
+    status: "RUNNING",
     model: agent.model,
     attributes: {
       workItemId: detail.run.workItemId,
@@ -6140,7 +6589,7 @@ const executeAutomatedStep = async (
     spanId: stepSpan.id,
     message: `${agent.name} started ${step.name}.`,
     details: {
-      stage: 'STEP_STARTED',
+      stage: "STEP_STARTED",
       stepName: step.name,
       phase: step.phase,
       attemptCount: currentRunStep.attemptCount,
@@ -6149,19 +6598,45 @@ const executeAutomatedStep = async (
     },
   });
 
-  const toolHistory: Array<{ role: 'assistant' | 'user'; content: string }> = [];
+  const toolHistory: Array<{ role: "assistant" | "user"; content: string }> =
+    [];
   // Ephemeral cache for the Lever-3 history rollup — lives for the duration
   // of this step execution only. Lets `requestStepDecision` fold only the
   // new older turns into the cached summary instead of re-summarizing the
   // same prefix on every iteration.
-  const rollupCacheRef: { current: RollupCacheEntry | null } = { current: null };
+  const rollupCacheRef: { current: RollupCacheEntry | null } = {
+    current: null,
+  };
+  // Fix 2 — Dynamic model routing: track the last tool called so
+  // resolveModelForTurn can choose a cheaper model for trivial read turns.
+  let lastToolName: string | null = null;
+  // Fix 4 — Real-time LLM delta streaming: SSE-only (not persisted to DB).
+  // Each token delta is forwarded to the run's SSE channel so operators see
+  // the agent's reasoning as it streams, without flooding the DB.
+  const onLlmDelta = (delta: string) => {
+    publishRunEvent({
+      id: `DELTA-${Math.random().toString(36).slice(2, 10).toUpperCase()}`,
+      capabilityId: detail.run.capabilityId,
+      runId: detail.run.id,
+      workItemId: detail.run.workItemId,
+      runStepId: currentRunStep.id,
+      traceId,
+      timestamp: new Date().toISOString(),
+      type: "LLM_DELTA",
+      level: "INFO",
+      message: delta,
+    });
+  };
   const inspectedPaths = new Set<string>();
   const attemptedTools: ToolAdapterId[] = [];
-  let hasApprovedDeployment = runningDetail.steps.some(
-    item => item.stepType === 'HUMAN_APPROVAL' && item.status === 'COMPLETED',
-  ) || runningDetail.waits.some(
-    wait => wait.type === 'APPROVAL' && wait.status === 'RESOLVED',
-  );
+  let hasApprovedDeployment =
+    runningDetail.steps.some(
+      (item) =>
+        item.stepType === "HUMAN_APPROVAL" && item.status === "COMPLETED",
+    ) ||
+    runningDetail.waits.some(
+      (wait) => wait.type === "APPROVAL" && wait.status === "RESOLVED",
+    );
   const handoffContext = buildWorkflowHandoffContext({
     detail: runningDetail,
     workItem: projection.workItem,
@@ -6211,7 +6686,9 @@ const executeAutomatedStep = async (
   });
 
   await replaceCapabilityWorkspaceContentRecord(detail.run.capabilityId, {
-    artifacts: replaceArtifacts(projection.workspace.artifacts, [executionPlanArtifact]),
+    artifacts: replaceArtifacts(projection.workspace.artifacts, [
+      executionPlanArtifact,
+    ]),
   });
   await emitRunProgressEvent({
     capabilityId: detail.run.capabilityId,
@@ -6222,16 +6699,17 @@ const executeAutomatedStep = async (
     spanId: stepSpan.id,
     message: `${step.name} compiled a bounded execution plan for this step.`,
     details: {
-      stage: 'STEP_CONTRACT_COMPILED',
+      stage: "STEP_CONTRACT_COMPILED",
       stepName: step.name,
       missingInputs: compiledStepContext.missingInputs.length,
-      allowedToolCount: compiledStepContext.executionBoundary.allowedToolIds.length,
+      allowedToolCount:
+        compiledStepContext.executionBoundary.allowedToolIds.length,
     },
   });
 
   if (compiledStepContext.missingInputs.length > 0) {
     if (
-      ['CANCELLED', 'PAUSED'].includes(
+      ["CANCELLED", "PAUSED"].includes(
         await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
       )
     ) {
@@ -6241,17 +6719,17 @@ const executeAutomatedStep = async (
     await finishTelemetrySpan({
       capabilityId: detail.run.capabilityId,
       spanId: stepSpan.id,
-      status: 'WAITING',
+      status: "WAITING",
       attributes: {
-        waitType: 'INPUT',
+        waitType: "INPUT",
         missingInputs: compiledStepContext.missingInputs
-          .map(input => input.label)
-          .join(', '),
+          .map((input) => input.label)
+          .join(", "),
       },
     });
     return completeRunWithWait({
       detail: runningDetail,
-      waitType: 'INPUT',
+      waitType: "INPUT",
       waitMessage: buildStructuredInputWaitMessage(
         step,
         compiledStepContext.missingInputs,
@@ -6268,7 +6746,7 @@ const executeAutomatedStep = async (
 
   for (let iteration = 0; iteration < MAX_AGENT_TOOL_LOOPS; iteration += 1) {
     if (
-      ['CANCELLED', 'PAUSED'].includes(
+      ["CANCELLED", "PAUSED"].includes(
         await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
       )
     ) {
@@ -6292,11 +6770,13 @@ const executeAutomatedStep = async (
       runId: detail.run.id,
       traceId,
       spanId: stepSpan.id,
+      onLlmDelta,
+      lastToolName,
     });
     const decision = decisionEnvelope.decision;
 
     if (
-      ['CANCELLED', 'PAUSED'].includes(
+      ["CANCELLED", "PAUSED"].includes(
         await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
       )
     ) {
@@ -6310,9 +6790,9 @@ const executeAutomatedStep = async (
       runStepId: currentRunStep.id,
       traceId,
       spanId: stepSpan.id,
-      message: `Grounded ${step.name} with ${decisionEnvelope.retrievalReferences.length} capability reference${decisionEnvelope.retrievalReferences.length === 1 ? '' : 's'}.`,
+      message: `Grounded ${step.name} with ${decisionEnvelope.retrievalReferences.length} capability reference${decisionEnvelope.retrievalReferences.length === 1 ? "" : "s"}.`,
       details: {
-        stage: 'CONTEXT_GROUNDED',
+        stage: "CONTEXT_GROUNDED",
         stepName: step.name,
         retrievalCount: decisionEnvelope.retrievalReferences.length,
         model: decisionEnvelope.model,
@@ -6337,7 +6817,7 @@ const executeAutomatedStep = async (
       spanId: stepSpan.id,
       message: buildDecisionProgressMessage(decision),
       details: {
-        stage: 'DECISION_READY',
+        stage: "DECISION_READY",
         stepName: step.name,
         action: decision.action,
         model: decisionEnvelope.model,
@@ -6348,7 +6828,7 @@ const executeAutomatedStep = async (
     await recordUsageMetrics({
       capabilityId: detail.run.capabilityId,
       traceId,
-      scopeType: 'STEP',
+      scopeType: "STEP",
       scopeId: currentRunStep.id,
       latencyMs: decisionEnvelope.latencyMs,
       totalTokens: decisionEnvelope.usage.totalTokens,
@@ -6358,14 +6838,15 @@ const executeAutomatedStep = async (
         model: decisionEnvelope.model,
       },
     });
-    const recoverableDecisionFeedback = getRecoverableDecisionFeedback(decision);
+    const recoverableDecisionFeedback =
+      getRecoverableDecisionFeedback(decision);
     if (recoverableDecisionFeedback) {
       toolHistory.push({
-        role: 'assistant',
+        role: "assistant",
         content: JSON.stringify(decision),
       });
       toolHistory.push({
-        role: 'user',
+        role: "user",
         content: recoverableDecisionFeedback,
       });
       currentRunStep = await updateWorkflowRunStep({
@@ -6382,10 +6863,10 @@ const executeAutomatedStep = async (
         runStepId: currentRunStep.id,
         traceId,
         spanId: stepSpan.id,
-        level: 'WARN',
+        level: "WARN",
         message: recoverableDecisionFeedback,
         details: {
-          stage: 'DECISION_REPAIRED',
+          stage: "DECISION_REPAIRED",
           stepName: step.name,
           iteration: iteration + 1,
         },
@@ -6393,21 +6874,21 @@ const executeAutomatedStep = async (
       continue;
     }
 
-    if (decision.action === 'invoke_tool') {
-    if (
-      ['CANCELLED', 'PAUSED'].includes(
-        await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
-      )
-    ) {
-      return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
-    }
+    if (decision.action === "invoke_tool") {
+      if (
+        ["CANCELLED", "PAUSED"].includes(
+          await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
+        )
+      ) {
+        return getWorkflowRunDetail(detail.run.capabilityId, detail.run.id);
+      }
 
       const allowedToolIds = step.allowedToolIds || [];
       if (!allowedToolIds.includes(decision.toolCall.toolId)) {
         await finishTelemetrySpan({
           capabilityId: detail.run.capabilityId,
           spanId: stepSpan.id,
-          status: 'ERROR',
+          status: "ERROR",
           costUsd: decisionEnvelope.usage.estimatedCostUsd,
           tokenUsage: decisionEnvelope.usage,
           attributes: {
@@ -6428,19 +6909,19 @@ const executeAutomatedStep = async (
         runId: detail.run.id,
         runStepId: currentRunStep.id,
         targetId:
-          typeof decision.toolCall.args?.path === 'string'
+          typeof decision.toolCall.args?.path === "string"
             ? decision.toolCall.args.path
-            : typeof decision.toolCall.args?.templateId === 'string'
-            ? decision.toolCall.args.templateId
-            : undefined,
+            : typeof decision.toolCall.args?.templateId === "string"
+              ? decision.toolCall.args.templateId
+              : undefined,
         hasApprovalBypass: hasApprovedDeployment,
       });
 
-      if (policyDecision.decision === 'DENY') {
+      if (policyDecision.decision === "DENY") {
         await finishTelemetrySpan({
           capabilityId: detail.run.capabilityId,
           spanId: stepSpan.id,
-          status: 'ERROR',
+          status: "ERROR",
           costUsd: decisionEnvelope.usage.estimatedCostUsd,
           tokenUsage: decisionEnvelope.usage,
           attributes: {
@@ -6454,9 +6935,9 @@ const executeAutomatedStep = async (
         });
       }
 
-      if (policyDecision.decision === 'REQUIRE_APPROVAL') {
+      if (policyDecision.decision === "REQUIRE_APPROVAL") {
         if (
-          ['CANCELLED', 'PAUSED'].includes(
+          ["CANCELLED", "PAUSED"].includes(
             await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
           )
         ) {
@@ -6466,7 +6947,7 @@ const executeAutomatedStep = async (
         await finishTelemetrySpan({
           capabilityId: detail.run.capabilityId,
           spanId: stepSpan.id,
-          status: 'WAITING',
+          status: "WAITING",
           costUsd: decisionEnvelope.usage.estimatedCostUsd,
           tokenUsage: decisionEnvelope.usage,
           attributes: {
@@ -6476,7 +6957,7 @@ const executeAutomatedStep = async (
         });
         return completeRunWithWait({
           detail: runningDetail,
-          waitType: 'APPROVAL',
+          waitType: "APPROVAL",
           waitMessage: policyDecision.reason,
           waitPayload: {
             compiledStepContext,
@@ -6490,10 +6971,10 @@ const executeAutomatedStep = async (
         capabilityId: detail.run.capabilityId,
         traceId,
         parentSpanId: stepSpan.id,
-        entityType: 'TOOL',
+        entityType: "TOOL",
         entityId: toolInvocationId,
         name: `${decision.toolCall.toolId} tool`,
-        status: 'RUNNING',
+        status: "RUNNING",
         attributes: {
           stepName: step.name,
           toolId: decision.toolCall.toolId,
@@ -6508,7 +6989,7 @@ const executeAutomatedStep = async (
         traceId,
         spanId: toolSpan.id,
         toolId: decision.toolCall.toolId,
-        status: 'RUNNING',
+        status: "RUNNING",
         request: decision.toolCall.args || {},
         retryable: false,
         policyDecisionId: policyDecision.id,
@@ -6521,10 +7002,10 @@ const executeAutomatedStep = async (
         runStepId: currentRunStep.id,
         traceId,
         spanId: toolSpan.id,
-        type: 'TOOL_STARTED',
+        type: "TOOL_STARTED",
         message: `Running ${formatToolLabel(decision.toolCall.toolId)} for ${step.name}.`,
         details: {
-          stage: 'TOOL_STARTED',
+          stage: "TOOL_STARTED",
           stepName: step.name,
           toolId: decision.toolCall.toolId,
           iteration: iteration + 1,
@@ -6535,41 +7016,48 @@ const executeAutomatedStep = async (
       try {
         attemptedTools.push(decision.toolCall.toolId);
         const result =
-          decision.toolCall.toolId === 'delegate_task'
+          decision.toolCall.toolId === "delegate_task"
             ? await executeDelegatedTask({
                 projection,
                 detail: runningDetail,
                 step,
                 parentAgent: agent,
                 delegatedAgentId:
-                  typeof decision.toolCall.args?.delegatedAgentId === 'string'
+                  typeof decision.toolCall.args?.delegatedAgentId === "string"
                     ? decision.toolCall.args.delegatedAgentId
-                    : '',
+                    : "",
                 title:
-                  typeof decision.toolCall.args?.title === 'string'
+                  typeof decision.toolCall.args?.title === "string"
                     ? decision.toolCall.args.title
                     : `${step.name} specialist delegation`,
                 prompt:
-                  typeof decision.toolCall.args?.prompt === 'string'
+                  typeof decision.toolCall.args?.prompt === "string"
                     ? decision.toolCall.args.prompt
-                    : '',
+                    : "",
                 toolInvocationId,
                 traceId,
-                promoteToHandoff: Boolean(decision.toolCall.args?.promoteToHandoff),
-                openQuestions: Array.isArray(decision.toolCall.args?.openQuestions)
+                promoteToHandoff: Boolean(
+                  decision.toolCall.args?.promoteToHandoff,
+                ),
+                openQuestions: Array.isArray(
+                  decision.toolCall.args?.openQuestions,
+                )
                   ? decision.toolCall.args.openQuestions.filter(
                       (value): value is string =>
-                        typeof value === 'string' && value.trim().length > 0,
+                        typeof value === "string" && value.trim().length > 0,
                     )
                   : undefined,
-                blockingDependencies: Array.isArray(decision.toolCall.args?.blockingDependencies)
+                blockingDependencies: Array.isArray(
+                  decision.toolCall.args?.blockingDependencies,
+                )
                   ? decision.toolCall.args.blockingDependencies.filter(
                       (value): value is string =>
-                        typeof value === 'string' && value.trim().length > 0,
+                        typeof value === "string" && value.trim().length > 0,
                     )
                   : undefined,
                 recommendedNextStep:
-                  typeof decision.toolCall.args?.recommendedNextStep === 'string'
+                  typeof decision.toolCall.args?.recommendedNextStep ===
+                  "string"
                     ? decision.toolCall.args.recommendedNextStep
                     : undefined,
               })
@@ -6587,7 +7075,7 @@ const executeAutomatedStep = async (
         const toolLatency = Date.now() - toolStartedAt;
         const completedTool = await updateToolInvocation({
           ...toolInvocation,
-          status: 'COMPLETED',
+          status: "COMPLETED",
           resultSummary: result.summary,
           workingDirectory: result.workingDirectory,
           exitCode: result.exitCode,
@@ -6601,7 +7089,7 @@ const executeAutomatedStep = async (
         await finishTelemetrySpan({
           capabilityId: detail.run.capabilityId,
           spanId: toolSpan.id,
-          status: 'OK',
+          status: "OK",
           attributes: {
             sandboxProfile: result.sandboxProfile,
             policyDecisionId: policyDecision.id,
@@ -6610,12 +7098,12 @@ const executeAutomatedStep = async (
         await recordUsageMetrics({
           capabilityId: detail.run.capabilityId,
           traceId,
-          scopeType: 'TOOL',
+          scopeType: "TOOL",
           scopeId: completedTool.id,
           latencyMs: toolLatency,
           tags: {
             toolId: completedTool.toolId,
-            sandbox: result.sandboxProfile || 'unknown',
+            sandbox: result.sandboxProfile || "unknown",
           },
         });
         await insertRunEvent(
@@ -6627,18 +7115,18 @@ const executeAutomatedStep = async (
             toolInvocationId: completedTool.id,
             traceId,
             spanId: toolSpan.id,
-            type: 'TOOL_COMPLETED',
-            level: 'INFO',
+            type: "TOOL_COMPLETED",
+            level: "INFO",
             message: result.summary,
             details: result.details,
           }),
         );
         toolHistory.push({
-          role: 'assistant',
+          role: "assistant",
           content: JSON.stringify(decision),
         });
         toolHistory.push({
-          role: 'user',
+          role: "user",
           content: `Tool ${completedTool.toolId} result:\n${JSON.stringify(
             {
               summary: result.summary,
@@ -6660,21 +7148,66 @@ const executeAutomatedStep = async (
         });
         const touchedPaths = Array.isArray(result.details?.touchedPaths)
           ? result.details.touchedPaths.filter(
-              (value): value is string => typeof value === 'string' && value.trim().length > 0,
+              (value): value is string =>
+                typeof value === "string" && value.trim().length > 0,
             )
-          : typeof result.details?.path === 'string' && result.details.path.trim()
-          ? [result.details.path.trim()]
-          : [];
-        touchedPaths.forEach(touchedPath => {
+          : typeof result.details?.path === "string" &&
+              result.details.path.trim()
+            ? [result.details.path.trim()]
+            : [];
+        touchedPaths.forEach((touchedPath) => {
           stepTouchedPaths.add(touchedPath);
         });
-        if (typeof decision.toolCall.args?.path === 'string' && decision.toolCall.args.path.trim()) {
+        // Fix 4 — emit TOOL_FILE_CHANGED for write/patch tools so the frontend
+        // can show live file-change activity in the Attempts panel. SSE-only,
+        // not persisted to DB (publishRunEvent, not insertRunEvent).
+        const FILE_WRITING_TOOLS = new Set([
+          "workspace_write",
+          "workspace_apply_patch",
+          "workspace_replace_block",
+        ]);
+        if (FILE_WRITING_TOOLS.has(decision.toolCall.toolId)) {
+          const changedPaths =
+            touchedPaths.length > 0
+              ? touchedPaths
+              : typeof decision.toolCall.args?.path === "string" &&
+                  decision.toolCall.args.path.trim()
+                ? [decision.toolCall.args.path.trim()]
+                : [];
+          changedPaths.forEach((changedPath) => {
+            publishRunEvent({
+              id: `FCH-${Math.random().toString(36).slice(2, 10).toUpperCase()}`,
+              capabilityId: detail.run.capabilityId,
+              runId: detail.run.id,
+              workItemId: detail.run.workItemId,
+              runStepId: currentRunStep.id,
+              traceId,
+              timestamp: new Date().toISOString(),
+              type: "TOOL_FILE_CHANGED",
+              level: "INFO",
+              message: changedPath,
+              details: {
+                toolId: decision.toolCall.toolId,
+                path: changedPath,
+              },
+            });
+          });
+        }
+        // Fix 2 — update routing state so the next requestStepDecision call
+        // can route trivial follow-up reads to the budget model.
+        lastToolName = decision.toolCall.toolId;
+        if (
+          typeof decision.toolCall.args?.path === "string" &&
+          decision.toolCall.args.path.trim()
+        ) {
           inspectedPaths.add(decision.toolCall.args.path.trim());
         }
         continue;
       } catch (error) {
         const message =
-          error instanceof Error ? error.message : 'Tool execution failed unexpectedly.';
+          error instanceof Error
+            ? error.message
+            : "Tool execution failed unexpectedly.";
         const recoverableToolError = classifyToolExecutionError({
           toolId: decision.toolCall.toolId,
           message,
@@ -6687,18 +7220,18 @@ const executeAutomatedStep = async (
           toolInvocationId,
           traceId,
           spanId: toolSpan.id,
-          type: 'TOOL_FAILED',
-          level: 'ERROR',
+          type: "TOOL_FAILED",
+          level: "ERROR",
           message: `${formatToolLabel(decision.toolCall.toolId)} failed: ${message}`,
           details: {
-            stage: 'TOOL_FAILED',
+            stage: "TOOL_FAILED",
             stepName: step.name,
             toolId: decision.toolCall.toolId,
           },
         });
         await updateToolInvocation({
           ...toolInvocation,
-          status: 'FAILED',
+          status: "FAILED",
           resultSummary: message,
           sandboxProfile: toolInvocation.sandboxProfile,
           completedAt: new Date().toISOString(),
@@ -6706,7 +7239,7 @@ const executeAutomatedStep = async (
         await finishTelemetrySpan({
           capabilityId: detail.run.capabilityId,
           spanId: toolSpan.id,
-          status: 'ERROR',
+          status: "ERROR",
           attributes: {
             error: message,
             policyDecisionId: policyDecision.id,
@@ -6714,11 +7247,11 @@ const executeAutomatedStep = async (
         });
         if (recoverableToolError?.recoverable) {
           toolHistory.push({
-            role: 'assistant',
+            role: "assistant",
             content: JSON.stringify(decision),
           });
           toolHistory.push({
-            role: 'user',
+            role: "user",
             content: recoverableToolError.feedback,
           });
           currentRunStep = await updateWorkflowRunStep({
@@ -6734,7 +7267,7 @@ const executeAutomatedStep = async (
         await finishTelemetrySpan({
           capabilityId: detail.run.capabilityId,
           spanId: stepSpan.id,
-          status: 'ERROR',
+          status: "ERROR",
           costUsd: decisionEnvelope.usage.estimatedCostUsd,
           tokenUsage: decisionEnvelope.usage,
           attributes: {
@@ -6748,7 +7281,7 @@ const executeAutomatedStep = async (
       }
     }
 
-    if (decision.action === 'complete') {
+    if (decision.action === "complete") {
       const artifact = buildArtifactFromStepCompletion({
         detail: runningDetail,
         step,
@@ -6770,7 +7303,7 @@ const executeAutomatedStep = async (
 
       if (codeDiffArtifact) {
         if (
-          ['CANCELLED', 'PAUSED'].includes(
+          ["CANCELLED", "PAUSED"].includes(
             await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
           )
         ) {
@@ -6780,18 +7313,18 @@ const executeAutomatedStep = async (
         await finishTelemetrySpan({
           capabilityId: detail.run.capabilityId,
           spanId: stepSpan.id,
-          status: 'WAITING',
+          status: "WAITING",
           costUsd: decisionEnvelope.usage.estimatedCostUsd,
           tokenUsage: decisionEnvelope.usage,
           attributes: {
             outputSummary: decision.summary,
-            waitType: 'APPROVAL',
+            waitType: "APPROVAL",
             codeDiffArtifactId: codeDiffArtifact.id,
           },
         });
         return completeRunWithWait({
           detail: runningDetail,
-          waitType: 'APPROVAL',
+          waitType: "APPROVAL",
           waitMessage: `${step.name} changed workspace files. Review the code diff and approve before the workflow continues.`,
           waitPayload: {
             postStepApproval: true,
@@ -6809,7 +7342,7 @@ const executeAutomatedStep = async (
 
       currentRunStep = await updateWorkflowRunStep({
         ...currentRunStep,
-        status: 'COMPLETED',
+        status: "COMPLETED",
         completedAt: new Date().toISOString(),
         evidenceSummary: decision.reasoning,
         outputSummary: decision.summary,
@@ -6822,10 +7355,10 @@ const executeAutomatedStep = async (
         runStepId: currentRunStep.id,
         traceId,
         spanId: stepSpan.id,
-        type: 'STEP_COMPLETED',
+        type: "STEP_COMPLETED",
         message: decision.summary,
         details: {
-          stage: 'STEP_COMPLETED',
+          stage: "STEP_COMPLETED",
           stepName: step.name,
           phase: step.phase,
           artifactName: artifact.name,
@@ -6862,14 +7395,16 @@ const executeAutomatedStep = async (
       await finishTelemetrySpan({
         capabilityId: detail.run.capabilityId,
         spanId: stepSpan.id,
-        status: 'OK',
+        status: "OK",
         costUsd: decisionEnvelope.usage.estimatedCostUsd,
         tokenUsage: decisionEnvelope.usage,
         attributes: {
           outputSummary: decision.summary,
         },
       });
-      await refreshCapabilityMemory(detail.run.capabilityId).catch(() => undefined);
+      await refreshCapabilityMemory(detail.run.capabilityId).catch(
+        () => undefined,
+      );
 
       if (!nextStep) {
         await releaseRunLease({
@@ -6882,17 +7417,17 @@ const executeAutomatedStep = async (
     }
 
     if (
-      decision.action === 'pause_for_input' ||
-      decision.action === 'pause_for_approval' ||
-      decision.action === 'pause_for_conflict'
+      decision.action === "pause_for_input" ||
+      decision.action === "pause_for_approval" ||
+      decision.action === "pause_for_conflict"
     ) {
       const waitType =
-        decision.action === 'pause_for_conflict'
-          ? 'CONFLICT_RESOLUTION'
+        decision.action === "pause_for_conflict"
+          ? "CONFLICT_RESOLUTION"
           : decision.wait.type;
 
       if (
-        ['CANCELLED', 'PAUSED'].includes(
+        ["CANCELLED", "PAUSED"].includes(
           await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
         )
       ) {
@@ -6902,7 +7437,7 @@ const executeAutomatedStep = async (
       await finishTelemetrySpan({
         capabilityId: detail.run.capabilityId,
         spanId: stepSpan.id,
-        status: 'WAITING',
+        status: "WAITING",
         costUsd: decisionEnvelope.usage.estimatedCostUsd,
         tokenUsage: decisionEnvelope.usage,
         attributes: {
@@ -6915,20 +7450,20 @@ const executeAutomatedStep = async (
         waitType,
         waitMessage: decision.wait.message,
         waitPayload:
-          waitType === 'INPUT'
+          waitType === "INPUT"
             ? {
                 requestedInputFields:
                   compiledStepContext.missingInputs.length > 0
                     ? compiledStepContext.missingInputs
                     : [
                         {
-                          id: 'operator-input',
-                          label: 'Operator input',
+                          id: "operator-input",
+                          label: "Operator input",
                           description: decision.wait.message,
                           required: true,
-                          source: 'HUMAN_INPUT',
-                          kind: 'MARKDOWN',
-                          status: 'MISSING',
+                          source: "HUMAN_INPUT",
+                          kind: "MARKDOWN",
+                          status: "MISSING",
                         },
                       ],
                 compiledStepContext,
@@ -6941,11 +7476,11 @@ const executeAutomatedStep = async (
       });
     }
 
-    if (decision.action === 'fail') {
+    if (decision.action === "fail") {
       await finishTelemetrySpan({
         capabilityId: detail.run.capabilityId,
         spanId: stepSpan.id,
-        status: 'ERROR',
+        status: "ERROR",
         costUsd: decisionEnvelope.usage.estimatedCostUsd,
         tokenUsage: decisionEnvelope.usage,
         attributes: {
@@ -6960,7 +7495,7 @@ const executeAutomatedStep = async (
   }
 
   if (
-    ['CANCELLED', 'PAUSED'].includes(
+    ["CANCELLED", "PAUSED"].includes(
       await getWorkflowRunStatus(detail.run.capabilityId, detail.run.id),
     )
   ) {
@@ -6975,10 +7510,10 @@ const executeAutomatedStep = async (
         detail: runningDetail,
         runStepId: currentRunStep.id,
       }) >= MAX_RESOLVED_TOOL_LOOP_EXHAUSTION_WAITS
-        ? 'ERROR'
-        : 'WAITING',
+        ? "ERROR"
+        : "WAITING",
     attributes: {
-      waitType: 'INPUT',
+      waitType: "INPUT",
       error: `${step.name} exceeded the maximum tool loop iterations.`,
     },
   });
@@ -7004,7 +7539,7 @@ const executeAutomatedStep = async (
   const escalatedToolLoopWait = resolvedLoopExhaustionCount > 0;
   return completeRunWithWait({
     detail: runningDetail,
-    waitType: 'INPUT',
+    waitType: "INPUT",
     waitMessage: escalatedToolLoopWait
       ? buildEscalatedToolLoopWaitMessage({
           step,
@@ -7040,19 +7575,24 @@ export const processWorkflowRun = async (
 
   let currentDetail = detail;
   const maxTransitions =
-    Math.max(getWorkflowNodes(currentDetail.run.workflowSnapshot).length, currentDetail.run.workflowSnapshot.steps.length) +
-    2;
+    Math.max(
+      getWorkflowNodes(currentDetail.run.workflowSnapshot).length,
+      currentDetail.run.workflowSnapshot.steps.length,
+    ) + 2;
   for (let index = 0; index < maxTransitions; index += 1) {
     const latestStatus = await getWorkflowRunStatus(
       currentDetail.run.capabilityId,
       currentDetail.run.id,
     );
-    if (latestStatus === 'CANCELLED' || latestStatus === 'PAUSED') {
-      return getWorkflowRunDetail(currentDetail.run.capabilityId, currentDetail.run.id);
+    if (latestStatus === "CANCELLED" || latestStatus === "PAUSED") {
+      return getWorkflowRunDetail(
+        currentDetail.run.capabilityId,
+        currentDetail.run.id,
+      );
     }
 
     const currentStep = getCurrentWorkflowStep(currentDetail);
-    if (currentStep.stepType === 'HUMAN_APPROVAL') {
+    if (currentStep.stepType === "HUMAN_APPROVAL") {
       const projection = await resolveProjectionContext(
         currentDetail.run.capabilityId,
         currentDetail.run.workItemId,
@@ -7074,7 +7614,9 @@ export const processWorkflowRun = async (
         workflow: currentDetail.run.workflowSnapshot,
         step: currentStep,
         agent:
-          projection.workspace.agents.find(agent => agent.id === currentStep.agentId) || null,
+          projection.workspace.agents.find(
+            (agent) => agent.id === currentStep.agentId,
+          ) || null,
         handoffContext,
         resolvedWaitContext,
         artifacts: projection.workspace.artifacts,
@@ -7102,19 +7644,21 @@ export const processWorkflowRun = async (
           executionPlanArtifactId: executionPlanArtifact.id,
         },
       });
-      await replaceCapabilityWorkspaceContentRecord(currentDetail.run.capabilityId, {
-        artifacts: replaceArtifacts(projection.workspace.artifacts, [
-          executionPlanArtifact,
-        ]),
-      });
+      await replaceCapabilityWorkspaceContentRecord(
+        currentDetail.run.capabilityId,
+        {
+          artifacts: replaceArtifacts(projection.workspace.artifacts, [
+            executionPlanArtifact,
+          ]),
+        },
+      );
 
       return completeRunWithWait({
         detail: currentDetail,
-        waitType: 'APPROVAL',
-        waitMessage:
-          currentStep.approverRoles?.length
-            ? `${currentStep.name} is waiting for ${currentStep.approverRoles.join(', ')} approval.`
-            : `${currentStep.name} is waiting for human approval.`,
+        waitType: "APPROVAL",
+        waitMessage: currentStep.approverRoles?.length
+          ? `${currentStep.name} is waiting for ${currentStep.approverRoles.join(", ")} approval.`
+          : `${currentStep.name} is waiting for human approval.`,
         waitPayload: {
           compiledStepContext,
           compiledWorkItemPlan,
@@ -7126,13 +7670,13 @@ export const processWorkflowRun = async (
 
     currentDetail = await executeAutomatedStep(currentDetail);
     if (
-      currentDetail.run.status === 'COMPLETED' ||
-      currentDetail.run.status === 'FAILED' ||
-      currentDetail.run.status === 'WAITING_APPROVAL' ||
-      currentDetail.run.status === 'WAITING_INPUT' ||
-      currentDetail.run.status === 'WAITING_CONFLICT' ||
-      currentDetail.run.status === 'PAUSED' ||
-      currentDetail.run.status === 'CANCELLED'
+      currentDetail.run.status === "COMPLETED" ||
+      currentDetail.run.status === "FAILED" ||
+      currentDetail.run.status === "WAITING_APPROVAL" ||
+      currentDetail.run.status === "WAITING_INPUT" ||
+      currentDetail.run.status === "WAITING_CONFLICT" ||
+      currentDetail.run.status === "PAUSED" ||
+      currentDetail.run.status === "CANCELLED"
     ) {
       return currentDetail;
     }
@@ -7140,6 +7684,6 @@ export const processWorkflowRun = async (
 
   return failRun({
     detail: currentDetail,
-    message: 'Workflow execution exceeded the maximum step transitions.',
+    message: "Workflow execution exceeded the maximum step transitions.",
   });
 };

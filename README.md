@@ -8,26 +8,29 @@ Instead of treating delivery as scattered tools for planning, coding, approvals,
 
 SingularityNeo isn't just about running agents; it's about **Enterprise Safety and Observability**. We've built state-of-the-art governance right into the core loop:
 
-*   🛡️ **Dynamic Learning & Atomic Rollbacks**: Agents don't just act; they learn. When operators provide corrections, agents distill these into new guardrails. If a bad habit is learned, our **Agent State Versioning** lets you instantly roll back an agent's brain to a previous operational policy snapshot.
-*   🔏 **Signed Change Attestations & Tamper-Evident Chain**: Every evidence packet is Ed25519-signed and linked into a `prev_bundle_id` chain rooted at the work item's first attestation. The packet page shows a `Signed · chain intact` chip and a verify drawer that walks the chain, recomputes the digest, and surfaces any gap/cycle/root mismatch. See [Governance](./docs/governance.md).
-*   🧭 **Controls Catalog + Framework Mapping**: Every enforced policy binds to external controls across NIST CSF 2.0, SOC 2 TSC 2017, and ISO/IEC 27001:2022 — ~45 seeded controls visible at `/governance/controls` with an audit-legible binding graph so decisions read against a framework instead of an internal tool name.
-*   ⏱️ **Time-Bound Exception Lifecycle**: Policy denials can be waived through a first-class request → approve → expire flow. An active exception flips `evaluateToolPolicy` from `REQUIRE_APPROVAL` to `ALLOW` and stamps an `exception_id` on the audit row; the sweeper auto-expires at the deadline. Live at `/governance/exceptions`.
-*   🔎 **Prove-the-Negative Provenance**: A single API call answers "did any AI touch `services/billing/**` between T1 and T2?" with three honest states — touched / not touched / gap. Logging gaps never masquerade as a silent "no". Live at `/governance/provenance`.
-*   📊 **One-Screen Compliance Posture**: `/governance/posture` aggregates signer ratio, control coverage by framework, active / expiring-soon exceptions, recent denials joined to their bound control, and provenance coverage gaps — the screen to open first during an audit walkthrough.
-*   🧪 **Gated, Versioned, Drift-Aware Learning Loop**: Every profile refresh is committed as an immutable version. Shape checks block empty-or-malformed distillations from going live, an async LLM-judge scores every new version against fixtures from real sessions, per-version canary counters feed a drift detector that surfaces regressions for operator-driven revert, and an advisory-lock + append-only audit path makes concurrent corrections race-safe. See [Self-Learning Loop](./docs/self-learning-loop.md).
-*   👻 **Shadow Mode Execution**: Need to test a high-stakes deployment without risking production? Toggle a capability into **Shadow Mode**. The execution layer intercepts destructive commands across the entire platform, simulating successful runs to let you validate agent reasoning in a 100% risk-free environment.
-*   📋 **Evidence-Based Execution**: Every run leaves behind a durable cryptographic-style evidence trail. Artifacts, handoffs, approvals, and wait states are comprehensively logged in the Flight Recorder, so you never have to ask "why did the agent do that?"
-*   🤝 **Strict Human-in-the-Loop Governance**: Agents can plan, design, implement, and review, but the platform ensures humans retain ultimate control over approvals, policy boundaries, and conflict resolution.
-*   💡 **9-Lever Token Optimization**: A principled context-budgeting layer keeps every main-model call lean. Phase-sliced guidance, semantic-hunk reads, tool-loop history rollup, diff-first prompting, per-phase token budgets with priority-based eviction, caller/callee retrieval bundles, diff-enforcement policy, structured rollup summaries, and per-call Prompt Receipts — all active by default, all tunable per capability. See [Token Optimization](./docs/token-optimization.md).
-*   🛂 **Release Passport**: A structured governance gate that aggregates run evidence, approval chains, risk signals, and open findings into a single release-readiness document. Passport approvals are linked to the run, signed, and stored alongside the evidence packet.
-*   💥 **Blast Radius Analysis**: Before a proposed file change is deployed, Shadow Execution maps which capabilities and files would break. Dependents are classified `CRITICAL`, `WARNING`, or `SAFE` so teams can assess risk before a single line ships.
-*   🔦 **Sentinel Mode**: Zero-prompt autonomous security remediation. Sentinel intercepts CVE alerts, maps the vulnerability to the affected workspace, patches it in isolation, signs the change, and delivers a Release Passport for 1-click human approval — no manual triage loop required.
+- 🛡️ **Dynamic Learning & Atomic Rollbacks**: Agents don't just act; they learn. When operators provide corrections, agents distill these into new guardrails. If a bad habit is learned, our **Agent State Versioning** lets you instantly roll back an agent's brain to a previous operational policy snapshot.
+- 🔏 **Signed Change Attestations & Tamper-Evident Chain**: Every evidence packet is Ed25519-signed and linked into a `prev_bundle_id` chain rooted at the work item's first attestation. The packet page shows a `Signed · chain intact` chip and a verify drawer that walks the chain, recomputes the digest, and surfaces any gap/cycle/root mismatch. See [Governance](./docs/governance.md).
+- 🧭 **Controls Catalog + Framework Mapping**: Every enforced policy binds to external controls across NIST CSF 2.0, SOC 2 TSC 2017, and ISO/IEC 27001:2022 — ~45 seeded controls visible at `/governance/controls` with an audit-legible binding graph so decisions read against a framework instead of an internal tool name.
+- ⏱️ **Time-Bound Exception Lifecycle**: Policy denials can be waived through a first-class request → approve → expire flow. An active exception flips `evaluateToolPolicy` from `REQUIRE_APPROVAL` to `ALLOW` and stamps an `exception_id` on the audit row; the sweeper auto-expires at the deadline. Live at `/governance/exceptions`.
+- 🔎 **Prove-the-Negative Provenance**: A single API call answers "did any AI touch `services/billing/**` between T1 and T2?" with three honest states — touched / not touched / gap. Logging gaps never masquerade as a silent "no". Live at `/governance/provenance`.
+- 📊 **One-Screen Compliance Posture**: `/governance/posture` aggregates signer ratio, control coverage by framework, active / expiring-soon exceptions, recent denials joined to their bound control, and provenance coverage gaps — the screen to open first during an audit walkthrough.
+- 🧪 **Gated, Versioned, Drift-Aware Learning Loop**: Every profile refresh is committed as an immutable version. Shape checks block empty-or-malformed distillations from going live, an async LLM-judge scores every new version against fixtures from real sessions, per-version canary counters feed a drift detector that surfaces regressions for operator-driven revert, and an advisory-lock + append-only audit path makes concurrent corrections race-safe. See [Self-Learning Loop](./docs/self-learning-loop.md).
+- 👻 **Shadow Mode Execution**: Need to test a high-stakes deployment without risking production? Toggle a capability into **Shadow Mode**. The execution layer intercepts destructive commands across the entire platform, simulating successful runs to let you validate agent reasoning in a 100% risk-free environment.
+- 📋 **Evidence-Based Execution**: Every run leaves behind a durable cryptographic-style evidence trail. Artifacts, handoffs, approvals, and wait states are comprehensively logged in the Flight Recorder, so you never have to ask "why did the agent do that?"
+- 🤝 **Strict Human-in-the-Loop Governance**: Agents can plan, design, implement, and review, but the platform ensures humans retain ultimate control over approvals, policy boundaries, and conflict resolution.
+- 💡 **9-Lever Token Optimization**: A principled context-budgeting layer keeps every main-model call lean. Phase-sliced guidance, semantic-hunk reads, tool-loop history rollup, diff-first prompting, per-phase token budgets with priority-based eviction, caller/callee retrieval bundles, diff-enforcement policy, structured rollup summaries, and per-call Prompt Receipts — all active by default, all tunable per capability. See [Token Optimization](./docs/token-optimization.md).
+- 💻 **User-Scoped Desktop Workspaces**: Local execution paths are resolved from `Desktop Workspaces`, not shared capability metadata. Each operator can save a different local root and working directory per desktop executor, with repository rows taking precedence over a capability fallback.
+- 🌿 **Work-Item Branch Standardization**: Repo-backed work-item execution now converges on one branch rule everywhere: the shared branch, checkout session, local commit flow, and push target all use the exact literal `workItem.id`.
+- 🛂 **Release Passport**: A structured governance gate that aggregates run evidence, approval chains, risk signals, and open findings into a single release-readiness document. Passport approvals are linked to the run, signed, and stored alongside the evidence packet.
+- 💥 **Blast Radius Analysis**: Before a proposed file change is deployed, Shadow Execution maps which capabilities and files would break. Dependents are classified `CRITICAL`, `WARNING`, or `SAFE` so teams can assess risk before a single line ships.
+- 🔦 **Sentinel Mode**: Zero-prompt autonomous security remediation. Sentinel intercepts CVE alerts, maps the vulnerability to the affected workspace, patches it in isolation, signs the change, and delivers a Release Passport for 1-click human approval — no manual triage loop required.
 
 ## What SingularityNeo Is
 
 SingularityNeo is best understood as a delivery operating system for a business capability.
 
 A capability owns:
+
 - its charter and business outcome
 - lifecycle phases and workflow steps
 - human collaborators and standard agents
@@ -35,7 +38,13 @@ A capability owns:
 - evidence, handoffs, review packets, and audit trails
 - memory, skills, tools, and agent learning
 
+Local execution paths do not belong to shared capability metadata anymore.
+They are resolved per operator and per desktop executor through `Desktop
+Workspaces`, while capability metadata fields remain useful as documentation
+and migration hints.
+
 The product is strongest when a team wants to:
+
 - move work through an explicit SDLC or org-specific lifecycle
 - deploy autonomous agents safely with full administrative rollbacks
 - explain why work is blocked, waiting, approved, or complete
@@ -55,12 +64,12 @@ The product is strongest when a team wants to:
 
 The sidebar organises specialist tools into four labelled groups visible to users with matching roles:
 
-| Group | Tools | Who sees it |
-| ----- | ----- | ----------- |
-| **Governance** | Posture Dashboard, Controls Catalog, Exceptions, Provenance, Work Item Report | Admins / Portfolio owners |
-| **Security** | Sentinel Mode, Blast Radius | Operators, Architects |
-| **Operations** | Ops Console, Incidents, MRM, Run Console, Memory, Evals | Operators |
-| **Platform** | Architecture, Access, Skills, Tools, Tool Access, Policies, Artifact Designer, Agent Studio, Tasks, Databases | Builders / Admins |
+| Group          | Tools                                                                                                         | Who sees it               |
+| -------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| **Governance** | Posture Dashboard, Controls Catalog, Exceptions, Provenance, Work Item Report                                 | Admins / Portfolio owners |
+| **Security**   | Sentinel Mode, Blast Radius                                                                                   | Operators, Architects     |
+| **Operations** | Ops Console, Incidents, MRM, Run Console, Memory, Evals                                                       | Operators                 |
+| **Platform**   | Architecture, Access, Skills, Tools, Tool Access, Policies, Artifact Designer, Agent Studio, Tasks, Databases | Builders / Admins         |
 
 ## Operator Roles & Audiences
 
@@ -73,15 +82,15 @@ workspaces assign these roles via the admin user list.
 
 Source of truth: `WorkspaceRole` in [`src/types.ts`](./src/types.ts).
 
-| Role | What it's for |
-| ---- | ------------- |
-| `WORKSPACE_ADMIN` | Full control plane — runtime config, connector secrets, user management, every governance surface. |
-| `PORTFOLIO_OWNER` | Owns outcomes across many capabilities. Sees every workspace, approves policy exceptions, reads posture dashboards. |
-| `TEAM_LEAD` | Owns a subset of capabilities. Approves team deploys, reviews evidence, manages team membership. |
-| `INCIDENT_COMMANDER` | On-call overrides — can revoke active exceptions, trigger rollback runs, and read flight recorder live. |
-| `OPERATOR` | Day-to-day work execution — runs workflows, approves routine actions, chats with capability agents. |
-| `AUDITOR` | Read-only across evidence, controls, exceptions, and provenance. Cannot execute tools or approve actions. |
-| `VIEWER` | Read-only business view — capabilities, work items, dashboards. No governance surfaces. |
+| Role                 | What it's for                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `WORKSPACE_ADMIN`    | Full control plane — runtime config, connector secrets, user management, every governance surface.                  |
+| `PORTFOLIO_OWNER`    | Owns outcomes across many capabilities. Sees every workspace, approves policy exceptions, reads posture dashboards. |
+| `TEAM_LEAD`          | Owns a subset of capabilities. Approves team deploys, reviews evidence, manages team membership.                    |
+| `INCIDENT_COMMANDER` | On-call overrides — can revoke active exceptions, trigger rollback runs, and read flight recorder live.             |
+| `OPERATOR`           | Day-to-day work execution — runs workflows, approves routine actions, chats with capability agents.                 |
+| `AUDITOR`            | Read-only across evidence, controls, exceptions, and provenance. Cannot execute tools or approve actions.           |
+| `VIEWER`             | Read-only business view — capabilities, work items, dashboards. No governance surfaces.                             |
 
 ### Sidebar audiences
 
@@ -89,13 +98,13 @@ Each advanced tool is tagged with an `AdvancedToolAudience`. The sidebar
 filters tools based on a role → audience match in
 `matchesAdvancedToolAudience` ([`src/lib/capabilityExperience.ts`](./src/lib/capabilityExperience.ts)).
 
-| Audience | Who sees it | Example tools |
-| -------- | ----------- | ------------- |
-| `ALL` | Everyone | Chat, Work Items |
-| `OPERATORS` | Anyone except `VIEWER` | Workflows, Approvals inbox |
-| `BUILDERS` | Anyone except `VIEWER` and `AUDITOR` | Agent studio, Schema designer |
-| `ADMINS` | `WORKSPACE_ADMIN` / `PORTFOLIO_OWNER` / `TEAM_LEAD` | Posture Dashboard, Controls Catalog, Exception Console |
-| `ARCHITECTS` | Same roles as `ADMINS` | Dependency graph, Published snapshots |
+| Audience     | Who sees it                                         | Example tools                                          |
+| ------------ | --------------------------------------------------- | ------------------------------------------------------ |
+| `ALL`        | Everyone                                            | Chat, Work Items                                       |
+| `OPERATORS`  | Anyone except `VIEWER`                              | Workflows, Approvals inbox                             |
+| `BUILDERS`   | Anyone except `VIEWER` and `AUDITOR`                | Agent studio, Schema designer                          |
+| `ADMINS`     | `WORKSPACE_ADMIN` / `PORTFOLIO_OWNER` / `TEAM_LEAD` | Posture Dashboard, Controls Catalog, Exception Console |
+| `ARCHITECTS` | Same roles as `ADMINS`                              | Dependency graph, Published snapshots                  |
 
 If a role does not match any listed audience for a tool, that tool is
 hidden rather than shown-and-disabled — so an `AUDITOR` never sees the
@@ -104,16 +113,28 @@ Agent Studio entry at all, and a `VIEWER` never sees approvals.
 ## Core Product Ideas
 
 ### 1. Capability-Centered
+
 The active capability is the center of gravity. Most of the application follows that selected capability, including its lifecycle, agents, evidence, database-backed state, and runtime context.
 
 ### 2. Human-Governed Agents
+
 Agents operate semi-autonomously through workflow steps that strictly define their boundaries, capability restrictions, and tool access, pausing seamlessly for human approval when policies dictate.
 
 ### 3. Work With Proof
+
 Every meaningful run can leave behind artifacts, handoffs, approvals, waits, policy decisions, and work-item explainability so the team can see what happened and why.
 
 ### 4. Adaptable Lifecycle
+
 The platform supports capability-specific lifecycles, including organization-specific flows like Brokerage SDLC. Lifecycle phases drive the Work lanes, Designer structure, and Evidence timeline.
+
+### 5. Desktop-Local Execution Authority
+
+When work touches a real repository, SingularityNeo resolves the local root
+and working directory from the current operator on the current desktop. A
+repository-specific desktop mapping wins over a capability fallback, and
+claim/start flows only succeed when that mapping validates on the local
+filesystem.
 
 ## What A Normal Day Looks Like
 
@@ -177,6 +198,7 @@ npm run dev
 ```
 
 This starts:
+
 - frontend at `http://localhost:3000`
 - API at `http://localhost:3001`
 
@@ -192,7 +214,8 @@ If this is a fresh database or first run:
 2. Confirm the Postgres connection
 3. Initialize the database objects and shared foundations
 4. Create or open a capability
-5. Review `Agents`, `Designer`, and `Work`
+5. Open `Operations` and save a `Desktop Workspaces` mapping for your current operator on this desktop
+6. Review `Agents`, `Designer`, and `Work`
 
 If the workspace looks empty after DB setup, that usually means the shared foundations are loaded but no visible business capability has been created yet.
 
@@ -222,6 +245,40 @@ The Express **control plane** runs on a server; the Electron shell and its
 Postgres stay server-side — the desktop adds a native chat surface and a
 local runtime lane.
 
+### Desktop Workspaces
+
+Desktop execution does not read local roots from shared capability metadata.
+Instead, each desktop executor stores mappings for the current operator:
+
+- repository-scoped row: `(executor, user, capability, repository)`
+- fallback row: `(executor, user, capability)`
+
+You manage these rows from `Operations` → `Desktop Workspaces`. The UI labels
+them clearly as "Stored for this operator on this desktop only."
+
+The runtime uses this precedence:
+
+1. repository-specific desktop mapping
+2. capability-level desktop fallback
+3. no runtime fallback to capability metadata
+
+`working_directory_path` must stay inside `local_root_path`. Capability
+metadata fields such as repository `localRootHint`, `localDirectories`, and
+`defaultWorkspacePath` remain visible as suggestions, but they are no longer
+runtime authority for claim, branch creation, or local git execution.
+
+### Work-Item Branch Rule
+
+For repo-backed work, the branch name is standardized everywhere to the
+literal `workItem.id`.
+
+- local checkout branch: `workItem.id`
+- shared branch context: `workItem.id`
+- local commit + push target: `origin workItem.id`
+- PR head branch: `workItem.id`
+
+`main` or the repository default branch remains the base branch.
+
 ### Laptop env vars
 
 ```bash
@@ -237,13 +294,13 @@ only — the desktop never connects to the database directly.
 
 Defined in [`package.json`](./package.json).
 
-| Command | Behaviour |
-| ------- | --------- |
-| `npm run desktop:start` | Foreground launch — server + Electron shell in one terminal. |
-| `npm run desktop:up` | Background launch. Writes PID to `.singularity/desktop-dev.pid`, logs to `.singularity/desktop-dev.log`. |
-| `npm run desktop:down` | Stops the backgrounded desktop using the PID file. |
-| `npm run desktop:dev` | Dev-mode Electron shell against a live-reloading Vite bundle. |
-| `npm run desktop:build` | Produces a distributable Electron binary. |
+| Command                 | Behaviour                                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| `npm run desktop:start` | Foreground launch — server + Electron shell in one terminal.                                             |
+| `npm run desktop:up`    | Background launch. Writes PID to `.singularity/desktop-dev.pid`, logs to `.singularity/desktop-dev.log`. |
+| `npm run desktop:down`  | Stops the backgrounded desktop using the PID file.                                                       |
+| `npm run desktop:dev`   | Dev-mode Electron shell against a live-reloading Vite bundle.                                            |
+| `npm run desktop:build` | Produces a distributable Electron binary.                                                                |
 
 ### Important caveat
 
@@ -257,6 +314,7 @@ Full topology, TLS, multi-machine deployment, and troubleshooting are in
 ## Architecture
 
 Frontend:
+
 - React 19
 - Vite
 - TypeScript
@@ -264,15 +322,19 @@ Frontend:
 - Tailwind CSS v4
 
 Backend:
+
 - Express
 - PostgreSQL
 - GitHub Copilot SDK runtime integration
 
 Runtime model:
+
 - the React app talks to the local Express API
 - Postgres is the durable system of record
 - workflow execution, waits, artifacts, approvals, and learning are persisted
 - the runtime combines deterministic orchestration with agent-backed execution
+- desktop-local git and workspace path resolution are derived from validated
+  `Desktop Workspaces` mappings for the current operator and executor
 
 ## Repository Structure
 
@@ -317,6 +379,7 @@ server/
 ### Work
 
 `/orchestrator` is the main delivery workbench. It is where users:
+
 - start or restart phases
 - review blockers and waits
 - guide agents
@@ -326,6 +389,7 @@ server/
 ### Evidence
 
 `/ledger` is the audit and proof workspace. It is where users:
+
 - browse artifacts and completed work
 - inspect approvals and handoffs
 - review flight recorder history
@@ -334,6 +398,7 @@ server/
 ### Agents
 
 `/team` is the operating model for collaborators and agents. In the UI, this workspace is labeled `Agents`. It is where users:
+
 - inspect standard agents
 - review skills, tools, and learning
 - adjust models or role setup
@@ -342,6 +407,7 @@ server/
 ### Release Passport
 
 `/release-passport` is the release governance gate. A Release Passport is a structured document that aggregates run evidence, approval chains, risk signals, open findings, test coverage, and a go/no-go recommendation for every run that reaches the release phase. Key features:
+
 - auto-populated from run artifacts and approval records
 - each approval is role-scoped (e.g. `TECH_LEAD`, `QA_OWNER`, `COMPLIANCE`)
 - passport status (`PENDING` / `APPROVED` / `REJECTED`) is stored and linked to the run
@@ -350,6 +416,7 @@ server/
 ### Blast Radius
 
 `/blast-radius` performs a dependency impact analysis before a change is shipped. A Shadow Execution dry-run maps which capabilities and workspace files would break if a proposed file change were deployed. Results are classified:
+
 - **CRITICAL** — direct runtime dependency
 - **WARNING** — indirect or soft dependency
 - **SAFE** — no detected path to the changed file
@@ -359,6 +426,7 @@ Useful as a pre-merge gate and for compliance teams who need to prove a change w
 ### Sentinel Mode
 
 `/sentinel` is the autonomous security remediation surface. When a CVE alert arrives (via webhook), Sentinel:
+
 1. Receives the alert at `POST /api/sentinel/trigger`
 2. Identifies the affected workspace and vulnerability context
 3. Spawns an execution run that patches, tests, and signs the fix
@@ -393,6 +461,7 @@ curl -i http://127.0.0.1:3001/api/state
 ```
 
 If it hangs or fails:
+
 - confirm Postgres is reachable
 - confirm the runtime DB is the expected one in `Database Setup`
 - restart the backend cleanly
@@ -400,6 +469,7 @@ If it hangs or fails:
 ### Database initialization fails
 
 Open `Database Setup` and verify:
+
 - host
 - port
 - database name
@@ -412,6 +482,7 @@ The app supports saved runtime DB profiles, so you can switch between known data
 ### Copilot runtime is not configured
 
 Set one of:
+
 - `COPILOT_CLI_URL`
 - `GITHUB_MODELS_TOKEN`
 
@@ -422,6 +493,7 @@ Then restart the backend.
 The e2e suite uses the configured Postgres database. If you do not isolate it, tests can create test capabilities in your normal workspace.
 
 Recommended:
+
 - use a dedicated database for e2e
 - or clean up test capabilities after the run
 
@@ -431,29 +503,29 @@ SingularityNeo ships a nine-lever token-optimization program that keeps every ma
 
 ### Lever overview
 
-| # | Name | What it does |
-|---|------|-------------|
-| 1 | **Phase-sliced guidance** | `buildGuidanceBlockFromPack()` filters repo guidance to only the categories relevant to the current lifecycle phase. An 8-phase build uses only ~⅛ of the guidance corpus per call. |
-| 2 | **Semantic-hunk reads** | `workspace_read` accepts a `symbol` name and returns only that function/class body plus ~10 lines of context instead of the whole file (80–95 % token saving). Pass `includeCallers` / `includeCallees` (0–3 each) to also pull in caller/callee signatures for cross-method refactors. |
-| 3 | **Tool-loop history rollup** | After ≥ 10 tool turns, the oldest prefix is summarised by the cheapest model on the capability's provider. Only the summary + last 6 raw turns reach the expensive main model. Tunable via `executionConfig.historyRollup`. |
-| 4 | **Diff-first prompting** | Tool descriptions for `workspace_write`, `workspace_apply_patch`, and `workspace_replace_block` steer agents toward diffs instead of full-file rewrites. |
-| 5 | **Context Budgeter** | Every prompt is assembled as typed `BudgetFragment[]` with per-source priorities. When the total would exceed the per-phase token ceiling, the lowest-priority sources are evicted first. SYSTEM_CORE and TOOL_DESCRIPTIONS are never evicted. |
-| 6 | **Retrieval Bundle** | `workspace_read` with `includeCallers` / `includeCallees` surfaces dependent-file paths and their top exported signatures in a single call, so cross-method invariants stay in scope without chaining extra reads. |
-| 7 | **Prompt Receipts** | After every main-model call a `PROMPT_RECEIPT` run event is emitted listing which fragments were included, which were evicted, and the estimated token count. Operators can answer "why did the model decide X" by inspecting the receipt. |
-| 8 | **Structured Rollup** | `invokeBudgetModelSummary` returns a JSON state note (`currentGoal`, `lastSuccessfulAction`, `currentBlocker`, `filesInPlay`, `pendingDecision`, `evidenceGenerated`) instead of prose — machine-consumable and more precise. |
-| 9 | **Diff Enforcement** | `workspace_write` on an existing file is blocked on the second attempt with a recoverable error pointing to `workspace_apply_patch`. The block lifts after two patch failures so agents are never permanently stuck. |
+| #   | Name                         | What it does                                                                                                                                                                                                                                                                            |
+| --- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Phase-sliced guidance**    | `buildGuidanceBlockFromPack()` filters repo guidance to only the categories relevant to the current lifecycle phase. An 8-phase build uses only ~⅛ of the guidance corpus per call.                                                                                                     |
+| 2   | **Semantic-hunk reads**      | `workspace_read` accepts a `symbol` name and returns only that function/class body plus ~10 lines of context instead of the whole file (80–95 % token saving). Pass `includeCallers` / `includeCallees` (0–3 each) to also pull in caller/callee signatures for cross-method refactors. |
+| 3   | **Tool-loop history rollup** | After ≥ 10 tool turns, the oldest prefix is summarised by the cheapest model on the capability's provider. Only the summary + last 6 raw turns reach the expensive main model. Tunable via `executionConfig.historyRollup`.                                                             |
+| 4   | **Diff-first prompting**     | Tool descriptions for `workspace_write`, `workspace_apply_patch`, and `workspace_replace_block` steer agents toward diffs instead of full-file rewrites.                                                                                                                                |
+| 5   | **Context Budgeter**         | Every prompt is assembled as typed `BudgetFragment[]` with per-source priorities. When the total would exceed the per-phase token ceiling, the lowest-priority sources are evicted first. SYSTEM_CORE and TOOL_DESCRIPTIONS are never evicted.                                          |
+| 6   | **Retrieval Bundle**         | `workspace_read` with `includeCallers` / `includeCallees` surfaces dependent-file paths and their top exported signatures in a single call, so cross-method invariants stay in scope without chaining extra reads.                                                                      |
+| 7   | **Prompt Receipts**          | After every main-model call a `PROMPT_RECEIPT` run event is emitted listing which fragments were included, which were evicted, and the estimated token count. Operators can answer "why did the model decide X" by inspecting the receipt.                                              |
+| 8   | **Structured Rollup**        | `invokeBudgetModelSummary` returns a JSON state note (`currentGoal`, `lastSuccessfulAction`, `currentBlocker`, `filesInPlay`, `pendingDecision`, `evidenceGenerated`) instead of prose — machine-consumable and more precise.                                                           |
+| 9   | **Diff Enforcement**         | `workspace_write` on an existing file is blocked on the second attempt with a recoverable error pointing to `workspace_apply_patch`. The block lifts after two patch failures so agents are never permanently stuck.                                                                    |
 
 ### Per-phase token budgets
 
-| Phase | Max input tokens | Reserved output |
-|-------|-----------------|-----------------|
-| Build / Development / Construction | 64 k | 16 k |
-| Plan / Design / Elaboration | 48 k | 8 k |
-| Analysis / Discover / Inception | 32 k | 4 k |
-| QA / Validate / Test / Delivery | 32 k | 4 k |
-| Governance / Review / Audit | 24 k | 2 k |
-| Release / Deploy / Ship | 16 k | 2 k |
-| Unknown / default | 64 k | 16 k |
+| Phase                              | Max input tokens | Reserved output |
+| ---------------------------------- | ---------------- | --------------- |
+| Build / Development / Construction | 64 k             | 16 k            |
+| Plan / Design / Elaboration        | 48 k             | 8 k             |
+| Analysis / Discover / Inception    | 32 k             | 4 k             |
+| QA / Validate / Test / Delivery    | 32 k             | 4 k             |
+| Governance / Review / Audit        | 24 k             | 2 k             |
+| Release / Deploy / Ship            | 16 k             | 2 k             |
+| Unknown / default                  | 64 k             | 16 k            |
 
 ### Capability-level tuning knob
 

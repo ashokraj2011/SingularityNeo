@@ -14,6 +14,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Sparkles,
   Trash2,
   Users,
   Workflow as WorkflowIcon,
@@ -31,6 +32,7 @@ import { cn } from '../lib/utils';
 import {
   fetchCapabilityAlmExport,
   clearRuntimeCredentials,
+  createStoryProposalBatch,
   detectCapabilityWorkspaceProfile,
   fetchCapabilityCodeIndex,
   fetchCapabilityCopilotGuidance,
@@ -534,6 +536,11 @@ export default function CapabilityMetadata() {
   const [codeIndexLoading, setCodeIndexLoading] = useState(false);
   const [codeIndexRefreshing, setCodeIndexRefreshing] = useState(false);
   const [codeIndexError, setCodeIndexError] = useState('');
+  const [storyPlanningPrompt, setStoryPlanningPrompt] = useState('');
+  const [selectedPlanningWorkflowId, setSelectedPlanningWorkflowId] = useState(
+    workspace.workflows[0]?.id || '',
+  );
+  const [isGeneratingStoryBatch, setIsGeneratingStoryBatch] = useState(false);
   const capabilityLifecycle = useMemo(
     () => normalizeCapabilityLifecycle(activeCapability.lifecycle),
     [activeCapability.lifecycle],
@@ -613,6 +620,18 @@ export default function CapabilityMetadata() {
     setPendingLifecycleDeletePhaseId(null);
     setLifecycleDeleteTargetPhaseId('');
   }, [activeCapability, capabilityLifecycle, workspace.workflows]);
+
+  useEffect(() => {
+    if (workspace.workflows.length === 0) {
+      setSelectedPlanningWorkflowId('');
+      return;
+    }
+    setSelectedPlanningWorkflowId(current =>
+      workspace.workflows.some(workflow => workflow.id === current)
+        ? current
+        : workspace.workflows[0]?.id || '',
+    );
+  }, [workspace.workflows]);
 
   useEffect(() => {
     let isMounted = true;
@@ -727,8 +746,10 @@ export default function CapabilityMetadata() {
   };
 
   // Code index snapshot — per-repo symbol / file / reference counts. Load
-  // the cached snapshot on mount; the refresh button walks each linked
-  // repo's Git tree and re-parses every source file.
+  // the cached snapshot on mount; the refresh button prefers a readable
+  // local clone when a repository root hint exists, otherwise falls back
+  // to the configured GitHub API base, reuses unchanged remote files by
+  // blob SHA, and reparses only the changed source files.
   useEffect(() => {
     if (!activeCapability.id) {
       setCodeIndex(null);
@@ -778,7 +799,7 @@ export default function CapabilityMetadata() {
         showError(
           'GitHub authentication missing',
           snapshot.lastRunMessage ||
-            'Set GITHUB_TOKEN on the runtime so we can fetch private repo trees.',
+            'Configure a workspace GitHub connector secret reference, GITHUB_TOKEN, or GH_TOKEN so we can fetch private repo trees.',
         );
       } else if (snapshot.lastRunStatus === 'RATE_LIMITED') {
         showError(
@@ -1658,6 +1679,41 @@ export default function CapabilityMetadata() {
     }
   };
 
+  const handleGenerateStoryBatch = async () => {
+    if (!activeCapability.id) {
+      return;
+    }
+    if (!selectedPlanningWorkflowId) {
+      showError(
+        'Workflow required',
+        'Choose a workflow before generating the planning proposal batch.',
+      );
+      return;
+    }
+
+    setIsGeneratingStoryBatch(true);
+    try {
+      const batch = await createStoryProposalBatch(activeCapability.id, {
+        workflowId: selectedPlanningWorkflowId,
+        prompt: storyPlanningPrompt.trim() || undefined,
+      });
+      success(
+        'Story plan generated',
+        'The Planning Agent created a proposal batch that is ready for review.',
+      );
+      navigate(
+        `/planning/${encodeURIComponent(activeCapability.id)}/story-proposals?batch=${encodeURIComponent(batch.id)}`,
+      );
+    } catch (error) {
+      showError(
+        'Unable to generate story plan',
+        error instanceof Error ? error.message : 'Story proposal generation failed.',
+      );
+    } finally {
+      setIsGeneratingStoryBatch(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -2156,6 +2212,90 @@ export default function CapabilityMetadata() {
                   className="field-textarea h-28"
                 />
               </label>
+            </section>
+
+            <section className="rounded-[2rem] border border-primary/15 bg-primary/5 px-5 py-5">
+              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                <div className="max-w-3xl">
+                  <p className="form-kicker">Planning Agent</p>
+                  <h2 className="mt-2 text-xl font-extrabold text-primary">
+                    Generate a reviewed epic plus child stories from the capability contract
+                  </h2>
+                  <p className="mt-2 text-sm leading-relaxed text-secondary">
+                    Keep planning out of the live inbox until a human reviews it. The Planning
+                    Agent will create a draft proposal batch with sizing, assumptions, and
+                    acceptance framing, then route you into the dedicated planning workspace.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigate(`/planning/${encodeURIComponent(activeCapability.id)}/story-proposals`)
+                    }
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    <WorkflowIcon size={16} />
+                    Open planning workspace
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-4 md:grid-cols-2">
+                <label className="space-y-2">
+                  <span className="field-label">Workflow for generated stories</span>
+                  <select
+                    value={selectedPlanningWorkflowId}
+                    onChange={event => setSelectedPlanningWorkflowId(event.target.value)}
+                    className="field-select"
+                  >
+                    {workspace.workflows.map(workflow => (
+                      <option key={workflow.id} value={workflow.id}>
+                        {workflow.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs leading-relaxed text-secondary">
+                    The Planning Agent uses this as the default workflow when creating the draft
+                    batch.
+                  </p>
+                </label>
+
+                <label className="space-y-2 md:col-span-2">
+                  <span className="field-label">Optional initiative prompt</span>
+                  <textarea
+                    value={storyPlanningPrompt}
+                    onChange={event => setStoryPlanningPrompt(event.target.value)}
+                    placeholder="Example: Break the next release into reviewable work items for case-insensitive rule operators, keeping evidence expectations and release readiness visible."
+                    className="field-textarea h-28"
+                  />
+                  <p className="text-xs leading-relaxed text-secondary">
+                    Use this to add release context, constraints, or a specific business initiative.
+                    Leave it blank to generate from the capability contract alone.
+                  </p>
+                </label>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleGenerateStoryBatch}
+                  disabled={
+                    isGeneratingStoryBatch ||
+                    workspace.workflows.length === 0 ||
+                    !selectedPlanningWorkflowId
+                  }
+                  className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {isGeneratingStoryBatch ? (
+                    <RefreshCw size={16} className="animate-spin" />
+                  ) : (
+                    <Sparkles size={16} />
+                  )}
+                  Generate stories
+                </button>
+                <StatusBadge tone="brand">Draft batch first</StatusBadge>
+              </div>
             </section>
 
             <section className="rounded-[2rem] border border-outline-variant/25 bg-surface-container-low px-5 py-5">

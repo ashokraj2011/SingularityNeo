@@ -172,7 +172,11 @@ export const OrchestratorArtifactsPanel = ({
                 <button
                   type="button"
                   title="Copy artifact name"
-                  onClick={() => void navigator.clipboard.writeText(selectedArtifact.name)}
+                  onClick={() => {
+                    navigator.clipboard.writeText(selectedArtifact.name).catch(() => {
+                      // Clipboard API unavailable (insecure context or permission denied) — silent fail
+                    });
+                  }}
                   className="rounded-lg p-1 text-secondary transition-colors hover:bg-surface-container hover:text-on-surface"
                 >
                   <Copy size={13} />

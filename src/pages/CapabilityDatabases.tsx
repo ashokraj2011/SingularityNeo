@@ -886,6 +886,27 @@ const CapabilityDatabases = () => {
               <p className="mt-2 text-sm font-semibold text-on-surface">
                 {databaseRuntime.pgvectorAvailable ? 'Available' : 'JSON fallback'}
               </p>
+              <p className="mt-1 text-xs text-secondary">
+                Retrieval mode:{' '}
+                {databaseRuntime.retrievalMode
+                  ? databaseRuntime.retrievalMode
+                  : databaseRuntime.pgvectorAvailable
+                  ? 'pgvector'
+                  : 'json-cosine'}
+              </p>
+            </div>
+            <div className="workspace-meta-card">
+              <p className="workspace-meta-label">Embeddings</p>
+              <p className="mt-2 text-sm font-semibold text-on-surface">
+                {databaseRuntime.embeddingConfigured ? 'Configured' : 'Deterministic fallback'}
+              </p>
+              <p className="mt-1 text-xs text-secondary">
+                Provider: {databaseRuntime.embeddingProviderKey || 'unknown'}
+              </p>
+              <p className="mt-1 text-xs text-secondary">
+                {databaseRuntime.fallbackReason ||
+                  'Local semantic retrieval is using the primary configured path.'}
+              </p>
             </div>
             <div className="workspace-meta-card">
               <p className="workspace-meta-label">Shared foundations</p>

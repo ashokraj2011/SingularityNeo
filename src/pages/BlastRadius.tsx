@@ -28,9 +28,11 @@ import {
 } from '../components/EnterpriseUI';
 import {
   fetchBlastRadius,
+  fetchBlastRadiusSymbolGraph,
   type BlastImpactLevel,
   type BlastNode,
   type BlastRadiusResult,
+  type BlastRadiusSymbolGraph,
 } from '../lib/api';
 import { useCapability } from '../context/CapabilityContext';
 
@@ -262,6 +264,7 @@ export default function BlastRadius() {
   const { activeCapability } = useCapability();
   const [filePath, setFilePath] = useState('');
   const [result, setResult] = useState<BlastRadiusResult | null>(null);
+  const [symbolGraph, setSymbolGraph] = useState<BlastRadiusSymbolGraph | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<BlastNode | null>(null);
@@ -276,10 +279,15 @@ export default function BlastRadius() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setSymbolGraph(null);
     setSelectedNode(null);
     try {
-      const data = await fetchBlastRadius(capabilityId, path);
+      const [data, graph] = await Promise.all([
+        fetchBlastRadius(capabilityId, path),
+        fetchBlastRadiusSymbolGraph(capabilityId, { filePath: path, maxDepth: 3, maxNodes: 48 }),
+      ]);
       setResult(data);
+      setSymbolGraph(graph);
     } catch (err: any) {
       setError(err?.message ?? 'Simulation failed');
     } finally {
@@ -392,6 +400,86 @@ export default function BlastRadius() {
               />
             </SectionCard>
           </div>
+
+          <SectionCard
+            title="Native Symbol Edge Graph"
+            description="Recursive SQL traversal over materialized code-symbol edges. Seeds come from the indexed top-level symbols in the selected file."
+            icon={Database}
+          >
+            {!symbolGraph || symbolGraph.nodes.length === 0 ? (
+              <EmptyState
+                title="No symbol graph available"
+                description="Refresh the code index for this capability to materialize containment edges, then rerun the simulation."
+                icon={Database}
+              />
+            ) : (
+              <div className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-3">
+                  <StatTile
+                    label="Seed symbols"
+                    value={symbolGraph.seedSymbolIds.length}
+                    tone="info"
+                  />
+                  <StatTile
+                    label="Connected symbols"
+                    value={symbolGraph.totalNodes}
+                    tone="brand"
+                  />
+                  <StatTile
+                    label="Max depth"
+                    value={symbolGraph.maxDepth}
+                    tone="neutral"
+                  />
+                </div>
+
+                <div className="overflow-x-auto rounded-2xl border border-outline-variant/40">
+                  <table className="min-w-full divide-y divide-outline-variant/20 text-sm">
+                    <thead className="bg-surface-container-low text-left text-[0.68rem] font-bold uppercase tracking-[0.16em] text-secondary">
+                      <tr>
+                        <th className="px-4 py-3">Relation</th>
+                        <th className="px-4 py-3 text-right">Depth</th>
+                        <th className="px-4 py-3">Symbol</th>
+                        <th className="px-4 py-3">Kind</th>
+                        <th className="px-4 py-3">File</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-outline-variant/10 bg-white">
+                      {symbolGraph.nodes.map(node => (
+                        <tr key={node.symbolId}>
+                          <td className="px-4 py-3">
+                            <StatusBadge
+                              tone={
+                                node.relation === 'SEED'
+                                  ? 'info'
+                                  : node.relation === 'ANCESTOR'
+                                    ? 'warning'
+                                    : 'success'
+                              }
+                            >
+                              {node.relation}
+                            </StatusBadge>
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono">{node.depth}</td>
+                          <td className="px-4 py-3 align-top">
+                            <div className="font-semibold text-on-surface">
+                              {node.qualifiedSymbolName || node.symbolName}
+                            </div>
+                            <code className="text-[0.72rem] text-secondary">{node.symbolId}</code>
+                          </td>
+                          <td className="px-4 py-3">
+                            <StatusBadge tone="neutral">{node.kind}</StatusBadge>
+                          </td>
+                          <td className="px-4 py-3 font-mono text-xs text-secondary">
+                            {node.filePath}:{node.sliceStartLine}-{node.sliceEndLine}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </SectionCard>
         </>
       ) : null}
     </div>

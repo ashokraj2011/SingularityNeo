@@ -298,10 +298,12 @@ const workItemCodeClaimFromRow = (row: Record<string, any>): WorkItemCodeClaim =
 const workItemCheckoutSessionFromRow = (
   row: Record<string, any>,
 ): WorkItemCheckoutSession => ({
+  executorId: row.executor_id,
   workItemId: row.work_item_id,
   userId: row.user_id,
   repositoryId: row.repository_id,
   localPath: row.local_path || undefined,
+  workingDirectoryPath: row.working_directory_path || undefined,
   branch: row.branch,
   lastSeenHeadSha: row.last_seen_head_sha || undefined,
   lastSyncedAt:
@@ -1064,6 +1066,17 @@ const workItemFromRow = (
   title: row.title,
   description: row.description,
   taskType: row.task_type || undefined,
+  parentWorkItemId: row.parent_work_item_id || undefined,
+  storyPoints:
+    typeof row.story_points === 'number'
+      ? row.story_points
+      : row.story_points
+      ? Number(row.story_points)
+      : undefined,
+  tShirtSize: row.t_shirt_size || undefined,
+  sizingConfidence: row.sizing_confidence || undefined,
+  planningBatchId: row.planning_batch_id || undefined,
+  planningProposalItemId: row.planning_proposal_item_id || undefined,
   phaseStakeholders: asJsonArray<NonNullable<WorkItem['phaseStakeholders']>[number]>(
     row.phase_stakeholders,
   ),
@@ -2282,6 +2295,12 @@ const replaceWorkItemsTx = async (
 	          title,
 	          description,
 	          task_type,
+	          parent_work_item_id,
+	          story_points,
+	          t_shirt_size,
+	          sizing_confidence,
+	          planning_batch_id,
+	          planning_proposal_item_id,
 	          phase_stakeholders,
 	          phase,
 	          workflow_id,
@@ -2302,7 +2321,7 @@ const replaceWorkItemsTx = async (
 	          history,
 	          updated_at
 	        )
-	        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,${withUpdatedTimestamp})
+	        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,${withUpdatedTimestamp})
 	      `,
 	      [
 	        capabilityId,
@@ -2310,6 +2329,12 @@ const replaceWorkItemsTx = async (
         item.title,
         item.description,
         item.taskType || null,
+        item.parentWorkItemId || null,
+        item.storyPoints || null,
+        item.tShirtSize || null,
+        item.sizingConfidence || null,
+        item.planningBatchId || null,
+        item.planningProposalItemId || null,
         JSON.stringify(item.phaseStakeholders || []),
         item.phase,
         item.workflowId,
@@ -2971,10 +2996,11 @@ const getCapabilityBundleTx = async (
   return { capability: enrichedCapability, workspace };
 };
 
-const buildSharedBranchName = (workItem: Pick<WorkItem, 'id' | 'title'>) => {
-  const slug = toStableSlug(workItem.title).toLowerCase() || 'work-item';
-  return `wi/${workItem.id.toLowerCase()}-${slug.slice(0, 40)}`;
-};
+// Branch name is the canonical `wi/{workItemId}` — deterministic, short, and
+// directly addressable by work item ID alone. No title slug appended so any
+// tool can derive the branch name from just the ID.
+const buildSharedBranchName = (workItem: Pick<WorkItem, 'id'>) =>
+  `wi/${String(workItem.id || '').toLowerCase().trim()}`;
 
 export const getCapabilityRepositoriesRecord = async (
   capabilityId: string,
@@ -3299,20 +3325,23 @@ export const upsertWorkItemCheckoutSessionRecord = async ({
     await assertCapabilityEditableTx(client, capabilityId);
     const result = await client.query(
       `
-        INSERT INTO capability_work_item_checkout_sessions (
+        INSERT INTO desktop_work_item_checkout_sessions (
+          executor_id,
           capability_id,
           work_item_id,
           user_id,
           repository_id,
           local_path,
+          working_directory_path,
           branch,
           last_seen_head_sha,
           last_synced_at,
           updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,${withUpdatedTimestamp})
-        ON CONFLICT (capability_id, work_item_id, user_id, repository_id) DO UPDATE SET
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,${withUpdatedTimestamp})
+        ON CONFLICT (executor_id, capability_id, work_item_id, user_id, repository_id) DO UPDATE SET
           local_path = EXCLUDED.local_path,
+          working_directory_path = EXCLUDED.working_directory_path,
           branch = EXCLUDED.branch,
           last_seen_head_sha = EXCLUDED.last_seen_head_sha,
           last_synced_at = EXCLUDED.last_synced_at,
@@ -3320,11 +3349,13 @@ export const upsertWorkItemCheckoutSessionRecord = async ({
         RETURNING *
       `,
       [
+        session.executorId,
         capabilityId,
         session.workItemId,
         session.userId,
         session.repositoryId,
         session.localPath || null,
+        session.workingDirectoryPath || null,
         session.branch,
         session.lastSeenHeadSha || null,
         session.lastSyncedAt || new Date().toISOString(),

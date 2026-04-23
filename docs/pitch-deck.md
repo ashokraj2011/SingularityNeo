@@ -1,7 +1,7 @@
 # SingularityNeo — Stakeholder & Sales Pitch
 
 > Dual-purpose deck: use as internal leadership alignment and as an external sales narrative.
-> Each section is one slide. Bullets are slide content. *Italic blocks are speaker notes.*
+> Each section is one slide. Bullets are slide content. _Italic blocks are speaker notes._
 > Recommended format: 16:9, 16 slides, 20-minute read-through.
 
 ---
@@ -9,11 +9,12 @@
 ## Slide 1 — Title
 
 # SingularityNeo
+
 ### The AI-Native Cockpit for Engineering Teams
 
 **Provable autonomy. Every agent action carries its receipts.**
 
-*Speaker note: Open with the tagline. Don't describe features. Set the frame that this is about trust + autonomy, not another copilot.*
+_Speaker note: Open with the tagline. Don't describe features. Set the frame that this is about trust + autonomy, not another copilot._
 
 ---
 
@@ -29,27 +30,28 @@
   4. **Can I replay it for my auditor, my CISO, my board?**
 - Without those answers, autonomy stalls at "toy project" scale
 
-*Speaker note: Every buyer in this space is nervous. Naming the fear gives us permission to sell the cure.*
+_Speaker note: Every buyer in this space is nervous. Naming the fear gives us permission to sell the cure._
 
 ---
 
 ## Slide 3 — The Market Has Three Camps — None of Them Solve It
 
-| Camp | Examples | Optimized For | What's Missing |
-|---|---|---|---|
-| **Coder Copilots** | Cursor, Copilot, Windsurf | Keystroke speed | No org intent, no memory, no audit |
-| **Autonomous Agents** | Devin, Factory, Replit Agent | Task completion | Opaque reasoning, "trust me" |
-| **Work Trackers + AI** | Linear, Jira, ServiceNow AI | Governance, tracking | Agents can't do the work |
+| Camp                   | Examples                     | Optimized For        | What's Missing                     |
+| ---------------------- | ---------------------------- | -------------------- | ---------------------------------- |
+| **Coder Copilots**     | Cursor, Copilot, Windsurf    | Keystroke speed      | No org intent, no memory, no audit |
+| **Autonomous Agents**  | Devin, Factory, Replit Agent | Task completion      | Opaque reasoning, "trust me"       |
+| **Work Trackers + AI** | Linear, Jira, ServiceNow AI  | Governance, tracking | Agents can't do the work           |
 
 **No one fuses execution + governance + evidence in one substrate.**
 
-*Speaker note: Draw the triangle on the whiteboard if live. Pause. Let the gap land.*
+_Speaker note: Draw the triangle on the whiteboard if live. Pause. Let the gap land._
 
 ---
 
 ## Slide 4 — The Differentiator
 
 # Replayable Provenance,
+
 # bound to a Signed Capability Contract.
 
 Every agent action in SingularityNeo is:
@@ -61,7 +63,7 @@ Every agent action in SingularityNeo is:
 
 **Not a compliance layer. The substrate.**
 
-*Speaker note: This is the core slide. Memorize it. Say it the same way every time.*
+_Speaker note: This is the core slide. Memorize it. Say it the same way every time._
 
 ---
 
@@ -72,22 +74,22 @@ Every agent action in SingularityNeo is:
 **That sentence is what engineering leaders want to say.**
 **SingularityNeo is the only product that lets them say it truthfully.**
 
-*Speaker note: Ask the room: "Can you say this today about your AI tools?" Silence sells the product.*
+_Speaker note: Ask the room: "Can you say this today about your AI tools?" Silence sells the product._
 
 ---
 
 ## Slide 6 — Four Substrate Ingredients. One Brain.
 
-| Ingredient | What It Is | Why It's Hard |
-|---|---|---|
-| **Capability Contract** | Human-signed outcome, DoD, boundary, owner — before any run | Requires hierarchy + versioning, not a prompt |
-| **Role Policy** | Declared tool allow/deny + memory scope + quality bar per agent role | Requires runtime enforcement, not prompt tricks |
-| **Unified Timeline** | Chat, thoughts, tool calls, retrievals, artifacts, approvals — one stream | Requires fusing runtime telemetry into the UX |
-| **Evidence Packet** | Content-addressed, replayable bundle, shareable via URL | Requires deterministic capture from day one |
+| Ingredient              | What It Is                                                                | Why It's Hard                                   |
+| ----------------------- | ------------------------------------------------------------------------- | ----------------------------------------------- |
+| **Capability Contract** | Human-signed outcome, DoD, boundary, owner — before any run               | Requires hierarchy + versioning, not a prompt   |
+| **Role Policy**         | Declared tool allow/deny + memory scope + quality bar per agent role      | Requires runtime enforcement, not prompt tricks |
+| **Unified Timeline**    | Chat, thoughts, tool calls, retrievals, artifacts, approvals — one stream | Requires fusing runtime telemetry into the UX   |
+| **Evidence Packet**     | Content-addressed, replayable bundle, shareable via URL                   | Requires deterministic capture from day one     |
 
 **Cursor has #3 partially. Devin has #2 partially. Jira has #1 partially. Nobody has all four.**
 
-*Speaker note: The "partially" column is the punchline. Competitors can't bolt these on — they'd have to rewrite their core.*
+_Speaker note: The "partially" column is the punchline. Competitors can't bolt these on — they'd have to rewrite their core._
 
 ---
 
@@ -103,7 +105,7 @@ Not a dashboard. Not a chat sidebar. **A cockpit.**
 
 **The competition is "many tabs." We are one brain.**
 
-*Speaker note: If doing a live demo, this is where you open the Cockpit. Don't narrate features — just use it. Let the unified stream sell itself.*
+_Speaker note: If doing a live demo, this is where you open the Cockpit. Don't narrate features — just use it. Let the unified stream sell itself._
 
 ---
 
@@ -113,15 +115,15 @@ Not a dashboard. Not a chat sidebar. **A cockpit.**
 
 1. Install / open app — **30 s**
 2. Connect GitHub repo — **60 s**
-3. Approve workspace root — **30 s**
+3. Save desktop workspace mapping — **30 s**
 4. Agents read repo, propose capability contract — **90 s**
 5. Pull a real issue as a work item — **60 s**
 6. Run the default workflow — **3 min**
 7. **Evidence packet generated, permalink copied to clipboard**
 
-**Paste the permalink into a PR or Slack. That link *is* the marketing.**
+**Paste the permalink into a PR or Slack. That link _is_ the marketing.**
 
-*Speaker note: Prospects never forget the moment the evidence URL lands in Slack. Make them experience it.*
+_Speaker note: Prospects never forget the moment the evidence URL lands in Slack. Make them experience it._
 
 ---
 
@@ -138,7 +140,7 @@ Every built-in role has **declarative, enforced** differences:
 
 **Role chips appear on every agent turn in the timeline. Difference is observable, not implied.**
 
-*Speaker note: "Why do I need five agents instead of one ChatGPT?" This is the answer. They're not different prompts — they're different policies.*
+_Speaker note: "Why do I need five agents instead of one ChatGPT?" This is the answer. They're not different prompts — they're different policies._
 
 ---
 
@@ -160,7 +162,7 @@ A workflow cannot run until six gates are green:
 **Below 6: agents can reason, summarize, critique — but cannot act.**
 **At 6: autonomy unlocks, with policy enforcement and evidence capture.**
 
-*Speaker note: This is why our agents don't go rogue. The gate is the product.*
+_Speaker note: This is why our agents don't go rogue. The gate is the product._
 
 ---
 
@@ -169,6 +171,7 @@ A workflow cannot run until six gates are green:
 ### Every run produces a shareable, replayable bundle
 
 Contains:
+
 - The capability contract the run executed against
 - The role policies that were enforced
 - Every tool call, with inputs and outputs
@@ -179,7 +182,7 @@ Contains:
 
 **Exportable to ALM, auditors, regulators. Permalink for PRs and Slack.**
 
-*Speaker note: Hold up a printed evidence packet if in person. Physical object sells digital provenance.*
+_Speaker note: Hold up a printed evidence packet if in person. Physical object sells digital provenance._
 
 ---
 
@@ -191,7 +194,7 @@ Contains:
 - **Coding tools are table stakes** — the next buying cycle is about governed autonomy
 - **The substrate takes 12–24 months to build** — the window to own this is now
 
-*Speaker note: If asked "why won't OpenAI/Cursor do this?" — they can't, without rewriting. The substrate is the moat.*
+_Speaker note: If asked "why won't OpenAI/Cursor do this?" — they can't, without rewriting. The substrate is the moat._
 
 ---
 
@@ -210,7 +213,7 @@ Contains:
 
 **You can add a chat box to a ledger. You can't add a ledger to a chat box.**
 
-*Speaker note: This is the line to close an investor or a skeptical CTO. Deliver it slowly.*
+_Speaker note: This is the line to close an investor or a skeptical CTO. Deliver it slowly._
 
 ---
 
@@ -219,34 +222,36 @@ Contains:
 ### Primary buyer: VP Engineering / Head of Platform
 
 **They feel three pains:**
+
 1. Scattered AI tool sprawl with no audit trail
 2. CISO and Risk blocking broader AI rollout
 3. Pressure to show AI-driven velocity gains to the board
 
 **We give them:**
+
 - One cockpit that consolidates the sprawl
 - An evidence trail that unblocks CISO
 - A quarterly "Agent Review Report" that ships to the board
 
 ### Secondary champions: Engineering Managers, Staff Engineers, Compliance
 
-*Speaker note: Sell to the VP. Demo to the Staff Engineer. Ship proof to the CISO.*
+_Speaker note: Sell to the VP. Demo to the Staff Engineer. Ship proof to the CISO._
 
 ---
 
 ## Slide 15 — The Business Case
 
-| Metric | Without SingularityNeo | With SingularityNeo |
-|---|---|---|
-| AI adoption ceiling | Pilot / sandbox | Production-wide |
-| Audit readiness | Manual reconstruction | One-click export |
-| Agent-shipped work | Unreported / unsafe | Measured + governed |
-| Tool sprawl | 4–7 tools | 1 cockpit |
-| Time-to-first-value | Weeks | **10 minutes** |
+| Metric              | Without SingularityNeo | With SingularityNeo |
+| ------------------- | ---------------------- | ------------------- |
+| AI adoption ceiling | Pilot / sandbox        | Production-wide     |
+| Audit readiness     | Manual reconstruction  | One-click export    |
+| Agent-shipped work  | Unreported / unsafe    | Measured + governed |
+| Tool sprawl         | 4–7 tools              | 1 cockpit           |
+| Time-to-first-value | Weeks                  | **10 minutes**      |
 
 **The ROI isn't "faster coding." It's "AI you can actually deploy org-wide."**
 
-*Speaker note: Don't compete on lines-of-code savings. Compete on the autonomy ceiling you just raised.*
+_Speaker note: Don't compete on lines-of-code savings. Compete on the autonomy ceiling you just raised._
 
 ---
 
@@ -262,7 +267,7 @@ Contains:
 
 > **Everyone else sells agent speed. We sell agent receipts — and in enterprise engineering, receipts are what actually unlock adoption at scale.**
 
-*Speaker note: End on the receipts line. Don't add anything after it.*
+_Speaker note: End on the receipts line. Don't add anything after it._
 
 ---
 
@@ -277,14 +282,14 @@ Contains:
 
 ## Appendix B — Objection Handling
 
-| Objection | Response |
-|---|---|
-| "We already have Copilot." | Copilot is a keystroke tool. It has no contract, no role policy, no evidence trail. Use it *inside* the Cockpit. |
-| "Can't you just add audit to Cursor?" | You can add logs. You can't add a capability hierarchy, role-enforced tool policy, or a signed contract model without rewriting. |
-| "Our compliance team will never approve AI agents." | Start with the evidence packet. That's the artifact your compliance team has been asking every other AI vendor to produce. |
-| "How is this different from LangSmith / Langfuse?" | Those are developer-facing traces. This is a product end users (engineers + leaders) live in. Traces are an ingredient; the cockpit is the meal. |
-| "Why not build in-house?" | You can. It will take 18–24 months, two platform teams, and the loss of the market window. |
-| "What about open-source frameworks (LangGraph, AutoGen)?" | Frameworks for building agents. Not products for running a team on agents. Different category. |
+| Objection                                                 | Response                                                                                                                                         |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| "We already have Copilot."                                | Copilot is a keystroke tool. It has no contract, no role policy, no evidence trail. Use it _inside_ the Cockpit.                                 |
+| "Can't you just add audit to Cursor?"                     | You can add logs. You can't add a capability hierarchy, role-enforced tool policy, or a signed contract model without rewriting.                 |
+| "Our compliance team will never approve AI agents."       | Start with the evidence packet. That's the artifact your compliance team has been asking every other AI vendor to produce.                       |
+| "How is this different from LangSmith / Langfuse?"        | Those are developer-facing traces. This is a product end users (engineers + leaders) live in. Traces are an ingredient; the cockpit is the meal. |
+| "Why not build in-house?"                                 | You can. It will take 18–24 months, two platform teams, and the loss of the market window.                                                       |
+| "What about open-source frameworks (LangGraph, AutoGen)?" | Frameworks for building agents. Not products for running a team on agents. Different category.                                                   |
 
 ---
 
@@ -305,4 +310,4 @@ Contains:
 
 ---
 
-*Document version: 1.0 · For internal stakeholder review and external sales conversations · Derived from product strategy sessions*
+_Document version: 1.0 · For internal stakeholder review and external sales conversations · Derived from product strategy sessions_

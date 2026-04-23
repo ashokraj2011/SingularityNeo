@@ -13,10 +13,15 @@
  */
 import { query } from '../db';
 import { getCapabilityRepositoriesRecord } from '../repository';
+import { detectSourceLanguage } from './parse';
 import type {
+  BlastRadiusSymbolGraph,
+  BlastRadiusSymbolGraphEdge,
+  BlastRadiusSymbolGraphNode,
   CapabilityCodeIndexRepoSummary,
   CapabilityCodeIndexRunStatus,
   CapabilityCodeIndexSnapshot,
+  CapabilityCodeSymbolEdgeKind,
   CapabilityCodeSymbol,
   CapabilityCodeSymbolKind,
 } from '../../src/types';
@@ -119,48 +124,211 @@ export const readCodeIndexSnapshot = async (
 interface SearchRow {
   repository_id: string;
   file_path: string;
+  symbol_id: string | null;
+  container_symbol_id: string | null;
   symbol_name: string;
+  qualified_symbol_name: string | null;
   kind: string;
+  language: string | null;
   parent_symbol: string | null;
   start_line: number;
   end_line: number;
+  slice_start_line: number | null;
+  slice_end_line: number | null;
   signature: string;
   is_exported: boolean;
   sha: string | null;
   indexed_at: string;
 }
 
+const buildQualifiedSymbolName = (
+  symbolName: string,
+  parentSymbol?: string | null,
+  qualifiedSymbolName?: string | null,
+) => {
+  const qualified = String(qualifiedSymbolName || '').trim();
+  if (qualified) {
+    return qualified;
+  }
+  const parent = String(parentSymbol || '').trim();
+  return parent ? `${parent}.${symbolName}` : symbolName;
+};
+
+const buildFallbackSymbolId = ({
+  capabilityId,
+  repositoryId,
+  filePath,
+  qualifiedSymbolName,
+  kind,
+  startLine,
+  endLine,
+}: {
+  capabilityId: string;
+  repositoryId: string;
+  filePath: string;
+  qualifiedSymbolName: string;
+  kind: string;
+  startLine: number;
+  endLine: number;
+}) =>
+  `LEGACY-${Buffer.from(
+    `${capabilityId}:${repositoryId}:${filePath}:${qualifiedSymbolName}:${kind}:${startLine}:${endLine}`,
+  )
+    .toString('base64')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .slice(0, 20)}`;
+
+const mapCapabilitySymbol = ({
+  capabilityId,
+  row,
+  labelByRepoId,
+}: {
+  capabilityId: string;
+  row: SearchRow;
+  labelByRepoId: Map<string, string>;
+}): CapabilityCodeSymbol => {
+  const qualifiedSymbolName = buildQualifiedSymbolName(
+    row.symbol_name,
+    row.parent_symbol,
+    row.qualified_symbol_name,
+  );
+  const startLine = Number(row.start_line) || 1;
+  const endLine = Number(row.end_line) || startLine;
+  return {
+    capabilityId,
+    repositoryId: row.repository_id,
+    repositoryLabel: labelByRepoId.get(row.repository_id),
+    filePath: row.file_path,
+    symbolId:
+      String(row.symbol_id || '').trim() ||
+      buildFallbackSymbolId({
+        capabilityId,
+        repositoryId: row.repository_id,
+        filePath: row.file_path,
+        qualifiedSymbolName,
+        kind: row.kind,
+        startLine,
+        endLine,
+      }),
+    containerSymbolId: row.container_symbol_id || undefined,
+    symbolName: row.symbol_name,
+    qualifiedSymbolName,
+    kind: row.kind as CapabilityCodeSymbolKind,
+    language: String(row.language || '').trim() || detectSourceLanguage(row.file_path),
+    parentSymbol: row.parent_symbol || undefined,
+    startLine,
+    endLine,
+    sliceStartLine: Number(row.slice_start_line) || startLine,
+    sliceEndLine: Number(row.slice_end_line) || endLine,
+    signature: row.signature,
+    isExported: Boolean(row.is_exported),
+    sha: row.sha || undefined,
+    indexedAt: row.indexed_at,
+  };
+};
+
 export const searchCodeSymbols = async (
   capabilityId: string,
   searchQuery: string,
-  options: { limit?: number; kind?: CapabilityCodeSymbolKind } = {},
+  options: {
+    limit?: number;
+    kind?: CapabilityCodeSymbolKind;
+    repositoryId?: string;
+    nearFilePath?: string;
+  } = {},
 ): Promise<CapabilityCodeSymbol[]> => {
   const trimmed = (searchQuery || '').trim();
   if (!trimmed) return [];
   const limit = Math.min(Math.max(options.limit || 25, 1), MAX_SEARCH_LIMIT);
-  // Rank: exact match (0) > prefix (1) > contains (2). Ties broken by
-  // isExported desc then symbol_name asc so the public API surfaces first.
-  const kindFilter = options.kind ? ' AND kind = $4' : '';
-  const params: unknown[] = [capabilityId, trimmed, `%${trimmed}%`];
-  if (options.kind) params.push(options.kind);
+  const qualifiedExpr = `
+    COALESCE(
+      NULLIF(qualified_symbol_name, ''),
+      CASE
+        WHEN parent_symbol IS NOT NULL AND parent_symbol <> ''
+          THEN parent_symbol || '.' || symbol_name
+        ELSE symbol_name
+      END
+    )
+  `;
+  const lowerTrimmed = trimmed.toLowerCase();
+  const prefixPattern = `${trimmed}%`;
+  const containsPattern = `%${trimmed}%`;
+  const pathSegments = String(options.nearFilePath || '')
+    .split('/')
+    .filter(Boolean);
+  const nearDirectoryPattern =
+    pathSegments.length > 1 ? `%/${pathSegments.slice(0, -1).join('/')}/%` : '';
+
+  const filters = ['capability_id = $1', `(${qualifiedExpr} ILIKE $3 OR symbol_name ILIKE $3)`];
+  const params: unknown[] = [capabilityId, lowerTrimmed, containsPattern];
+  let parameterIndex = params.length;
+  if (options.kind) {
+    parameterIndex += 1;
+    filters.push(`kind = $${parameterIndex}`);
+    params.push(options.kind);
+  }
+
+  let repositoryRankClause = '0';
+  if (options.repositoryId) {
+    parameterIndex += 1;
+    params.push(options.repositoryId);
+    repositoryRankClause = `CASE WHEN repository_id = $${parameterIndex} THEN 0 ELSE 1 END`;
+  }
+
+  let pathRankClause = '0';
+  if (options.nearFilePath) {
+    parameterIndex += 1;
+    params.push(options.nearFilePath);
+    const exactPathIndex = parameterIndex;
+    if (nearDirectoryPattern) {
+      parameterIndex += 1;
+      params.push(nearDirectoryPattern);
+      pathRankClause = `
+        CASE
+          WHEN file_path = $${exactPathIndex} OR file_path LIKE ('%/' || $${exactPathIndex}) THEN 0
+          WHEN file_path LIKE $${parameterIndex} THEN 1
+          ELSE 2
+        END
+      `;
+    } else {
+      pathRankClause = `
+        CASE
+          WHEN file_path = $${exactPathIndex} OR file_path LIKE ('%/' || $${exactPathIndex}) THEN 0
+          ELSE 1
+        END
+      `;
+    }
+  }
+
+  parameterIndex += 1;
+  params.push(prefixPattern);
+  const prefixIndex = parameterIndex;
+  parameterIndex += 1;
   params.push(limit);
 
   const result = await query(
     `
-      SELECT repository_id, file_path, symbol_name, kind, parent_symbol,
-             start_line, end_line, signature, is_exported, sha, indexed_at
+      SELECT repository_id, file_path, symbol_id, container_symbol_id,
+             symbol_name, qualified_symbol_name, kind, language, parent_symbol,
+             start_line, end_line, slice_start_line, slice_end_line,
+             signature, is_exported, sha, indexed_at
       FROM capability_code_symbols
-      WHERE capability_id = $1
-        AND symbol_name ILIKE $3${kindFilter}
+      WHERE ${filters.join('\n        AND ')}
       ORDER BY
         CASE
-          WHEN symbol_name = $2 THEN 0
-          WHEN symbol_name ILIKE ($2 || '%') THEN 1
-          ELSE 2
+          WHEN LOWER(${qualifiedExpr}) = $2 THEN 0
+          WHEN LOWER(symbol_name) = $2 THEN 1
+          WHEN ${qualifiedExpr} ILIKE $${prefixIndex} THEN 2
+          WHEN symbol_name ILIKE $${prefixIndex} THEN 3
+          WHEN ${qualifiedExpr} ILIKE $3 THEN 4
+          ELSE 5
         END,
-        is_exported DESC,
+        CASE WHEN is_exported THEN 0 ELSE 1 END,
+        ${repositoryRankClause},
+        ${pathRankClause},
+        LENGTH(file_path) ASC,
         symbol_name ASC
-      LIMIT $${params.length}
+      LIMIT $${parameterIndex}
     `,
     params,
   );
@@ -172,21 +340,13 @@ export const searchCodeSymbols = async (
     repositories.map(r => [r.id, r.label || r.url || r.id] as const),
   );
 
-  return ((result.rows as SearchRow[]) || []).map(row => ({
-    capabilityId,
-    repositoryId: row.repository_id,
-    repositoryLabel: labelByRepoId.get(row.repository_id),
-    filePath: row.file_path,
-    symbolName: row.symbol_name,
-    kind: row.kind as CapabilityCodeSymbolKind,
-    parentSymbol: row.parent_symbol || undefined,
-    startLine: row.start_line,
-    endLine: row.end_line,
-    signature: row.signature,
-    isExported: Boolean(row.is_exported),
-    sha: row.sha || undefined,
-    indexedAt: row.indexed_at,
-  }));
+  return ((result.rows as SearchRow[]) || []).map(row =>
+    mapCapabilitySymbol({
+      capabilityId,
+      row,
+      labelByRepoId,
+    }),
+  );
 };
 
 /**
@@ -202,19 +362,43 @@ export const findSymbolRangeInFile = async (
   capabilityId: string,
   filePath: string,
   symbolName: string,
-): Promise<{ startLine: number; endLine: number; kind: string } | null> => {
+): Promise<{
+  symbolId?: string;
+  containerSymbolId?: string;
+  qualifiedSymbolName?: string;
+  startLine: number;
+  endLine: number;
+  sliceStartLine: number;
+  sliceEndLine: number;
+  kind: string;
+} | null> => {
   const trimmedPath = (filePath || '').trim();
   const trimmedName = (symbolName || '').trim();
   if (!trimmedPath || !trimmedName) return null;
 
   const result = await query(
     `
-      SELECT start_line, end_line, kind, file_path
+      SELECT symbol_id, container_symbol_id, symbol_name, qualified_symbol_name,
+             parent_symbol, start_line, end_line, slice_start_line, slice_end_line,
+             kind, file_path
       FROM capability_code_symbols
       WHERE capability_id = $1
-        AND symbol_name = $2
+        AND (
+          symbol_name = $2
+          OR COALESCE(
+            NULLIF(qualified_symbol_name, ''),
+            CASE
+              WHEN parent_symbol IS NOT NULL AND parent_symbol <> ''
+                THEN parent_symbol || '.' || symbol_name
+              ELSE symbol_name
+            END
+          ) = $2
+        )
         AND (file_path = $3 OR file_path LIKE $4)
-      ORDER BY is_exported DESC, LENGTH(file_path) ASC
+      ORDER BY
+        CASE WHEN file_path = $3 THEN 0 ELSE 1 END,
+        is_exported DESC,
+        LENGTH(file_path) ASC
       LIMIT 1
     `,
     [capabilityId, trimmedName, trimmedPath, `%/${trimmedPath}`],
@@ -222,13 +406,31 @@ export const findSymbolRangeInFile = async (
 
   if (result.rows.length === 0) return null;
   const row = result.rows[0] as {
+    symbol_id?: string | null;
+    container_symbol_id?: string | null;
+    symbol_name: string;
+    qualified_symbol_name?: string | null;
+    parent_symbol?: string | null;
     start_line: number;
     end_line: number;
+    slice_start_line?: number | null;
+    slice_end_line?: number | null;
     kind: string;
   };
+  const startLine = Number(row.start_line) || 1;
+  const endLine = Number(row.end_line) || startLine;
   return {
-    startLine: Number(row.start_line) || 1,
-    endLine: Number(row.end_line) || 1,
+    symbolId: row.symbol_id || undefined,
+    containerSymbolId: row.container_symbol_id || undefined,
+    qualifiedSymbolName: buildQualifiedSymbolName(
+      row.symbol_name,
+      row.parent_symbol,
+      row.qualified_symbol_name,
+    ),
+    startLine,
+    endLine,
+    sliceStartLine: Number(row.slice_start_line) || startLine,
+    sliceEndLine: Number(row.slice_end_line) || endLine,
     kind: String(row.kind || ''),
   };
 };
@@ -416,4 +618,268 @@ export const listTopExportsInFile = async (
     endLine: Number(row.end_line) || 1,
     isExported: Boolean(row.is_exported),
   }));
+};
+
+interface BlastGraphRow extends SearchRow {
+  root_symbol_id: string;
+  depth: number;
+  relation: BlastRadiusSymbolGraphNode['relation'];
+}
+
+interface BlastGraphEdgeRow {
+  repository_id: string;
+  from_symbol_id: string;
+  to_symbol_id: string;
+  from_file_path: string;
+  to_file_path: string;
+  edge_kind: CapabilityCodeSymbolEdgeKind;
+  from_symbol_name: string | null;
+  to_symbol_name: string | null;
+  from_qualified_symbol_name: string | null;
+  to_qualified_symbol_name: string | null;
+}
+
+const BLAST_GRAPH_SEED_LIMIT = 8;
+const BLAST_GRAPH_DEPTH_CAP = 5;
+const BLAST_GRAPH_NODE_CAP = 80;
+
+export const readBlastRadiusSymbolGraph = async (
+  capabilityId: string,
+  options: {
+    filePath?: string;
+    symbolId?: string;
+    maxDepth?: number;
+    maxNodes?: number;
+  },
+): Promise<BlastRadiusSymbolGraph> => {
+  const symbolId = String(options.symbolId || '').trim();
+  const filePath = String(options.filePath || '').trim();
+  const maxDepth = Math.min(Math.max(Number(options.maxDepth) || 2, 1), BLAST_GRAPH_DEPTH_CAP);
+  const maxNodes = Math.min(Math.max(Number(options.maxNodes) || 40, 1), BLAST_GRAPH_NODE_CAP);
+
+  if (!symbolId && !filePath) {
+    return {
+      capabilityId,
+      seedSymbolIds: [],
+      maxDepth,
+      totalNodes: 0,
+      nodes: [],
+      edges: [],
+      analyzedAt: new Date().toISOString(),
+    };
+  }
+
+  const repositories = await getCapabilityRepositoriesRecord(capabilityId);
+  const labelByRepoId = new Map(
+    repositories.map(repository => [repository.id, repository.label || repository.url || repository.id] as const),
+  );
+
+  const nodeResult = await query<BlastGraphRow>(
+    `
+      WITH RECURSIVE seed_symbols AS (
+        SELECT
+          symbol_id,
+          repository_id,
+          file_path,
+          symbol_name,
+          qualified_symbol_name,
+          start_line,
+          is_exported,
+          container_symbol_id
+        FROM capability_code_symbols
+        WHERE capability_id = $1
+          AND (
+            ($2::text <> '' AND symbol_id = $2)
+            OR (
+              $2::text = ''
+              AND $3::text <> ''
+              AND (file_path = $3 OR file_path LIKE $4)
+              AND (is_exported = TRUE OR container_symbol_id IS NULL)
+            )
+          )
+        ORDER BY
+          is_exported DESC,
+          CASE WHEN container_symbol_id IS NULL THEN 0 ELSE 1 END,
+          start_line ASC,
+          symbol_name ASC
+        LIMIT $5
+      ),
+      walk AS (
+        SELECT
+          symbol_id,
+          symbol_id AS root_symbol_id,
+          0 AS depth,
+          'SEED'::text AS relation,
+          ARRAY[symbol_id]::text[] AS path_ids
+        FROM seed_symbols
+        UNION ALL
+        SELECT
+          CASE
+            WHEN edge.from_symbol_id = walk.symbol_id THEN edge.to_symbol_id
+            ELSE edge.from_symbol_id
+          END AS symbol_id,
+          walk.root_symbol_id,
+          walk.depth + 1 AS depth,
+          CASE
+            WHEN edge.edge_kind = 'CONTAINS' AND edge.from_symbol_id = walk.symbol_id
+              THEN 'DESCENDANT'
+            WHEN edge.edge_kind = 'CONTAINS' AND edge.to_symbol_id = walk.symbol_id
+              THEN 'ANCESTOR'
+            ELSE 'DESCENDANT'
+          END AS relation,
+          walk.path_ids || CASE
+            WHEN edge.from_symbol_id = walk.symbol_id THEN edge.to_symbol_id
+            ELSE edge.from_symbol_id
+          END AS path_ids
+        FROM walk
+        JOIN capability_code_symbol_edges AS edge
+          ON edge.capability_id = $1
+         AND (edge.from_symbol_id = walk.symbol_id OR edge.to_symbol_id = walk.symbol_id)
+        WHERE walk.depth < $6
+          AND NOT (
+            CASE
+              WHEN edge.from_symbol_id = walk.symbol_id THEN edge.to_symbol_id
+              ELSE edge.from_symbol_id
+            END = ANY(walk.path_ids)
+          )
+      ),
+      ranked AS (
+        SELECT
+          walk.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY walk.symbol_id
+            ORDER BY
+              walk.depth ASC,
+              CASE walk.relation
+                WHEN 'SEED' THEN 0
+                WHEN 'ANCESTOR' THEN 1
+                ELSE 2
+              END ASC,
+              walk.root_symbol_id ASC
+          ) AS rn
+        FROM walk
+      )
+      SELECT
+        symbol.repository_id,
+        symbol.file_path,
+        symbol.symbol_id,
+        symbol.container_symbol_id,
+        symbol.symbol_name,
+        symbol.qualified_symbol_name,
+        symbol.kind,
+        symbol.language,
+        symbol.parent_symbol,
+        symbol.start_line,
+        symbol.end_line,
+        symbol.slice_start_line,
+        symbol.slice_end_line,
+        symbol.signature,
+        symbol.is_exported,
+        symbol.sha,
+        symbol.indexed_at,
+        ranked.root_symbol_id,
+        ranked.depth,
+        ranked.relation
+      FROM ranked
+      JOIN capability_code_symbols AS symbol
+        ON symbol.capability_id = $1
+       AND symbol.symbol_id = ranked.symbol_id
+      WHERE ranked.rn = 1
+      ORDER BY
+        CASE ranked.relation
+          WHEN 'SEED' THEN 0
+          WHEN 'ANCESTOR' THEN 1
+          ELSE 2
+        END ASC,
+        ranked.depth ASC,
+        symbol.file_path ASC,
+        symbol.start_line ASC
+      LIMIT $7
+    `,
+    [
+      capabilityId,
+      symbolId,
+      filePath,
+      `%/${filePath}`,
+      BLAST_GRAPH_SEED_LIMIT,
+      maxDepth,
+      maxNodes,
+    ],
+  );
+
+  const rows = (nodeResult.rows as BlastGraphRow[]) || [];
+  const nodes: BlastRadiusSymbolGraphNode[] = rows.map(row => ({
+    ...mapCapabilitySymbol({
+      capabilityId,
+      row,
+      labelByRepoId,
+    }),
+    rootSymbolId: row.root_symbol_id,
+    relation: row.relation,
+    depth: Number(row.depth) || 0,
+  }));
+
+  const nodeIds = nodes.map(node => node.symbolId);
+  const seedSymbolIds = nodes
+    .filter(node => node.relation === 'SEED')
+    .map(node => node.symbolId);
+
+  const edgeResult =
+    nodeIds.length > 0
+      ? await query<BlastGraphEdgeRow>(
+          `
+            SELECT
+              edge.repository_id,
+              edge.from_symbol_id,
+              edge.to_symbol_id,
+              edge.from_file_path,
+              edge.to_file_path,
+              edge.edge_kind,
+              from_symbol.symbol_name AS from_symbol_name,
+              to_symbol.symbol_name AS to_symbol_name,
+              COALESCE(from_symbol.qualified_symbol_name, from_symbol.symbol_name) AS from_qualified_symbol_name,
+              COALESCE(to_symbol.qualified_symbol_name, to_symbol.symbol_name) AS to_qualified_symbol_name
+            FROM capability_code_symbol_edges AS edge
+            LEFT JOIN capability_code_symbols AS from_symbol
+              ON from_symbol.capability_id = edge.capability_id
+             AND from_symbol.symbol_id = edge.from_symbol_id
+            LEFT JOIN capability_code_symbols AS to_symbol
+              ON to_symbol.capability_id = edge.capability_id
+             AND to_symbol.symbol_id = edge.to_symbol_id
+            WHERE edge.capability_id = $1
+              AND edge.from_symbol_id = ANY($2::text[])
+              AND edge.to_symbol_id = ANY($2::text[])
+            ORDER BY edge.from_file_path ASC, edge.to_file_path ASC, edge.from_symbol_id ASC
+          `,
+          [capabilityId, nodeIds],
+        )
+      : { rows: [] as BlastGraphEdgeRow[] };
+
+  const edges: BlastRadiusSymbolGraphEdge[] = ((edgeResult.rows as BlastGraphEdgeRow[]) || []).map(
+    row => ({
+      capabilityId,
+      repositoryId: row.repository_id,
+      fromSymbolId: row.from_symbol_id,
+      toSymbolId: row.to_symbol_id,
+      fromFilePath: row.from_file_path,
+      toFilePath: row.to_file_path,
+      edgeKind: row.edge_kind,
+      fromSymbolName: row.from_symbol_name || undefined,
+      toSymbolName: row.to_symbol_name || undefined,
+      fromQualifiedSymbolName: row.from_qualified_symbol_name || undefined,
+      toQualifiedSymbolName: row.to_qualified_symbol_name || undefined,
+    }),
+  );
+
+  return {
+    capabilityId,
+    filePath: filePath || undefined,
+    symbolId: symbolId || undefined,
+    seedSymbolIds,
+    maxDepth,
+    totalNodes: nodes.length,
+    nodes,
+    edges,
+    analyzedAt: new Date().toISOString(),
+  };
 };

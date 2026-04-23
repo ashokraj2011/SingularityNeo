@@ -24,6 +24,12 @@ vi.mock('../db', () => ({
     pgvectorAvailable: false,
     memoryEmbeddingDimensions: 4,
   }),
+  getMemoryRetrievalDiagnostics: () => ({
+    retrievalMode: 'deterministic-hash',
+    embeddingConfigured: false,
+    embeddingProviderKey: 'deterministic-hash',
+    fallbackReason: 'Local embedding provider is not configured.',
+  }),
   query: poolQueryMock,
   transaction: transactionMock,
 }));

@@ -39,6 +39,7 @@ import {
   buildCapabilityHealthSnapshot,
   buildCollectionRollupSnapshot,
   buildExecutiveSummarySnapshot,
+  buildGovernanceCostAllocationSnapshot,
   buildOperationsDashboardSnapshot,
   buildReportExportPayload,
   buildTeamQueueSnapshot,
@@ -160,6 +161,22 @@ export const registerReportingEvidenceRoutes = (app: express.Express) => {
       const actor = parseActorContext(request, 'Workspace Operator');
       await assertWorkspacePermission({ actor, action: 'report.view.audit' });
       response.json(await buildAuditReportSnapshot(actor));
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.get('/api/reports/governance-cost-allocation', async (request, response) => {
+    try {
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertWorkspacePermission({ actor, action: 'report.view.audit' });
+      const daysRaw = Number.parseInt(String(request.query.days || ''), 10);
+      response.json(
+        await buildGovernanceCostAllocationSnapshot({
+          actor,
+          windowDays: Number.isFinite(daysRaw) ? daysRaw : 7,
+        }),
+      );
     } catch (error) {
       sendApiError(response, error);
     }

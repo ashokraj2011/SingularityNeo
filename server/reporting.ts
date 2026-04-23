@@ -12,6 +12,7 @@ import type {
   CapabilityHealthSnapshot,
   CollectionRollupSnapshot,
   ExecutiveSummarySnapshot,
+  GovernanceCostAllocationSnapshot,
   OperationsDashboardSnapshot,
   ReportExportPayload,
   ReportFilter,
@@ -573,6 +574,137 @@ export const buildReportExportPayload = ({
   filters,
   payload,
 });
+
+export const buildGovernanceCostAllocationSnapshot = async ({
+  actor,
+  windowDays = 7,
+}: {
+  actor?: ActorContext | null;
+  windowDays?: number;
+} = {}): Promise<GovernanceCostAllocationSnapshot> => {
+  const state = await getAuthorizedAppState(actor);
+  const visibleCapabilities = state.capabilities.filter(capability =>
+    canReadCapabilityLiveDetail(capability.effectivePermissions),
+  );
+  const capabilityIds = visibleCapabilities.map(capability => capability.id);
+
+  if (capabilityIds.length === 0) {
+    return {
+      generatedAt: new Date().toISOString(),
+      windowDays,
+      capabilityCount: 0,
+      totalTokens: 0,
+      totalCostUsd: 0,
+      rows: [],
+    };
+  }
+
+  const cappedWindowDays = Math.min(Math.max(Math.round(windowDays) || 7, 1), 90);
+  const result = await query<{
+    capability_id: string;
+    capability_name: string;
+    agent_id: string;
+    agent_name: string;
+    span_count: string;
+    prompt_tokens: string | null;
+    completion_tokens: string | null;
+    total_tokens: string | null;
+    total_cost_usd: string | null;
+    last_seen_at: string | null;
+    stages: string[] | null;
+  }>(
+    `
+      WITH span_base AS (
+        SELECT
+          spans.capability_id,
+          capabilities.name AS capability_name,
+          COALESCE(
+            NULLIF(spans.attributes->>'agentId', ''),
+            CASE
+              WHEN spans.entity_type = 'STEP' THEN run_steps.agent_id
+              WHEN spans.entity_type = 'CHAT' THEN spans.entity_id
+              ELSE NULL
+            END,
+            'SYSTEM'
+          ) AS agent_id,
+          COALESCE(
+            NULLIF(spans.attributes->>'agentName', ''),
+            agents.name,
+            CASE
+              WHEN spans.entity_type = 'APPROVAL' THEN 'Approval Synthesizer'
+              WHEN spans.entity_type = 'CHAT' THEN 'Capability Copilot'
+              ELSE 'System'
+            END
+          ) AS agent_name,
+          COALESCE(NULLIF(spans.attributes->>'stage', ''), LOWER(spans.entity_type)) AS stage,
+          COALESCE((spans.token_usage->>'promptTokens')::numeric, 0) AS prompt_tokens,
+          COALESCE((spans.token_usage->>'completionTokens')::numeric, 0) AS completion_tokens,
+          COALESCE((spans.token_usage->>'totalTokens')::numeric, 0) AS total_tokens,
+          COALESCE(spans.cost_usd, 0) AS cost_usd,
+          spans.ended_at
+        FROM capability_trace_spans AS spans
+        JOIN capabilities
+          ON capabilities.id = spans.capability_id
+        LEFT JOIN capability_workflow_run_steps AS run_steps
+          ON spans.entity_type = 'STEP'
+         AND run_steps.capability_id = spans.capability_id
+         AND run_steps.id = spans.entity_id
+        LEFT JOIN capability_agents AS agents
+          ON agents.capability_id = spans.capability_id
+         AND agents.id = COALESCE(
+           NULLIF(spans.attributes->>'agentId', ''),
+           CASE
+             WHEN spans.entity_type = 'STEP' THEN run_steps.agent_id
+             WHEN spans.entity_type = 'CHAT' THEN spans.entity_id
+             ELSE NULL
+           END
+         )
+        WHERE spans.capability_id = ANY($1::text[])
+          AND spans.token_usage IS NOT NULL
+          AND spans.ended_at >= NOW() - ($2::int * INTERVAL '1 day')
+      )
+      SELECT
+        capability_id,
+        capability_name,
+        agent_id,
+        agent_name,
+        COUNT(*)::text AS span_count,
+        SUM(prompt_tokens)::text AS prompt_tokens,
+        SUM(completion_tokens)::text AS completion_tokens,
+        SUM(total_tokens)::text AS total_tokens,
+        SUM(cost_usd)::text AS total_cost_usd,
+        MAX(ended_at)::text AS last_seen_at,
+        ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(stage, '')), NULL) AS stages
+      FROM span_base
+      GROUP BY capability_id, capability_name, agent_id, agent_name
+      ORDER BY capability_name ASC, SUM(total_tokens) DESC, agent_name ASC
+    `,
+    [capabilityIds, cappedWindowDays],
+  );
+
+  const rows = result.rows.map(row => ({
+    capabilityId: row.capability_id,
+    capabilityName: row.capability_name,
+    agentId: row.agent_id,
+    agentName: row.agent_name,
+    spanCount: Math.max(0, Number(row.span_count || 0)),
+    promptTokens: Math.max(0, Number(row.prompt_tokens || 0)),
+    completionTokens: Math.max(0, Number(row.completion_tokens || 0)),
+    totalTokens: Math.max(0, Number(row.total_tokens || 0)),
+    totalCostUsd: Math.max(0, Number(row.total_cost_usd || 0)),
+    stages: Array.isArray(row.stages) ? row.stages.filter(Boolean) : [],
+    lastSeenAt: row.last_seen_at || undefined,
+  }));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    windowDays: cappedWindowDays,
+    capabilityCount: new Set(rows.map(row => row.capabilityId)).size,
+    totalTokens: rows.reduce((sum, row) => sum + row.totalTokens, 0),
+    totalCostUsd: Math.round(rows.reduce((sum, row) => sum + row.totalCostUsd, 0) * 10000) / 10000,
+    rows,
+  };
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Work Item Efficiency Report

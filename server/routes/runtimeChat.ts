@@ -162,16 +162,23 @@ export const registerRuntimeChatRoutes = (
           memoryPrompt: memoryContext.prompt,
         }),
       });
+      const { promptReceipt, tokenPolicy, ...publicChatResponse } = chatResponse as typeof chatResponse & {
+        promptReceipt?: Record<string, unknown>;
+        tokenPolicy?: Record<string, unknown>;
+      };
       await finishTelemetrySpan({
         capabilityId: liveCapability.id,
         spanId: span.id,
         status: 'OK',
-        costUsd: chatResponse.usage.estimatedCostUsd,
-        tokenUsage: chatResponse.usage,
+        costUsd: publicChatResponse.usage.estimatedCostUsd,
+        tokenUsage: publicChatResponse.usage,
         attributes: {
           memoryHits: memoryContext.results.length,
           sessionMode: body.sessionMode || 'resume',
-          isNewSession: String(Boolean(chatResponse.isNewSession)),
+          isNewSession: String(Boolean(publicChatResponse.isNewSession)),
+          stage: 'capability_chat',
+          promptReceipt,
+          tokenPolicy,
         },
       });
       await recordUsageMetrics({
@@ -179,16 +186,17 @@ export const registerRuntimeChatRoutes = (
         traceId,
         scopeType: 'CHAT',
         scopeId: liveAgent.id,
-        totalTokens: chatResponse.usage.totalTokens,
-        costUsd: chatResponse.usage.estimatedCostUsd,
+        totalTokens: publicChatResponse.usage.totalTokens,
+        costUsd: publicChatResponse.usage.estimatedCostUsd,
         tags: {
-          model: chatResponse.model,
+          model: publicChatResponse.model,
           sessionMode: body.sessionMode || 'resume',
+          stage: 'capability_chat',
         },
       });
 
       response.json({
-        ...chatResponse,
+        ...publicChatResponse,
         traceId,
         sessionMode: body.sessionMode || 'resume',
         memoryReferences: memoryContext.results.map(result => result.reference),
@@ -315,18 +323,25 @@ export const registerRuntimeChatRoutes = (
           });
         },
       });
+      const { promptReceipt, tokenPolicy, ...publicStreamed } = streamed as typeof streamed & {
+        promptReceipt?: Record<string, unknown>;
+        tokenPolicy?: Record<string, unknown>;
+      };
 
       await finishTelemetrySpan({
         capabilityId: liveCapability.id,
         spanId: span.id,
         status: 'OK',
-        costUsd: streamed.usage.estimatedCostUsd,
-        tokenUsage: streamed.usage,
+        costUsd: publicStreamed.usage.estimatedCostUsd,
+        tokenUsage: publicStreamed.usage,
         attributes: {
           memoryHits: memoryContext.results.length,
           streamed: true,
           sessionMode: body.sessionMode || 'resume',
-          isNewSession: String(Boolean(streamed.isNewSession)),
+          isNewSession: String(Boolean(publicStreamed.isNewSession)),
+          stage: 'capability_chat',
+          promptReceipt,
+          tokenPolicy,
         },
       });
       await recordUsageMetrics({
@@ -334,26 +349,27 @@ export const registerRuntimeChatRoutes = (
         traceId,
         scopeType: 'CHAT',
         scopeId: liveAgent.id,
-        totalTokens: streamed.usage.totalTokens,
-        costUsd: streamed.usage.estimatedCostUsd,
+        totalTokens: publicStreamed.usage.totalTokens,
+        costUsd: publicStreamed.usage.estimatedCostUsd,
         tags: {
-          model: streamed.model,
+          model: publicStreamed.model,
           streamed: 'true',
           sessionMode: body.sessionMode || 'resume',
+          stage: 'capability_chat',
         },
       });
 
       writeSseEvent(response, 'complete', {
         type: 'complete',
         traceId,
-        content: streamed.content,
-        createdAt: streamed.createdAt,
-        model: streamed.model,
-        usage: streamed.usage,
-        sessionId: streamed.sessionId,
-        sessionScope: streamed.sessionScope,
-        sessionScopeId: streamed.sessionScopeId,
-        isNewSession: streamed.isNewSession,
+        content: publicStreamed.content,
+        createdAt: publicStreamed.createdAt,
+        model: publicStreamed.model,
+        usage: publicStreamed.usage,
+        sessionId: publicStreamed.sessionId,
+        sessionScope: publicStreamed.sessionScope,
+        sessionScopeId: publicStreamed.sessionScopeId,
+        isNewSession: publicStreamed.isNewSession,
         sessionMode: body.sessionMode || 'resume',
         memoryReferences: memoryContext.results.map(result => result.reference),
       });

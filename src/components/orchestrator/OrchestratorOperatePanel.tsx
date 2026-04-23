@@ -1,5 +1,5 @@
-import React from 'react';
-import { motion } from 'motion/react';
+import React from "react";
+import { motion } from "motion/react";
 import {
   AlertCircle,
   ArrowRight,
@@ -13,18 +13,21 @@ import {
   ShieldCheck,
   User,
   Workflow as WorkflowIcon,
-} from 'lucide-react';
-import AgentGitSessionCard from './AgentGitSessionCard';
-import AgentKnowledgeLensPanel from '../AgentKnowledgeLensPanel';
-import CapabilityBriefingPanel from '../CapabilityBriefingPanel';
-import ErrorBoundary from '../ErrorBoundary';
-import InteractionTimeline from '../InteractionTimeline';
-import MarkdownContent from '../MarkdownContent';
-import { CopilotMessageBody, CopilotThinkingIndicator } from './OrchestratorCopilotTranscript';
-import { formatEnumLabel, getStatusTone } from '../../lib/enterprise';
-import { compactMarkdownPreview } from '../../lib/markdown';
-import { cn } from '../../lib/utils';
-import { StatusBadge } from '../EnterpriseUI';
+} from "lucide-react";
+import AgentGitSessionCard from "./AgentGitSessionCard";
+import AgentKnowledgeLensPanel from "../AgentKnowledgeLensPanel";
+import CapabilityBriefingPanel from "../CapabilityBriefingPanel";
+import ErrorBoundary from "../ErrorBoundary";
+import InteractionTimeline from "../InteractionTimeline";
+import MarkdownContent from "../MarkdownContent";
+import {
+  CopilotMessageBody,
+  CopilotThinkingIndicator,
+} from "./OrchestratorCopilotTranscript";
+import { formatEnumLabel, getStatusTone } from "../../lib/enterprise";
+import { compactMarkdownPreview } from "../../lib/markdown";
+import { cn } from "../../lib/utils";
+import { StatusBadge } from "../EnterpriseUI";
 import type {
   AgentArtifactExpectation,
   AgentKnowledgeLens,
@@ -53,14 +56,14 @@ import type {
   WorkspacePathValidationResult,
   Workflow,
   WorkflowRun,
-} from '../../types';
+} from "../../types";
 import {
   type StageChatMessage,
   formatTimestamp,
   normalizeMarkdownishText,
-} from '../../lib/orchestrator/support';
+} from "../../lib/orchestrator/support";
 
-type Tone = React.ComponentProps<typeof StatusBadge>['tone'];
+type Tone = React.ComponentProps<typeof StatusBadge>["tone"];
 
 type Props = {
   briefing: CapabilityBriefing;
@@ -107,7 +110,7 @@ type Props = {
   onAppendGuidanceSuggestion: (suggestion: string) => void;
   resolutionIsRequired: boolean;
   selectedWorkflow: Workflow | null;
-  selectedCurrentStep: Workflow['steps'][number] | null;
+  selectedCurrentStep: Workflow["steps"][number] | null;
   currentRun: WorkflowRun | null;
   currentRunStatusLabel: string | null;
   selectedSharedBranch: WorkItemBranch | null;
@@ -130,11 +133,13 @@ type Props = {
     items: CompiledRequiredInputField[],
     emptyLabel: string,
   ) => React.ReactNode;
-  renderArtifactChecklist: (items: CompiledArtifactChecklistItem[]) => React.ReactNode;
+  renderArtifactChecklist: (
+    items: CompiledArtifactChecklistItem[],
+  ) => React.ReactNode;
   renderAgentArtifactExpectations: (
     items: AgentArtifactExpectation[],
     emptyLabel: string,
-    tone: 'neutral' | 'brand',
+    tone: "neutral" | "brand",
   ) => React.ReactNode;
   selectedCompiledWorkItemPlan: CompiledWorkItemPlan | null;
   selectedArtifacts: Artifact[];
@@ -186,7 +191,7 @@ type Props = {
   onStageChatInputChange: (value: string) => void;
   onStageChatSend: React.FormEventHandler<HTMLFormElement>;
   canWriteChat: boolean;
-  selectedResetStep: Workflow['steps'][number] | null;
+  selectedResetStep: Workflow["steps"][number] | null;
   selectedResetPhase: WorkItemPhase;
   selectedResetAgentName: string | null;
   getPhaseMeta: (phase: WorkItemPhase) => { label: string };
@@ -319,11 +324,15 @@ export const OrchestratorOperatePanel = ({
       <div className="grid gap-3 lg:grid-cols-3">
         <div className="workspace-meta-card">
           <p className="workspace-meta-label">What is happening</p>
-          <p className="mt-2 text-sm leading-relaxed text-on-surface">{selectedStateSummary}</p>
+          <p className="mt-2 text-sm leading-relaxed text-on-surface">
+            {selectedStateSummary}
+          </p>
         </div>
         <div className="workspace-meta-card">
           <p className="workspace-meta-label">What is blocked</p>
-          <p className="mt-2 text-sm leading-relaxed text-on-surface">{selectedBlockerSummary}</p>
+          <p className="mt-2 text-sm leading-relaxed text-on-surface">
+            {selectedBlockerSummary}
+          </p>
         </div>
         <div className="workspace-meta-card">
           <p className="workspace-meta-label">What is next</p>
@@ -334,7 +343,11 @@ export const OrchestratorOperatePanel = ({
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
-        <CapabilityBriefingPanel briefing={briefing} compact title="Capability brain" />
+        <CapabilityBriefingPanel
+          briefing={briefing}
+          compact
+          title="Capability brain"
+        />
         {selectedAgentKnowledgeLens ? (
           <AgentKnowledgeLensPanel
             lens={selectedAgentKnowledgeLens}
@@ -353,11 +366,17 @@ export const OrchestratorOperatePanel = ({
                 Starts and restarts are now gated by six hard readiness checks.
               </p>
             </div>
-            <StatusBadge tone={readinessContract.allReady ? 'success' : 'warning'}>
-              {readinessContract.allReady ? 'Ready to start' : 'Execution gated'}
+            <StatusBadge
+              tone={readinessContract.allReady ? "success" : "warning"}
+            >
+              {readinessContract.allReady
+                ? "Ready to start"
+                : "Execution gated"}
             </StatusBadge>
           </div>
-          <p className="mt-3 text-sm font-semibold text-on-surface">{readinessContract.summary}</p>
+          <p className="mt-3 text-sm font-semibold text-on-surface">
+            {readinessContract.summary}
+          </p>
           {primaryReadinessGate ? (
             <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
               <p className="text-xs font-bold uppercase tracking-[0.16em] text-amber-800">
@@ -380,8 +399,8 @@ export const OrchestratorOperatePanel = ({
             <div>
               <p className="workspace-meta-label">Task projection</p>
               <p className="mt-2 text-sm leading-relaxed text-secondary">
-                Lower-level workflow task records stay visible here so you can keep operating from
-                Work.
+                Lower-level workflow task records stay visible here so you can
+                keep operating from Work.
               </p>
             </div>
             <button
@@ -398,7 +417,7 @@ export const OrchestratorOperatePanel = ({
             </p>
           ) : (
             <div className="mt-4 space-y-2">
-              {selectedTasks.slice(0, 3).map(task => (
+              {selectedTasks.slice(0, 3).map((task) => (
                 <button
                   key={task.id}
                   type="button"
@@ -406,11 +425,15 @@ export const OrchestratorOperatePanel = ({
                   className="w-full rounded-2xl border border-outline-variant/25 bg-white px-4 py-3 text-left transition hover:border-primary/20 hover:bg-primary/5"
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-sm font-semibold text-on-surface">{task.title}</p>
-                    <StatusBadge tone={getStatusTone(task.status)}>{task.status}</StatusBadge>
+                    <p className="text-sm font-semibold text-on-surface">
+                      {task.title}
+                    </p>
+                    <StatusBadge tone={getStatusTone(task.status)}>
+                      {task.status}
+                    </StatusBadge>
                   </div>
                   <p className="mt-2 text-xs leading-relaxed text-secondary">
-                    {task.workflowStepId || 'Workflow task'} • {task.agent}
+                    {task.workflowStepId || "Workflow task"} • {task.agent}
                   </p>
                 </button>
               ))}
@@ -424,33 +447,38 @@ export const OrchestratorOperatePanel = ({
           <div className="workspace-meta-card">
             <p className="workspace-meta-label">Tool policy</p>
             <p className="mt-2 text-sm font-semibold text-on-surface">
-              {selectedAgent.rolePolicy?.summary || 'Use approved tools only.'}
+              {selectedAgent.rolePolicy?.summary || "Use approved tools only."}
             </p>
             <p className="mt-2 text-xs leading-relaxed text-secondary">
-              {(selectedAgent.rolePolicy?.allowedToolIds || selectedAgent.preferredToolIds || [])
+              {(
+                selectedAgent.rolePolicy?.allowedToolIds ||
+                selectedAgent.preferredToolIds ||
+                []
+              )
                 .slice(0, 4)
-                .join(', ') || 'No preferred tools recorded'}
+                .join(", ") || "No preferred tools recorded"}
             </p>
           </div>
           <div className="workspace-meta-card">
             <p className="workspace-meta-label">Memory scope</p>
             <p className="mt-2 text-sm font-semibold text-on-surface">
-              {selectedAgent.memoryScope?.summary || 'Capability context and current work state.'}
+              {selectedAgent.memoryScope?.summary ||
+                "Capability context and current work state."}
             </p>
             <p className="mt-2 text-xs leading-relaxed text-secondary">
-              {selectedAgent.memoryScope?.scopeLabels.join(' • ') ||
-                'Capability briefing • Work item context'}
+              {selectedAgent.memoryScope?.scopeLabels.join(" • ") ||
+                "Capability briefing • Work item context"}
             </p>
           </div>
           <div className="workspace-meta-card">
             <p className="workspace-meta-label">Quality bar</p>
             <p className="mt-2 text-sm font-semibold text-on-surface">
-              {selectedAgent.qualityBar?.label || 'Execution quality'}
+              {selectedAgent.qualityBar?.label || "Execution quality"}
             </p>
             <p className="mt-2 text-xs leading-relaxed text-secondary">
               {selectedAgent.evalProfile?.summary ||
                 selectedAgent.qualityBar?.summary ||
-                'The specialist should leave usable evidence and clear next steps.'}
+                "The specialist should leave usable evidence and clear next steps."}
             </p>
           </div>
         </div>
@@ -462,7 +490,7 @@ export const OrchestratorOperatePanel = ({
         title="Attempt story"
         emptyMessage="This work item has not produced a linked interaction story yet."
         onOpenArtifact={onOpenArtifactFromTimeline}
-        onOpenRun={runId => onOpenRunFromTimeline(runId)}
+        onOpenRun={(runId) => onOpenRunFromTimeline(runId)}
         onOpenTask={onOpenTaskFromTimeline}
       />
 
@@ -473,25 +501,30 @@ export const OrchestratorOperatePanel = ({
             <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em]">
               {selectedAttentionLabel}
             </p>
-            <p className="mt-2 text-sm font-semibold leading-relaxed">{selectedAttentionReason}</p>
+            <p className="mt-2 text-sm font-semibold leading-relaxed">
+              {selectedAttentionReason}
+            </p>
             <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs">
               <span>
-                Requested by:{' '}
+                Requested by:{" "}
                 <strong>
-                  {agentsById.get(selectedAttentionRequestedBy || '')?.name ||
+                  {agentsById.get(selectedAttentionRequestedBy || "")?.name ||
                     selectedAttentionRequestedBy ||
-                    'System'}
+                    "System"}
                 </strong>
               </span>
               <span>
-                Since: <strong>{formatTimestamp(selectedAttentionTimestamp)}</strong>
+                Since:{" "}
+                <strong>{formatTimestamp(selectedAttentionTimestamp)}</strong>
               </span>
             </div>
           </div>
         </div>
       )}
 
-      {(selectedCanGuideBlockedAgent || selectedOpenWait || requestChangesIsAvailable) && (
+      {(selectedCanGuideBlockedAgent ||
+        selectedOpenWait ||
+        requestChangesIsAvailable) && (
         <div
           id="orchestrator-guidance"
           className="workspace-meta-card border-outline-variant/30 bg-white/90"
@@ -501,10 +534,10 @@ export const OrchestratorOperatePanel = ({
               <p className="workspace-meta-label">Agent guidance</p>
               <p className="mt-2 text-sm leading-relaxed text-secondary">
                 {selectedOpenWait
-                  ? 'Use this note to guide the agent before the run continues. Approval, human input, and conflict decisions all carry this guidance forward.'
+                  ? "Use this note to guide the agent before the run continues. Approval, human input, and conflict decisions all carry this guidance forward."
                   : selectedCanGuideBlockedAgent
-                    ? 'The item is blocked. Add what changed and how the agent should retry, then restart from the current phase.'
-                    : 'Use this note field for approvals, human input, restart notes, or cancellation reasons.'}
+                    ? "The item is blocked. Add what changed and how the agent should retry, then restart from the current phase."
+                    : "Use this note field for approvals, human input, restart notes, or cancellation reasons."}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -515,12 +548,12 @@ export const OrchestratorOperatePanel = ({
                   disabled={!canGuideAndRestart || busyAction !== null}
                   title={
                     !canGuideAndRestart
-                      ? 'Add operator guidance to the note field above, then use this button to restart.'
+                      ? "Add operator guidance to the note field above, then use this button to restart."
                       : undefined
                   }
                   className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  {busyAction === 'guideRestart' ? (
+                  {busyAction === "guideRestart" ? (
                     <LoaderCircle size={16} className="animate-spin" />
                   ) : (
                     <ArrowRight size={16} />
@@ -528,7 +561,7 @@ export const OrchestratorOperatePanel = ({
                   Guide agent and restart
                 </button>
               ) : null}
-              {selectedOpenWait?.type === 'APPROVAL' ? (
+              {selectedOpenWait?.type === "APPROVAL" ? (
                 <button
                   type="button"
                   onMouseDown={onApprovalReviewMouseDown}
@@ -539,19 +572,19 @@ export const OrchestratorOperatePanel = ({
                   Open approval review
                 </button>
               ) : null}
-              {selectedOpenWait && selectedOpenWait.type !== 'APPROVAL' ? (
+              {selectedOpenWait && selectedOpenWait.type !== "APPROVAL" ? (
                 <button
                   type="button"
                   onClick={onResolveWait}
                   disabled={!canResolveSelectedWait || busyAction !== null}
                   title={
                     !canResolveSelectedWait
-                      ? 'Complete the required note field above to resolve this wait state.'
+                      ? "Complete the required note field above to resolve this wait state."
                       : undefined
                   }
                   className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  {busyAction === 'resolve' ? (
+                  {busyAction === "resolve" ? (
                     <LoaderCircle size={16} className="animate-spin" />
                   ) : (
                     <ShieldCheck size={16} />
@@ -562,7 +595,7 @@ export const OrchestratorOperatePanel = ({
             </div>
           </div>
           {selectedFailureReason &&
-          selectedWorkItem.status === 'BLOCKED' &&
+          selectedWorkItem.status === "BLOCKED" &&
           !selectedOpenWait ? (
             <div className="mt-3 rounded-2xl border border-red-200/80 bg-red-50/60 px-4 py-3">
               <p className="workspace-meta-label">Latest failure from engine</p>
@@ -575,7 +608,9 @@ export const OrchestratorOperatePanel = ({
             <div className="mt-3 rounded-2xl border border-amber-200/80 bg-amber-50/60 px-4 py-3">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p className="workspace-meta-label">Current blocker from agent</p>
+                  <p className="workspace-meta-label">
+                    Current blocker from agent
+                  </p>
                   <p className="mt-2 text-sm leading-relaxed text-on-surface">
                     {selectedAttentionReason}
                   </p>
@@ -595,12 +630,14 @@ export const OrchestratorOperatePanel = ({
           <textarea
             ref={resolutionNoteRef}
             value={resolutionNote}
-            onChange={event => onResolutionNoteChange(event.target.value)}
-            onKeyDown={event => {
-              if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+            onChange={(event) => onResolutionNoteChange(event.target.value)}
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                 event.preventDefault();
-                if (canGuideAndRestart && busyAction === null) onGuideAndRestart();
-                else if (canResolveSelectedWait && busyAction === null) onResolveWait();
+                if (canGuideAndRestart && busyAction === null)
+                  onGuideAndRestart();
+                else if (canResolveSelectedWait && busyAction === null)
+                  onResolveWait();
               }
             }}
             placeholder={resolutionPlaceholder}
@@ -608,7 +645,7 @@ export const OrchestratorOperatePanel = ({
           />
           {guidanceSuggestions.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
-              {guidanceSuggestions.map(suggestion => (
+              {guidanceSuggestions.map((suggestion) => (
                 <button
                   key={suggestion}
                   type="button"
@@ -622,19 +659,24 @@ export const OrchestratorOperatePanel = ({
           )}
           {requestChangesIsAvailable && (
             <p className="mt-2 text-xs text-secondary">
-              Review notes entered here also carry into the approval review window.
+              Review notes entered here also carry into the approval review
+              window.
             </p>
           )}
           {selectedCanGuideBlockedAgent && !resolutionNote.trim() && (
             <p className="mt-2 text-xs font-medium text-amber-700">
-              Add operator guidance above before restarting the blocked work item.
+              Add operator guidance above before restarting the blocked work
+              item.
             </p>
           )}
-          {resolutionIsRequired && !resolutionNote.trim() && selectedOpenWait && (
-            <p className="mt-2 text-xs font-medium text-amber-700">
-              Add the missing detail above to unblock this work item and continue execution.
-            </p>
-          )}
+          {resolutionIsRequired &&
+            !resolutionNote.trim() &&
+            selectedOpenWait && (
+              <p className="mt-2 text-xs font-medium text-amber-700">
+                Add the missing detail above to unblock this work item and
+                continue execution.
+              </p>
+            )}
           {requestChangesIsAvailable && !resolutionNote.trim() && (
             <p className="mt-2 text-xs font-medium text-amber-700">
               Requesting changes requires review notes.
@@ -646,7 +688,9 @@ export const OrchestratorOperatePanel = ({
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="workspace-meta-card">
           <p className="workspace-meta-label">Workflow</p>
-          <p className="workspace-meta-value">{selectedWorkflow?.name || 'Workflow missing'}</p>
+          <p className="workspace-meta-value">
+            {selectedWorkflow?.name || "Workflow missing"}
+          </p>
           <p className="mt-1 text-xs text-secondary">
             {selectedWorkflow?.steps.length || 0} steps staged across SDLC lanes
           </p>
@@ -654,29 +698,34 @@ export const OrchestratorOperatePanel = ({
         <div className="workspace-meta-card">
           <p className="workspace-meta-label">Current Step</p>
           <p className="workspace-meta-value">
-            {selectedCurrentStep?.name || 'Awaiting orchestration'}
+            {selectedCurrentStep?.name || "Awaiting orchestration"}
           </p>
           <p className="mt-1 text-xs text-secondary">
             {selectedCurrentStep?.stepType
               ? formatEnumLabel(selectedCurrentStep.stepType)
-              : 'Not assigned yet'}
+              : "Not assigned yet"}
           </p>
         </div>
         <div className="workspace-meta-card">
           <p className="workspace-meta-label">Active Agent</p>
-          <p className="workspace-meta-value">{selectedAgent?.name || 'Unassigned'}</p>
+          <p className="workspace-meta-value">
+            {selectedAgent?.name || "Unassigned"}
+          </p>
           <p className="mt-1 text-xs text-secondary">
-            {selectedAgent?.role || 'No agent has been activated for this step yet.'}
+            {selectedAgent?.role ||
+              "No agent has been activated for this step yet."}
           </p>
         </div>
         <div className="workspace-meta-card">
           <p className="workspace-meta-label">Current Run</p>
           <p className="workspace-meta-value">
-            {currentRun ? `Attempt ${currentRun.attemptNumber}` : 'No run started yet'}
+            {currentRun
+              ? `Attempt ${currentRun.attemptNumber}`
+              : "No run started yet"}
           </p>
           <p className="mt-1 text-xs text-secondary">
             {currentRunStatusLabel ||
-              'Stage the item and start execution to create a durable run.'}
+              "Stage the item and start execution to create a durable run."}
           </p>
         </div>
       </div>
@@ -687,15 +736,15 @@ export const OrchestratorOperatePanel = ({
             <p className="workspace-meta-label">Shared branch collaboration</p>
             <p className="mt-2 text-sm font-semibold text-on-surface">
               {selectedSharedBranch?.sharedBranch ||
-                'No shared branch has been prepared for this work item yet.'}
+                "No shared branch has been prepared for this work item yet."}
             </p>
             <p className="mt-2 text-sm leading-relaxed text-secondary">
               {selectedExecutionRepository
                 ? `${selectedExecutionRepository.label} · base ${
                     selectedSharedBranch?.baseBranch ||
                     selectedExecutionRepository.defaultBranch
-                  }${selectedExecutionRepository.localRootHint ? ` · ${selectedExecutionRepository.localRootHint}` : ''}`
-                : 'Execution defaults now belong to the work item, not the capability-wide local workspace.'}
+                  }${selectedExecutionRepository.localRootHint ? ` · ${selectedExecutionRepository.localRootHint}` : ""}`
+                : "Execution defaults now belong to the work item, not the capability-wide local workspace."}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -705,17 +754,19 @@ export const OrchestratorOperatePanel = ({
               disabled={!canInitializeExecutionContext || busyAction !== null}
               title={
                 !canInitializeExecutionContext
-                  ? 'An execution repository must be configured before the context can be initialized.'
+                  ? "An execution repository must be configured before the context can be initialized."
                   : undefined
               }
               className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {busyAction === 'initExecutionContext' ? (
+              {busyAction === "initExecutionContext" ? (
                 <LoaderCircle size={16} className="animate-spin" />
               ) : (
                 <WorkflowIcon size={16} />
               )}
-              {selectedEffectiveExecutionContext ? 'Refresh context' : 'Initialize context'}
+              {selectedEffectiveExecutionContext
+                ? "Refresh context"
+                : "Initialize context"}
             </button>
             <button
               type="button"
@@ -723,17 +774,19 @@ export const OrchestratorOperatePanel = ({
               disabled={!canCreateSharedBranch || busyAction !== null}
               title={
                 !canCreateSharedBranch
-                  ? 'Initialize an execution context first to create a shared branch.'
+                  ? "Initialize an execution context first to create a shared branch."
                   : undefined
               }
               className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {busyAction === 'createSharedBranch' ? (
+              {busyAction === "createSharedBranch" ? (
                 <LoaderCircle size={16} className="animate-spin" />
               ) : (
                 <ArrowRight size={16} />
               )}
-              {selectedSharedBranch?.status === 'ACTIVE' ? 'Re-open branch' : 'Create shared branch'}
+              {selectedSharedBranch?.status === "ACTIVE"
+                ? "Re-open branch"
+                : "Create shared branch"}
             </button>
           </div>
         </div>
@@ -742,12 +795,14 @@ export const OrchestratorOperatePanel = ({
           <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
             <p className="workspace-meta-label">Primary repository</p>
             <p className="mt-2 text-sm font-semibold text-on-surface">
-              {selectedExecutionRepository?.label || 'Not attached'}
+              {selectedExecutionRepository?.label || "Not attached"}
             </p>
           </div>
           <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
             <p className="workspace-meta-label">Active writer</p>
-            <p className="mt-2 text-sm font-semibold text-on-surface">{selectedActiveWriterLabel}</p>
+            <p className="mt-2 text-sm font-semibold text-on-surface">
+              {selectedActiveWriterLabel}
+            </p>
           </div>
           <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
             <p className="workspace-meta-label">Writer claim</p>
@@ -758,12 +813,15 @@ export const OrchestratorOperatePanel = ({
                 disabled={busyAction !== null || !canControlWorkItems}
                 className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {busyAction === 'claimWriteControl' || busyAction === 'releaseWriteControl' ? (
+                {busyAction === "claimWriteControl" ||
+                busyAction === "releaseWriteControl" ? (
                   <LoaderCircle size={14} className="animate-spin" />
                 ) : (
                   <User size={14} />
                 )}
-                {currentActorOwnsWriteControl ? 'Release write control' : 'Take write control'}
+                {currentActorOwnsWriteControl
+                  ? "Release write control"
+                  : "Take write control"}
               </button>
             </div>
           </div>
@@ -788,7 +846,7 @@ export const OrchestratorOperatePanel = ({
                 <p className="workspace-meta-label">Latest handoff</p>
                 <p className="mt-2 text-sm leading-relaxed text-secondary">
                   {latestSelectedHandoff?.summary ||
-                    'Capture a handoff packet when another stakeholder needs to continue this same shared branch.'}
+                    "Capture a handoff packet when another stakeholder needs to continue this same shared branch."}
                 </p>
               </div>
               {latestSelectedHandoff?.acceptedAt ? (
@@ -811,17 +869,21 @@ export const OrchestratorOperatePanel = ({
               <button
                 type="button"
                 onClick={onCreateHandoff}
-                disabled={!resolutionNote.trim() || busyAction !== null || !canControlWorkItems}
+                disabled={
+                  !resolutionNote.trim() ||
+                  busyAction !== null ||
+                  !canControlWorkItems
+                }
                 title={
                   !resolutionNote.trim()
-                    ? 'Add a resolution note above to create a handoff packet.'
+                    ? "Add a resolution note above to create a handoff packet."
                     : !canControlWorkItems
-                      ? 'Write control is required to create a handoff.'
+                      ? "Write control is required to create a handoff."
                       : undefined
                 }
                 className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {busyAction === 'createHandoff' ? (
+                {busyAction === "createHandoff" ? (
                   <LoaderCircle size={14} className="animate-spin" />
                 ) : (
                   <Send size={14} />
@@ -831,10 +893,14 @@ export const OrchestratorOperatePanel = ({
               <button
                 type="button"
                 onClick={onAcceptLatestHandoff}
-                disabled={!latestSelectedHandoff || busyAction !== null || !canControlWorkItems}
+                disabled={
+                  !latestSelectedHandoff ||
+                  busyAction !== null ||
+                  !canControlWorkItems
+                }
                 className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {busyAction === 'acceptHandoff' ? (
+                {busyAction === "acceptHandoff" ? (
                   <LoaderCircle size={14} className="animate-spin" />
                 ) : (
                   <ShieldCheck size={14} />
@@ -843,8 +909,9 @@ export const OrchestratorOperatePanel = ({
               </button>
             </div>
             <p className="mt-3 text-xs leading-relaxed text-secondary">
-              Use the guidance note above as the handoff summary so the next stakeholder inherits
-              the branch context, artifacts, and next step clearly.
+              Use the guidance note above as the handoff summary so the next
+              stakeholder inherits the branch context, artifacts, and next step
+              clearly.
             </p>
           </div>
         </div>
@@ -862,31 +929,38 @@ export const OrchestratorOperatePanel = ({
                 <p className="mt-2 text-sm leading-relaxed text-secondary">
                   {selectedCompiledStepContext.description ||
                     selectedCompiledStepContext.executionNotes ||
-                    'The engine compiled this step into a bounded execution contract.'}
+                    "The engine compiled this step into a bounded execution contract."}
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
                 <StatusBadge
                   tone={
-                    selectedCompiledStepContext.executionBoundary.workspaceMode === 'APPROVED_WRITE'
-                      ? 'warning'
-                      : selectedCompiledStepContext.executionBoundary.workspaceMode === 'READ_ONLY'
-                        ? 'info'
-                        : 'neutral'
+                    selectedCompiledStepContext.executionBoundary
+                      .workspaceMode === "APPROVED_WRITE"
+                      ? "warning"
+                      : selectedCompiledStepContext.executionBoundary
+                            .workspaceMode === "READ_ONLY"
+                        ? "info"
+                        : "neutral"
                   }
                 >
-                  {selectedCompiledStepContext.executionBoundary.workspaceMode.replace(/_/g, ' ')}
+                  {selectedCompiledStepContext.executionBoundary.workspaceMode.replace(
+                    /_/g,
+                    " ",
+                  )}
                 </StatusBadge>
                 <StatusBadge
                   tone={
-                    selectedCompiledStepContext.executionBoundary.requiresHumanApproval
-                      ? 'warning'
-                      : 'success'
+                    selectedCompiledStepContext.executionBoundary
+                      .requiresHumanApproval
+                      ? "warning"
+                      : "success"
                   }
                 >
-                  {selectedCompiledStepContext.executionBoundary.requiresHumanApproval
-                    ? 'Approval-aware'
-                    : 'Engine-managed'}
+                  {selectedCompiledStepContext.executionBoundary
+                    .requiresHumanApproval
+                    ? "Approval-aware"
+                    : "Engine-managed"}
                 </StatusBadge>
               </div>
             </div>
@@ -895,21 +969,26 @@ export const OrchestratorOperatePanel = ({
               <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
                 <p className="workspace-meta-label">Allowed tools</p>
                 <div className="mt-2 flex flex-wrap gap-2">
-                  {selectedCompiledStepContext.executionBoundary.allowedToolIds.length > 0 ? (
-                    selectedCompiledStepContext.executionBoundary.allowedToolIds.map(toolId => (
-                      <StatusBadge key={toolId} tone="info">
-                        {formatEnumLabel(toolId)}
-                      </StatusBadge>
-                    ))
+                  {selectedCompiledStepContext.executionBoundary.allowedToolIds
+                    .length > 0 ? (
+                    selectedCompiledStepContext.executionBoundary.allowedToolIds.map(
+                      (toolId) => (
+                        <StatusBadge key={toolId} tone="info">
+                          {formatEnumLabel(toolId)}
+                        </StatusBadge>
+                      ),
+                    )
                   ) : (
-                    <span className="text-sm text-secondary">No tools for this step</span>
+                    <span className="text-sm text-secondary">
+                      No tools for this step
+                    </span>
                   )}
                 </div>
               </div>
               <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
                 <p className="workspace-meta-label">Next allowed actions</p>
                 <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
-                  {selectedCompiledStepContext.nextActions.map(action => (
+                  {selectedCompiledStepContext.nextActions.map((action) => (
                     <li key={action} className="flex gap-2">
                       <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />
                       <span>{action}</span>
@@ -927,27 +1006,33 @@ export const OrchestratorOperatePanel = ({
                     {selectedCompiledStepContext.ownership.stepOwnerTeamId ||
                     selectedCompiledStepContext.ownership.phaseOwnerTeamId
                       ? workspaceTeamsById.get(
-                          selectedCompiledStepContext.ownership.stepOwnerTeamId ||
-                            selectedCompiledStepContext.ownership.phaseOwnerTeamId ||
-                            '',
+                          selectedCompiledStepContext.ownership
+                            .stepOwnerTeamId ||
+                            selectedCompiledStepContext.ownership
+                              .phaseOwnerTeamId ||
+                            "",
                         )?.name ||
                         selectedCompiledStepContext.ownership.stepOwnerTeamId ||
                         selectedCompiledStepContext.ownership.phaseOwnerTeamId
-                      : 'Phase default'}
+                      : "Phase default"}
                   </p>
                   <p className="mt-1 text-xs text-secondary">
-                    Current queue routing follows this team unless an operator claim is active.
+                    Current queue routing follows this team unless an operator
+                    claim is active.
                   </p>
                 </div>
                 <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
                   <p className="workspace-meta-label">Approval routing</p>
                   <div className="mt-2 flex flex-wrap gap-2">
-                    {selectedCompiledStepContext.ownership.approvalTeamIds.length > 0 ? (
-                      selectedCompiledStepContext.ownership.approvalTeamIds.map(teamId => (
-                        <StatusBadge key={teamId} tone="warning">
-                          {workspaceTeamsById.get(teamId)?.name || teamId}
-                        </StatusBadge>
-                      ))
+                    {selectedCompiledStepContext.ownership.approvalTeamIds
+                      .length > 0 ? (
+                      selectedCompiledStepContext.ownership.approvalTeamIds.map(
+                        (teamId) => (
+                          <StatusBadge key={teamId} tone="warning">
+                            {workspaceTeamsById.get(teamId)?.name || teamId}
+                          </StatusBadge>
+                        ),
+                      )
                     ) : (
                       <span className="text-sm text-secondary">
                         No explicit approval team override
@@ -958,17 +1043,25 @@ export const OrchestratorOperatePanel = ({
                 <div className="rounded-2xl border border-outline-variant/30 bg-white/85 px-4 py-3">
                   <p className="workspace-meta-label">Escalation / handoff</p>
                   <div className="mt-2 flex flex-wrap gap-2">
-                    {selectedCompiledStepContext.ownership.escalationTeamIds.length > 0 ? (
-                      selectedCompiledStepContext.ownership.escalationTeamIds.map(teamId => (
-                        <StatusBadge key={teamId} tone="danger">
-                          {workspaceTeamsById.get(teamId)?.name || teamId}
-                        </StatusBadge>
-                      ))
+                    {selectedCompiledStepContext.ownership.escalationTeamIds
+                      .length > 0 ? (
+                      selectedCompiledStepContext.ownership.escalationTeamIds.map(
+                        (teamId) => (
+                          <StatusBadge key={teamId} tone="danger">
+                            {workspaceTeamsById.get(teamId)?.name || teamId}
+                          </StatusBadge>
+                        ),
+                      )
                     ) : (
-                      <StatusBadge tone="neutral">No escalation teams</StatusBadge>
+                      <StatusBadge tone="neutral">
+                        No escalation teams
+                      </StatusBadge>
                     )}
-                    {selectedCompiledStepContext.ownership.requireHandoffAcceptance ? (
-                      <StatusBadge tone="info">Handoff acceptance required</StatusBadge>
+                    {selectedCompiledStepContext.ownership
+                      .requireHandoffAcceptance ? (
+                      <StatusBadge tone="info">
+                        Handoff acceptance required
+                      </StatusBadge>
                     ) : null}
                   </div>
                 </div>
@@ -982,23 +1075,27 @@ export const OrchestratorOperatePanel = ({
                 <p className="workspace-meta-label">Required inputs</p>
                 <StatusBadge
                   tone={
-                    selectedCompiledStepContext.missingInputs.length > 0 ? 'warning' : 'success'
+                    selectedCompiledStepContext.missingInputs.length > 0
+                      ? "warning"
+                      : "success"
                   }
                 >
                   {selectedCompiledStepContext.missingInputs.length > 0
                     ? `${selectedCompiledStepContext.missingInputs.length} missing`
-                    : 'Ready'}
+                    : "Ready"}
                 </StatusBadge>
               </div>
               {renderStructuredInputs(
                 selectedCompiledStepContext.requiredInputs,
-                'No structured inputs are declared for this step.',
+                "No structured inputs are declared for this step.",
               )}
             </div>
 
             <div className="workspace-meta-card">
               <p className="workspace-meta-label">Artifact checklist</p>
-              {renderArtifactChecklist(selectedCompiledStepContext.artifactChecklist)}
+              {renderArtifactChecklist(
+                selectedCompiledStepContext.artifactChecklist,
+              )}
             </div>
           </div>
 
@@ -1006,26 +1103,28 @@ export const OrchestratorOperatePanel = ({
             <div className="workspace-meta-card">
               <p className="workspace-meta-label">Agent suggested inputs</p>
               <p className="mt-2 text-xs leading-relaxed text-secondary">
-                Advisory defaults from the assigned agent contract. These do not block execution
-                unless the workflow step explicitly requires them.
+                Advisory defaults from the assigned agent contract. These do not
+                block execution unless the workflow step explicitly requires
+                them.
               </p>
               {renderAgentArtifactExpectations(
                 selectedCompiledStepContext.agentSuggestedInputs,
-                'No advisory input suggestions are attached to this agent.',
-                'neutral',
+                "No advisory input suggestions are attached to this agent.",
+                "neutral",
               )}
             </div>
 
             <div className="workspace-meta-card">
               <p className="workspace-meta-label">Agent expected outputs</p>
               <p className="mt-2 text-xs leading-relaxed text-secondary">
-                Default outputs the assigned agent is shaped to produce. Workflow artifact contracts
-                still remain the execution source of truth.
+                Default outputs the assigned agent is shaped to produce.
+                Workflow artifact contracts still remain the execution source of
+                truth.
               </p>
               {renderAgentArtifactExpectations(
                 selectedCompiledStepContext.agentExpectedOutputs,
-                'No default output expectations are attached to this agent.',
-                'brand',
+                "No default output expectations are attached to this agent.",
+                "brand",
               )}
             </div>
           </div>
@@ -1035,16 +1134,19 @@ export const OrchestratorOperatePanel = ({
               <p className="workspace-meta-label">Completion checklist</p>
               {selectedCompiledStepContext.completionChecklist.length > 0 ? (
                 <ul className="mt-3 space-y-1 text-xs leading-relaxed text-secondary">
-                  {selectedCompiledStepContext.completionChecklist.map(item => (
-                    <li key={item} className="flex gap-2">
-                      <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />
-                      <span>{item}</span>
-                    </li>
-                  ))}
+                  {selectedCompiledStepContext.completionChecklist.map(
+                    (item) => (
+                      <li key={item} className="flex gap-2">
+                        <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />
+                        <span>{item}</span>
+                      </li>
+                    ),
+                  )}
                 </ul>
               ) : (
                 <p className="mt-3 text-xs leading-relaxed text-secondary">
-                  This step does not define an explicit completion checklist yet.
+                  This step does not define an explicit completion checklist
+                  yet.
                 </p>
               )}
             </div>
@@ -1053,7 +1155,7 @@ export const OrchestratorOperatePanel = ({
               <p className="workspace-meta-label">Memory boundary</p>
               {selectedCompiledStepContext.memoryBoundary.length > 0 ? (
                 <div className="mt-3 flex flex-wrap gap-2">
-                  {selectedCompiledStepContext.memoryBoundary.map(item => (
+                  {selectedCompiledStepContext.memoryBoundary.map((item) => (
                     <StatusBadge key={item} tone="neutral">
                       {item}
                     </StatusBadge>
@@ -1061,7 +1163,8 @@ export const OrchestratorOperatePanel = ({
                 </div>
               ) : (
                 <p className="mt-3 text-xs leading-relaxed text-secondary">
-                  The engine will rely on retrieved capability memory and current step context.
+                  The engine will rely on retrieved capability memory and
+                  current step context.
                 </p>
               )}
             </div>
@@ -1090,7 +1193,8 @@ export const OrchestratorOperatePanel = ({
           <div>
             <p className="workspace-meta-label">Recent artifacts</p>
             <p className="mt-2 text-sm leading-relaxed text-secondary">
-              Keep the latest working documents close while you operate the step.
+              Keep the latest working documents close while you operate the
+              step.
             </p>
           </div>
           <button
@@ -1108,23 +1212,30 @@ export const OrchestratorOperatePanel = ({
           </p>
         ) : (
           <div className="mt-4 grid gap-3 lg:grid-cols-3">
-            {selectedArtifacts.slice(0, 3).map(artifact => (
+            {selectedArtifacts.slice(0, 3).map((artifact) => (
               <button
                 key={artifact.id}
                 type="button"
                 onClick={() => onSelectArtifactAndOpen(artifact.id)}
                 className={cn(
-                  'rounded-[1.35rem] border border-outline-variant/30 bg-white px-4 py-4 text-left transition-colors hover:border-primary/30 hover:bg-primary/5',
-                  selectedArtifact?.id === artifact.id && 'border-primary/35 bg-primary/5',
+                  "rounded-[1.35rem] border border-outline-variant/30 bg-white px-4 py-4 text-left transition-colors hover:border-primary/30 hover:bg-primary/5",
+                  selectedArtifact?.id === artifact.id &&
+                    "border-primary/35 bg-primary/5",
                 )}
               >
                 <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-sm font-semibold text-on-surface">{artifact.name}</p>
-                  <StatusBadge tone="brand">{artifact.direction || 'OUTPUT'}</StatusBadge>
+                  <p className="text-sm font-semibold text-on-surface">
+                    {artifact.name}
+                  </p>
+                  <StatusBadge tone="brand">
+                    {artifact.direction || "OUTPUT"}
+                  </StatusBadge>
                 </div>
                 <p className="mt-2 text-xs leading-relaxed text-secondary">
                   {compactMarkdownPreview(
-                    artifact.summary || artifact.description || `${artifact.type} · ${artifact.version}`,
+                    artifact.summary ||
+                      artifact.description ||
+                      `${artifact.type} · ${artifact.version}`,
                     150,
                   )}
                 </p>
@@ -1137,14 +1248,18 @@ export const OrchestratorOperatePanel = ({
       <div className="workspace-meta-card">
         <p className="workspace-meta-label">Tags and routing</p>
         <div className="mt-3 flex flex-wrap gap-2">
-          <StatusBadge tone="neutral">{selectedWorkItemTaskTypeLabel}</StatusBadge>
-          {selectedWorkItem.tags.map(tag => (
+          <StatusBadge tone="neutral">
+            {selectedWorkItemTaskTypeLabel}
+          </StatusBadge>
+          {selectedWorkItem.tags.map((tag) => (
             <span key={tag}>
               <StatusBadge tone="neutral">{tag}</StatusBadge>
             </span>
           ))}
           {selectedWorkItem.tags.length === 0 ? (
-            <span className="text-sm text-secondary">No extra tags were attached to this work item.</span>
+            <span className="text-sm text-secondary">
+              No extra tags were attached to this work item.
+            </span>
           ) : null}
         </div>
         <p className="mt-3 text-xs leading-relaxed text-secondary">
@@ -1155,22 +1270,29 @@ export const OrchestratorOperatePanel = ({
       <div className="workspace-meta-card">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p className="workspace-meta-label">Phase stakeholders & sign-off</p>
+            <p className="workspace-meta-label">
+              Phase stakeholders & sign-off
+            </p>
             <p className="mt-2 text-sm leading-relaxed text-secondary">
-              These stakeholders are carried into phase-specific human documents and sign-off
-              records for this work item.
+              These stakeholders are carried into phase-specific human documents
+              and sign-off records for this work item.
             </p>
           </div>
-          <StatusBadge tone={selectedCurrentPhaseStakeholders.length > 0 ? 'info' : 'neutral'}>
+          <StatusBadge
+            tone={
+              selectedCurrentPhaseStakeholders.length > 0 ? "info" : "neutral"
+            }
+          >
             {selectedPhaseStakeholderAssignments.length > 0
               ? `${selectedPhaseStakeholderAssignments.length} phases configured`
-              : 'No phase stakeholders'}
+              : "No phase stakeholders"}
           </StatusBadge>
         </div>
 
         <div className="mt-4 rounded-[1.25rem] border border-outline-variant/30 bg-white/80 px-4 py-3">
           <p className="workspace-meta-label">
-            Current phase · {getLifecyclePhaseLabelForPhase(selectedWorkItem.phase)}
+            Current phase ·{" "}
+            {getLifecyclePhaseLabelForPhase(selectedWorkItem.phase)}
           </p>
           {selectedCurrentPhaseStakeholders.length > 0 ? (
             <ul className="mt-3 space-y-2 text-xs leading-relaxed text-secondary">
@@ -1193,7 +1315,7 @@ export const OrchestratorOperatePanel = ({
 
         {selectedPhaseStakeholderAssignments.length > 0 ? (
           <div className="mt-4 grid gap-3">
-            {selectedPhaseStakeholderAssignments.map(assignment => (
+            {selectedPhaseStakeholderAssignments.map((assignment) => (
               <div
                 key={assignment.phaseId}
                 className="rounded-[1.25rem] border border-outline-variant/20 bg-surface-container-low/35 px-4 py-3"
@@ -1222,9 +1344,12 @@ export const OrchestratorOperatePanel = ({
         <div className="workspace-inline-alert workspace-inline-alert-warning">
           <AlertCircle size={18} className="mt-0.5 shrink-0" />
           <div>
-            <p className="text-sm font-semibold">Agent connection is not ready</p>
+            <p className="text-sm font-semibold">
+              Agent connection is not ready
+            </p>
             <p className="mt-1 text-sm leading-relaxed">
-              {runtimeError || 'Configure the agent connection before starting or restarting execution.'}
+              {runtimeError ||
+                "Configure the agent connection before starting or restarting execution."}
             </p>
           </div>
         </div>
@@ -1248,13 +1373,15 @@ export const OrchestratorOperatePanel = ({
               Waiting for {formatEnumLabel(selectedOpenWait.type)}
             </p>
             <div className="mt-2 rounded-2xl border border-outline-variant/25 bg-white/90 px-4 py-3">
-              <MarkdownContent content={normalizeMarkdownishText(selectedOpenWait.message)} />
+              <MarkdownContent
+                content={normalizeMarkdownishText(selectedOpenWait.message)}
+              />
             </div>
           </div>
         </div>
       ) : null}
 
-      {selectedOpenWait?.type === 'INPUT' ? (
+      {selectedOpenWait?.type === "INPUT" ? (
         <div
           id="orchestrator-structured-input"
           className="workspace-meta-card border-amber-200/80 bg-amber-50/50"
@@ -1284,21 +1411,21 @@ export const OrchestratorOperatePanel = ({
                 onClick={onOpenExecutionPolicyConfig}
                 className="enterprise-button enterprise-button-primary"
               >
-                Configure workspace paths
+                Open Desktop Workspaces
               </button>
             ) : null}
           </div>
 
           {waitRequiresApprovedWorkspace ? (
             <div className="mt-4 rounded-2xl border border-outline-variant/25 bg-white/85 px-4 py-3">
-              <p className="workspace-meta-label">Approved workspace path</p>
+              <p className="workspace-meta-label">Desktop workspace</p>
               {hasApprovedWorkspaceConfigured ? (
                 <>
                   <p className="mt-2 text-xs leading-relaxed text-secondary">
-                    Configured roots for this capability:
+                    Validated roots for this operator on this desktop:
                   </p>
                   <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
-                    {approvedWorkspaceRoots.slice(0, 4).map(root => (
+                    {approvedWorkspaceRoots.slice(0, 4).map((root) => (
                       <li key={root} className="font-mono text-[0.72rem]">
                         {root}
                       </li>
@@ -1312,19 +1439,21 @@ export const OrchestratorOperatePanel = ({
                 </>
               ) : (
                 <p className="mt-2 text-xs leading-relaxed text-secondary">
-                  No approved workspace paths are configured yet.
+                  No desktop workspace mappings are saved yet.
                 </p>
               )}
 
               <p className="mt-3 text-xs leading-relaxed text-secondary">
                 {hasApprovedWorkspaceConfigured
-                  ? 'Add another local directory path if this work item needs a different codebase.'
-                  : 'Add a readable local directory so the engine can safely run workspace tools.'}
+                  ? "Add another mapped local directory if this work item needs a different codebase."
+                  : "Save a readable local directory for this operator so the engine can safely run workspace tools."}
               </p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <input
                   value={approvedWorkspaceDraft}
-                  onChange={event => onApprovedWorkspaceDraftChange(event.target.value)}
+                  onChange={(event) =>
+                    onApprovedWorkspaceDraftChange(event.target.value)
+                  }
                   placeholder="/path/to/your/repo"
                   className="field-input min-w-[16rem] flex-1 bg-white"
                 />
@@ -1334,12 +1463,12 @@ export const OrchestratorOperatePanel = ({
                   disabled={busyAction !== null}
                   className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  {busyAction === 'approveWorkspacePath' ? (
+                  {busyAction === "approveWorkspacePath" ? (
                     <LoaderCircle size={16} className="animate-spin" />
                   ) : (
                     <ShieldCheck size={16} />
                   )}
-                  Approve and continue
+                  Save and continue
                 </button>
                 <button
                   type="button"
@@ -1347,7 +1476,7 @@ export const OrchestratorOperatePanel = ({
                   disabled={busyAction !== null}
                   className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  Approve only
+                  Save only
                 </button>
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
@@ -1355,14 +1484,16 @@ export const OrchestratorOperatePanel = ({
                   <button
                     type="button"
                     onClick={() =>
-                      onApprovedWorkspaceDraftChange(selectedExecutionRepository.localRootHint || '')
+                      onApprovedWorkspaceDraftChange(
+                        selectedExecutionRepository.localRootHint || "",
+                      )
                     }
                     className="enterprise-button enterprise-button-secondary"
                   >
                     Use repo root hint
                   </button>
                 ) : null}
-                {approvedWorkspaceRoots.slice(0, 2).map(root => (
+                {approvedWorkspaceRoots.slice(0, 2).map((root) => (
                   <button
                     key={root}
                     type="button"
@@ -1372,7 +1503,7 @@ export const OrchestratorOperatePanel = ({
                     {root}
                   </button>
                 ))}
-                {activeCapabilityLocalDirectories.slice(0, 2).map(root => (
+                {activeCapabilityLocalDirectories.slice(0, 2).map((root) => (
                   <button
                     key={root}
                     type="button"
@@ -1386,8 +1517,10 @@ export const OrchestratorOperatePanel = ({
               {approvedWorkspaceValidation ? (
                 <p
                   className={cn(
-                    'mt-2 text-xs font-medium',
-                    approvedWorkspaceValidation.valid ? 'text-emerald-700' : 'text-amber-800',
+                    "mt-2 text-xs font-medium",
+                    approvedWorkspaceValidation.valid
+                      ? "text-emerald-700"
+                      : "text-amber-800",
                   )}
                 >
                   {approvedWorkspaceValidation.message}
@@ -1395,8 +1528,8 @@ export const OrchestratorOperatePanel = ({
               ) : null}
               {!canEditCapability ? (
                 <p className="mt-2 text-xs font-medium text-amber-800">
-                  Approving new paths requires capability edit access. Switch Current Operator (top
-                  right) to a workspace admin if needed.
+                  Approving new paths requires capability edit access. Switch
+                  Current Operator (top right) to a workspace admin if needed.
                 </p>
               ) : null}
             </div>
@@ -1404,12 +1537,12 @@ export const OrchestratorOperatePanel = ({
 
           {renderStructuredInputs(
             selectedRequestedInputFields,
-            'The step is waiting for operator input, but no structured field list was attached to this wait.',
+            "The step is waiting for operator input, but no structured field list was attached to this wait.",
           )}
         </div>
       ) : null}
 
-      {selectedOpenWait?.type === 'APPROVAL' && selectedCodeDiffArtifactId ? (
+      {selectedOpenWait?.type === "APPROVAL" && selectedCodeDiffArtifactId ? (
         <div className="workspace-meta-card border-primary/15 bg-primary/5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -1424,7 +1557,7 @@ export const OrchestratorOperatePanel = ({
           <p className="mt-3 text-sm leading-relaxed text-secondary">
             {selectedCodeDiffArtifact?.summary ||
               selectedOpenWait.payload?.codeDiffSummary ||
-              'This approval gate includes a code diff generated from the developer step.'}
+              "This approval gate includes a code diff generated from the developer step."}
           </p>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-3">
@@ -1437,7 +1570,7 @@ export const OrchestratorOperatePanel = ({
             <div className="rounded-2xl border border-outline-variant/25 bg-white/90 px-4 py-3">
               <p className="workspace-meta-label">Touched files</p>
               <p className="mt-2 text-sm font-semibold text-on-surface">
-                {selectedCodeDiffTouchedFileCount || 'Tracked in diff'}
+                {selectedCodeDiffTouchedFileCount || "Tracked in diff"}
               </p>
             </div>
             <div className="rounded-2xl border border-outline-variant/25 bg-white/90 px-4 py-3">
@@ -1455,14 +1588,14 @@ export const OrchestratorOperatePanel = ({
 
           {!selectedCodeDiffArtifact ? (
             <p className="mt-4 text-sm leading-relaxed text-secondary">
-              The approval is waiting on a stored code diff artifact, but it is not loaded in the
-              current workspace snapshot yet.
+              The approval is waiting on a stored code diff artifact, but it is
+              not loaded in the current workspace snapshot yet.
             </p>
           ) : null}
         </div>
       ) : null}
 
-      {selectedOpenWait?.type === 'CONFLICT_RESOLUTION' ? (
+      {selectedOpenWait?.type === "CONFLICT_RESOLUTION" ? (
         <div className="workspace-meta-card border-red-200/70 bg-red-50/55">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -1474,12 +1607,12 @@ export const OrchestratorOperatePanel = ({
             <div className="flex flex-wrap gap-2">
               <StatusBadge tone={selectedContrarianReviewTone}>
                 {selectedContrarianReview
-                  ? selectedContrarianReview.status === 'READY'
-                    ? 'Review ready'
-                    : selectedContrarianReview.status === 'PENDING'
-                      ? 'Review pending'
-                      : 'Review unavailable'
-                  : 'Review unavailable'}
+                  ? selectedContrarianReview.status === "READY"
+                    ? "Review ready"
+                    : selectedContrarianReview.status === "PENDING"
+                      ? "Review pending"
+                      : "Review unavailable"
+                  : "Review unavailable"}
               </StatusBadge>
               {selectedContrarianReview ? (
                 <StatusBadge tone={selectedContrarianReviewTone}>
@@ -1491,23 +1624,27 @@ export const OrchestratorOperatePanel = ({
 
           {!selectedContrarianReview ? (
             <p className="mt-3 text-sm leading-relaxed text-secondary">
-              No contrarian payload is attached to this wait yet. You can still resolve the
-              conflict manually.
+              No contrarian payload is attached to this wait yet. You can still
+              resolve the conflict manually.
             </p>
           ) : null}
 
-          {selectedContrarianReview?.status === 'PENDING' ? (
+          {selectedContrarianReview?.status === "PENDING" ? (
             <p className="mt-3 text-sm leading-relaxed text-secondary">
-              The Contrarian Reviewer is challenging the assumptions behind this conflict wait. The
-              operator decision remains available while the advisory pass completes.
+              The Contrarian Reviewer is challenging the assumptions behind this
+              conflict wait. The operator decision remains available while the
+              advisory pass completes.
             </p>
           ) : null}
 
-          {selectedContrarianReview?.status === 'ERROR' ? (
+          {selectedContrarianReview?.status === "ERROR" ? (
             <div className="mt-3 rounded-2xl border border-red-200 bg-white/80 px-4 py-3">
-              <p className="text-sm font-semibold text-red-800">Review unavailable</p>
+              <p className="text-sm font-semibold text-red-800">
+                Review unavailable
+              </p>
               <p className="mt-1 text-sm leading-relaxed text-secondary">
-                {selectedContrarianReview.lastError || selectedContrarianReview.summary}
+                {selectedContrarianReview.lastError ||
+                  selectedContrarianReview.summary}
               </p>
             </div>
           ) : null}
@@ -1528,7 +1665,8 @@ export const OrchestratorOperatePanel = ({
                 <div className="rounded-2xl border border-outline-variant/25 bg-white/80 px-4 py-3">
                   <p className="workspace-meta-label">Sources</p>
                   <p className="mt-2 text-sm font-semibold text-on-surface">
-                    {selectedContrarianReview.sourceDocumentIds?.length || 0} documents
+                    {selectedContrarianReview.sourceDocumentIds?.length || 0}{" "}
+                    documents
                   </p>
                 </div>
               </div>
@@ -1537,7 +1675,9 @@ export const OrchestratorOperatePanel = ({
                 <button
                   type="button"
                   onClick={() =>
-                    onResolutionNoteChange(selectedContrarianReview.suggestedResolution || '')
+                    onResolutionNoteChange(
+                      selectedContrarianReview.suggestedResolution || "",
+                    )
                   }
                   className="enterprise-button enterprise-button-secondary"
                 >
@@ -1551,28 +1691,28 @@ export const OrchestratorOperatePanel = ({
                   <p className="workspace-meta-label">Challenged assumptions</p>
                   {renderReviewList(
                     selectedContrarianReview.challengedAssumptions || [],
-                    'No assumptions were challenged.',
+                    "No assumptions were challenged.",
                   )}
                 </div>
                 <div className="rounded-2xl border border-outline-variant/25 bg-white/80 px-4 py-3">
                   <p className="workspace-meta-label">Risks</p>
                   {renderReviewList(
                     selectedContrarianReview.risks || [],
-                    'No major risks were flagged.',
+                    "No major risks were flagged.",
                   )}
                 </div>
                 <div className="rounded-2xl border border-outline-variant/25 bg-white/80 px-4 py-3">
                   <p className="workspace-meta-label">Missing evidence</p>
                   {renderReviewList(
                     selectedContrarianReview.missingEvidence || [],
-                    'No missing evidence was identified.',
+                    "No missing evidence was identified.",
                   )}
                 </div>
                 <div className="rounded-2xl border border-outline-variant/25 bg-white/80 px-4 py-3">
                   <p className="workspace-meta-label">Alternative paths</p>
                   {renderReviewList(
                     selectedContrarianReview.alternativePaths || [],
-                    'No alternative path was proposed.',
+                    "No alternative path was proposed.",
                   )}
                 </div>
               </div>
@@ -1586,9 +1726,9 @@ export const OrchestratorOperatePanel = ({
           <div>
             <p className="workspace-meta-label">Direct stage control</p>
             <p className="mt-2 text-sm leading-relaxed text-secondary">
-              Open a focused Codex-style work window for this stage, chat directly with the
-              assigned agent, and continue the workflow once you are satisfied with the stage
-              guidance or output direction.
+              Open a focused Codex-style work window for this stage, chat
+              directly with the assigned agent, and continue the workflow once
+              you are satisfied with the stage guidance or output direction.
             </p>
           </div>
           <button
@@ -1603,18 +1743,20 @@ export const OrchestratorOperatePanel = ({
         </div>
         {!selectedAgent ? (
           <p className="mt-3 text-xs text-secondary">
-            This work item does not currently have a resolved stage agent to chat with.
+            This work item does not currently have a resolved stage agent to
+            chat with.
           </p>
         ) : (
           <p className="mt-3 text-xs text-secondary">
-            Direct control will stay scoped to <strong>{selectedAgent.name}</strong> and the
-            current work item stage.
+            Direct control will stay scoped to{" "}
+            <strong>{selectedAgent.name}</strong> and the current work item
+            stage.
           </p>
         )}
       </div>
 
       <ErrorBoundary
-        resetKey={`${selectedWorkItem.id}:${selectedAgent?.id || 'none'}:${selectedCurrentStep?.id || 'stage'}`}
+        resetKey={`${selectedWorkItem.id}:${selectedAgent?.id || "none"}:${selectedCurrentStep?.id || "stage"}`}
         title="Direct agent chat could not render"
         description="The inline stage chat hit an unexpected UI problem. The rest of the workbench stays available, and you can still use Full Chat or Take control while we keep this route stable."
       >
@@ -1623,8 +1765,9 @@ export const OrchestratorOperatePanel = ({
             <div>
               <p className="workspace-meta-label">Direct agent chat</p>
               <p className="mt-2 text-sm leading-relaxed text-secondary">
-                Work with the current stage agent right here, ask what it plans to do, clarify
-                blockers, or steer the next attempt before you continue.
+                Work with the current stage agent right here, ask what it plans
+                to do, clarify blockers, or steer the next attempt before you
+                continue.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1659,7 +1802,7 @@ export const OrchestratorOperatePanel = ({
             <>
               {stageChatSuggestedPrompts.length > 0 ? (
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {stageChatSuggestedPrompts.map(prompt => (
+                  {stageChatSuggestedPrompts.map((prompt) => (
                     <button
                       key={prompt}
                       type="button"
@@ -1681,42 +1824,51 @@ export const OrchestratorOperatePanel = ({
                 !stageChatDraft &&
                 !isStageChatSending ? (
                   <div className="orchestrator-stage-chat-empty">
-                    Ask <strong>{selectedAgent.name}</strong> what is happening in{' '}
-                    <strong>{selectedCurrentStep?.name || 'this stage'}</strong>, what it needs, or
-                    which files and artifacts it plans to change.
+                    Ask <strong>{selectedAgent.name}</strong> what is happening
+                    in{" "}
+                    <strong>{selectedCurrentStep?.name || "this stage"}</strong>
+                    , what it needs, or which files and artifacts it plans to
+                    change.
                   </div>
                 ) : (
                   <>
-                    {selectedStageChatMessages.map(message => (
+                    {selectedStageChatMessages.map((message) => (
                       <motion.div
                         key={message.id}
                         initial={{ opacity: 0, y: 6 }}
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
                         className={cn(
-                          'orchestrator-stage-chat-message',
-                          message.role === 'user'
-                            ? 'orchestrator-stage-chat-message-user'
-                            : 'orchestrator-stage-chat-message-agent',
+                          "orchestrator-stage-chat-message",
+                          message.role === "user"
+                            ? "orchestrator-stage-chat-message-user"
+                            : "orchestrator-stage-chat-message-agent",
                         )}
                       >
                         <div className="orchestrator-stage-chat-message-meta">
                           <span className="inline-flex items-center gap-2">
-                            {message.role === 'user' ? <User size={14} /> : <Bot size={14} />}
-                            {message.role === 'user' ? 'You' : selectedAgent.name}
+                            {message.role === "user" ? (
+                              <User size={14} />
+                            ) : (
+                              <Bot size={14} />
+                            )}
+                            {message.role === "user"
+                              ? "You"
+                              : selectedAgent.name}
                           </span>
                           <span>{message.timestamp}</span>
                         </div>
                         <CopilotMessageBody
                           content={message.content}
-                          tone={message.role === 'user' ? 'user' : 'agent'}
+                          tone={message.role === "user" ? "user" : "agent"}
                         />
-                        {message.deliveryState && message.deliveryState !== 'clean' ? (
+                        {message.deliveryState &&
+                        message.deliveryState !== "clean" ? (
                           <p className="mt-2 text-xs text-secondary">
-                            {message.deliveryState === 'recovered'
-                              ? 'Recovered draft'
-                              : 'Partial response'}
-                            {message.error ? ` · ${message.error}` : ''}
+                            {message.deliveryState === "recovered"
+                              ? "Recovered draft"
+                              : "Partial response"}
+                            {message.error ? ` · ${message.error}` : ""}
                           </p>
                         ) : null}
                       </motion.div>
@@ -1736,7 +1888,11 @@ export const OrchestratorOperatePanel = ({
                           </span>
                           <CopilotThinkingIndicator label="Typing" />
                         </div>
-                        <CopilotMessageBody content={stageChatDraft} tone="draft" isStreaming />
+                        <CopilotMessageBody
+                          content={stageChatDraft}
+                          tone="draft"
+                          isStreaming
+                        />
                       </motion.div>
                     ) : isStageChatSending ? (
                       <motion.div
@@ -1771,11 +1927,16 @@ export const OrchestratorOperatePanel = ({
               <form onSubmit={onStageChatSend} className="mt-4 space-y-3">
                 <textarea
                   value={stageChatInput}
-                  onChange={event => onStageChatInputChange(event.target.value)}
-                  onKeyDown={event => {
-                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                  onChange={(event) =>
+                    onStageChatInputChange(event.target.value)
+                  }
+                  onKeyDown={(event) => {
+                    if (
+                      (event.metaKey || event.ctrlKey) &&
+                      event.key === "Enter"
+                    ) {
                       event.preventDefault();
-                      event.currentTarget.closest('form')?.requestSubmit();
+                      event.currentTarget.closest("form")?.requestSubmit();
                     }
                   }}
                   placeholder={`Ask ${selectedAgent.name} about this stage, blockers, files, artifacts, or next steps.`}
@@ -1783,14 +1944,24 @@ export const OrchestratorOperatePanel = ({
                 />
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p className="text-xs leading-relaxed text-secondary">
-                    Scoped to <strong>{selectedWorkItem.id}</strong> and{' '}
-                    <strong>{selectedCurrentStep?.name || 'the active stage'}</strong>.
-                    {' '}<span className="opacity-60">⌘↵ to send.</span>
+                    Scoped to <strong>{selectedWorkItem.id}</strong> and{" "}
+                    <strong>
+                      {selectedCurrentStep?.name || "the active stage"}
+                    </strong>
+                    . <span className="opacity-60">⌘↵ to send.</span>
                   </p>
                   <button
                     type="submit"
-                    disabled={!stageChatInput.trim() || isStageChatSending || !canWriteChat}
-                    title={!canWriteChat ? 'Chat is read-only — take control to send messages.' : undefined}
+                    disabled={
+                      !stageChatInput.trim() ||
+                      isStageChatSending ||
+                      !canWriteChat
+                    }
+                    title={
+                      !canWriteChat
+                        ? "Chat is read-only — take control to send messages."
+                        : undefined
+                    }
                     className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {isStageChatSending ? (
@@ -1809,10 +1980,15 @@ export const OrchestratorOperatePanel = ({
 
       <div className="workspace-meta-card">
         <p className="workspace-meta-label">Reset target</p>
-        <p className="workspace-meta-value">{selectedResetStep?.name || 'Workflow start'}</p>
+        <p className="workspace-meta-value">
+          {selectedResetStep?.name || "Workflow start"}
+        </p>
         <p className="mt-1 text-xs leading-relaxed text-secondary">
-          Reset moves the work item back to <strong>{getPhaseMeta(selectedResetPhase).label}</strong>
-          {selectedResetAgentName ? ` and restarts with ${selectedResetAgentName}.` : '.'}
+          Reset moves the work item back to{" "}
+          <strong>{getPhaseMeta(selectedResetPhase).label}</strong>
+          {selectedResetAgentName
+            ? ` and restarts with ${selectedResetAgentName}.`
+            : "."}
         </p>
       </div>
     </div>

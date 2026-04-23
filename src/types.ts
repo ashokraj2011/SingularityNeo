@@ -1,24 +1,38 @@
-export type Status = 'PENDING' | 'VERIFIED' | 'RUNNING' | 'STABLE' | 'ALERT' | 'BETA' | 'IN_PROGRESS' | 'ARCHIVED' | 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'URGENT';
+export type Status =
+  | "PENDING"
+  | "VERIFIED"
+  | "RUNNING"
+  | "STABLE"
+  | "ALERT"
+  | "BETA"
+  | "IN_PROGRESS"
+  | "ARCHIVED"
+  | "QUEUED"
+  | "PROCESSING"
+  | "COMPLETED"
+  | "URGENT";
 
-export type SkillKind = 'GENERAL' | 'ROLE' | 'CUSTOM' | 'LEARNING';
-export type SkillOrigin = 'FOUNDATION' | 'CAPABILITY';
-export type ProviderKey = 'github-copilot' | 'local-openai';
-export type EmbeddingProviderKey = 'local-openai' | 'deterministic-hash';
+export type SkillKind = "GENERAL" | "ROLE" | "CUSTOM" | "LEARNING";
+export type SkillOrigin = "FOUNDATION" | "CAPABILITY";
+export type ProviderKey = "github-copilot" | "local-openai";
+export type EmbeddingProviderKey = "local-openai" | "deterministic-hash";
+
+export type MemoryRetrievalMode = "pgvector" | "json-cosine" | "deterministic-hash";
 export type AgentRoleStarterKey =
-  | 'OWNER'
-  | 'PLANNING'
-  | 'BUSINESS-ANALYST'
-  | 'ARCHITECT'
-  | 'SOFTWARE-DEVELOPER'
-  | 'QA'
-  | 'DEVOPS'
-  | 'VALIDATION'
-  | 'EXECUTION-OPS'
-  | 'CONTRARIAN-REVIEWER';
+  | "OWNER"
+  | "PLANNING"
+  | "BUSINESS-ANALYST"
+  | "ARCHITECT"
+  | "SOFTWARE-DEVELOPER"
+  | "QA"
+  | "DEVOPS"
+  | "VALIDATION"
+  | "EXECUTION-OPS"
+  | "CONTRARIAN-REVIEWER";
 
 export interface AgentArtifactExpectation {
   artifactName: string;
-  direction: 'INPUT' | 'OUTPUT';
+  direction: "INPUT" | "OUTPUT";
   requiredByDefault: boolean;
   description?: string;
 }
@@ -39,7 +53,7 @@ export interface Skill {
   id: string;
   name: string;
   description: string;
-  category: 'Analysis' | 'Automation' | 'Security' | 'Compliance' | 'Data';
+  category: "Analysis" | "Automation" | "Security" | "Compliance" | "Data";
   version: string;
   contentMarkdown?: string;
   kind?: SkillKind;
@@ -54,7 +68,7 @@ export interface CapabilityStakeholder {
   teamName?: string;
 }
 
-export type CapabilityRepositoryStatus = 'ACTIVE' | 'ARCHIVED';
+export type CapabilityRepositoryStatus = "ACTIVE" | "ARCHIVED";
 
 export interface CapabilityRepository {
   id: string;
@@ -77,14 +91,14 @@ export interface CapabilityRepository {
 // as the "house testing guidance" for that capability.
 // ──────────────────────────────────────────────────────────────────────────
 
-export type CapabilityCopilotGuidanceCategory = 'guidance' | 'testing';
+export type CapabilityCopilotGuidanceCategory = "guidance" | "testing";
 
 export type CapabilityCopilotGuidanceFetchStatus =
-  | 'OK'
-  | 'NOT_FOUND'
-  | 'AUTH_MISSING'
-  | 'RATE_LIMITED'
-  | 'ERROR';
+  | "OK"
+  | "NOT_FOUND"
+  | "AUTH_MISSING"
+  | "RATE_LIMITED"
+  | "ERROR";
 
 export interface CapabilityCopilotGuidanceFile {
   repositoryId: string;
@@ -125,7 +139,12 @@ export interface CapabilityChatDistillationRecord {
  * duplicating the union.
  */
 export interface ChatDistillationResult {
-  status: 'APPLIED' | 'NO_LEARNING' | 'TOO_SHORT' | 'ALREADY_DISTILLED' | 'ERROR';
+  status:
+    | "APPLIED"
+    | "NO_LEARNING"
+    | "TOO_SHORT"
+    | "ALREADY_DISTILLED"
+    | "ERROR";
   correctionPreview?: string;
   messageCount: number;
   message?: string;
@@ -148,37 +167,83 @@ export interface ChatDistillationResult {
 // ──────────────────────────────────────────────────────────────────────────
 
 export type CapabilityCodeSymbolKind =
-  | 'class'
-  | 'function'
-  | 'interface'
-  | 'type'
-  | 'enum'
-  | 'variable'
-  | 'method'
-  | 'property';
+  | "class"
+  | "function"
+  | "interface"
+  | "type"
+  | "enum"
+  | "variable"
+  | "method"
+  | "property";
+
+export type CapabilityCodeSymbolEdgeKind = "CONTAINS";
 
 export type CapabilityCodeIndexRunStatus =
-  | 'OK'
-  | 'PARTIAL'
-  | 'AUTH_MISSING'
-  | 'RATE_LIMITED'
-  | 'EMPTY'
-  | 'ERROR';
+  | "OK"
+  | "PARTIAL"
+  | "AUTH_MISSING"
+  | "RATE_LIMITED"
+  | "EMPTY"
+  | "ERROR";
 
 export interface CapabilityCodeSymbol {
   capabilityId: string;
   repositoryId: string;
   repositoryLabel?: string;
   filePath: string;
+  symbolId: string;
+  containerSymbolId?: string;
   symbolName: string;
+  qualifiedSymbolName?: string;
   kind: CapabilityCodeSymbolKind;
+  language: string;
   parentSymbol?: string;
   startLine: number;
   endLine: number;
+  sliceStartLine: number;
+  sliceEndLine: number;
   signature: string;
   isExported: boolean;
   sha?: string;
   indexedAt: string;
+}
+
+export interface CapabilityCodeSymbolEdge {
+  capabilityId: string;
+  repositoryId: string;
+  fromSymbolId: string;
+  toSymbolId: string;
+  fromFilePath: string;
+  toFilePath: string;
+  edgeKind: CapabilityCodeSymbolEdgeKind;
+  recordedAt?: string;
+}
+
+export type BlastRadiusSymbolRelation = "SEED" | "ANCESTOR" | "DESCENDANT";
+
+export interface BlastRadiusSymbolGraphNode extends CapabilityCodeSymbol {
+  rootSymbolId: string;
+  relation: BlastRadiusSymbolRelation;
+  depth: number;
+}
+
+export interface BlastRadiusSymbolGraphEdge extends CapabilityCodeSymbolEdge {
+  fromSymbolName?: string;
+  toSymbolName?: string;
+  fromQualifiedSymbolName?: string;
+  toQualifiedSymbolName?: string;
+}
+
+export interface BlastRadiusSymbolGraph {
+  capabilityId: string;
+  filePath?: string;
+  symbolId?: string;
+  seedSymbolIds: string[];
+  maxDepth: number;
+  totalNodes: number;
+  nodes: BlastRadiusSymbolGraphNode[];
+  edges: BlastRadiusSymbolGraphEdge[];
+  analyzedAt: string;
 }
 
 export interface CapabilityCodeIndexRepoSummary {
@@ -227,24 +292,24 @@ export interface CapabilityMetadataEntry {
 }
 
 export type CapabilityDatabaseEngine =
-  | 'POSTGRES'
-  | 'MYSQL'
-  | 'MARIADB'
-  | 'SQLSERVER'
-  | 'ORACLE'
-  | 'SNOWFLAKE'
-  | 'MONGODB'
-  | 'REDIS'
-  | 'OTHER';
+  | "POSTGRES"
+  | "MYSQL"
+  | "MARIADB"
+  | "SQLSERVER"
+  | "ORACLE"
+  | "SNOWFLAKE"
+  | "MONGODB"
+  | "REDIS"
+  | "OTHER";
 
 export type CapabilityDatabaseAuthentication =
-  | 'SECRET_REFERENCE'
-  | 'USERNAME_PASSWORD'
-  | 'IAM'
-  | 'INTEGRATED'
-  | 'NONE';
+  | "SECRET_REFERENCE"
+  | "USERNAME_PASSWORD"
+  | "IAM"
+  | "INTEGRATED"
+  | "NONE";
 
-export type CapabilityDatabaseSslMode = 'DISABLE' | 'PREFER' | 'REQUIRE';
+export type CapabilityDatabaseSslMode = "DISABLE" | "PREFER" | "REQUIRE";
 
 export interface CapabilityDatabaseConfig {
   id: string;
@@ -294,56 +359,56 @@ export interface WorkspaceConnectorSettings {
   confluence: WorkspaceConfluenceConnectorSettings;
 }
 
-export type WorkspaceUserStatus = 'ACTIVE' | 'INVITED' | 'DISABLED';
+export type WorkspaceUserStatus = "ACTIVE" | "INVITED" | "DISABLED";
 export type WorkspaceRole =
-  | 'WORKSPACE_ADMIN'
-  | 'PORTFOLIO_OWNER'
-  | 'TEAM_LEAD'
-  | 'INCIDENT_COMMANDER'
-  | 'OPERATOR'
-  | 'AUDITOR'
-  | 'VIEWER';
+  | "WORKSPACE_ADMIN"
+  | "PORTFOLIO_OWNER"
+  | "TEAM_LEAD"
+  | "INCIDENT_COMMANDER"
+  | "OPERATOR"
+  | "AUDITOR"
+  | "VIEWER";
 export type WorkspaceTeamMembershipRole =
-  | 'LEAD'
-  | 'MEMBER'
-  | 'APPROVER'
-  | 'VIEWER';
-export type CapabilityAccessRole = 'OWNER' | 'OPERATOR' | 'APPROVER' | 'VIEWER';
-export type ExternalIdentityProvider = 'GITHUB' | 'JIRA' | 'CONFLUENCE' | 'SSO';
-export type NotificationChannel = 'INBOX' | 'EMAIL' | 'SLACK' | 'TEAMS';
+  | "LEAD"
+  | "MEMBER"
+  | "APPROVER"
+  | "VIEWER";
+export type CapabilityAccessRole = "OWNER" | "OPERATOR" | "APPROVER" | "VIEWER";
+export type ExternalIdentityProvider = "GITHUB" | "JIRA" | "CONFLUENCE" | "SSO";
+export type NotificationChannel = "INBOX" | "EMAIL" | "SLACK" | "TEAMS";
 export type NotificationTrigger =
-  | 'APPROVAL_REQUESTED'
-  | 'PHASE_ENTERED'
-  | 'SLA_BREACHED'
-  | 'REQUEST_CHANGES'
-  | 'CONFLICT_NEEDS_RESOLUTION'
-  | 'HANDOFF_ACCEPTANCE_REQUIRED';
+  | "APPROVAL_REQUESTED"
+  | "PHASE_ENTERED"
+  | "SLA_BREACHED"
+  | "REQUEST_CHANGES"
+  | "CONFLICT_NEEDS_RESOLUTION"
+  | "HANDOFF_ACCEPTANCE_REQUIRED";
 export type PermissionAction =
-  | 'workspace.manage'
-  | 'access.manage'
-  | 'capability.create'
-  | 'capability.read'
-  | 'capability.read.rollup'
-  | 'capability.edit'
-  | 'capability.execution.claim'
-  | 'workflow.edit'
-  | 'agents.manage'
-  | 'contract.publish'
-  | 'workitem.read'
-  | 'workitem.create'
-  | 'workitem.control'
-  | 'workitem.restart'
-  | 'approval.decide'
-  | 'artifact.read'
-  | 'artifact.publish'
-  | 'telemetry.read'
-  | 'chat.read'
-  | 'chat.write'
-  | 'report.view.operations'
-  | 'report.view.portfolio'
-  | 'report.view.executive'
-  | 'report.view.audit';
-export type CapabilityVisibilityScope = 'NONE' | 'ROLLUP_ONLY' | 'LIVE_DETAIL';
+  | "workspace.manage"
+  | "access.manage"
+  | "capability.create"
+  | "capability.read"
+  | "capability.read.rollup"
+  | "capability.edit"
+  | "capability.execution.claim"
+  | "workflow.edit"
+  | "agents.manage"
+  | "contract.publish"
+  | "workitem.read"
+  | "workitem.create"
+  | "workitem.control"
+  | "workitem.restart"
+  | "approval.decide"
+  | "artifact.read"
+  | "artifact.publish"
+  | "telemetry.read"
+  | "chat.read"
+  | "chat.write"
+  | "report.view.operations"
+  | "report.view.portfolio"
+  | "report.view.executive"
+  | "report.view.audit";
+export type CapabilityVisibilityScope = "NONE" | "ROLLUP_ONLY" | "LIVE_DETAIL";
 
 export interface WorkspaceUser {
   id: string;
@@ -392,7 +457,54 @@ export interface UserPreference {
   userId: string;
   defaultCapabilityId?: string;
   lastSelectedTeamId?: string;
-  workbenchView?: 'ALL_WORK' | 'MY_QUEUE' | 'TEAM_QUEUE' | 'ATTENTION' | 'WATCHING';
+  workbenchView?:
+    | "ALL_WORK"
+    | "MY_QUEUE"
+    | "TEAM_QUEUE"
+    | "ATTENTION"
+    | "WATCHING";
+}
+
+export type DesktopWorkspaceMappingValidationCode =
+  | "VALID"
+  | "WORKING_DIRECTORY_PENDING"
+  | "MAPPING_MISSING"
+  | "LOCAL_ROOT_MISSING"
+  | "LOCAL_ROOT_NOT_DIRECTORY"
+  | "WORKING_DIRECTORY_MISSING"
+  | "WORKING_DIRECTORY_NOT_DIRECTORY"
+  | "WORKING_DIRECTORY_OUTSIDE_ROOT"
+  | "REPOSITORY_NOT_INITIALIZED";
+
+export interface DesktopWorkspaceMappingValidation {
+  code: DesktopWorkspaceMappingValidationCode;
+  valid: boolean;
+  message: string;
+}
+
+export interface DesktopWorkspaceMapping {
+  id: string;
+  executorId: string;
+  userId: string;
+  capabilityId: string;
+  repositoryId?: string;
+  localRootPath: string;
+  workingDirectoryPath: string;
+  validation: DesktopWorkspaceMappingValidation;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceResolution {
+  executorId: string;
+  userId: string;
+  capabilityId: string;
+  repositoryId?: string;
+  mappingId?: string;
+  localRootPath?: string;
+  workingDirectoryPath?: string;
+  approvedWorkspaceRoots: string[];
+  validation: DesktopWorkspaceMappingValidation;
 }
 
 export interface NotificationRule {
@@ -457,14 +569,14 @@ export interface AccessAuditEvent {
   actorDisplayName: string;
   action: string;
   targetType:
-    | 'WORKSPACE_USER'
-    | 'WORKSPACE_TEAM'
-    | 'CAPABILITY_ACCESS'
-    | 'DESCENDANT_ACCESS'
-    | 'NOTIFICATION_RULE'
-    | 'CONTRACT_PUBLISH'
-    | 'WORK_ITEM_CONTROL'
-    | 'WORK_ITEM_WRITE_CLAIM';
+    | "WORKSPACE_USER"
+    | "WORKSPACE_TEAM"
+    | "CAPABILITY_ACCESS"
+    | "DESCENDANT_ACCESS"
+    | "NOTIFICATION_RULE"
+    | "CONTRACT_PUBLISH"
+    | "WORK_ITEM_CONTROL"
+    | "WORK_ITEM_WRITE_CLAIM";
   targetId: string;
   capabilityId?: string;
   summary: string;
@@ -522,8 +634,7 @@ export interface WorkspaceDatabaseBootstrapConfig {
   password?: string;
 }
 
-export interface WorkspaceDatabaseBootstrapProfile
-  extends WorkspaceDatabaseBootstrapConfig {
+export interface WorkspaceDatabaseBootstrapProfile extends WorkspaceDatabaseBootstrapConfig {
   id: string;
   label: string;
   lastUsedAt: string;
@@ -542,6 +653,10 @@ export interface WorkspaceDatabaseRuntimeInfo {
   adminDatabaseName?: string;
   passwordConfigured: boolean;
   pgvectorAvailable: boolean;
+  retrievalMode?: MemoryRetrievalMode;
+  embeddingConfigured?: boolean;
+  embeddingProviderKey?: EmbeddingProviderKey;
+  fallbackReason?: string;
   lastConnectionError?: string;
 }
 
@@ -584,7 +699,7 @@ export interface WorkspaceEvalSuiteTemplate {
   name: string;
   description: string;
   agentRole: string;
-  evalType: 'STRUCTURED_OUTPUT' | 'RETRIEVAL' | 'WORKFLOW';
+  evalType: "STRUCTURED_OUTPUT" | "RETRIEVAL" | "WORKFLOW";
   enabled: boolean;
   cases: WorkspaceEvalCaseTemplate[];
 }
@@ -594,8 +709,8 @@ export interface WorkspaceWorkflowTemplate {
   templateId: string;
   name: string;
   summary?: string;
-  workflowType?: 'SDLC' | 'Operational' | 'Governance' | 'Custom';
-  scope: 'GLOBAL';
+  workflowType?: "SDLC" | "Operational" | "Governance" | "Custom";
+  scope: "GLOBAL";
   schemaVersion?: number;
   entryNodeId?: string;
   nodes?: WorkflowNode[];
@@ -608,7 +723,7 @@ export interface WorkspaceArtifactTemplate {
   id: string;
   name: string;
   type: string;
-  direction: 'INPUT' | 'OUTPUT';
+  direction: "INPUT" | "OUTPUT";
   agentLabel: string;
   description: string;
   inputs: string[];
@@ -622,13 +737,13 @@ export interface WorkspaceToolTemplate {
   label: string;
   description: string;
   category:
-    | 'Workspace'
-    | 'Search'
-    | 'Git'
-    | 'Build'
-    | 'Test'
-    | 'Docs'
-    | 'Deploy';
+    | "Workspace"
+    | "Search"
+    | "Git"
+    | "Build"
+    | "Test"
+    | "Docs"
+    | "Deploy";
   requiresApproval: boolean;
 }
 
@@ -683,7 +798,7 @@ export interface CapabilityDeploymentTarget {
   workspacePath?: string;
 }
 
-export type ExecutionMode = 'LIVE' | 'SHADOW';
+export type ExecutionMode = "LIVE" | "SHADOW";
 
 export interface CapabilityExecutionConfig {
   executionMode?: ExecutionMode;
@@ -691,6 +806,20 @@ export interface CapabilityExecutionConfig {
   allowedWorkspacePaths: string[];
   commandTemplates: CapabilityExecutionCommandTemplate[];
   deploymentTargets: CapabilityDeploymentTarget[];
+  /**
+   * Prompt-budget tuning for chat, memory retrieval, and approval synthesis.
+   * These defaults are intentionally conservative so we reduce runaway token
+   * growth before we attempt more aggressive compression.
+   */
+  tokenOptimization?: {
+    chatHistoryKeepLastN?: number;
+    chatRollupThreshold?: number;
+    chatMaxInputTokens?: number;
+    memoryPromptMaxTokens?: number;
+    memoryChunkMaxTokens?: number;
+    approvalSynthesisMaxInputTokens?: number;
+    approvalExcerptMaxChars?: number;
+  };
   /**
    * Tool-loop history rollup tuning (Lever 3 of the token-optimization
    * program). When the inner execution loop exceeds `threshold` tool
@@ -704,6 +833,34 @@ export interface CapabilityExecutionConfig {
     enabled?: boolean;
     keepLastN?: number;
     threshold?: number;
+  };
+  /**
+   * Dynamic model routing for the agent tool loop (Fix 2).
+   * When enabled, trivial read-only tool calls (workspace_list, git_status,
+   * workspace_search) use `budgetModel` instead of the agent's primary model,
+   * saving tokens without affecting decision quality. Standard tools
+   * (workspace_read, run_build, run_test) use `standardModel`. Write and
+   * deployment tools always use the agent's primary model.
+   * Disabled by default — opt in per capability.
+   */
+  agentModelRouting?: {
+    enabled: boolean;
+    /** Model for TRIVIAL read-only tools. Default: 'gpt-4o-mini'. */
+    budgetModel?: string;
+    /** Model for STANDARD tools. Default: agent.model. */
+    standardModel?: string;
+  };
+  /**
+   * Cross-capability (global) memory settings for this capability.
+   * When `canWrite` is true, agents running under this capability are allowed
+   * to call `writeGlobalMemoryDocument` and persist findings that every other
+   * capability can retrieve. Global documents are stored with
+   * `is_global = TRUE` and are returned by `searchCapabilityMemory` /
+   * `listMemoryDocuments` regardless of which capability is querying.
+   */
+  globalMemory?: {
+    /** Allow agents to write globally-visible memory documents. Default: false. */
+    canWrite?: boolean;
   };
 }
 
@@ -744,7 +901,7 @@ export interface OperatingPolicySnapshot {
 }
 
 export interface ConnectorValidationItem {
-  connector: 'GITHUB' | 'JIRA' | 'CONFLUENCE';
+  connector: "GITHUB" | "JIRA" | "CONFLUENCE";
   value: string;
   valid: boolean;
   message: string;
@@ -779,21 +936,21 @@ export interface DeploymentTargetValidationResult {
   message: string;
 }
 
-export type WorkspaceStackKind = 'NODE' | 'PYTHON' | 'JAVA' | 'GENERIC';
+export type WorkspaceStackKind = "NODE" | "PYTHON" | "JAVA" | "GENERIC";
 
 export type WorkspaceBuildTool =
-  | 'NPM'
-  | 'PNPM'
-  | 'YARN'
-  | 'UV'
-  | 'POETRY'
-  | 'PIP'
-  | 'PIPENV'
-  | 'MAVEN'
-  | 'GRADLE'
-  | 'UNKNOWN';
+  | "NPM"
+  | "PNPM"
+  | "YARN"
+  | "UV"
+  | "POETRY"
+  | "PIP"
+  | "PIPENV"
+  | "MAVEN"
+  | "GRADLE"
+  | "UNKNOWN";
 
-export type WorkspaceDetectionConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
+export type WorkspaceDetectionConfidence = "HIGH" | "MEDIUM" | "LOW";
 
 export interface WorkspaceStackProfile {
   stack: WorkspaceStackKind;
@@ -803,8 +960,7 @@ export interface WorkspaceStackProfile {
   summary: string;
 }
 
-export interface WorkspaceCommandRecommendation
-  extends CapabilityExecutionCommandTemplate {
+export interface WorkspaceCommandRecommendation extends CapabilityExecutionCommandTemplate {
   rationale?: string;
 }
 
@@ -819,7 +975,7 @@ export interface WorkspaceDetectionResult {
 
 export type WorkflowPhaseId = string;
 
-export type SystemPhaseId = 'BACKLOG' | 'DONE';
+export type SystemPhaseId = "BACKLOG" | "DONE";
 
 export interface CapabilityLifecyclePhase {
   id: WorkflowPhaseId;
@@ -827,8 +983,7 @@ export interface CapabilityLifecyclePhase {
   description?: string;
 }
 
-export interface RetiredCapabilityLifecyclePhase
-  extends CapabilityLifecyclePhase {
+export interface RetiredCapabilityLifecyclePhase extends CapabilityLifecyclePhase {
   retiredAt: string;
 }
 
@@ -838,7 +993,7 @@ export interface CapabilityLifecycle {
   retiredPhases: RetiredCapabilityLifecyclePhase[];
 }
 
-export type CapabilitySystemRole = 'FOUNDATION';
+export type CapabilitySystemRole = "FOUNDATION";
 
 export interface CapabilityPhaseOwnershipRule {
   phaseId: WorkflowPhaseId;
@@ -848,27 +1003,27 @@ export interface CapabilityPhaseOwnershipRule {
   escalationTeamIds: string[];
 }
 
-export type CapabilityKind = 'DELIVERY' | 'COLLECTION';
+export type CapabilityKind = "DELIVERY" | "COLLECTION";
 
 export type CapabilityCollectionKind =
-  | 'BUSINESS_DOMAIN'
-  | 'PLATFORM_LAYER'
-  | 'ENTERPRISE_LAYER'
-  | 'CITY_PLAN'
-  | 'ALM_PORTFOLIO';
+  | "BUSINESS_DOMAIN"
+  | "PLATFORM_LAYER"
+  | "ENTERPRISE_LAYER"
+  | "CITY_PLAN"
+  | "ALM_PORTFOLIO";
 
 export type CapabilityDependencyKind =
-  | 'FUNCTIONAL'
-  | 'API'
-  | 'DATA'
-  | 'PLATFORM'
-  | 'OPERATIONAL';
+  | "FUNCTIONAL"
+  | "API"
+  | "DATA"
+  | "PLATFORM"
+  | "OPERATIONAL";
 
 export type CapabilityDependencyCriticality =
-  | 'LOW'
-  | 'MEDIUM'
-  | 'HIGH'
-  | 'CRITICAL';
+  | "LOW"
+  | "MEDIUM"
+  | "HIGH"
+  | "CRITICAL";
 
 export interface CapabilityDependency {
   id: string;
@@ -891,22 +1046,22 @@ export interface FunctionalRequirementRecord {
   id: string;
   title: string;
   description: string;
-  priority?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-  status?: 'DRAFT' | 'ACTIVE' | 'DONE';
+  priority?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  status?: "DRAFT" | "ACTIVE" | "DONE";
   linkedArtifactIds?: string[];
 }
 
 export interface NonFunctionalRequirementRecord {
   id: string;
   category:
-    | 'PERFORMANCE'
-    | 'RELIABILITY'
-    | 'SECURITY'
-    | 'COMPLIANCE'
-    | 'OBSERVABILITY'
-    | 'SCALABILITY'
-    | 'OPERABILITY'
-    | 'OTHER';
+    | "PERFORMANCE"
+    | "RELIABILITY"
+    | "SECURITY"
+    | "COMPLIANCE"
+    | "OBSERVABILITY"
+    | "SCALABILITY"
+    | "OPERABILITY"
+    | "OTHER";
   title: string;
   description: string;
   target?: string;
@@ -915,7 +1070,7 @@ export interface NonFunctionalRequirementRecord {
 export interface ApiContractReference {
   id: string;
   name: string;
-  kind?: 'REST' | 'GRAPHQL' | 'EVENT' | 'RPC' | 'FILE' | 'OTHER';
+  kind?: "REST" | "GRAPHQL" | "EVENT" | "RPC" | "FILE" | "OTHER";
   version?: string;
   provider?: string;
   consumer?: string;
@@ -935,7 +1090,7 @@ export interface SoftwareVersionRecord {
 
 export interface CapabilityAlmReference {
   id: string;
-  system: 'JIRA' | 'CONFLUENCE' | 'GITHUB' | 'ADO' | 'SERVICE_NOW' | 'OTHER';
+  system: "JIRA" | "CONFLUENCE" | "GITHUB" | "ADO" | "SERVICE_NOW" | "OTHER";
   label: string;
   url?: string;
   externalId?: string;
@@ -980,14 +1135,14 @@ export interface CapabilityPublishedSnapshot {
 
 export interface CapabilityRollupWarning {
   id: string;
-  severity: 'INFO' | 'WARN' | 'ERROR';
+  severity: "INFO" | "WARN" | "ERROR";
   kind:
-    | 'MISSING_PUBLISH'
-    | 'STALE_PUBLISH'
-    | 'UNRESOLVED_DEPENDENCY'
-    | 'VERSION_MISMATCH'
-    | 'CYCLE'
-    | 'INVALID_PARENT';
+    | "MISSING_PUBLISH"
+    | "STALE_PUBLISH"
+    | "UNRESOLVED_DEPENDENCY"
+    | "VERSION_MISMATCH"
+    | "CYCLE"
+    | "INVALID_PARENT";
   message: string;
   relatedCapabilityId?: string;
   relatedSnapshotId?: string;
@@ -1125,23 +1280,23 @@ export interface AgentOutputRecord {
   title: string;
   summary: string;
   timestamp: string;
-  status: 'completed' | 'pending';
+  status: "completed" | "pending";
   relatedTaskId?: string;
   artifactId?: string;
 }
 
 export type AgentLearningStatus =
-  | 'NOT_STARTED'
-  | 'QUEUED'
-  | 'LEARNING'
-  | 'READY'
-  | 'STALE'
-  | 'ERROR'
+  | "NOT_STARTED"
+  | "QUEUED"
+  | "LEARNING"
+  | "READY"
+  | "STALE"
+  | "ERROR"
   // Slice B — candidate version failed shape checks (or its judge score is
   // still being computed). Prior version keeps serving inference.
-  | 'REVIEW_PENDING';
+  | "REVIEW_PENDING";
 
-export type AgentSessionScope = 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+export type AgentSessionScope = "GENERAL_CHAT" | "WORK_ITEM" | "TASK";
 
 export interface AgentLearningProfile {
   status: AgentLearningStatus;
@@ -1259,7 +1414,7 @@ export interface CopilotSessionMonitorEntry {
   totalTokens: number;
   live: boolean;
   resumable: boolean;
-  state: 'ACTIVE' | 'STORED';
+  state: "ACTIVE" | "STORED";
 }
 
 export interface CopilotSessionMonitorSnapshot {
@@ -1267,7 +1422,11 @@ export interface CopilotSessionMonitorSnapshot {
   runtime: {
     configured: boolean;
     provider: string;
-    runtimeAccessMode?: 'copilot-session' | 'headless-cli' | 'http-fallback' | 'unconfigured';
+    runtimeAccessMode?:
+      | "copilot-session"
+      | "headless-cli"
+      | "http-fallback"
+      | "unconfigured";
     httpFallbackEnabled?: boolean;
     tokenSource: string | null;
     defaultModel: string;
@@ -1298,15 +1457,18 @@ export interface AgentLearningProfileDetail {
 }
 
 export type AgentKnowledgeFreshness =
-  | 'FRESH'
-  | 'ACTIVE'
-  | 'STALE'
-  | 'NOT_STARTED'
-  | 'ERROR';
+  | "FRESH"
+  | "ACTIVE"
+  | "STALE"
+  | "NOT_STARTED"
+  | "ERROR";
 
-export type AgentKnowledgeConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
-export type AgentUserVisibility = 'PRIMARY_COPILOT' | 'SPECIALIST' | 'BACKGROUND';
-export type CapabilityRuntimeOwner = 'DESKTOP' | 'SERVER';
+export type AgentKnowledgeConfidence = "HIGH" | "MEDIUM" | "LOW";
+export type AgentUserVisibility =
+  | "PRIMARY_COPILOT"
+  | "SPECIALIST"
+  | "BACKGROUND";
+export type CapabilityRuntimeOwner = "DESKTOP" | "SERVER";
 
 export interface AgentRolePolicy {
   summary: string;
@@ -1334,7 +1496,7 @@ export interface AgentEvalProfile {
 export interface LearningDelta {
   id: string;
   timestamp: string;
-  triggerType?: LearningUpdate['triggerType'];
+  triggerType?: LearningUpdate["triggerType"];
   insight: string;
   sourceLogIds: string[];
   relatedWorkItemId?: string;
@@ -1343,7 +1505,7 @@ export interface LearningDelta {
 
 export interface KnowledgeSourceSummary {
   id: string;
-  kind: 'SKILL' | 'METADATA' | 'ARTIFACT' | 'LEARNING' | 'SESSION';
+  kind: "SKILL" | "METADATA" | "ARTIFACT" | "LEARNING" | "SESSION";
   label: string;
   summary?: string;
   linkedArtifactId?: string;
@@ -1386,7 +1548,7 @@ export interface CapabilityAgent {
   objective: string;
   systemPrompt: string;
   contract: AgentOperatingContract;
-  initializationStatus: 'NOT_STARTED' | 'READY';
+  initializationStatus: "NOT_STARTED" | "READY";
   documentationSources: string[];
   inputArtifacts: string[];
   outputArtifacts: string[];
@@ -1415,7 +1577,7 @@ export interface CapabilityAgent {
 export interface CapabilityChatMessage {
   id: string;
   capabilityId: string;
-  role: 'user' | 'agent';
+  role: "user" | "agent";
   content: string;
   timestamp: string;
   agentId?: string;
@@ -1446,14 +1608,14 @@ export interface AgentTask {
   title: string;
   agent: string;
   capabilityId: string;
-  taskSubtype?: 'WORKFLOW' | 'DELEGATED_RUN';
+  taskSubtype?: "WORKFLOW" | "DELEGATED_RUN";
   workItemId?: string;
   workflowId?: string;
   workflowStepId?: string;
   managedByWorkflow?: boolean;
-  taskType?: 'DELIVERY' | 'TEST' | 'APPROVAL' | 'GOVERNANCE';
+  taskType?: "DELIVERY" | "TEST" | "APPROVAL" | "GOVERNANCE";
   phase?: WorkItemPhase;
-  priority: 'High' | 'Med' | 'Low';
+  priority: "High" | "Med" | "Low";
   status: Status;
   timestamp: string;
   prompt?: string;
@@ -1466,10 +1628,14 @@ export interface AgentTask {
   delegatedAgentId?: string;
   handoffPacketId?: string;
   toolInvocationId?: string;
-  linkedArtifacts?: { name: string; size: string; type: 'table' | 'scale' | 'file' }[];
+  linkedArtifacts?: {
+    name: string;
+    size: string;
+    type: "table" | "scale" | "file";
+  }[];
   producedOutputs?: {
     name: string;
-    status: 'completed' | 'pending';
+    status: "completed" | "pending";
     downloadUrl?: string;
     artifactId?: string;
     runId?: string;
@@ -1489,35 +1655,35 @@ export interface Blueprint {
 }
 
 export type ArtifactKind =
-  | 'PHASE_OUTPUT'
-  | 'CODE_DIFF'
+  | "PHASE_OUTPUT"
+  | "CODE_DIFF"
   // CODE_PATCH is a unified-diff artifact that is *applicable* — the
   // agent produced it intending it to become a commit. Distinct from
   // CODE_DIFF (which is a read-only snapshot for comparison).
-  | 'CODE_PATCH'
-  | 'HANDOFF_PACKET'
-  | 'DELEGATION_RESULT'
-  | 'EVIDENCE_PACKET'
-  | 'LEARNING_NOTE'
-  | 'APPROVAL_RECORD'
-  | 'UPLOAD'
-  | 'INPUT_NOTE'
-  | 'STAGE_CONTROL_NOTE'
-  | 'CONFLICT_RESOLUTION'
-  | 'CONTRARIAN_REVIEW'
-  | 'EXECUTION_PLAN'
-  | 'REVIEW_PACKET'
-  | 'EXECUTION_SUMMARY';
+  | "CODE_PATCH"
+  | "HANDOFF_PACKET"
+  | "DELEGATION_RESULT"
+  | "EVIDENCE_PACKET"
+  | "LEARNING_NOTE"
+  | "APPROVAL_RECORD"
+  | "UPLOAD"
+  | "INPUT_NOTE"
+  | "STAGE_CONTROL_NOTE"
+  | "CONFLICT_RESOLUTION"
+  | "CONTRARIAN_REVIEW"
+  | "EXECUTION_PLAN"
+  | "REVIEW_PACKET"
+  | "EXECUTION_SUMMARY";
 
-export type ArtifactContentFormat = 'TEXT' | 'MARKDOWN' | 'JSON' | 'BINARY';
+export type ArtifactContentFormat = "TEXT" | "MARKDOWN" | "JSON" | "BINARY";
 
 export type ArtifactTemplateSectionType =
-  | 'FREE_TEXT'
-  | 'DECISION_BOX'
-  | 'CHANGE_LOG'
-  | 'LEARNING_RECORD'
-  | 'CHECKLIST'
-  | 'CUSTOM';
+  | "FREE_TEXT"
+  | "DECISION_BOX"
+  | "CHANGE_LOG"
+  | "LEARNING_RECORD"
+  | "CHECKLIST"
+  | "CUSTOM";
 
 export interface ArtifactTemplateSection {
   id: string;
@@ -1538,7 +1704,7 @@ export interface Artifact {
   created: string;
   template?: string;
   templateSections?: ArtifactTemplateSection[];
-  documentationStatus?: 'PENDING' | 'SYNCED' | 'FAILED';
+  documentationStatus?: "PENDING" | "SYNCED" | "FAILED";
   isLearningArtifact?: boolean;
   isMasterArtifact?: boolean;
   decisions?: string[];
@@ -1546,7 +1712,7 @@ export interface Artifact {
   learningInsights?: string[];
   governanceRules?: string[];
   description?: string;
-  direction?: 'INPUT' | 'OUTPUT';
+  direction?: "INPUT" | "OUTPUT";
   connectedAgentId?: string;
   sourceWorkflowId?: string;
   runId?: string;
@@ -1577,13 +1743,13 @@ export interface Artifact {
 export type WorkItemPhase = WorkflowPhaseId;
 
 export type WorkflowStepType =
-  | 'DELIVERY'
-  | 'GOVERNANCE_GATE'
-  | 'HUMAN_APPROVAL'
+  | "DELIVERY"
+  | "GOVERNANCE_GATE"
+  | "HUMAN_APPROVAL"
   // BUILD is a step whose contractual output is a CODE_PATCH artifact:
   // the agent is expected to produce an applicable unified diff, which
   // downstream Phase-C wiring can turn into a branch + commit + PR.
-  | 'BUILD';
+  | "BUILD";
 
 // ─────────────────────────────────────────────────────────────────────
 // Code patch payloads — the structured side of a CODE_PATCH artifact.
@@ -1600,7 +1766,7 @@ export interface CodePatchFileStat {
   path: string;
   /** Old-side path (the `--- a/...` side). Empty for pure additions. */
   oldPath?: string;
-  status: 'ADDED' | 'MODIFIED' | 'DELETED' | 'RENAMED';
+  status: "ADDED" | "MODIFIED" | "DELETED" | "RENAMED";
   additions: number;
   deletions: number;
   hunkCount: number;
@@ -1643,7 +1809,11 @@ export interface CodePatchPayload {
 //      session into REVIEWING state.
 // ─────────────────────────────────────────────────────────────────────
 
-export type AgentBranchSessionStatus = 'ACTIVE' | 'REVIEWING' | 'CLOSED' | 'FAILED';
+export type AgentBranchSessionStatus =
+  | "ACTIVE"
+  | "REVIEWING"
+  | "CLOSED"
+  | "FAILED";
 
 export interface AgentBranchSession {
   id: string;
@@ -1664,7 +1834,7 @@ export interface AgentBranchSession {
   updatedAt: string;
 }
 
-export type AgentPullRequestState = 'OPEN' | 'MERGED' | 'CLOSED';
+export type AgentPullRequestState = "OPEN" | "MERGED" | "CLOSED";
 
 export interface AgentPullRequest {
   id: string;
@@ -1692,7 +1862,13 @@ export interface AgentPullRequest {
  */
 export interface AgentBranchCommitFileStatus {
   path: string;
-  status: 'CLEAN' | 'CREATED' | 'DELETED' | 'CONFLICT' | 'BINARY_SKIPPED' | 'MISSING_ORIGINAL';
+  status:
+    | "CLEAN"
+    | "CREATED"
+    | "DELETED"
+    | "CONFLICT"
+    | "BINARY_SKIPPED"
+    | "MISSING_ORIGINAL";
   applied: boolean;
   reason?: string;
 }
@@ -1712,14 +1888,14 @@ export interface AgentBounty {
   sourceAgentId: string;
   targetRole?: string;
   instructions: string;
-  status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' | 'FAILED';
+  status: "OPEN" | "IN_PROGRESS" | "RESOLVED" | "FAILED";
   createdAt: string;
   timeoutMs?: number;
 }
 
 export interface AgentBountySignal {
   bountyId: string;
-  status: 'RESOLVED' | 'FAILED';
+  status: "RESOLVED" | "FAILED";
   resultSummary?: string;
   detailPayload?: Record<string, any>;
   resolvedByAgentId?: string;
@@ -1727,38 +1903,38 @@ export interface AgentBountySignal {
 }
 
 export type ToolAdapterId =
-  | 'workspace_list'
-  | 'workspace_read'
-  | 'workspace_search'
-  | 'git_status'
-  | 'workspace_write'
-  | 'workspace_replace_block'
-  | 'workspace_apply_patch'
-  | 'delegate_task'
-  | 'publish_bounty'
-  | 'resolve_bounty'
-  | 'wait_for_signal'
-  | 'run_build'
-  | 'run_test'
-  | 'run_docs'
-  | 'run_deploy';
+  | "workspace_list"
+  | "workspace_read"
+  | "workspace_search"
+  | "git_status"
+  | "workspace_write"
+  | "workspace_replace_block"
+  | "workspace_apply_patch"
+  | "delegate_task"
+  | "publish_bounty"
+  | "resolve_bounty"
+  | "wait_for_signal"
+  | "run_build"
+  | "run_test"
+  | "run_docs"
+  | "run_deploy";
 
 export type WorkflowNodeType =
-  | 'START'
-  | 'DELIVERY'
-  | 'EVENT'
-  | 'ALERT'
-  | 'GOVERNANCE_GATE'
-  | 'HUMAN_APPROVAL'
-  | 'DECISION'
-  | 'PARALLEL_SPLIT'
-  | 'PARALLEL_JOIN'
-  | 'RELEASE'
-  | 'END'
-  | 'EXTRACT'
-  | 'TRANSFORM'
-  | 'LOAD'
-  | 'FILTER';
+  | "START"
+  | "DELIVERY"
+  | "EVENT"
+  | "ALERT"
+  | "GOVERNANCE_GATE"
+  | "HUMAN_APPROVAL"
+  | "DECISION"
+  | "PARALLEL_SPLIT"
+  | "PARALLEL_JOIN"
+  | "RELEASE"
+  | "END"
+  | "EXTRACT"
+  | "TRANSFORM"
+  | "LOAD"
+  | "FILTER";
 
 export interface WorkflowNodeEtlConfig {
   subType?: string;
@@ -1766,16 +1942,16 @@ export interface WorkflowNodeEtlConfig {
   sourceTable?: string;
   sourceQuery?: string;
   targetTable?: string;
-  writeMode?: 'APPEND' | 'OVERWRITE' | 'UPSERT';
+  writeMode?: "APPEND" | "OVERWRITE" | "UPSERT";
   filterExpression?: string;
   mappingRules?: string;
-  joinType?: 'INNER' | 'LEFT' | 'RIGHT' | 'FULL';
+  joinType?: "INNER" | "LEFT" | "RIGHT" | "FULL";
   joinKey?: string;
   aggregateFunction?: string;
   schemaHint?: string;
 }
 
-export type WorkflowEventTrigger = 'ON_ENTER' | 'ON_SUCCESS' | 'ON_FAILURE';
+export type WorkflowEventTrigger = "ON_ENTER" | "ON_SUCCESS" | "ON_FAILURE";
 
 export interface WorkflowEventConfig {
   eventName?: string;
@@ -1784,7 +1960,7 @@ export interface WorkflowEventConfig {
   payloadTemplate?: string;
 }
 
-export type WorkflowAlertSeverity = 'INFO' | 'WARNING' | 'CRITICAL';
+export type WorkflowAlertSeverity = "INFO" | "WARNING" | "CRITICAL";
 
 export interface WorkflowAlertConfig {
   severity?: WorkflowAlertSeverity;
@@ -1794,16 +1970,16 @@ export interface WorkflowAlertConfig {
   requiresAcknowledgement?: boolean;
 }
 
-export type WorkflowPublishState = 'DRAFT' | 'VALIDATED' | 'PUBLISHED';
+export type WorkflowPublishState = "DRAFT" | "VALIDATED" | "PUBLISHED";
 
 export type WorkflowEdgeConditionType =
-  | 'DEFAULT'
-  | 'SUCCESS'
-  | 'FAILURE'
-  | 'APPROVED'
-  | 'REJECTED'
-  | 'PARALLEL'
-  | 'CUSTOM';
+  | "DEFAULT"
+  | "SUCCESS"
+  | "FAILURE"
+  | "APPROVED"
+  | "REJECTED"
+  | "PARALLEL"
+  | "CUSTOM";
 
 export interface WorkflowGraphLayout {
   x: number;
@@ -1816,8 +1992,8 @@ export interface WorkflowArtifactContract {
   notes?: string;
 }
 
-export type ApprovalRuleTarget = 'USER' | 'TEAM' | 'CAPABILITY_ROLE';
-export type ApprovalMode = 'ANY_ONE' | 'ALL_REQUIRED' | 'QUORUM';
+export type ApprovalRuleTarget = "USER" | "TEAM" | "CAPABILITY_ROLE";
+export type ApprovalMode = "ANY_ONE" | "ALL_REQUIRED" | "QUORUM";
 
 export interface ApprovalPolicyTarget {
   targetType: ApprovalRuleTarget;
@@ -1846,20 +2022,20 @@ export interface WorkflowStepOwnershipRule {
 }
 
 export type RequiredInputFieldSource =
-  | 'WORK_ITEM'
-  | 'CAPABILITY'
-  | 'WORKSPACE'
-  | 'HANDOFF'
-  | 'ARTIFACT'
-  | 'HUMAN_INPUT'
-  | 'RUNTIME';
+  | "WORK_ITEM"
+  | "CAPABILITY"
+  | "WORKSPACE"
+  | "HANDOFF"
+  | "ARTIFACT"
+  | "HUMAN_INPUT"
+  | "RUNTIME";
 
 export type RequiredInputFieldKind =
-  | 'TEXT'
-  | 'MARKDOWN'
-  | 'PATH'
-  | 'ARTIFACT'
-  | 'CONTEXT';
+  | "TEXT"
+  | "MARKDOWN"
+  | "PATH"
+  | "ARTIFACT"
+  | "CONTEXT";
 
 export interface RequiredInputField {
   id: string;
@@ -1872,21 +2048,21 @@ export interface RequiredInputField {
 }
 
 export interface CompiledRequiredInputField extends RequiredInputField {
-  status: 'READY' | 'MISSING';
+  status: "READY" | "MISSING";
   valueSummary?: string;
 }
 
 export interface CompiledArtifactChecklistItem {
   id: string;
   label: string;
-  direction: 'INPUT' | 'OUTPUT';
-  status: 'READY' | 'EXPECTED';
+  direction: "INPUT" | "OUTPUT";
+  status: "READY" | "EXPECTED";
   description?: string;
 }
 
 export interface ExecutionBoundary {
   allowedToolIds: ToolAdapterId[];
-  workspaceMode: 'NONE' | 'READ_ONLY' | 'APPROVED_WRITE';
+  workspaceMode: "NONE" | "READ_ONLY" | "APPROVED_WRITE";
   requiresHumanApproval: boolean;
   escalationTriggers: string[];
 }
@@ -2040,8 +2216,8 @@ export interface Workflow {
   handoffProtocols?: WorkflowHandoffProtocol[];
   publishState?: WorkflowPublishState;
   status: Status;
-  workflowType?: 'SDLC' | 'Operational' | 'Governance' | 'Custom';
-  scope?: 'CAPABILITY' | 'GLOBAL';
+  workflowType?: "SDLC" | "Operational" | "Governance" | "Custom";
+  scope?: "CAPABILITY" | "GLOBAL";
   summary?: string;
   archivedAt?: string;
 }
@@ -2052,7 +2228,7 @@ export interface ExecutionLog {
   capabilityId: string;
   agentId: string;
   timestamp: string;
-  level: 'INFO' | 'WARN' | 'ERROR';
+  level: "INFO" | "WARN" | "ERROR";
   message: string;
   runId?: string;
   runStepId?: string;
@@ -2068,7 +2244,7 @@ export interface CapabilityBriefingSection {
   label: string;
   summary: string;
   items: string[];
-  tone?: 'brand' | 'info' | 'warning' | 'neutral';
+  tone?: "brand" | "info" | "warning" | "neutral";
 }
 
 export interface CapabilityBriefing {
@@ -2094,14 +2270,14 @@ export interface CapabilityBriefing {
 }
 
 export type CapabilityInteractionType =
-  | 'CHAT'
-  | 'TOOL'
-  | 'RUN_EVENT'
-  | 'WAIT'
-  | 'APPROVAL'
-  | 'LEARNING'
-  | 'ARTIFACT'
-  | 'TASK';
+  | "CHAT"
+  | "TOOL"
+  | "RUN_EVENT"
+  | "WAIT"
+  | "APPROVAL"
+  | "LEARNING"
+  | "ARTIFACT"
+  | "TASK";
 
 export interface CapabilityInteractionRecord {
   id: string;
@@ -2110,7 +2286,7 @@ export interface CapabilityInteractionRecord {
   timestamp: string;
   title: string;
   summary: string;
-  level: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS' | 'NEUTRAL';
+  level: "INFO" | "WARN" | "ERROR" | "SUCCESS" | "NEUTRAL";
   actorLabel?: string;
   agentId?: string;
   agentName?: string;
@@ -2130,7 +2306,7 @@ export interface CapabilityInteractionRecord {
 
 export interface CapabilityInteractionFeed {
   capabilityId: string;
-  scope: 'CAPABILITY' | 'WORK_ITEM';
+  scope: "CAPABILITY" | "WORK_ITEM";
   scopeId?: string;
   generatedAt: string;
   records: CapabilityInteractionRecord[];
@@ -2147,12 +2323,12 @@ export interface CapabilityInteractionFeed {
 }
 
 export type ReadinessGateId =
-  | 'OWNER_ASSIGNED'
-  | 'OUTCOME_CONTRACT_COMPLETE'
-  | 'SOURCE_CONTEXT_CONNECTED'
-  | 'APPROVED_WORKSPACE_PRESENT'
-  | 'WORKFLOW_VALID_AND_PUBLISHED'
-  | 'EXECUTION_RUNTIME_READY';
+  | "OWNER_ASSIGNED"
+  | "OUTCOME_CONTRACT_COMPLETE"
+  | "SOURCE_CONTEXT_CONNECTED"
+  | "APPROVED_WORKSPACE_PRESENT"
+  | "WORKFLOW_VALID_AND_PUBLISHED"
+  | "EXECUTION_RUNTIME_READY";
 
 export interface ReadinessGate {
   id: ReadinessGateId;
@@ -2174,7 +2350,11 @@ export interface ReadinessContract {
   gates: ReadinessGate[];
 }
 
-export type GoldenPathStepStatus = 'COMPLETE' | 'CURRENT' | 'UP_NEXT' | 'BLOCKED';
+export type GoldenPathStepStatus =
+  | "COMPLETE"
+  | "CURRENT"
+  | "UP_NEXT"
+  | "BLOCKED";
 
 export interface GoldenPathStep {
   id: string;
@@ -2202,53 +2382,53 @@ export interface LearningUpdate {
   skillUpdate?: string;
   timestamp: string;
   triggerType?:
-    | 'INITIALIZATION'
-    | 'REQUEST_CHANGES'
-    | 'GUIDANCE'
-    | 'STAGE_CONTROL'
-    | 'CONFLICT_RESOLUTION'
-    | 'EXPERIENCE_DISTILLATION'
-    | 'INCIDENT_DERIVED'
-    | 'USER_CORRECTION'
-    | 'MANUAL_REFRESH'
-    | 'SKILL_CHANGE'
+    | "INITIALIZATION"
+    | "REQUEST_CHANGES"
+    | "GUIDANCE"
+    | "STAGE_CONTROL"
+    | "CONFLICT_RESOLUTION"
+    | "EXPERIENCE_DISTILLATION"
+    | "INCIDENT_DERIVED"
+    | "USER_CORRECTION"
+    | "MANUAL_REFRESH"
+    | "SKILL_CHANGE"
     // Reserved for later slices of the self-learning robustness upgrade:
     // Slice D (PIPELINE_ERROR), Slice E (PREVIEW_REQUESTED),
     // Slice C (DRIFT_FLAGGED), Slice A (VERSION_REVERTED).
-    | 'PIPELINE_ERROR'
-    | 'PREVIEW_REQUESTED'
-    | 'DRIFT_FLAGGED'
-    | 'VERSION_REVERTED'
+    | "PIPELINE_ERROR"
+    | "PREVIEW_REQUESTED"
+    | "DRIFT_FLAGGED"
+    | "VERSION_REVERTED"
     // Slice 3 — the agent-learning timeline picks up governance-exception
     // decisions so exception approvals / denials / revocations appear on the
     // same audit thread as corrections and drift events.
-    | 'GOVERNANCE_EXCEPTION';
+    | "GOVERNANCE_EXCEPTION";
   relatedWorkItemId?: string;
   relatedRunId?: string;
 }
 
 export type WorkItemStatus =
-  | 'ACTIVE'
-  | 'BLOCKED'
-  | 'PAUSED'
-  | 'PENDING_APPROVAL'
-  | 'COMPLETED'
-  | 'CANCELLED'
-  | 'ARCHIVED';
+  | "ACTIVE"
+  | "BLOCKED"
+  | "PAUSED"
+  | "PENDING_APPROVAL"
+  | "COMPLETED"
+  | "CANCELLED"
+  | "ARCHIVED";
 
 export type ExecutionDispatchState =
-  | 'UNASSIGNED'
-  | 'WAITING_FOR_EXECUTOR'
-  | 'ASSIGNED'
-  | 'STALE_EXECUTOR';
+  | "UNASSIGNED"
+  | "WAITING_FOR_EXECUTOR"
+  | "ASSIGNED"
+  | "STALE_EXECUTOR";
 
 export type WorkflowRunQueueReason =
-  | 'WAITING_FOR_EXECUTOR'
-  | 'EXECUTOR_DISCONNECTED'
-  | 'EXECUTOR_RELEASED'
-  | 'MANUAL_REQUEUE';
+  | "WAITING_FOR_EXECUTOR"
+  | "EXECUTOR_DISCONNECTED"
+  | "EXECUTOR_RELEASED"
+  | "MANUAL_REQUEUE";
 
-export type ExecutorHeartbeatStatus = 'FRESH' | 'STALE' | 'OFFLINE';
+export type ExecutorHeartbeatStatus = "FRESH" | "STALE" | "OFFLINE";
 
 export interface DesktopExecutorRegistration {
   id: string;
@@ -2257,6 +2437,13 @@ export interface DesktopExecutorRegistration {
   actorTeamIds: string[];
   ownedCapabilityIds: string[];
   approvedWorkspaceRoots: Record<string, string[]>;
+  /**
+   * User-level working directory for this desktop / machine.
+   * When set, overrides capability.localDirectories for workspace path
+   * resolution so each developer's machine uses its own project root
+   * regardless of what the capability metadata says.
+   */
+  workingDirectory?: string;
   heartbeatStatus: ExecutorHeartbeatStatus;
   heartbeatAt: string;
   createdAt: string;
@@ -2314,18 +2501,18 @@ export interface WorkspaceWriteLock {
 }
 
 export interface WorkItemPendingRequest {
-  type: 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION';
+  type: "APPROVAL" | "INPUT" | "CONFLICT_RESOLUTION";
   message: string;
   requestedBy: string;
   timestamp: string;
 }
 
 export interface WorkItemBlocker {
-  type: 'CONFLICT_RESOLUTION' | 'HUMAN_INPUT' | 'APPROVAL';
+  type: "CONFLICT_RESOLUTION" | "HUMAN_INPUT" | "APPROVAL";
   message: string;
   requestedBy: string;
   timestamp: string;
-  status: 'OPEN' | 'RESOLVED';
+  status: "OPEN" | "RESOLVED";
   resolution?: string;
 }
 
@@ -2340,19 +2527,19 @@ export interface WorkItemHistoryEntry {
 }
 
 export type WorkItemTaskType =
-  | 'GENERAL'
-  | 'STRATEGIC_INITIATIVE'
-  | 'NEW_BUSINESS_CASE'
-  | 'FEATURE_ENHANCEMENT'
-  | 'PRODUCTION_ISSUE'
-  | 'BUGFIX'
-  | 'SECURITY_FINDING'
-  | 'REHYDRATION';
+  | "GENERAL"
+  | "STRATEGIC_INITIATIVE"
+  | "NEW_BUSINESS_CASE"
+  | "FEATURE_ENHANCEMENT"
+  | "PRODUCTION_ISSUE"
+  | "BUGFIX"
+  | "SECURITY_FINDING"
+  | "REHYDRATION";
 
 export interface WorkItemRepositoryAssignment {
   workItemId: string;
   repositoryId: string;
-  role: 'PRIMARY' | 'SUPPORTING';
+  role: "PRIMARY" | "SUPPORTING";
   checkoutRequired: boolean;
 }
 
@@ -2366,7 +2553,7 @@ export interface WorkItemBranch {
   createdAt: string;
   headSha?: string;
   linkedPrUrl?: string;
-  status: 'NOT_CREATED' | 'ACTIVE' | 'MERGED' | 'ABANDONED';
+  status: "NOT_CREATED" | "ACTIVE" | "MERGED" | "ABANDONED";
 }
 
 export interface WorkItemExecutionContext {
@@ -2376,25 +2563,27 @@ export interface WorkItemExecutionContext {
   branch?: WorkItemBranch;
   activeWriterUserId?: string;
   claimExpiresAt?: string;
-  strategy: 'SHARED_BRANCH';
+  strategy: "SHARED_BRANCH";
 }
 
 export interface WorkItemCodeClaim {
   workItemId: string;
   userId: string;
   teamId?: string;
-  claimType: 'WRITE' | 'REVIEW';
-  status: 'ACTIVE' | 'RELEASED' | 'EXPIRED';
+  claimType: "WRITE" | "REVIEW";
+  status: "ACTIVE" | "RELEASED" | "EXPIRED";
   claimedAt: string;
   expiresAt: string;
   releasedAt?: string;
 }
 
 export interface WorkItemCheckoutSession {
+  executorId: string;
   workItemId: string;
   userId: string;
   repositoryId: string;
   localPath?: string;
+  workingDirectoryPath?: string;
   branch: string;
   lastSeenHeadSha?: string;
   lastSyncedAt?: string;
@@ -2424,6 +2613,12 @@ export interface WorkItem {
   title: string;
   description: string;
   taskType?: WorkItemTaskType;
+  parentWorkItemId?: string;
+  storyPoints?: number;
+  tShirtSize?: "XS" | "S" | "M" | "L" | "XL";
+  sizingConfidence?: "LOW" | "MEDIUM" | "HIGH";
+  planningBatchId?: string;
+  planningProposalItemId?: string;
   phaseStakeholders?: WorkItemPhaseStakeholderAssignment[];
   phase: WorkItemPhase;
   phaseOwnerTeamId?: string;
@@ -2435,7 +2630,7 @@ export interface WorkItem {
   currentStepId?: string;
   assignedAgentId?: string;
   status: WorkItemStatus;
-  priority: 'High' | 'Med' | 'Low';
+  priority: "High" | "Med" | "Low";
   tags: string[];
   pendingRequest?: WorkItemPendingRequest;
   blocker?: WorkItemBlocker;
@@ -2446,45 +2641,165 @@ export interface WorkItem {
   history: WorkItemHistoryEntry[];
 }
 
+export type StoryProposalStatus =
+  | "DRAFT"
+  | "REVIEW_READY"
+  | "APPROVED"
+  | "PARTIALLY_APPROVED"
+  | "DISCARDED";
+
+export type StoryProposalItemType = "EPIC" | "STORY";
+
+export type StoryProposalItemReviewState =
+  | "PROPOSED"
+  | "EDITED"
+  | "APPROVED"
+  | "REJECTED"
+  | "PROMOTED";
+
+export type StoryTShirtSize = "XS" | "S" | "M" | "L" | "XL";
+
+export type StorySizingConfidence = "LOW" | "MEDIUM" | "HIGH";
+
+export type StoryProposalDecisionDisposition =
+  | "GENERATED"
+  | "EDITED"
+  | "APPROVED"
+  | "REJECTED"
+  | "PROMOTED"
+  | "REGENERATED";
+
+export interface StorySizing {
+  storyPoints?: number;
+  tShirtSize?: StoryTShirtSize;
+  sizingConfidence?: StorySizingConfidence;
+  sizingRationale?: string;
+}
+
+export interface PlanningGenerationRequest {
+  workflowId?: string;
+  prompt?: string;
+}
+
+export interface PlanningGenerationArtifact {
+  artifactId: string;
+  name: string;
+  summary?: string;
+  createdAt: string;
+  contentFormat?: ArtifactContentFormat;
+  contentText?: string;
+  model?: string;
+}
+
+export interface StoryProposalDecision {
+  id: string;
+  capabilityId: string;
+  batchId: string;
+  itemId?: string;
+  disposition: StoryProposalDecisionDisposition;
+  actorUserId?: string;
+  actorDisplayName: string;
+  note?: string;
+  fieldChanges: string[];
+  createdAt: string;
+}
+
+export interface StoryProposalItem extends StorySizing {
+  id: string;
+  capabilityId: string;
+  batchId: string;
+  itemType: StoryProposalItemType;
+  parentProposalItemId?: string;
+  title: string;
+  description: string;
+  businessOutcome?: string;
+  acceptanceCriteria: string[];
+  dependencies: string[];
+  risks: string[];
+  recommendedWorkflowId: string;
+  recommendedTaskType?: WorkItemTaskType;
+  implementationNotes?: string;
+  tags: string[];
+  reviewState: StoryProposalItemReviewState;
+  sortOrder: number;
+  promotedWorkItemId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoryProposalBatchSummary {
+  id: string;
+  capabilityId: string;
+  title: string;
+  status: StoryProposalStatus;
+  selectedWorkflowId: string;
+  sourcePrompt?: string;
+  summary: string;
+  assumptions: string[];
+  dependencies: string[];
+  risks: string[];
+  sizingPolicy: string;
+  generatedByAgentId?: string;
+  generationMode: "PLANNING_AGENT" | "FALLBACK";
+  planningArtifacts: PlanningGenerationArtifact[];
+  createdByUserId?: string;
+  itemCount: number;
+  approvedCount: number;
+  rejectedCount: number;
+  promotedCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoryProposalBatch extends StoryProposalBatchSummary {
+  items: StoryProposalItem[];
+  decisions: StoryProposalDecision[];
+}
+
+export interface StoryProposalPromotionResult {
+  batch: StoryProposalBatch;
+  workItems: WorkItem[];
+}
+
 export type WorkflowRunStatus =
-  | 'QUEUED'
-  | 'RUNNING'
-  | 'PAUSED'
-  | 'WAITING_APPROVAL'
-  | 'WAITING_INPUT'
-  | 'WAITING_CONFLICT'
-  | 'COMPLETED'
-  | 'FAILED'
-  | 'CANCELLED';
+  | "QUEUED"
+  | "RUNNING"
+  | "PAUSED"
+  | "WAITING_APPROVAL"
+  | "WAITING_INPUT"
+  | "WAITING_CONFLICT"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
 
 export type WorkflowRunStepStatus =
-  | 'PENDING'
-  | 'RUNNING'
-  | 'WAITING'
-  | 'COMPLETED'
-  | 'FAILED'
-  | 'CANCELLED';
+  | "PENDING"
+  | "RUNNING"
+  | "WAITING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
 
 export type ToolInvocationStatus =
-  | 'PENDING'
-  | 'RUNNING'
-  | 'COMPLETED'
-  | 'FAILED'
-  | 'CANCELLED';
+  | "PENDING"
+  | "RUNNING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
 
-export type RunWaitType = 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION';
+export type RunWaitType = "APPROVAL" | "INPUT" | "CONFLICT_RESOLUTION";
 
-export type RunWaitStatus = 'OPEN' | 'RESOLVED' | 'CANCELLED';
+export type RunWaitStatus = "OPEN" | "RESOLVED" | "CANCELLED";
 
-export type ContrarianReviewStatus = 'PENDING' | 'READY' | 'ERROR';
+export type ContrarianReviewStatus = "PENDING" | "READY" | "ERROR";
 
-export type ContrarianReviewSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+export type ContrarianReviewSeverity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
 export type ContrarianReviewRecommendation =
-  | 'CONTINUE'
-  | 'REVISE_RESOLUTION'
-  | 'ESCALATE'
-  | 'STOP';
+  | "CONTINUE"
+  | "REVISE_RESOLUTION"
+  | "ESCALATE"
+  | "STOP";
 
 export interface ContrarianConflictReview {
   status: ContrarianReviewStatus;
@@ -2617,7 +2932,7 @@ export interface RunEvent {
   traceId?: string;
   spanId?: string;
   timestamp: string;
-  level: 'INFO' | 'WARN' | 'ERROR';
+  level: "INFO" | "WARN" | "ERROR";
   type: string;
   message: string;
   runStepId?: string;
@@ -2745,16 +3060,17 @@ export interface ArtifactContentResponse {
 }
 
 export type TelemetrySpanKind =
-  | 'HTTP'
-  | 'CHAT'
-  | 'RUN'
-  | 'STEP'
-  | 'TOOL'
-  | 'MEMORY'
-  | 'POLICY'
-  | 'EVAL';
+  | "HTTP"
+  | "CHAT"
+  | "APPROVAL"
+  | "RUN"
+  | "STEP"
+  | "TOOL"
+  | "MEMORY"
+  | "POLICY"
+  | "EVAL";
 
-export type TelemetrySpanStatus = 'OK' | 'ERROR' | 'WAITING' | 'RUNNING';
+export type TelemetrySpanStatus = "OK" | "ERROR" | "WAITING" | "RUNNING";
 
 export interface TelemetrySpan {
   id: string;
@@ -2782,11 +3098,19 @@ export interface TelemetryMetricSample {
   id: string;
   capabilityId: string;
   traceId?: string;
-  scopeType: 'CAPABILITY' | 'AGENT' | 'RUN' | 'STEP' | 'TOOL' | 'CHAT' | 'EVAL';
+  scopeType:
+    | "CAPABILITY"
+    | "AGENT"
+    | "RUN"
+    | "STEP"
+    | "TOOL"
+    | "CHAT"
+    | "APPROVAL"
+    | "EVAL";
   scopeId: string;
   metricName: string;
   metricValue: number;
-  unit: 'ms' | 'usd' | 'tokens' | 'count' | 'ratio';
+  unit: "ms" | "usd" | "tokens" | "count" | "ratio";
   tags?: Record<string, string>;
   recordedAt: string;
 }
@@ -2807,16 +3131,16 @@ export interface TelemetrySummary {
 }
 
 export type PolicyActionType =
-  | 'workspace_write'
-  | 'git_branch'
-  | 'run_build'
-  | 'run_test'
-  | 'run_docs'
-  | 'run_deploy'
-  | 'destructive_git'
-  | 'custom';
+  | "workspace_write"
+  | "git_branch"
+  | "run_build"
+  | "run_test"
+  | "run_docs"
+  | "run_deploy"
+  | "destructive_git"
+  | "custom";
 
-export type PolicyDecisionResult = 'ALLOW' | 'REQUIRE_APPROVAL' | 'DENY';
+export type PolicyDecisionResult = "ALLOW" | "REQUIRE_APPROVAL" | "DENY";
 
 export interface PolicyDecision {
   id: string;
@@ -2842,27 +3166,27 @@ export interface PolicyDecision {
 }
 
 export type FlightRecorderVerdict =
-  | 'ALLOWED'
-  | 'NEEDS_APPROVAL'
-  | 'DENIED'
-  | 'INCOMPLETE';
+  | "ALLOWED"
+  | "NEEDS_APPROVAL"
+  | "DENIED"
+  | "INCOMPLETE";
 
 export type FlightRecorderEventType =
-  | 'RUN_STARTED'
-  | 'RUN_COMPLETED'
-  | 'RUN_FAILED'
-  | 'STEP_COMPLETED'
-  | 'WAIT_OPENED'
-  | 'WAIT_RESOLVED'
-  | 'APPROVAL_CAPTURED'
-  | 'CONFLICT_RESOLVED'
-  | 'CONTRARIAN_REVIEW'
-  | 'POLICY_DECISION'
-  | 'TOOL_COMPLETED'
-  | 'TOOL_FAILED'
-  | 'ARTIFACT_CREATED'
-  | 'HANDOFF_CREATED'
-  | 'RELEASE_VERDICT';
+  | "RUN_STARTED"
+  | "RUN_COMPLETED"
+  | "RUN_FAILED"
+  | "STEP_COMPLETED"
+  | "WAIT_OPENED"
+  | "WAIT_RESOLVED"
+  | "APPROVAL_CAPTURED"
+  | "CONFLICT_RESOLVED"
+  | "CONTRARIAN_REVIEW"
+  | "POLICY_DECISION"
+  | "TOOL_COMPLETED"
+  | "TOOL_FAILED"
+  | "ARTIFACT_CREATED"
+  | "HANDOFF_CREATED"
+  | "RELEASE_VERDICT";
 
 export interface FlightRecorderEvent {
   id: string;
@@ -2884,7 +3208,7 @@ export interface FlightRecorderEvent {
   actorName?: string;
   phase?: WorkItemPhase;
   verdict?: FlightRecorderVerdict;
-  severity?: 'INFO' | 'WARN' | 'ERROR';
+  severity?: "INFO" | "WARN" | "ERROR";
 }
 
 export interface FlightRecorderPolicySummary {
@@ -2973,19 +3297,19 @@ export interface CapabilityFlightRecorderSnapshot {
 }
 
 export type ReleaseReadinessStatus =
-  | 'READY'
-  | 'WAITING_APPROVAL'
-  | 'BLOCKED'
-  | 'INCOMPLETE';
+  | "READY"
+  | "WAITING_APPROVAL"
+  | "BLOCKED"
+  | "INCOMPLETE";
 
 export interface ReleaseReadinessDimension {
   id:
-    | 'evidence_complete'
-    | 'approvals_resolved'
-    | 'no_denied_policy'
-    | 'qa_complete'
-    | 'handoff_complete'
-    | 'deployment_authorized';
+    | "evidence_complete"
+    | "approvals_resolved"
+    | "no_denied_policy"
+    | "qa_complete"
+    | "handoff_complete"
+    | "deployment_authorized";
   label: string;
   weight: number;
   applicable: boolean;
@@ -3026,15 +3350,15 @@ export interface ReviewPacketArtifactSummary {
 }
 
 export type ApprovalClarificationRequestStatus =
-  | 'PENDING_RESPONSE'
-  | 'RESPONDED'
-  | 'FAILED';
+  | "PENDING_RESPONSE"
+  | "RESPONDED"
+  | "FAILED";
 
 export type ApprovalClarificationWorkspaceStatus =
-  | 'IDLE'
-  | 'WAITING_FOR_AGENT'
-  | 'RESPONDED'
-  | 'FAILED';
+  | "IDLE"
+  | "WAITING_FOR_AGENT"
+  | "RESPONDED"
+  | "FAILED";
 
 export interface ApprovalClarificationRequest {
   id: string;
@@ -3086,7 +3410,7 @@ export interface ApprovalStructuredPacketDeterministicSummary {
 }
 
 export interface ApprovalStructuredPacketAiSummary {
-  status: 'READY' | 'ERROR' | 'UNAVAILABLE';
+  status: "READY" | "ERROR" | "UNAVAILABLE";
   generatedAt?: string;
   model?: string;
   summary?: string;
@@ -3118,30 +3442,30 @@ export interface ApprovalWorkspaceState {
 
 export interface StageControlContinueResponse {
   action:
-    | 'APPROVED_WAIT'
-    | 'PROVIDED_INPUT'
-    | 'RESOLVED_CONFLICT'
-    | 'RESTARTED'
-    | 'CANCELLED_AND_RESTARTED'
-    | 'STARTED';
+    | "APPROVED_WAIT"
+    | "PROVIDED_INPUT"
+    | "RESOLVED_CONFLICT"
+    | "RESTARTED"
+    | "CANCELLED_AND_RESTARTED"
+    | "STARTED";
   summary: string;
   artifactId?: string;
   run: WorkflowRun;
 }
 
 export type ApprovalAssignmentStatus =
-  | 'PENDING'
-  | 'APPROVED'
-  | 'REJECTED'
-  | 'REQUEST_CHANGES'
-  | 'DELEGATED'
-  | 'CANCELLED';
+  | "PENDING"
+  | "APPROVED"
+  | "REJECTED"
+  | "REQUEST_CHANGES"
+  | "DELEGATED"
+  | "CANCELLED";
 
 export type ApprovalDecisionDisposition =
-  | 'APPROVE'
-  | 'REJECT'
-  | 'REQUEST_CHANGES'
-  | 'DELEGATE';
+  | "APPROVE"
+  | "REJECT"
+  | "REQUEST_CHANGES"
+  | "DELEGATE";
 
 export interface ApprovalAssignment {
   id: string;
@@ -3215,7 +3539,7 @@ export interface WorkItemClaim {
   workItemId: string;
   userId: string;
   teamId?: string;
-  status: 'ACTIVE' | 'RELEASED' | 'EXPIRED';
+  status: "ACTIVE" | "RELEASED" | "EXPIRED";
   claimedAt: string;
   expiresAt: string;
   releasedAt?: string;
@@ -3262,7 +3586,7 @@ export interface PhaseHandoffPacket {
   delegationOriginAgentId?: string;
 }
 
-export type ConnectorSyncStatus = 'READY' | 'NEEDS_CONFIGURATION' | 'ERROR';
+export type ConnectorSyncStatus = "READY" | "NEEDS_CONFIGURATION" | "ERROR";
 
 export interface GithubConnectorRepositoryContext {
   url: string;
@@ -3289,7 +3613,7 @@ export interface GithubConnectorIssueContext {
 }
 
 export interface GithubConnectorSyncResult {
-  provider: 'GITHUB';
+  provider: "GITHUB";
   status: ConnectorSyncStatus;
   message: string;
   syncedAt: string;
@@ -3306,7 +3630,7 @@ export interface JiraConnectorIssueContext {
 }
 
 export interface JiraConnectorSyncResult {
-  provider: 'JIRA';
+  provider: "JIRA";
   status: ConnectorSyncStatus;
   message: string;
   syncedAt: string;
@@ -3322,7 +3646,7 @@ export interface ConfluenceConnectorPageContext {
 }
 
 export interface ConfluenceConnectorSyncResult {
-  provider: 'CONFLUENCE';
+  provider: "CONFLUENCE";
   status: ConnectorSyncStatus;
   message: string;
   syncedAt: string;
@@ -3364,21 +3688,21 @@ export interface WorkItemExplainDetail {
   policyDecisions: FlightRecorderPolicySummary[];
   artifacts: FlightRecorderArtifactSummary[];
   handoffArtifacts: FlightRecorderArtifactSummary[];
-  telemetry: WorkItemFlightRecorderDetail['telemetry'];
+  telemetry: WorkItemFlightRecorderDetail["telemetry"];
   connectors: CapabilityConnectorContext;
   reviewPacket?: ReviewPacketArtifactSummary;
 }
 
 export type MemorySourceType =
-  | 'CAPABILITY_METADATA'
-  | 'CHAT_SESSION'
-  | 'WORK_ITEM'
-  | 'ARTIFACT'
-  | 'HANDOFF'
-  | 'HUMAN_INTERACTION'
-  | 'REPOSITORY_FILE';
+  | "CAPABILITY_METADATA"
+  | "CHAT_SESSION"
+  | "WORK_ITEM"
+  | "ARTIFACT"
+  | "HANDOFF"
+  | "HUMAN_INTERACTION"
+  | "REPOSITORY_FILE";
 
-export type MemoryStoreTier = 'WORKING' | 'SESSION' | 'LONG_TERM';
+export type MemoryStoreTier = "WORKING" | "SESSION" | "LONG_TERM";
 
 export interface MemoryReference {
   documentId: string;
@@ -3387,7 +3711,7 @@ export interface MemoryReference {
   sourceType: MemorySourceType;
   tier: MemoryStoreTier;
   score?: number;
-  retrievalMethod?: 'SEMANTIC' | 'LEXICAL' | 'BLENDED';
+  retrievalMethod?: "SEMANTIC" | "LEXICAL" | "BLENDED";
   semanticScore?: number;
   lexicalScore?: number;
   rerankScore?: number;
@@ -3401,9 +3725,16 @@ export interface MemoryDocument {
   tier: MemoryStoreTier;
   sourceId?: string;
   sourceUri?: string;
-  freshness?: 'HOT' | 'WARM' | 'COLD';
+  freshness?: "HOT" | "WARM" | "COLD";
   metadata?: Record<string, any>;
   contentPreview: string;
+  /**
+   * When true this document is visible to all capabilities (cross-capability
+   * memory). `capabilityId` still records the writing capability for
+   * provenance. Documents can only be written with `isGlobal = true` by
+   * capabilities whose `executionConfig.globalMemory.canWrite` is `true`.
+   */
+  isGlobal?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -3424,16 +3755,20 @@ export interface MemorySearchResult {
   document: MemoryDocument;
   chunk: MemoryChunk;
   embeddingProviderKey?: EmbeddingProviderKey;
+  embeddingConfigured?: boolean;
+  retrievalMode?: MemoryRetrievalMode;
+  pgvectorAvailable?: boolean;
+  fallbackReason?: string;
   vectorModel?: string;
 }
 
 export type DelegationStatus =
-  | 'QUEUED'
-  | 'RUNNING'
-  | 'COMPLETED'
-  | 'FAILED'
-  | 'CANCELLED'
-  | 'PROMOTED_TO_HANDOFF';
+  | "QUEUED"
+  | "RUNNING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED"
+  | "PROMOTED_TO_HANDOFF";
 
 export interface DelegationRequest {
   delegatedAgentId: string;
@@ -3484,7 +3819,7 @@ export interface EvalSuite {
   name: string;
   description: string;
   agentRole: string;
-  evalType: 'STRUCTURED_OUTPUT' | 'RETRIEVAL' | 'WORKFLOW';
+  evalType: "STRUCTURED_OUTPUT" | "RETRIEVAL" | "WORKFLOW";
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -3507,7 +3842,7 @@ export interface EvalRunCaseResult {
   capabilityId: string;
   evalRunId: string;
   evalCaseId: string;
-  status: 'PASSED' | 'FAILED' | 'WARN';
+  status: "PASSED" | "FAILED" | "WARN";
   score: number;
   summary: string;
   details?: Record<string, any>;
@@ -3518,7 +3853,7 @@ export interface EvalRun {
   id: string;
   capabilityId: string;
   suiteId: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+  status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
   traceId?: string;
   judgeModel?: string;
   score?: number;
@@ -3544,13 +3879,8 @@ export interface RunConsoleSnapshot {
 }
 
 export interface ChatStreamEvent {
-  type:
-    | 'start'
-    | 'memory'
-    | 'delta'
-    | 'complete'
-    | 'error';
-  sessionMode?: 'resume' | 'fresh';
+  type: "start" | "memory" | "delta" | "complete" | "error";
+  sessionMode?: "resume" | "fresh";
   sessionId?: string;
   sessionScope?: AgentSessionScope;
   sessionScopeId?: string;
@@ -3706,7 +4036,7 @@ export interface EvidencePacketVerification {
 export interface SignerStatus {
   configured: boolean;
   activeKeyId: string | null;
-  algorithm: 'ed25519';
+  algorithm: "ed25519";
   registryPath: string;
   knownKeyCount: number;
   activeKeyAgeDays: number | null;
@@ -3715,19 +4045,22 @@ export interface SignerStatus {
 
 // -- Slice 2 — governance controls catalog -----------------------------------
 
-export type GovernanceControlFramework = 'NIST_CSF_2' | 'SOC2_TSC' | 'ISO27001_2022';
-export type GovernanceControlSeverity = 'STANDARD' | 'SEV_1';
-export type GovernanceControlStatus = 'ACTIVE' | 'RETIRED';
+export type GovernanceControlFramework =
+  | "NIST_CSF_2"
+  | "SOC2_TSC"
+  | "ISO27001_2022";
+export type GovernanceControlSeverity = "STANDARD" | "SEV_1";
+export type GovernanceControlStatus = "ACTIVE" | "RETIRED";
 export type GovernanceControlOwnerRole =
-  | 'SECURITY'
-  | 'COMPLIANCE'
-  | 'PLATFORM'
-  | 'EXECUTIVE';
+  | "SECURITY"
+  | "COMPLIANCE"
+  | "PLATFORM"
+  | "EXECUTIVE";
 export type GovernanceBindingKind =
-  | 'POLICY_DECISION'
-  | 'APPROVAL_FLOW'
-  | 'SIGNING_REQUIRED'
-  | 'EVIDENCE_PACKET';
+  | "POLICY_DECISION"
+  | "APPROVAL_FLOW"
+  | "SIGNING_REQUIRED"
+  | "EVIDENCE_PACKET";
 
 export interface GovernanceControl {
   controlId: string;
@@ -3783,19 +4116,19 @@ export interface GovernanceControlBindingInput {
 // Slice 3 — Governance exception lifecycle. An exception is a time-bound,
 // auditable waiver of a policy decision. Every transition writes an event.
 export type GovernanceExceptionStatus =
-  | 'REQUESTED'
-  | 'APPROVED'
-  | 'DENIED'
-  | 'EXPIRED'
-  | 'REVOKED';
+  | "REQUESTED"
+  | "APPROVED"
+  | "DENIED"
+  | "EXPIRED"
+  | "REVOKED";
 
 export type GovernanceExceptionEventType =
-  | 'REQUESTED'
-  | 'APPROVED'
-  | 'DENIED'
-  | 'EXPIRED'
-  | 'REVOKED'
-  | 'COMMENTED';
+  | "REQUESTED"
+  | "APPROVED"
+  | "DENIED"
+  | "EXPIRED"
+  | "REVOKED"
+  | "COMMENTED";
 
 export interface GovernanceException {
   exceptionId: string;
@@ -3838,7 +4171,7 @@ export interface GovernanceExceptionRequestInput {
 }
 
 export interface GovernanceExceptionDecisionInput {
-  status: 'APPROVED' | 'DENIED';
+  status: "APPROVED" | "DENIED";
   comment?: string;
   // If omitted and an exception is APPROVED, service inherits
   // requested expiresAt — the decision cannot extend beyond the request.
@@ -3861,7 +4194,7 @@ export interface GovernanceExceptionsListResponse {
 // Slice 4 — prove-the-negative provenance.
 // ──────────────────────────────────────────────────────────────────────────
 
-export type ProvenanceActorKind = 'AI' | 'HUMAN' | 'ANY';
+export type ProvenanceActorKind = "AI" | "HUMAN" | "ANY";
 
 export interface ProvenanceCoverageWindow {
   coverageId: string;
@@ -3889,7 +4222,7 @@ export interface ProvenanceTouchMatch {
   capabilityId: string;
   runId: string;
   toolId: string;
-  actorKind: 'AI' | 'HUMAN';
+  actorKind: "AI" | "HUMAN";
   touchedPaths: string[];
   startedAt: string | null;
   completedAt: string | null;
@@ -3997,17 +4330,33 @@ export interface GovernancePostureSnapshot {
   warnings: string[];
 }
 
-export type IncidentSeverity = 'SEV1' | 'SEV2' | 'SEV3' | 'SEV4';
-export type IncidentSource = 'pagerduty' | 'servicenow' | 'incident-io' | 'manual';
-export type IncidentCorrelation = 'CONFIRMED' | 'SUSPECTED' | 'BLAST_RADIUS' | 'DISMISSED';
-export type IncidentStatus = 'triggered' | 'investigating' | 'resolved' | 'closed';
-export type IncidentExportTarget = 'datadog' | 'servicenow';
-export type IncidentExportKind = 'INCIDENT' | 'MRM';
-export type IncidentExportDeliveryStatus = 'QUEUED' | 'DELIVERED' | 'FAILED';
-export type IncidentExportAuthType = 'API_KEY' | 'BASIC';
-export type IncidentJobType = 'CORRELATE' | 'EXPORT_INCIDENT' | 'EXPORT_MRM';
-export type IncidentJobStatus = 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
-export type IncidentSourceAuthType = 'HMAC_SHA256' | 'BASIC';
+export type IncidentSeverity = "SEV1" | "SEV2" | "SEV3" | "SEV4";
+export type IncidentSource =
+  | "pagerduty"
+  | "servicenow"
+  | "incident-io"
+  | "manual";
+export type IncidentCorrelation =
+  | "CONFIRMED"
+  | "SUSPECTED"
+  | "BLAST_RADIUS"
+  | "DISMISSED";
+export type IncidentStatus =
+  | "triggered"
+  | "investigating"
+  | "resolved"
+  | "closed";
+export type IncidentExportTarget = "datadog" | "servicenow";
+export type IncidentExportKind = "INCIDENT" | "MRM";
+export type IncidentExportDeliveryStatus = "QUEUED" | "DELIVERED" | "FAILED";
+export type IncidentExportAuthType = "API_KEY" | "BASIC";
+export type IncidentJobType = "CORRELATE" | "EXPORT_INCIDENT" | "EXPORT_MRM";
+export type IncidentJobStatus =
+  | "QUEUED"
+  | "PROCESSING"
+  | "COMPLETED"
+  | "FAILED";
+export type IncidentSourceAuthType = "HMAC_SHA256" | "BASIC";
 
 export interface IncidentPacketLink {
   incidentId: string;
@@ -4145,7 +4494,7 @@ export interface ModelRiskMonitoringSummary {
     confirmedContributors: number;
   }>;
   byProvider: Array<{
-    providerKey: ProviderKey | 'unknown';
+    providerKey: ProviderKey | "unknown";
     model: string;
     confirmedContributors: number;
     suspectedContributors: number;
@@ -4156,7 +4505,7 @@ export interface ModelRiskMonitoringSummary {
     packetBundleId: string;
     capabilityId: string;
     concernText: string;
-    status: 'PENDING' | 'APPROVED' | 'REJECTED';
+    status: "PENDING" | "APPROVED" | "REJECTED";
     requestedAt: string;
     requestedBy?: string;
   }>;
@@ -4181,7 +4530,7 @@ export interface ReportWorkItemSummary {
   title: string;
   phase: WorkItemPhase;
   status: WorkItemStatus;
-  priority: WorkItem['priority'];
+  priority: WorkItem["priority"];
   phaseOwnerTeamId?: string;
   claimOwnerUserId?: string;
   activeWriterUserId?: string;
@@ -4220,7 +4569,7 @@ export interface WorkItemEfficiencyRow {
   title: string;
   status: WorkItemStatus;
   phase: WorkItemPhase;
-  priority: WorkItem['priority'];
+  priority: WorkItem["priority"];
   /** Sum of cost_usd across all metric samples scoped to this work item. */
   totalCostUsd: number;
   /** Sum of tokens across all metric samples scoped to this work item. */
@@ -4262,6 +4611,29 @@ export interface WorkItemEfficiencySnapshot {
     totalDocumentsProduced: number;
   };
   rows: WorkItemEfficiencyRow[];
+}
+
+export interface GovernanceCostAllocationRow {
+  capabilityId: string;
+  capabilityName: string;
+  agentId: string;
+  agentName: string;
+  spanCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  stages: string[];
+  lastSeenAt?: string | null;
+}
+
+export interface GovernanceCostAllocationSnapshot {
+  generatedAt: string;
+  windowDays: number;
+  capabilityCount: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  rows: GovernanceCostAllocationRow[];
 }
 
 export interface ApprovalInboxEntry {
@@ -4327,7 +4699,7 @@ export interface CapabilityHealthSnapshot {
   totalCostUsd: number;
   totalTokens: number;
   averageLatencyMs: number;
-  publishFreshness: 'FRESH' | 'STALE' | 'MISSING';
+  publishFreshness: "FRESH" | "STALE" | "MISSING";
   latestPublishedVersion?: number;
   latestPublishedAt?: string;
   dependencyCount: number;
@@ -4377,12 +4749,12 @@ export interface AuditReportSnapshot {
 
 export interface ReportExportPayload {
   reportType:
-    | 'operations'
-    | 'team'
-    | 'capability'
-    | 'collection'
-    | 'executive'
-    | 'audit';
+    | "operations"
+    | "team"
+    | "capability"
+    | "collection"
+    | "executive"
+    | "audit";
   generatedAt: string;
   filters?: ReportFilter;
   payload:
@@ -4436,7 +4808,7 @@ export interface AccessAttestationRecord {
   attestedAt: string;
 }
 
-export type BusinessCriticality = 'HIGH' | 'MEDIUM' | 'LOW';
+export type BusinessCriticality = "HIGH" | "MEDIUM" | "LOW";
 
 export interface CapabilityServiceProfile {
   capabilityId: string;
@@ -4449,7 +4821,7 @@ export interface CapabilityServiceProfile {
   updatedAt: string;
 }
 
-export type ExecutionLaneType = 'DESKTOP' | 'MANAGED_POOL' | 'AUDIT_ONLY';
+export type ExecutionLaneType = "DESKTOP" | "MANAGED_POOL" | "AUDIT_ONLY";
 
 export interface ExecutionLane {
   id: string;

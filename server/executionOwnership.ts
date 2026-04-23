@@ -9,6 +9,7 @@ import type {
   WorkflowRunQueueReason,
 } from '../src/types';
 import { query } from './db';
+import { listValidatedWorkspaceRootsByCapability } from './desktopWorkspaces';
 import { normalizeDirectoryPath } from './workspacePaths';
 
 const EXECUTOR_HEARTBEAT_TTL_MS = 45_000;
@@ -84,6 +85,9 @@ const executorRegistrationFromRow = (
   actorTeamIds: asStringArray(row.actor_team_ids),
   ownedCapabilityIds: asStringArray(row.owned_capability_ids),
   approvedWorkspaceRoots: asApprovedWorkspaceRootMap(row.approved_workspace_roots),
+  workingDirectory: typeof row.working_directory === 'string' && row.working_directory.trim()
+    ? row.working_directory.trim()
+    : undefined,
   heartbeatStatus: getExecutorHeartbeatStatus(asIso(row.heartbeat_at)),
   heartbeatAt: asIso(row.heartbeat_at),
   createdAt: asIso(row.created_at),
@@ -119,11 +123,15 @@ export const registerDesktopExecutor = async ({
   actor,
   approvedWorkspaceRoots,
   runtimeSummary,
+  workingDirectory,
 }: {
   executorId: string;
   actor?: ActorContext | null;
   approvedWorkspaceRoots?: Record<string, string[]>;
   runtimeSummary?: Record<string, unknown>;
+  /** User-level workspace root for this desktop. Overrides capability-level
+   *  localDirectories for all work items executed on this machine. */
+  workingDirectory?: string;
 }): Promise<DesktopExecutorRegistration> => {
   const existingRegistration = await getDesktopExecutorRegistration(executorId);
   if (
@@ -134,7 +142,18 @@ export const registerDesktopExecutor = async ({
     throw new Error('This desktop executor is already registered for a different workspace operator.');
   }
 
-  const normalizedRoots = normalizeApprovedWorkspaceRoots(approvedWorkspaceRoots);
+  const normalizedRoots = actor?.userId
+    ? normalizeApprovedWorkspaceRoots(
+        await listValidatedWorkspaceRootsByCapability({
+          executorId,
+          userId: actor.userId,
+        }),
+      )
+    : normalizeApprovedWorkspaceRoots(approvedWorkspaceRoots);
+  const normalizedWorkingDirectory =
+    typeof workingDirectory === 'string' && workingDirectory.trim()
+      ? workingDirectory.trim()
+      : null;
   const result = await query(
     `
       INSERT INTO desktop_executor_registrations (
@@ -144,10 +163,11 @@ export const registerDesktopExecutor = async ({
         actor_team_ids,
         approved_workspace_roots,
         runtime_summary,
+        working_directory,
         heartbeat_at,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW())
       ON CONFLICT (id) DO UPDATE SET
         actor_user_id = EXCLUDED.actor_user_id,
         actor_display_name = EXCLUDED.actor_display_name,
@@ -158,6 +178,12 @@ export const registerDesktopExecutor = async ({
           ELSE EXCLUDED.approved_workspace_roots
         END,
         runtime_summary = EXCLUDED.runtime_summary,
+        -- Preserve existing working_directory when the new registration
+        -- doesn't send one (COALESCE keeps old value on heartbeats).
+        working_directory = COALESCE(
+          EXCLUDED.working_directory,
+          desktop_executor_registrations.working_directory
+        ),
         heartbeat_at = NOW(),
         updated_at = NOW()
       RETURNING *
@@ -169,6 +195,7 @@ export const registerDesktopExecutor = async ({
       normalizeActorTeamIds(actor),
       JSON.stringify(normalizedRoots),
       JSON.stringify(runtimeSummary || {}),
+      normalizedWorkingDirectory,
     ],
   );
 
@@ -180,17 +207,20 @@ export const heartbeatDesktopExecutor = async ({
   actor,
   approvedWorkspaceRoots,
   runtimeSummary,
+  workingDirectory,
 }: {
   executorId: string;
   actor?: ActorContext | null;
   approvedWorkspaceRoots?: Record<string, string[]>;
   runtimeSummary?: Record<string, unknown>;
+  workingDirectory?: string;
 }): Promise<DesktopExecutorRegistration> =>
   registerDesktopExecutor({
     executorId,
     actor,
     approvedWorkspaceRoots,
     runtimeSummary,
+    workingDirectory,
   });
 
 export const getDesktopExecutorRegistration = async (
@@ -522,7 +552,20 @@ export const claimCapabilityExecution = async ({
   }
 
   const normalizedRoots = Array.from(
-    new Set(approvedWorkspaceRoots.map(root => normalizeDirectoryPath(root)).filter(Boolean)),
+    new Set(
+      (
+        actor?.userId
+          ? (
+              await listValidatedWorkspaceRootsByCapability({
+                executorId,
+                userId: actor.userId,
+              })
+            )[capabilityId] || []
+          : approvedWorkspaceRoots
+      )
+        .map(root => normalizeDirectoryPath(root))
+        .filter(Boolean),
+    ),
   );
   if (normalizedRoots.length === 0) {
     throw new Error(

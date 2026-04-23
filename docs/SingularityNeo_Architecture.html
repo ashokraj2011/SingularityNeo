@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: -apple-system, system-ui, sans-serif; padding: 40px; margin: 0 auto; max-width: 900px; color: #1e293b; background: white; }
+        h1 { color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; margin-top: 40px; }
+        h2 { color: #3b82f6; margin-top: 30px; }
+        p, li { line-height: 1.6; }
+        strong { color: #0f172a; }
+        code { background: #f1f5f9; padding: 2px 5px; border-radius: 4px; color: #7c3aed; }
+        .hero { background: #0f172a; color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; }
+        .hero h1 { color: white; border: none; margin-top: 0; }
+        .hero p { color: #cbd5e1; }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <h1>SingularityNeo: Enterprise Architecture Deep-Dive</h1>
+        <p>This document provides a detailed breakdown of the two core subsystems powering the SingularityNeo platform: the <strong>Token Optimization Framework</strong> and the <strong>Agent Learning Model</strong>.</p>
+    </div>
+
+    <h1>Part 1: Token Optimization Framework</h1>
+    <p>The Token Optimization strategy attacks token waste across all three phases of an LLM generation: Input (what the agent sees), Execution (how long sessions are remembered), and Output (what the agent types back).</p>
+
+    <h2>Strategy 1: Input Truncation</h2>
+    <p><em>Goal: Stop unnecessary tokens from ever entering the System Prompt.</em></p>
+    <ul>
+        <li><strong>1. Phase-Sliced Guidance:</strong> Agents were historically loaded with massive instruction files. Now, SingularityNeo filters the injected rules based on the active SDLC phase. A BUILD phase developer agent never reads GOVERNANCE policies.</li>
+        <li><strong>2. Semantic Hunk Reads (<code>workspace_read</code>):</strong> Using the native TypeScript AST compiler, the backend extracts the <code>sliceStartLine</code> to <code>sliceEndLine</code> and injects only that function hunk into the prompt. Saves 80–95% of input tokens.</li>
+        <li><strong>3. The Context Budgeter:</strong> A mathematically precise Eviction Engine drops items based on Priority when limits are hit: SYSTEM_CORE &gt; PHASE_GUIDANCE &gt; WORK_ITEM_BRIEFING &gt; RECENT_CHAT_HISTORY &gt; CODE_HUNKS &gt; MEMORY_HITS.</li>
+    </ul>
+
+    <h2>Strategy 2: Execution Compression</h2>
+    <p><em>Goal: Prevent long-running autonomous tasks from expanding the context window to infinity.</em></p>
+    <ul>
+        <li><strong>4. Tool-Loop History Rollup:</strong> SingularityNeo intercepts <code>localMessages</code>. When the array hits ~10 turns, it passes the oldest turns to a cheap model (<code>gpt-4o-mini</code>) to compress the history.</li>
+        <li><strong>5. Structured Rollup Output:</strong> The budget model outputs a highly compressed JSON state note (currentGoal, lastAction, blocker). This is injected into the prompt, keeping state awareness while only paying for 6 raw turns.</li>
+        <li><strong>6. Multi-Symbol Retrieval Bundles:</strong> Agents can pass <code>includeCallers</code> and <code>includeCallees</code> to <code>workspace_read</code>, retrieving the target function and dependencies in a single, cheap payload.</li>
+    </ul>
+
+    <h2>Strategy 3: Output Constraints</h2>
+    <p><em>Goal: Force the LLM to type as few characters as mathematically possible.</em></p>
+    <ul>
+        <li><strong>7. Diff-First Prompting:</strong> System prompts aggressively steer the agent towards using <code>workspace_apply_patch</code> or <code>workspace_replace_block</code>.</li>
+        <li><strong>8. Diff Enforcement Policy:</strong> If an agent calls <code>workspace_write</code> on an existing file twice, it returns a recoverable error, pushing the agent toward producing unified diffs.</li>
+        <li><strong>9. Prompt Receipts:</strong> The platform tracks exactly which fragments were included, evicted, and how many tokens were burned per model call.</li>
+    </ul>
+
+    <hr style="margin: 50px 0; border: 1px solid #e2e8f0;" />
+
+    <h1>Part 2: The Agent Learning Model</h1>
+    <p>Unlike standard coding assistants, the SingularityNeo Learning Model is built as a <strong>Continuous Intelligence Engine</strong>. It studies past executions, learns from mistakes, and instantly absorbs human feedback.</p>
+
+    <ul>
+        <li><strong>1. Four-Tiered Memory Hierarchy:</strong> 
+            <br>&bull; HOT: Active Session uncompressed logs.
+            <br>&bull; WARM: Recent Work Items (rank highly in vectors).
+            <br>&bull; COLD: Historical bugs (isolated).
+            <br>&bull; ARCHIVE: Aged-out records.
+        </li>
+        <li><strong>2. The Distillation Engine:</strong> Passes the completed session to a background model which extracts the pure signal ("What was the goal? What error occurred?"). It overrides bad future paths.</li>
+        <li><strong>3. Graceful Vector Storage:</strong> If Postgres <code>pgvector</code> is available, ANN searches are executed natively. Otherwise, it gracefully degrades to local JSON-Cosine similarity.</li>
+        <li><strong>4. Human Operations Contract:</strong> When an Operator corrects an agent, it is pushed into an Operations Contract injected at the top of the System Prompt, structurally superseding AI hallucination loops.</li>
+        <li><strong>5. Incremental & Symbol-Deep Indexing:</strong> The ingest engine hashes file checkpoints. Only changed files are embedded. The Directed Edge Graph maps dependencies (e.g. `login` CALLS `validate`).</li>
+    </ul>
+
+</body>
+</html>

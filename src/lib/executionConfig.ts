@@ -95,6 +95,15 @@ export const getDefaultExecutionConfig = (
     allowedWorkspacePaths,
     commandTemplates: [],
     deploymentTargets: [],
+    tokenOptimization: {
+      chatHistoryKeepLastN: 6,
+      chatRollupThreshold: 12,
+      chatMaxInputTokens: 12_000,
+      memoryPromptMaxTokens: 2_200,
+      memoryChunkMaxTokens: 350,
+      approvalSynthesisMaxInputTokens: 8_000,
+      approvalExcerptMaxChars: 420,
+    },
   };
 };
 
@@ -121,5 +130,9 @@ export const normalizeExecutionConfig = (
     deploymentTargets: config?.deploymentTargets?.length
       ? config.deploymentTargets.map(target => ({ ...target }))
       : [],
+    tokenOptimization: {
+      ...(defaults.tokenOptimization || {}),
+      ...(config?.tokenOptimization || {}),
+    },
   };
 };

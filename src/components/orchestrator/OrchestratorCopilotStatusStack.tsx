@@ -1,12 +1,18 @@
-import React from 'react';
-import { ArrowRight, LoaderCircle, Play, RefreshCw, ShieldCheck } from 'lucide-react';
-import MarkdownContent from '../MarkdownContent';
-import { StatusBadge } from '../EnterpriseUI';
-import { formatEnumLabel } from '../../lib/enterprise';
-import { normalizeMarkdownishText } from '../../lib/orchestrator/support';
-import type { RunWait, WorkspacePathValidationResult } from '../../types';
-import type { CapabilityReadinessItem } from '../../lib/capabilityExperience';
-import { cn } from '../../lib/utils';
+import React from "react";
+import {
+  ArrowRight,
+  LoaderCircle,
+  Play,
+  RefreshCw,
+  ShieldCheck,
+} from "lucide-react";
+import MarkdownContent from "../MarkdownContent";
+import { StatusBadge } from "../EnterpriseUI";
+import { formatEnumLabel } from "../../lib/enterprise";
+import { normalizeMarkdownishText } from "../../lib/orchestrator/support";
+import type { RunWait, WorkspacePathValidationResult } from "../../types";
+import type { CapabilityReadinessItem } from "../../lib/capabilityExperience";
+import { cn } from "../../lib/utils";
 
 type Props = {
   selectedWorkItemPresent: boolean;
@@ -40,49 +46,51 @@ type Props = {
 };
 
 const summarizeWaitMessage = (message: string) => {
-  const normalized = message.replace(/\s+/g, ' ').trim();
+  const normalized = message.replace(/\s+/g, " ").trim();
   if (!normalized) {
-    return '';
+    return "";
   }
 
   const sentences = normalized
     .split(/(?<=[.!?])\s+/)
-    .map(sentence => sentence.trim())
+    .map((sentence) => sentence.trim())
     .filter(Boolean);
-  const firstTwo = sentences.slice(0, 2).join(' ');
+  const firstTwo = sentences.slice(0, 2).join(" ");
   const summary = firstTwo || normalized;
 
-  return summary.length > 260 ? `${summary.slice(0, 257).trimEnd()}...` : summary;
+  return summary.length > 260
+    ? `${summary.slice(0, 257).trimEnd()}...`
+    : summary;
 };
 
 const getWaitModeMeta = (wait: RunWait | null) => {
   switch (wait?.type) {
-    case 'APPROVAL':
+    case "APPROVAL":
       return {
-        title: 'Decision required',
+        title: "Decision required",
         subtitle:
-          'Review the evidence, ask follow-up questions if needed, then move into the approval review flow.',
-        tone: 'warning' as const,
+          "Review the evidence, ask follow-up questions if needed, then move into the approval review flow.",
+        tone: "warning" as const,
       };
-    case 'CONFLICT_RESOLUTION':
+    case "CONFLICT_RESOLUTION":
       return {
-        title: 'Conflict resolution needed',
+        title: "Conflict resolution needed",
         subtitle:
-          'Choose the final path, constraints, or escalation outcome so the workflow can proceed cleanly.',
-        tone: 'warning' as const,
+          "Choose the final path, constraints, or escalation outcome so the workflow can proceed cleanly.",
+        tone: "warning" as const,
       };
-    case 'INPUT':
+    case "INPUT":
       return {
-        title: 'Specific input needed',
+        title: "Specific input needed",
         subtitle:
-          'Give the agent concrete business or implementation guidance. Generic replies will not unblock the run.',
-        tone: 'warning' as const,
+          "Give the agent concrete business or implementation guidance. Generic replies will not unblock the run.",
+        tone: "warning" as const,
       };
     default:
       return {
-        title: 'No pending request',
-        subtitle: 'The workflow is not waiting on a human decision right now.',
-        tone: 'neutral' as const,
+        title: "No pending request",
+        subtitle: "The workflow is not waiting on a human decision right now.",
+        tone: "neutral" as const,
       };
   }
 };
@@ -120,29 +128,32 @@ export const OrchestratorCopilotStatusStack = ({
   if (!selectedWorkItemPresent) {
     return (
       <div className="workspace-meta-card">
-        Select a work item to see the current decision state, pending requests, and the focused
-        copilot thread for that item.
+        Select a work item to see the current decision state, pending requests,
+        and the focused copilot thread for that item.
       </div>
     );
   }
 
   const normalizedWaitMessage = selectedOpenWait
     ? normalizeMarkdownishText(selectedOpenWait.message)
-    : '';
+    : "";
   const waitSummary = summarizeWaitMessage(normalizedWaitMessage);
   const waitMeta = getWaitModeMeta(selectedOpenWait);
   const showFullWaitRequest =
     Boolean(normalizedWaitMessage.trim()) &&
-    normalizedWaitMessage.replace(/\s+/g, ' ').trim() !== waitSummary;
+    normalizedWaitMessage.replace(/\s+/g, " ").trim() !== waitSummary;
 
   const phaseCard = (
     <div className="workspace-meta-card border-primary/18 bg-primary/5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="workspace-meta-label">Current phase</p>
-          <p className="mt-2 text-base font-semibold text-on-surface">{phaseLabel}</p>
+          <p className="mt-2 text-base font-semibold text-on-surface">
+            {phaseLabel}
+          </p>
           <p className="mt-1 text-xs leading-relaxed text-secondary">
-            Keep the response grounded in what this phase must decide or produce next.
+            Keep the response grounded in what this phase must decide or produce
+            next.
           </p>
         </div>
         {canRestartFromPhase ? (
@@ -152,7 +163,7 @@ export const OrchestratorCopilotStatusStack = ({
             disabled={busyAction !== null}
             className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {busyAction === 'restart' ? (
+            {busyAction === "restart" ? (
               <LoaderCircle size={14} className="animate-spin" />
             ) : (
               <RefreshCw size={14} />
@@ -171,9 +182,12 @@ export const OrchestratorCopilotStatusStack = ({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="workspace-meta-label">Paused</p>
-          <p className="mt-2 text-sm font-semibold text-on-surface">Execution is paused</p>
+          <p className="mt-2 text-sm font-semibold text-on-surface">
+            Execution is paused
+          </p>
           <p className="mt-1 text-xs leading-relaxed text-secondary">
-            Resume to continue, or capture the required decision from this dock first.
+            Resume to continue, or capture the required decision from this dock
+            first.
           </p>
         </div>
         <button
@@ -182,7 +196,7 @@ export const OrchestratorCopilotStatusStack = ({
           disabled={!canResumeRun}
           className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {busyAction?.startsWith('resume-') ? (
+          {busyAction?.startsWith("resume-") ? (
             <LoaderCircle size={14} className="animate-spin" />
           ) : (
             <Play size={14} />
@@ -203,8 +217,8 @@ export const OrchestratorCopilotStatusStack = ({
               This work item can start from the dock
             </p>
             <p className="mt-1 text-xs leading-relaxed text-secondary">
-              Add optional kickoff guidance below, upload any context that matters, then start the
-              workflow from here.
+              Add optional kickoff guidance below, upload any context that
+              matters, then start the workflow from here.
             </p>
           </div>
           <StatusBadge tone="success">{executionDispatchLabel}</StatusBadge>
@@ -249,8 +263,8 @@ export const OrchestratorCopilotStatusStack = ({
               Restart from this dock with explicit guidance
             </p>
             <p className="mt-1 text-xs leading-relaxed text-secondary">
-              Explain what changed and what the next attempt should do differently. The composer
-              below becomes the new restart brief.
+              Explain what changed and what the next attempt should do
+              differently. The composer below becomes the new restart brief.
             </p>
           </div>
           <StatusBadge tone="brand">Restart-ready</StatusBadge>
@@ -260,12 +274,14 @@ export const OrchestratorCopilotStatusStack = ({
 
   const workspacePathCard = waitRequiresApprovedWorkspace ? (
     <div className="workspace-meta-card border-outline-variant/30 bg-white/92">
-      <p className="workspace-meta-label">Approved workspace path</p>
+      <p className="workspace-meta-label">Desktop workspace</p>
       {hasApprovedWorkspaceConfigured ? (
         <>
-          <p className="mt-2 text-xs leading-relaxed text-secondary">Configured roots:</p>
+          <p className="mt-2 text-xs leading-relaxed text-secondary">
+            Validated roots for this operator on this desktop:
+          </p>
           <ul className="mt-2 space-y-1 text-xs leading-relaxed text-secondary">
-            {approvedWorkspaceRoots.slice(0, 4).map(root => (
+            {approvedWorkspaceRoots.slice(0, 4).map((root) => (
               <li key={root} className="font-mono text-[0.72rem]">
                 {root}
               </li>
@@ -274,23 +290,23 @@ export const OrchestratorCopilotStatusStack = ({
         </>
       ) : (
         <p className="mt-2 text-xs leading-relaxed text-secondary">
-          No approved workspace paths are configured yet.
+          No desktop workspace mappings are saved yet.
         </p>
       )}
 
       <p className="mt-3 text-xs leading-relaxed text-secondary">
         {hasApprovedWorkspaceConfigured
-          ? 'Add another path if this work item needs a different codebase.'
-          : 'Add a local directory path that tools are allowed to read and write.'}
+          ? "Add another mapped path if this work item needs a different codebase."
+          : "Save a local directory path for this operator on this desktop."}
       </p>
       <input
         value={approvedWorkspaceDraft}
-        onChange={event => onApprovedWorkspaceDraftChange(event.target.value)}
+        onChange={(event) => onApprovedWorkspaceDraftChange(event.target.value)}
         placeholder="/Users/you/projects/my-repo"
         className="mt-3 field-input font-mono text-[0.8rem]"
       />
       <div className="mt-3 flex flex-wrap gap-2">
-        {approvedWorkspaceSuggestions.map(root => (
+        {approvedWorkspaceSuggestions.map((root) => (
           <button
             key={root}
             type="button"
@@ -308,7 +324,7 @@ export const OrchestratorCopilotStatusStack = ({
           disabled={busyAction !== null}
           className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {busyAction === 'approveWorkspacePath' ? (
+          {busyAction === "approveWorkspacePath" ? (
             <LoaderCircle size={16} className="animate-spin" />
           ) : (
             <ShieldCheck size={16} />
@@ -327,8 +343,10 @@ export const OrchestratorCopilotStatusStack = ({
       {approvedWorkspaceValidation ? (
         <p
           className={cn(
-            'mt-2 text-xs font-medium',
-            approvedWorkspaceValidation.valid ? 'text-emerald-700' : 'text-amber-800',
+            "mt-2 text-xs font-medium",
+            approvedWorkspaceValidation.valid
+              ? "text-emerald-700"
+              : "text-amber-800",
           )}
         >
           {approvedWorkspaceValidation.message}
@@ -336,8 +354,8 @@ export const OrchestratorCopilotStatusStack = ({
       ) : null}
       {!canEditCapability ? (
         <p className="mt-2 text-xs font-medium text-amber-800">
-          Approving new paths requires capability edit access. Switch Current Operator to a
-          workspace admin if needed.
+          Approving new paths requires capability edit access. Switch Current
+          Operator to a workspace admin if needed.
         </p>
       ) : null}
     </div>
@@ -350,28 +368,40 @@ export const OrchestratorCopilotStatusStack = ({
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="workspace-meta-label">Pending request</p>
-              <p className="mt-2 text-base font-semibold text-on-surface">{selectedAttentionLabel}</p>
-              <p className="mt-1 text-sm leading-relaxed text-secondary">{waitMeta.subtitle}</p>
+              <p className="mt-2 text-base font-semibold text-on-surface">
+                {selectedAttentionLabel}
+              </p>
+              <p className="mt-1 text-sm leading-relaxed text-secondary">
+                {waitMeta.subtitle}
+              </p>
             </div>
-            <StatusBadge tone={waitMeta.tone}>{formatEnumLabel(selectedOpenWait.type)}</StatusBadge>
+            <StatusBadge tone={waitMeta.tone}>
+              {formatEnumLabel(selectedOpenWait.type)}
+            </StatusBadge>
           </div>
 
           <div className="orchestrator-copilot-status-summary mt-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="workspace-meta-label">What needs your decision</p>
-                <p className="mt-2 text-sm font-semibold text-on-surface">{waitMeta.title}</p>
+                <p className="mt-2 text-sm font-semibold text-on-surface">
+                  {waitMeta.title}
+                </p>
               </div>
               <StatusBadge tone="neutral">Respond from the dock</StatusBadge>
             </div>
-            <p className="mt-3 text-sm leading-7 text-on-surface">{waitSummary || normalizedWaitMessage}</p>
+            <p className="mt-3 text-sm leading-7 text-on-surface">
+              {waitSummary || normalizedWaitMessage}
+            </p>
           </div>
 
           {dockMissingFieldLabels.length > 0 ? (
             <div className="mt-4">
-              <p className="workspace-meta-label">Still missing from your response</p>
+              <p className="workspace-meta-label">
+                Still missing from your response
+              </p>
               <div className="mt-2 flex flex-wrap gap-2">
-                {dockMissingFieldLabels.map(label => (
+                {dockMissingFieldLabels.map((label) => (
                   <button
                     key={label}
                     type="button"
@@ -394,7 +424,9 @@ export const OrchestratorCopilotStatusStack = ({
             </details>
           ) : null}
 
-          {workspacePathCard ? <div className="mt-4">{workspacePathCard}</div> : null}
+          {workspacePathCard ? (
+            <div className="mt-4">{workspacePathCard}</div>
+          ) : null}
         </div>
 
         <div className="orchestrator-copilot-status-rail">
@@ -406,22 +438,26 @@ export const OrchestratorCopilotStatusStack = ({
   }
 
   const passiveCards = [
-    { key: 'blocking', node: blockingCard },
-    { key: 'ready', node: readyCard },
-    { key: 'restart-guidance', node: restartGuidanceCard },
-    { key: 'paused', node: pausedCard },
-  ].filter((entry): entry is { key: string; node: React.ReactElement } => Boolean(entry.node));
+    { key: "blocking", node: blockingCard },
+    { key: "ready", node: readyCard },
+    { key: "restart-guidance", node: restartGuidanceCard },
+    { key: "paused", node: pausedCard },
+  ].filter((entry): entry is { key: string; node: React.ReactElement } =>
+    Boolean(entry.node),
+  );
 
   return (
     <div className="orchestrator-copilot-status-grid">
       <div className="orchestrator-copilot-status-rail">{phaseCard}</div>
       <div className="orchestrator-copilot-status-grid-cards">
         {passiveCards.length > 0 ? (
-          passiveCards.map(entry => <React.Fragment key={entry.key}>{entry.node}</React.Fragment>)
+          passiveCards.map((entry) => (
+            <React.Fragment key={entry.key}>{entry.node}</React.Fragment>
+          ))
         ) : (
           <div className="workspace-meta-card">
-            No open approval, input, or conflict wait is attached to the selected work item right
-            now.
+            No open approval, input, or conflict wait is attached to the
+            selected work item right now.
           </div>
         )}
       </div>

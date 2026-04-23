@@ -50,6 +50,13 @@ import {
   resolveAgentProviderKey,
   resolveProviderDisplayName,
 } from './providerRegistry';
+import {
+  buildBudgetedSectionPrompt,
+  buildDeterministicChatRollup,
+  renderChatTranscript,
+  resolveTokenOptimizationPolicy,
+  truncateTextToTokenBudget,
+} from './tokenOptimization';
 
 export type ChatHistoryMessage = {
   role?: 'user' | 'agent';
@@ -95,6 +102,7 @@ type ManagedChatSessionRecord = {
   model?: string;
   createdAt: string;
   lastUsedAt: string;
+  localHistoryRollup?: string;
   localMessages?: ProviderMessage[];
 };
 
@@ -1440,6 +1448,38 @@ const getChatSessionFingerprint = ({
     ].join('\n---\n'),
   );
 
+const buildScopedSystemPromptSections = ({
+  capability,
+  agent,
+  developerPrompt,
+  learningContextBlock,
+  copilotGuidanceBlock,
+  scope,
+  scopeId,
+}: {
+  capability: Partial<Capability>;
+  agent: Partial<CapabilityAgent>;
+  developerPrompt?: string;
+  learningContextBlock?: string;
+  copilotGuidanceBlock?: string;
+  scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  scopeId?: string;
+}) => ({
+  developerPrompt:
+    developerPrompt ||
+    'You are operating inside an enterprise capability workspace. Stay scoped to the provided capability and agent context, and be explicit when context is missing.',
+  systemCore: buildCapabilitySystemPrompt({ capability, agent }),
+  learningContext: learningContextBlock
+    ? `Agent learning profile context:\n${learningContextBlock}`
+    : null,
+  repoGuidance: copilotGuidanceBlock
+    ? `Repository copilot guidance (house rules authored by the team):\n${copilotGuidanceBlock}`
+    : null,
+  activeScope: scopeId
+    ? `Active session scope: ${scope}${scope === 'GENERAL_CHAT' ? '' : ` / ${scopeId}`}`
+    : `Active session scope: ${scope}`,
+});
+
 const buildScopedSystemPrompt = ({
   capability,
   agent,
@@ -1457,26 +1497,242 @@ const buildScopedSystemPrompt = ({
   scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
   scopeId?: string;
 }) =>
-  [
-    developerPrompt ||
-      'You are operating inside an enterprise capability workspace. Stay scoped to the provided capability and agent context, and be explicit when context is missing.',
-    buildCapabilitySystemPrompt({ capability, agent }),
-    learningContextBlock
-      ? `Agent learning profile context:\n${learningContextBlock}`
-      : null,
-    // Copilot guidance ingested from the capability's linked repositories
-    // (CLAUDE.md, AGENTS.md, .cursor/rules, .github/copilot-instructions.md,
-    // etc.). Treat these as authoritative house style / authoring rules for
-    // this capability — cite them by filename when you apply one.
-    copilotGuidanceBlock
-      ? `Repository copilot guidance (house rules authored by the team):\n${copilotGuidanceBlock}`
-      : null,
-    scopeId
-      ? `Active session scope: ${scope}${scope === 'GENERAL_CHAT' ? '' : ` / ${scopeId}`}`
-      : `Active session scope: ${scope}`,
-  ]
+  Object.values(
+    buildScopedSystemPromptSections({
+      capability,
+      agent,
+      developerPrompt,
+      learningContextBlock,
+      copilotGuidanceBlock,
+      scope,
+      scopeId,
+    }),
+  )
     .filter(Boolean)
     .join('\n\n');
+
+const formatHistorySummaryFragment = (summary?: string | null) =>
+  summary?.trim()
+    ? /^Earlier conversation state/i.test(summary.trim())
+      ? summary.trim()
+      : `Earlier conversation state summary:\n${summary.trim()}`
+    : '';
+
+const formatMemoryFragment = (memoryPrompt?: string | null) =>
+  memoryPrompt?.trim() ? `Retrieved memory context:\n${memoryPrompt.trim()}` : '';
+
+const buildChatPromptPlan = ({
+  capability,
+  providerKey,
+  model,
+  developerPrompt,
+  systemCore,
+  learningContext,
+  repoGuidance,
+  activeScope,
+  history,
+  message,
+  memoryPrompt,
+}: {
+  capability: Partial<Capability>;
+  providerKey?: string;
+  model?: string;
+  developerPrompt: string;
+  systemCore: string;
+  learningContext?: string | null;
+  repoGuidance?: string | null;
+  activeScope: string;
+  history: Array<{ role: 'assistant' | 'user'; content: string }>;
+  message: string;
+  memoryPrompt?: string;
+}) => {
+  const tokenPolicy = resolveTokenOptimizationPolicy(capability);
+  const keepLastN = tokenPolicy.chatHistoryKeepLastN;
+  const recentHistory = history.slice(-keepLastN);
+  const olderHistory = history.slice(0, Math.max(0, history.length - keepLastN));
+  const historySummary =
+    olderHistory.length > 0
+      ? buildDeterministicChatRollup(olderHistory, {
+          maxChars: tokenPolicy.approvalExcerptMaxChars,
+        })
+      : '';
+
+  const protectedFragments = [
+    {
+      source: 'DEVELOPER_PROMPT' as const,
+      text: developerPrompt,
+    },
+    {
+      source: 'SYSTEM_CORE' as const,
+      text: `${systemCore}\n\n${activeScope}`,
+    },
+    learningContext
+      ? {
+          source: 'LEARNING_CONTEXT' as const,
+          text: learningContext,
+        }
+      : null,
+    repoGuidance
+      ? {
+          source: 'REPO_GUIDANCE' as const,
+          text: repoGuidance,
+        }
+      : null,
+  ].filter(Boolean) as Array<{
+    source: 'DEVELOPER_PROMPT' | 'SYSTEM_CORE' | 'LEARNING_CONTEXT' | 'REPO_GUIDANCE';
+    text: string;
+  }>;
+
+  const initialBudget = buildBudgetedSectionPrompt({
+    protectedFragments,
+    promptFragments: [
+      historySummary
+        ? {
+            source: 'HISTORY_ROLLUP' as const,
+            text: formatHistorySummaryFragment(historySummary),
+          }
+        : null,
+      recentHistory.length > 0
+        ? {
+            source: 'CONVERSATION_HISTORY' as const,
+            text: `Recent conversation turns:\n${renderChatTranscript(recentHistory, {
+              maxTurns: recentHistory.length,
+              maxCharsPerTurn: 280,
+            })}`,
+          }
+        : null,
+      memoryPrompt?.trim()
+        ? {
+            source: 'MEMORY_HITS' as const,
+            text: formatMemoryFragment(memoryPrompt),
+          }
+        : null,
+      {
+        source: 'LATEST_USER_MESSAGE' as const,
+        text: `Latest user request:\n${message.trim()}`,
+      },
+      {
+        source: 'WORK_ITEM_BRIEFING' as const,
+        text: 'Respond directly to the latest user request. Use earlier context only where it materially helps.',
+      },
+    ].filter(Boolean) as Array<{
+      source:
+        | 'HISTORY_ROLLUP'
+        | 'CONVERSATION_HISTORY'
+        | 'MEMORY_HITS'
+        | 'LATEST_USER_MESSAGE'
+        | 'WORK_ITEM_BRIEFING';
+      text: string;
+    }>,
+    maxInputTokens: tokenPolicy.chatMaxInputTokens,
+    providerKey,
+    model,
+  });
+
+  const currentBudget = buildBudgetedSectionPrompt({
+    protectedFragments,
+    promptFragments: [
+      memoryPrompt?.trim()
+        ? {
+            source: 'MEMORY_HITS' as const,
+            text: formatMemoryFragment(memoryPrompt),
+          }
+        : null,
+      {
+        source: 'LATEST_USER_MESSAGE' as const,
+        text: `Latest user request:\n${message.trim()}`,
+      },
+      {
+        source: 'WORK_ITEM_BRIEFING' as const,
+        text: 'Respond directly to the latest user request. Use earlier context only where it materially helps.',
+      },
+    ].filter(Boolean) as Array<{
+      source: 'MEMORY_HITS' | 'LATEST_USER_MESSAGE' | 'WORK_ITEM_BRIEFING';
+      text: string;
+    }>,
+    maxInputTokens: tokenPolicy.chatMaxInputTokens,
+    providerKey,
+    model,
+  });
+
+  return {
+    tokenPolicy,
+    historySummary,
+    recentHistory,
+    prompt: currentBudget.prompt,
+    initialPrompt: initialBudget.prompt || currentBudget.prompt,
+    currentReceipt: currentBudget.receipt,
+    initialReceipt: initialBudget.receipt,
+  };
+};
+
+const normalizeLocalConversationTail = (messages: ProviderMessage[]) =>
+  messages
+    .filter(message => (message.role === 'assistant' || message.role === 'user') && message.content.trim())
+    .map(message => ({
+      role: message.role,
+      content: message.content.trim(),
+    })) as Array<{ role: 'assistant' | 'user'; content: string }>;
+
+const condenseLocalConversationState = async ({
+  capability,
+  agent,
+  priorSummary,
+  messages,
+}: {
+  capability: Partial<Capability>;
+  agent: Partial<CapabilityAgent>;
+  priorSummary?: string;
+  messages: ProviderMessage[];
+}) => {
+  const tokenPolicy = resolveTokenOptimizationPolicy(capability);
+  const keepLastN = tokenPolicy.chatHistoryKeepLastN;
+  if (messages.length <= tokenPolicy.chatRollupThreshold) {
+    return {
+      summary: priorSummary || '',
+      messages,
+    };
+  }
+
+  const tailMessages = messages.slice(-keepLastN);
+  const olderTurns = normalizeLocalConversationTail(
+    messages.slice(0, Math.max(0, messages.length - keepLastN)),
+  );
+
+  if (olderTurns.length === 0) {
+    return {
+      summary: priorSummary || '',
+      messages: tailMessages,
+    };
+  }
+
+  let summary = priorSummary || '';
+  try {
+    const rolled = await invokeBudgetModelSummary({
+      capability,
+      agent,
+      priorSummary,
+      newTurns: olderTurns,
+    });
+    summary = rolled.summary || summary;
+  } catch {
+    const deterministicSummary = buildDeterministicChatRollup(olderTurns, {
+      maxChars: tokenPolicy.approvalExcerptMaxChars,
+    });
+    summary = [priorSummary, deterministicSummary].filter(Boolean).join('\n\n');
+  }
+
+  summary = truncateTextToTokenBudget({
+    text: summary,
+    maxTokens: Math.max(400, Math.floor(tokenPolicy.chatMaxInputTokens / 5)),
+    providerKey: resolveAgentProviderKey(agent),
+  });
+
+  return {
+    summary,
+    messages: tailMessages,
+  };
+};
 
 const buildSessionModelCandidates = async (requestedModel?: string) => {
   const requested = normalizeModel(requestedModel);
@@ -1527,6 +1783,7 @@ const getManagedScopedSession = async ({
   scope,
   scopeId,
   resetSession = false,
+  modelOverride,
 }: {
   capability: Partial<Capability>;
   agent: Partial<CapabilityAgent>;
@@ -1536,7 +1793,12 @@ const getManagedScopedSession = async ({
   scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
   scopeId?: string;
   resetSession?: boolean;
+  /** Optional model override from dynamic routing (Fix 2). */
+  modelOverride?: string;
 }) => {
+  // Dynamic model routing: use the caller-supplied override when present so
+  // the session is created/looked up with the right model (budget vs primary).
+  const effectiveModel = modelOverride ?? agent.model;
   const workingDirectory = selectWorkingDirectory(capability);
   const providerKey = resolveAgentProviderKey(agent);
   const fingerprint = getChatSessionFingerprint({
@@ -1595,6 +1857,7 @@ const getManagedScopedSession = async ({
       fingerprint,
       model: cached.model,
       providerKey,
+      localHistoryRollup: cached.localHistoryRollup || '',
       localMessages: cached.localMessages || [],
     };
   }
@@ -1619,6 +1882,7 @@ const getManagedScopedSession = async ({
       model: agent.model || undefined,
       createdAt: new Date().toISOString(),
       lastUsedAt: new Date().toISOString(),
+      localHistoryRollup: cached?.localHistoryRollup || '',
       localMessages: initialMessages,
     });
 
@@ -1630,6 +1894,7 @@ const getManagedScopedSession = async ({
       fingerprint,
       model: agent.model,
       providerKey,
+      localHistoryRollup: cached?.localHistoryRollup || '',
       localMessages: initialMessages,
     };
   }
@@ -1644,12 +1909,12 @@ const getManagedScopedSession = async ({
     scope,
     scopeId,
   });
-  const modelCandidates = await buildSessionModelCandidates(agent.model);
+  const modelCandidates = await buildSessionModelCandidates(effectiveModel);
 
   let session: CopilotSession | null = null;
   let isNewSession = false;
   let lastError: unknown = null;
-  let selectedModel = normalizeModel(agent.model);
+  let selectedModel = normalizeModel(effectiveModel);
 
   for (const candidateModel of modelCandidates) {
     const sessionConfig = createSessionConfig({
@@ -1715,6 +1980,7 @@ const getManagedScopedSession = async ({
     fingerprint,
     model: selectedModel,
     providerKey,
+    localHistoryRollup: '',
     localMessages: [],
   };
 };
@@ -1731,12 +1997,15 @@ export const invokeScopedCapabilitySession = async ({
   scopeId,
   prompt,
   initialPrompt,
+  promptReceipt,
+  initialPromptReceipt,
   developerPrompt,
   memoryPrompt,
   timeoutMs,
   onDelta,
   resetSession = false,
   workItemPhase,
+  modelOverride,
 }: {
   capability: Partial<Capability>;
   agent: Partial<CapabilityAgent>;
@@ -1744,6 +2013,8 @@ export const invokeScopedCapabilitySession = async ({
   scopeId?: string;
   prompt: string;
   initialPrompt?: string;
+  promptReceipt?: Record<string, unknown>;
+  initialPromptReceipt?: Record<string, unknown>;
   developerPrompt?: string;
   memoryPrompt?: string;
   timeoutMs?: number;
@@ -1757,7 +2028,17 @@ export const invokeScopedCapabilitySession = async ({
    * full pack (chat / ad-hoc sessions).
    */
   workItemPhase?: string | null;
+  /**
+   * Optional model override for dynamic model routing (Fix 2).
+   * When provided, bypasses agent.model for this specific call so the
+   * execution engine can route trivial tool turns to a cheaper model.
+   * Falls back to agent.model when absent.
+   */
+  modelOverride?: string;
 }) => {
+  // Dynamic model routing: prefer the caller-supplied override so the
+  // execution engine can direct trivial tool turns to a cheaper model.
+  const effectiveModel = modelOverride ?? agent.model;
   const learningContextBlock = agent.learningProfile?.contextBlock?.trim() || '';
   // Load cached copilot guidance (CLAUDE.md / AGENTS.md / .cursor/rules /
   // .github/copilot-instructions.md / CONTRIBUTING.md) for this capability.
@@ -1772,6 +2053,18 @@ export const invokeScopedCapabilitySession = async ({
         phase: workItemPhase ?? null,
       }).catch(() => null)
     : null;
+  const systemPromptSections = buildScopedSystemPromptSections({
+    capability,
+    agent,
+    developerPrompt,
+    learningContextBlock,
+    copilotGuidanceBlock: copilotGuidanceBlock || undefined,
+    scope,
+    scopeId,
+  });
+  const systemPrompt = Object.values(systemPromptSections)
+    .filter(Boolean)
+    .join('\n\n');
   const effectivePrompt = prependRetrievedMemory(
     initialPrompt && resetSession ? initialPrompt : prompt,
     memoryPrompt,
@@ -1779,7 +2072,7 @@ export const invokeScopedCapabilitySession = async ({
 
   if (!(await shouldPreferHttpFallback())) {
     let managedSession:
-      | {
+        | {
           session: CopilotSession | null;
           isNewSession: boolean;
           sessionId: string;
@@ -1787,6 +2080,7 @@ export const invokeScopedCapabilitySession = async ({
           fingerprint: string;
           model?: string;
           providerKey: string;
+          localHistoryRollup?: string;
           localMessages: ProviderMessage[];
         }
       | null = null;
@@ -1801,28 +2095,26 @@ export const invokeScopedCapabilitySession = async ({
         scope,
         scopeId,
         resetSession,
+        modelOverride,
       });
 
       const result =
         managedSession.providerKey === LOCAL_OPENAI_PROVIDER_KEY
           ? await withSessionLock(managedSession.cacheKey, async () => {
-              const systemPrompt = buildScopedSystemPrompt({
-                capability,
-                agent,
-                developerPrompt,
-                learningContextBlock,
-                copilotGuidanceBlock: copilotGuidanceBlock || undefined,
-                scope,
-                scopeId,
-              });
               const localMessages: ProviderMessage[] = [
                 { role: 'system', content: systemPrompt },
+                ...(managedSession!.localHistoryRollup?.trim()
+                  ? [
+                      {
+                        role: 'system' as const,
+                        content: managedSession!.localHistoryRollup!.trim(),
+                      },
+                    ]
+                  : []),
                 ...managedSession!.localMessages,
               ];
-              const nextPrompt = prependRetrievedMemory(
-                managedSession!.isNewSession && initialPrompt ? initialPrompt : prompt,
-                memoryPrompt,
-              );
+              const nextPrompt =
+                managedSession!.isNewSession && initialPrompt ? initialPrompt : prompt;
               localMessages.push({
                 role: 'user',
                 content: nextPrompt,
@@ -1840,12 +2132,19 @@ export const invokeScopedCapabilitySession = async ({
                     timeoutMs,
                   });
 
-              updateManagedSessionRecord(managedSession!.sessionId, {
-                localMessages: [
+              const condensedState = await condenseLocalConversationState({
+                capability,
+                agent,
+                priorSummary: managedSession!.localHistoryRollup,
+                messages: [
                   ...managedSession!.localMessages,
                   { role: 'user', content: nextPrompt },
                   { role: 'assistant', content: completion.content },
                 ],
+              });
+              updateManagedSessionRecord(managedSession!.sessionId, {
+                localHistoryRollup: condensedState.summary,
+                localMessages: condensedState.messages,
               });
               return {
                 ...completion,
@@ -1900,6 +2199,10 @@ export const invokeScopedCapabilitySession = async ({
         sessionId: managedSession.sessionId,
         sessionScope: scope,
         sessionScopeId: scopeId,
+        promptReceipt:
+          managedSession.isNewSession && initialPromptReceipt
+            ? initialPromptReceipt
+            : promptReceipt,
       };
     } catch (error) {
       if (managedSession) {
@@ -1918,6 +2221,8 @@ export const invokeScopedCapabilitySession = async ({
           scopeId,
           prompt,
           initialPrompt,
+          promptReceipt,
+          initialPromptReceipt,
           developerPrompt,
           memoryPrompt,
           timeoutMs,
@@ -1935,15 +2240,7 @@ export const invokeScopedCapabilitySession = async ({
   const fallbackMessages: ProviderMessage[] = [
     {
       role: 'system',
-      content: buildScopedSystemPrompt({
-        capability,
-        agent,
-        developerPrompt,
-        learningContextBlock,
-        copilotGuidanceBlock: copilotGuidanceBlock || undefined,
-        scope,
-        scopeId,
-      }),
+      content: systemPrompt,
     },
     {
       role: 'user',
@@ -1953,12 +2250,12 @@ export const invokeScopedCapabilitySession = async ({
   const fallbackResult =
     resolveAgentProviderKey(agent) === LOCAL_OPENAI_PROVIDER_KEY
       ? await requestLocalOpenAIModel({
-          model: agent.model,
+          model: effectiveModel,
           messages: fallbackMessages,
           timeoutMs,
         })
       : await requestGitHubModelsHttp({
-          model: await resolveRuntimeModel(agent.model),
+          model: await resolveRuntimeModel(effectiveModel),
           messages: fallbackMessages,
           timeoutMs,
           maxAttempts: scope === 'GENERAL_CHAT' ? 1 : 3,
@@ -1975,6 +2272,7 @@ export const invokeScopedCapabilitySession = async ({
     sessionId: undefined,
     sessionScope: scope,
     sessionScopeId: scopeId,
+    promptReceipt: initialPromptReceipt || promptReceipt,
   };
 };
 
@@ -2237,42 +2535,65 @@ export const invokeCapabilityChat = async ({
 }) => {
   const normalizedHistory = (history || [])
     .filter(item => item?.content?.trim())
-    .slice(-10)
     .map(item => ({
       role: item.role === 'agent' ? 'assistant' : 'user',
       content: item.content!.trim(),
     })) as Array<{ role: 'assistant' | 'user'; content: string }>;
-
-  const latestConversation = [
-    ...normalizedHistory,
-    {
-      role: 'user' as const,
-      content: message.trim(),
-    },
-  ];
-
-  const conversationPrompt = buildPromptFromConversation({
-    conversation: latestConversation,
-    includeHistory: false,
+  const resolvedScopeId =
+    scopeId || (scope === 'GENERAL_CHAT' ? capability.id : undefined);
+  const learningContextBlock = agent.learningProfile?.contextBlock?.trim() || '';
+  const copilotGuidanceBlock = capability.id
+    ? await loadGuidanceSystemPromptBlock(capability.id, {
+        phase: null,
+      }).catch(() => null)
+    : null;
+  const systemPromptSections = buildScopedSystemPromptSections({
+    capability,
+    agent,
+    developerPrompt,
+    learningContextBlock,
+    copilotGuidanceBlock: copilotGuidanceBlock || undefined,
+    scope,
+    scopeId: resolvedScopeId,
   });
-  const initialConversationPrompt = buildPromptFromConversation({
-    conversation: latestConversation,
-    includeHistory: true,
+  const promptPlan = buildChatPromptPlan({
+    capability,
+    providerKey: resolveAgentProviderKey(agent),
+    model: agent.model,
+    developerPrompt: systemPromptSections.developerPrompt,
+    systemCore: systemPromptSections.systemCore,
+    learningContext: systemPromptSections.learningContext,
+    repoGuidance: systemPromptSections.repoGuidance,
+    activeScope: systemPromptSections.activeScope,
+    history: normalizedHistory,
+    message: message.trim(),
+    memoryPrompt,
   });
 
   const result = await invokeScopedCapabilitySession({
     capability,
     agent,
     scope,
-    scopeId: scopeId || (scope === 'GENERAL_CHAT' ? capability.id : undefined),
-    prompt: conversationPrompt,
-    initialPrompt: initialConversationPrompt,
+    scopeId: resolvedScopeId,
+    prompt: promptPlan.prompt,
+    initialPrompt: promptPlan.initialPrompt,
+    promptReceipt: {
+      stage: 'capability_chat',
+      ...promptPlan.currentReceipt,
+    },
+    initialPromptReceipt: {
+      stage: 'capability_chat',
+      ...promptPlan.initialReceipt,
+    },
     developerPrompt,
-    memoryPrompt,
+    memoryPrompt: undefined,
     resetSession,
   });
 
-  return result;
+  return {
+    ...result,
+    tokenPolicy: promptPlan.tokenPolicy,
+  };
 };
 
 export const invokeCapabilityChatStream = async ({
@@ -2301,41 +2622,64 @@ export const invokeCapabilityChatStream = async ({
 }) => {
   const normalizedHistory = (history || [])
     .filter(item => item?.content?.trim())
-    .slice(-10)
     .map(item => ({
       role: item.role === 'agent' ? 'assistant' : 'user',
       content: item.content!.trim(),
     })) as Array<{ role: 'assistant' | 'user'; content: string }>;
-
-  const latestConversation = [
-    ...normalizedHistory,
-    {
-      role: 'user' as const,
-      content: message.trim(),
-    },
-  ];
-
-  const conversationPrompt = buildPromptFromConversation({
-    conversation: latestConversation,
-    includeHistory: false,
+  const resolvedScopeId =
+    scopeId || (scope === 'GENERAL_CHAT' ? capability.id : undefined);
+  const learningContextBlock = agent.learningProfile?.contextBlock?.trim() || '';
+  const copilotGuidanceBlock = capability.id
+    ? await loadGuidanceSystemPromptBlock(capability.id, {
+        phase: null,
+      }).catch(() => null)
+    : null;
+  const systemPromptSections = buildScopedSystemPromptSections({
+    capability,
+    agent,
+    developerPrompt,
+    learningContextBlock,
+    copilotGuidanceBlock: copilotGuidanceBlock || undefined,
+    scope,
+    scopeId: resolvedScopeId,
   });
-  const initialConversationPrompt = buildPromptFromConversation({
-    conversation: latestConversation,
-    includeHistory: true,
+  const promptPlan = buildChatPromptPlan({
+    capability,
+    providerKey: resolveAgentProviderKey(agent),
+    model: agent.model,
+    developerPrompt: systemPromptSections.developerPrompt,
+    systemCore: systemPromptSections.systemCore,
+    learningContext: systemPromptSections.learningContext,
+    repoGuidance: systemPromptSections.repoGuidance,
+    activeScope: systemPromptSections.activeScope,
+    history: normalizedHistory,
+    message: message.trim(),
+    memoryPrompt,
   });
 
   const result = await invokeScopedCapabilitySession({
     capability,
     agent,
     scope,
-    scopeId: scopeId || (scope === 'GENERAL_CHAT' ? capability.id : undefined),
-    prompt: conversationPrompt,
-    initialPrompt: initialConversationPrompt,
+    scopeId: resolvedScopeId,
+    prompt: promptPlan.prompt,
+    initialPrompt: promptPlan.initialPrompt,
+    promptReceipt: {
+      stage: 'capability_chat',
+      ...promptPlan.currentReceipt,
+    },
+    initialPromptReceipt: {
+      stage: 'capability_chat',
+      ...promptPlan.initialReceipt,
+    },
     developerPrompt,
-    memoryPrompt,
+    memoryPrompt: undefined,
     onDelta,
     resetSession,
   });
 
-  return result;
+  return {
+    ...result,
+    tokenPolicy: promptPlan.tokenPolicy,
+  };
 };

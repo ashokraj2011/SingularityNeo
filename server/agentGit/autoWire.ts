@@ -34,30 +34,30 @@
  * `server/execution/service.ts` therefore use **dynamic** `import()` of
  * this module to avoid the cycle. Keep it that way.
  */
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import type {
-  Artifact,
-  CapabilityRepository,
-  WorkItem,
-} from '../../src/types';
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import type { Artifact, CapabilityRepository, WorkItem } from "../../src/types";
 import {
   buildAgentBranchName,
   commitPatchArtifactToSession,
   commitRawPatchToSession,
   startAgentBranchSession,
-} from './service';
+} from "./service";
 import {
   createOrReuseAgentBranchSession,
   getAgentBranchSessionById,
   insertAgentBranchCommit,
   listAgentBranchSessionsForWorkItem,
   updateAgentBranchSession,
-} from './repository';
-import { resolveGithubAuth } from './session';
-import { normalizeDirectoryPath } from '../workspacePaths';
+} from "./repository";
+import { resolveGithubAuth } from "./session";
+import {
+  requireValidDesktopWorkspaceResolution,
+  resolveDesktopWorkspace,
+} from "../desktopWorkspaces";
+import { getCapabilityExecutionOwnership } from "../executionOwnership";
 
-const LOG_PREFIX = '[agentGit/autoWire]';
+const LOG_PREFIX = "[agentGit/autoWire]";
 const execFileAsync = promisify(execFile);
 
 const logSkip = (context: string, reason: string) => {
@@ -74,39 +74,56 @@ const logError = (context: string, error: unknown) => {
 };
 
 const pickPrimaryRepository = (repositories: CapabilityRepository[]) =>
-  repositories.find(repository => repository.isPrimary) || repositories[0] || null;
+  repositories.find((repository) => repository.isPrimary) ||
+  repositories[0] ||
+  null;
 
 const runGit = async (workspaceRoot: string, args: string[]) => {
-  const result = await execFileAsync('git', ['-C', workspaceRoot, ...args], {
+  const result = await execFileAsync("git", ["-C", workspaceRoot, ...args], {
     cwd: workspaceRoot,
     maxBuffer: 1024 * 1024 * 8,
   });
-  return String(result.stdout || '').trim();
+  return String(result.stdout || "").trim();
 };
 
 const ensureLocalGitRepository = async (workspaceRoot: string) => {
-  const insideWorkTree = await runGit(workspaceRoot, ['rev-parse', '--is-inside-work-tree']).catch(
-    () => '',
-  );
-  return insideWorkTree === 'true';
+  const insideWorkTree = await runGit(workspaceRoot, [
+    "rev-parse",
+    "--is-inside-work-tree",
+  ]).catch(() => "");
+  return insideWorkTree === "true";
 };
 
-const resolveLocalWorkspaceRoot = ({
+const resolveLocalWorkspaceRoot = async ({
+  capabilityId,
   repository,
   workspaceRoots = [],
 }: {
+  capabilityId: string;
   repository: CapabilityRepository;
   workspaceRoots?: string[];
 }) => {
-  const repositoryRoot = normalizeDirectoryPath(repository.localRootHint || '');
-  if (repositoryRoot) {
-    return repositoryRoot;
+  void workspaceRoots;
+  const ownership = await getCapabilityExecutionOwnership(capabilityId).catch(
+    () => null,
+  );
+  if (!ownership?.executorId || !ownership.actorUserId) {
+    return "";
   }
 
-  const normalizedRoots = workspaceRoots
-    .map(root => normalizeDirectoryPath(root))
-    .filter(Boolean);
-  return normalizedRoots.length === 1 ? normalizedRoots[0] : '';
+  try {
+    const resolution = requireValidDesktopWorkspaceResolution(
+      await resolveDesktopWorkspace({
+        executorId: ownership.executorId,
+        userId: ownership.actorUserId,
+        capabilityId,
+        repositoryId: repository.id,
+      }),
+    );
+    return resolution.workingDirectoryPath;
+  } catch {
+    return "";
+  }
 };
 
 const ensureLocalBranchCheckedOut = async ({
@@ -119,21 +136,21 @@ const ensureLocalBranchCheckedOut = async ({
   baseBranch: string;
 }) => {
   const existingBranch = await runGit(workspaceRoot, [
-    'rev-parse',
-    '--verify',
-    '--quiet',
+    "rev-parse",
+    "--verify",
+    "--quiet",
     `refs/heads/${branchName}`,
-  ]).catch(() => '');
+  ]).catch(() => "");
 
   if (existingBranch) {
-    await runGit(workspaceRoot, ['switch', branchName]);
+    await runGit(workspaceRoot, ["switch", branchName]);
     return;
   }
 
   try {
-    await runGit(workspaceRoot, ['switch', '-c', branchName, baseBranch]);
+    await runGit(workspaceRoot, ["switch", "-c", branchName, baseBranch]);
   } catch {
-    await runGit(workspaceRoot, ['switch', '-c', branchName]);
+    await runGit(workspaceRoot, ["switch", "-c", branchName]);
   }
 };
 
@@ -145,22 +162,26 @@ const ensureLocalBranchSessionForWorkItem = async ({
   context,
 }: {
   capabilityId: string;
-  workItem: Pick<WorkItem, 'id' | 'title'>;
+  workItem: Pick<WorkItem, "id" | "title">;
   repositories: CapabilityRepository[];
   workspaceRoots?: string[];
   context: string;
 }) => {
   const repository = pickPrimaryRepository(repositories);
   if (!repository) {
-    logSkip(context, 'capability has no git repositories wired');
+    logSkip(context, "capability has no git repositories wired");
     return null;
   }
 
-  const workspaceRoot = resolveLocalWorkspaceRoot({ repository, workspaceRoots });
+  const workspaceRoot = await resolveLocalWorkspaceRoot({
+    capabilityId,
+    repository,
+    workspaceRoots,
+  });
   if (!workspaceRoot) {
     logSkip(
       context,
-      'no local repository root was resolved; set repository localRootHint or exactly one approved workspace root',
+      "no valid desktop workspace mapping was resolved for the current operator on this desktop",
     );
     return null;
   }
@@ -171,10 +192,10 @@ const ensureLocalBranchSessionForWorkItem = async ({
   }
 
   const branchName = buildAgentBranchName(capabilityId, workItem);
-  const baseBranch = String(repository.defaultBranch || '').trim() || 'main';
+  const baseBranch = String(repository.defaultBranch || "").trim() || "main";
   const baseSha =
-    (await runGit(workspaceRoot, ['rev-parse', baseBranch]).catch(() => '')) ||
-    (await runGit(workspaceRoot, ['rev-parse', 'HEAD']).catch(() => ''));
+    (await runGit(workspaceRoot, ["rev-parse", baseBranch]).catch(() => "")) ||
+    (await runGit(workspaceRoot, ["rev-parse", "HEAD"]).catch(() => ""));
 
   const { session } = await createOrReuseAgentBranchSession({
     capabilityId,
@@ -182,35 +203,43 @@ const ensureLocalBranchSessionForWorkItem = async ({
     repositoryId: repository.id,
     repositoryUrl: repository.url,
     baseBranch,
-    baseSha: baseSha || 'UNKNOWN',
+    baseSha: baseSha || "UNKNOWN",
     branchName,
   });
 
   try {
-    await ensureLocalBranchCheckedOut({ workspaceRoot, branchName, baseBranch });
-    const headSha = await runGit(workspaceRoot, ['rev-parse', 'HEAD']).catch(() => null);
+    await ensureLocalBranchCheckedOut({
+      workspaceRoot,
+      branchName,
+      baseBranch,
+    });
+    const headSha = await runGit(workspaceRoot, ["rev-parse", "HEAD"]).catch(
+      () => null,
+    );
     await updateAgentBranchSession({
       sessionId: session.id,
       headSha,
-      status: 'ACTIVE',
+      status: "ACTIVE",
       lastError: null,
     });
 
-    await runGit(workspaceRoot, ['push', '-u', 'origin', branchName]).catch(async error => {
-      await updateAgentBranchSession({
-        sessionId: session.id,
-        status: 'FAILED',
-        lastError:
-          error instanceof Error
-            ? `Local git push failed: ${error.message}`
-            : `Local git push failed: ${String(error)}`,
-      });
-      throw error;
-    });
+    await runGit(workspaceRoot, ["push", "-u", "origin", branchName]).catch(
+      async (error) => {
+        await updateAgentBranchSession({
+          sessionId: session.id,
+          status: "FAILED",
+          lastError:
+            error instanceof Error
+              ? `Local git push failed: ${error.message}`
+              : `Local git push failed: ${String(error)}`,
+        });
+        throw error;
+      },
+    );
 
     await updateAgentBranchSession({
       sessionId: session.id,
-      status: 'ACTIVE',
+      status: "ACTIVE",
       lastError: null,
     });
   } catch (error) {
@@ -220,21 +249,35 @@ const ensureLocalBranchSessionForWorkItem = async ({
   return session.id;
 };
 
-const resolveLocalCommitSelection = ({
+const resolveLocalCommitSelection = async ({
+  capabilityId,
   artifact,
   repository,
   workspaceRoots = [],
   context,
 }: {
+  capabilityId: string;
   artifact: Artifact;
   repository: CapabilityRepository;
   workspaceRoots?: string[];
   context: string;
 }) => {
-  if (artifact.artifactKind === 'CODE_DIFF') {
+  const repoRoot = await resolveLocalWorkspaceRoot({
+    capabilityId,
+    repository,
+    workspaceRoots,
+  });
+  if (!repoRoot) {
+    logSkip(
+      context,
+      "no valid desktop workspace mapping was resolved for the current operator on this desktop",
+    );
+    return null;
+  }
+
+  if (artifact.artifactKind === "CODE_DIFF") {
     const body = (artifact.contentJson || {}) as {
       repositories?: Array<{
-        repoRoot?: string;
         touchedFiles?: string[];
       }>;
     };
@@ -243,20 +286,19 @@ const resolveLocalCommitSelection = ({
       logSkip(
         context,
         repos.length === 0
-          ? 'CODE_DIFF artifact has no repository snapshot for local commit'
+          ? "CODE_DIFF artifact has no repository snapshot for local commit"
           : `CODE_DIFF spans ${repos.length} repos and cannot be committed from one local branch session yet`,
       );
       return null;
     }
 
-    const repoRoot = normalizeDirectoryPath(repos[0].repoRoot || '');
     const touchedFiles = Array.isArray(repos[0].touchedFiles)
       ? repos[0].touchedFiles
-          .map(file => String(file || '').trim())
+          .map((file) => String(file || "").trim())
           .filter(Boolean)
       : [];
-    if (!repoRoot || touchedFiles.length === 0) {
-      logSkip(context, 'CODE_DIFF artifact did not include repoRoot + touchedFiles');
+    if (touchedFiles.length === 0) {
+      logSkip(context, "CODE_DIFF artifact did not include touched files");
       return null;
     }
     return { repoRoot, touchedFiles };
@@ -265,16 +307,13 @@ const resolveLocalCommitSelection = ({
   const payload = (artifact.contentJson || {}) as {
     files?: Array<{ path?: string; oldPath?: string }>;
   };
-  const repoRoot = resolveLocalWorkspaceRoot({ repository, workspaceRoots });
   const touchedFiles = Array.isArray(payload.files)
     ? payload.files
-        .map(file =>
-          String(file.path || file.oldPath || '').trim(),
-        )
+        .map((file) => String(file.path || file.oldPath || "").trim())
         .filter(Boolean)
     : [];
   if (!repoRoot || touchedFiles.length === 0) {
-    logSkip(context, 'CODE_PATCH artifact did not resolve local touched files');
+    logSkip(context, "CODE_PATCH artifact did not resolve local touched files");
     return null;
   }
   return { repoRoot, touchedFiles };
@@ -301,13 +340,19 @@ const commitArtifactToLocalBranchSession = async ({
     return;
   }
 
-  const repository = repositories.find(item => item.id === session.repositoryId);
+  const repository = repositories.find(
+    (item) => item.id === session.repositoryId,
+  );
   if (!repository) {
-    logSkip(context, `repository ${session.repositoryId} was not found on the capability`);
+    logSkip(
+      context,
+      `repository ${session.repositoryId} was not found on the capability`,
+    );
     return;
   }
 
-  const selection = resolveLocalCommitSelection({
+  const selection = await resolveLocalCommitSelection({
+    capabilityId,
     artifact,
     repository,
     workspaceRoots,
@@ -329,40 +374,50 @@ const commitArtifactToLocalBranchSession = async ({
   });
 
   const statusOutput = await runGit(selection.repoRoot, [
-    'status',
-    '--porcelain',
-    '--',
+    "status",
+    "--porcelain",
+    "--",
     ...selection.touchedFiles,
-  ]).catch(() => '');
+  ]).catch(() => "");
   if (!statusOutput.trim()) {
-    logSkip(context, 'no local file changes matched the artifact paths');
+    logSkip(context, "no local file changes matched the artifact paths");
     return;
   }
 
-  await runGit(selection.repoRoot, ['add', '-A', '--', ...selection.touchedFiles]);
+  await runGit(selection.repoRoot, [
+    "add",
+    "-A",
+    "--",
+    ...selection.touchedFiles,
+  ]);
 
   const message =
     (artifact.summary && artifact.summary.trim()) ||
-    `Agent commit for ${session.workItemId} (${artifact.name || artifact.artifactKind || 'change'})`;
+    `Agent commit for ${session.workItemId} (${artifact.name || artifact.artifactKind || "change"})`;
 
   try {
-    await runGit(selection.repoRoot, ['commit', '-m', message]);
+    await runGit(selection.repoRoot, ["commit", "-m", message]);
   } catch (error) {
     const messageText = error instanceof Error ? error.message : String(error);
     if (/nothing to commit|no changes added to commit/i.test(messageText)) {
-      logSkip(context, 'git reported no staged changes to commit');
+      logSkip(context, "git reported no staged changes to commit");
       return;
     }
     throw error;
   }
 
-  const commitSha = await runGit(selection.repoRoot, ['rev-parse', 'HEAD']);
+  const commitSha = await runGit(selection.repoRoot, ["rev-parse", "HEAD"]);
   try {
-    await runGit(selection.repoRoot, ['push', '-u', 'origin', session.branchName]);
+    await runGit(selection.repoRoot, [
+      "push",
+      "-u",
+      "origin",
+      session.branchName,
+    ]);
   } catch (error) {
     await updateAgentBranchSession({
       sessionId,
-      status: 'FAILED',
+      status: "FAILED",
       headSha: commitSha,
       incrementCommits: 1,
       lastCommitMessage: message,
@@ -388,7 +443,7 @@ const commitArtifactToLocalBranchSession = async ({
 
   await updateAgentBranchSession({
     sessionId,
-    status: 'ACTIVE',
+    status: "ACTIVE",
     headSha: commitSha,
     incrementCommits: 1,
     lastCommitMessage: message,
@@ -402,7 +457,7 @@ const commitArtifactToLocalBranchSession = async ({
 
 export interface AutoStartInput {
   capabilityId: string;
-  workItem: Pick<WorkItem, 'id' | 'title'>;
+  workItem: Pick<WorkItem, "id" | "title">;
   repositories: CapabilityRepository[];
   workspaceRoots?: string[];
 }
@@ -421,7 +476,7 @@ export const autoStartSessionForWorkItem = async (
   const context = `start(capability=${input.capabilityId}, workItem=${input.workItem.id})`;
   try {
     if (!input.repositories.length) {
-      logSkip(context, 'capability has no git repositories wired');
+      logSkip(context, "capability has no git repositories wired");
       return;
     }
 
@@ -446,7 +501,7 @@ export const autoStartSessionForWorkItem = async (
     });
 
     if (result.ok === false) {
-      if (result.status === 'AUTH_MISSING') {
+      if (result.status === "AUTH_MISSING") {
         await ensureLocalBranchSessionForWorkItem({
           capabilityId: input.capabilityId,
           workItem: input.workItem,
@@ -461,8 +516,8 @@ export const autoStartSessionForWorkItem = async (
       // conditions; lump the rest together as real failures worth the louder
       // log line.
       if (
-        result.status === 'NO_REPOSITORY' ||
-        result.status === 'RATE_LIMITED'
+        result.status === "NO_REPOSITORY" ||
+        result.status === "RATE_LIMITED"
       ) {
         logSkip(context, `${result.status} — ${result.message}`);
       } else {
@@ -491,7 +546,7 @@ export interface AutoCommitInput {
   capabilityId: string;
   artifact: Artifact;
   /** The work item the artifact belongs to — needed when lazy-creating a session. */
-  workItem: Pick<WorkItem, 'id' | 'title'>;
+  workItem: Pick<WorkItem, "id" | "title">;
   repositories: CapabilityRepository[];
   workspaceRoots?: string[];
 }
@@ -501,7 +556,7 @@ export interface AutoCommitInput {
  * code-change kind (e.g. `CODE_REFACTOR`) only requires extending this
  * type + the dispatch switch below — the session plumbing is shared.
  */
-const COMMITTABLE_KINDS = new Set<string>(['CODE_PATCH', 'CODE_DIFF']);
+const COMMITTABLE_KINDS = new Set<string>(["CODE_PATCH", "CODE_DIFF"]);
 
 /**
  * Find the existing ACTIVE/REVIEWING/FAILED session for the work item, or
@@ -518,7 +573,7 @@ const resolveOrOpenSessionId = async ({
   context,
 }: {
   capabilityId: string;
-  workItem: Pick<WorkItem, 'id' | 'title'>;
+  workItem: Pick<WorkItem, "id" | "title">;
   repositories: CapabilityRepository[];
   workspaceRoots?: string[];
   context: string;
@@ -529,8 +584,10 @@ const resolveOrOpenSessionId = async ({
   });
 
   const reusable = existingSessions.find(
-    s =>
-      s.status === 'ACTIVE' || s.status === 'REVIEWING' || s.status === 'FAILED',
+    (s) =>
+      s.status === "ACTIVE" ||
+      s.status === "REVIEWING" ||
+      s.status === "FAILED",
   );
   if (reusable) return reusable.id;
 
@@ -540,7 +597,7 @@ const resolveOrOpenSessionId = async ({
     repositories,
   });
   if (started.ok === false) {
-    if (started.status === 'AUTH_MISSING') {
+    if (started.status === "AUTH_MISSING") {
       return ensureLocalBranchSessionForWorkItem({
         capabilityId,
         workItem,
@@ -549,7 +606,10 @@ const resolveOrOpenSessionId = async ({
         context,
       });
     }
-    if (started.status === 'NO_REPOSITORY' || started.status === 'RATE_LIMITED') {
+    if (
+      started.status === "NO_REPOSITORY" ||
+      started.status === "RATE_LIMITED"
+    ) {
       logSkip(context, `lazy-start ${started.status} — ${started.message}`);
     } else {
       console.error(
@@ -583,7 +643,10 @@ const extractCodeDiffPatchText = (
   };
   const repos = Array.isArray(body.repositories) ? body.repositories : [];
   if (repos.length === 0) {
-    logSkip(context, 'CODE_DIFF artifact has no repositories array in contentJson');
+    logSkip(
+      context,
+      "CODE_DIFF artifact has no repositories array in contentJson",
+    );
     return null;
   }
   if (repos.length > 1) {
@@ -593,11 +656,11 @@ const extractCodeDiffPatchText = (
     );
     return null;
   }
-  const raw = String(repos[0].patchText || '').trim();
+  const raw = String(repos[0].patchText || "").trim();
   if (!raw) {
     logSkip(
       context,
-      'CODE_DIFF artifact has no patchText — likely a status-only capture with no applied changes',
+      "CODE_DIFF artifact has no patchText — likely a status-only capture with no applied changes",
     );
     return null;
   }
@@ -621,14 +684,20 @@ const extractCodeDiffPatchText = (
 export const autoCommitArtifact = async (
   input: AutoCommitInput,
 ): Promise<void> => {
-  const context = `commit(capability=${input.capabilityId}, artifact=${input.artifact.id}, kind=${input.artifact.artifactKind || 'unknown'})`;
+  const context = `commit(capability=${input.capabilityId}, artifact=${input.artifact.id}, kind=${input.artifact.artifactKind || "unknown"})`;
 
   try {
-    if (!input.artifact.artifactKind || !COMMITTABLE_KINDS.has(input.artifact.artifactKind)) {
+    if (
+      !input.artifact.artifactKind ||
+      !COMMITTABLE_KINDS.has(input.artifact.artifactKind)
+    ) {
       return; // not our concern
     }
     if (!input.artifact.workItemId) {
-      logSkip(context, 'artifact has no workItemId — cannot route to a session');
+      logSkip(
+        context,
+        "artifact has no workItemId — cannot route to a session",
+      );
       return;
     }
     if (input.artifact.workItemId !== input.workItem.id) {
@@ -639,7 +708,7 @@ export const autoCommitArtifact = async (
       return;
     }
     if (!input.repositories.length) {
-      logSkip(context, 'capability has no git repositories wired');
+      logSkip(context, "capability has no git repositories wired");
       return;
     }
 
@@ -670,7 +739,7 @@ export const autoCommitArtifact = async (
       | Awaited<ReturnType<typeof commitPatchArtifactToSession>>
       | Awaited<ReturnType<typeof commitRawPatchToSession>>;
 
-    if (input.artifact.artifactKind === 'CODE_PATCH') {
+    if (input.artifact.artifactKind === "CODE_PATCH") {
       result = await commitPatchArtifactToSession({
         capabilityId: input.capabilityId,
         sessionId,
@@ -682,7 +751,7 @@ export const autoCommitArtifact = async (
       if (!patchText) return;
       const message =
         (input.artifact.summary && input.artifact.summary.trim()) ||
-        `Agent commit for ${input.workItem.id} (${input.artifact.name || 'code diff'})`;
+        `Agent commit for ${input.workItem.id} (${input.artifact.name || "code diff"})`;
       result = await commitRawPatchToSession({
         capabilityId: input.capabilityId,
         sessionId,
@@ -694,8 +763,11 @@ export const autoCommitArtifact = async (
     }
 
     if (result.ok === false) {
-      if (result.status === 'AUTH_MISSING' || result.status === 'RATE_LIMITED') {
-        if (result.status === 'AUTH_MISSING') {
+      if (
+        result.status === "AUTH_MISSING" ||
+        result.status === "RATE_LIMITED"
+      ) {
+        if (result.status === "AUTH_MISSING") {
           await commitArtifactToLocalBranchSession({
             capabilityId: input.capabilityId,
             sessionId,

@@ -103,6 +103,7 @@ import { registerRuntimeChatRoutes } from './routes/runtimeChat';
 import { registerAgentGitRoutes } from './routes/agentGit';
 import { registerWorkItemRoutes } from './routes/workItems';
 import { registerWorkflowRunRoutes } from './routes/workflowRuns';
+import { registerStoryProposalRoutes } from './routes/storyProposals';
 import { registerPassportRoutes } from './routes/passport';
 import { registerBlastRadiusRoutes } from './routes/blastRadius';
 import { registerSentinelRoutes } from './routes/sentinel';
@@ -902,6 +903,9 @@ registerWorkItemRoutes(app, {
   inspectCodeWorkspace,
   parseActor,
   runGitCommand,
+});
+registerStoryProposalRoutes(app, {
+  parseActorContext,
 });
 registerWorkflowRunRoutes(app, {
   parseActor,

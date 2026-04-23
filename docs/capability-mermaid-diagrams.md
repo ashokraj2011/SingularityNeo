@@ -3,6 +3,7 @@
 This document gives you high-level Mermaid diagrams for the main product ideas in Singulairy.
 
 The diagrams are intentionally layered:
+
 - Level 0: enterprise and collection view
 - Level 1: capability operating model
 - Level 2: workflow design view
@@ -176,7 +177,9 @@ stateDiagram-v2
 
 ## 7. Work Item Collaboration With Shared Branch
 
-This view matches the newer multiuser model: the work item is the shared object, not a single local workspace.
+This view matches the newer multiuser model: the work item is the shared
+object, not a single local workspace. For repo-backed work, the shared
+branch name is the exact `workItem.id`.
 
 ```mermaid
 flowchart LR
@@ -200,6 +203,43 @@ flowchart LR
   UA -. "take control / write claim" .-> BR
   UB -. "review / guide / approve" .-> WI
   HO -. "transfer context" .-> UB
+```
+
+## 7a. User-Scoped Desktop Workspace Resolution
+
+This shows how local execution paths are resolved now: per operator, per
+desktop, with repository mappings taking precedence over the capability
+fallback.
+
+```mermaid
+flowchart TD
+  OP["Current Operator"]
+  EX["Desktop Executor"]
+  CAP["Capability"]
+  REPO["Repository (optional)"]
+
+  MAP1["Desktop mapping
+  (executor + user + capability + repository)"]
+  MAP2["Desktop fallback
+  (executor + user + capability)"]
+  ROOT["Validated local root"]
+  WD["Working directory
+  inside local root"]
+  CLAIM["Claim / branch / local git execution"]
+
+  OP --> MAP1
+  EX --> MAP1
+  CAP --> MAP1
+  REPO --> MAP1
+
+  OP --> MAP2
+  EX --> MAP2
+  CAP --> MAP2
+
+  MAP1 -->|preferred| ROOT
+  MAP2 -->|fallback| ROOT
+  ROOT --> WD
+  WD --> CLAIM
 ```
 
 ## 8. Developer Cockpit / Workbench
@@ -237,12 +277,15 @@ sequenceDiagram
   participant Chat
   participant Context as "Capability Context"
   participant Runtime as "Desktop Runtime / Agent"
+  participant Map as "Desktop Workspaces"
   participant Tools
   participant Feed as "Interaction Timeline"
   participant Learn as "Learning Engine"
 
   User->>Chat: "Why did WI-104 fail?"
   Chat->>Context: Resolve work item, run, branch, stage
+  Context->>Map: Resolve local root + working directory for current operator
+  Map-->>Context: Validated desktop-local path
   Context->>Runtime: Send briefing + work item logs + tool traces
   Runtime->>Tools: Inspect relevant tool output if needed
   Tools-->>Runtime: Build/test/log results

@@ -52,45 +52,16 @@ import type { ParsedRepo } from './session';
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
 
-const slugify = (value: string, maxLen = 40): string =>
-  value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, maxLen) || 'work-item';
-
-/**
- * Git-ref-safe slug for a capability id. Capability ids are usually
- * already url-safe, but we pass them through `slugify` to be defensive
- * and clip to a short prefix — the capability segment is only there to
- * disambiguate across capabilities that share a repo, so 24 chars of
- * entropy is plenty.
- */
-const slugifyCapabilityId = (capabilityId: string): string =>
-  slugify(capabilityId, 24);
-
 /**
  * Construct the session branch name.
  *
- * Branch layout: `agent/cap-<capSlug>/wi-<wiId>-<titleSlug>`
- *
- * The `cap-<capSlug>` segment prevents cross-capability branch collision
- * when two capabilities point at the same GitHub repo AND have work
- * items with colliding (id, titleSlug) pairs. Without it, both would
- * target the same remote ref and interleave each other's commits.
- * Slashes inside a ref are valid git syntax (namespaced refs).
+ * Work-item execution uses the literal work item id as the branch name so
+ * local checkouts, desktop runtime, and GitHub all speak the same ref.
  */
 const buildBranchName = (
-  capabilityId: string,
+  _capabilityId: string,
   workItem: Pick<WorkItem, 'id' | 'title'>,
-): string => {
-  const capSlug = slugifyCapabilityId(capabilityId);
-  const titleSlug = slugify(workItem.title || workItem.id);
-  // Lowercase id for readability; keep each segment short so the whole
-  // ref fits comfortably into PR titles + git reflog lines.
-  return `agent/cap-${capSlug}/wi-${workItem.id.toLowerCase()}-${titleSlug}`;
-};
+): string => String(workItem.id || '').trim();
 
 export const buildAgentBranchName = buildBranchName;
 

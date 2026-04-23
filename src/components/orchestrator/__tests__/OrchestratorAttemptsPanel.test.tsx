@@ -109,6 +109,8 @@ describe('OrchestratorAttemptsPanel', () => {
         agentsById={agentsById}
         getRunEventTone={() => 'info'}
         getRunEventLabel={() => 'Info'}
+        liveStreamingText=""
+        recentlyChangedFiles={[]}
       />
       </MemoryRouter>,
     );

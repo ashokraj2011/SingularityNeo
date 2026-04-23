@@ -42,6 +42,17 @@ import { getCompletedWorkOrderEvidence } from './ledger';
 import { buildWorkItemFlightRecorderDetail } from './flightRecorder';
 import { invokeCapabilityChat, requestGitHubModel } from './githubModels';
 import { buildWorkItemRuntimeBriefing } from './chatWorkspace';
+import {
+  compactApprovalDeterministicSummary,
+  buildBudgetedSectionPrompt,
+  resolveTokenOptimizationPolicy,
+} from './tokenOptimization';
+import {
+  createTraceId,
+  finishTelemetrySpan,
+  recordUsageMetrics,
+  startTelemetrySpan,
+} from './telemetry';
 
 const createId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
@@ -484,39 +495,104 @@ const buildApprovalAiSummary = async ({
   wait: RunWait;
   packetDeterministic: ApprovalStructuredPacket['deterministic'];
 }): Promise<ApprovalStructuredPacketAiSummary> => {
+  const providerKey = agent?.providerKey || agent?.provider;
+  const tokenPolicy = resolveTokenOptimizationPolicy(capability);
+  const compactDeterministic = compactApprovalDeterministicSummary({
+    deterministic: packetDeterministic,
+    excerptMaxChars: tokenPolicy.approvalExcerptMaxChars,
+  });
+  const systemPrompt =
+    'You are an approval packet synthesizer. Read the deterministic approval packet context and return strict JSON only.';
+  const userPrompt = buildBudgetedSectionPrompt({
+    protectedFragments: [
+      {
+        source: 'SYSTEM_CORE',
+        text: systemPrompt,
+      },
+    ],
+    promptFragments: [
+      {
+        source: 'WORK_ITEM_BRIEFING',
+        text: [
+          `Capability: ${capability.name}`,
+          `Work item: ${workItem.title}`,
+          `Approval wait: ${wait.message}`,
+          '',
+          'Return JSON with this shape:',
+          '{"summary":"...","topRisks":["..."],"missingEvidence":["..."],"disagreements":["..."],"suggestedClarifications":["..."]}',
+          '',
+          'Rules:',
+          '- summary must be 2-3 concise sentences',
+          '- topRisks should contain 2-5 concrete risks',
+          '- missingEvidence should contain only gaps supported by the deterministic context',
+          '- disagreements should summarize unresolved reviewer concerns or requested changes',
+          '- suggestedClarifications should be concise reviewer prompts',
+          '- do not invent facts or artifacts that are not present',
+        ].join('\n'),
+      },
+      {
+        source: 'APPROVAL_PACKET',
+        text: `Deterministic approval packet context:\n${JSON.stringify(compactDeterministic, null, 2)}`,
+      },
+    ],
+    maxInputTokens: tokenPolicy.approvalSynthesisMaxInputTokens,
+    providerKey,
+    model: agent?.model,
+  });
+  const traceId = createTraceId();
+  const span = await startTelemetrySpan({
+    capabilityId: capability.id,
+    traceId,
+    entityType: 'APPROVAL',
+    entityId: wait.id,
+    name: `Approval synthesis: ${workItem.title}`,
+    status: 'RUNNING',
+    model: agent?.model,
+    attributes: {
+      waitId: wait.id,
+      runId: wait.runId,
+      stage: 'approval_synthesis',
+    },
+  });
+
   try {
     const response = await requestGitHubModel({
       model: agent?.model,
-      providerKey: agent?.providerKey || agent?.provider,
+      providerKey,
       messages: [
         {
           role: 'system',
-          content:
-            'You are an approval packet synthesizer. Read the deterministic approval packet context and return strict JSON only.',
+          content: systemPrompt,
         },
         {
           role: 'user',
-          content: [
-            `Capability: ${capability.name}`,
-            `Work item: ${workItem.title}`,
-            `Approval wait: ${wait.message}`,
-            '',
-            'Return JSON with this shape:',
-            '{"summary":"...","topRisks":["..."],"missingEvidence":["..."],"disagreements":["..."],"suggestedClarifications":["..."]}',
-            '',
-            'Rules:',
-            '- summary must be 2-3 concise sentences',
-            '- topRisks should contain 2-5 concrete risks',
-            '- missingEvidence should contain only gaps supported by the deterministic context',
-            '- disagreements should summarize unresolved reviewer concerns or requested changes',
-            '- suggestedClarifications should be concise reviewer prompts',
-            '- do not invent facts or artifacts that are not present',
-            '',
-            JSON.stringify(packetDeterministic, null, 2),
-          ].join('\n'),
+          content: userPrompt.prompt,
         },
       ],
       timeoutMs: 30_000,
+    });
+    await finishTelemetrySpan({
+      capabilityId: capability.id,
+      spanId: span.id,
+      status: 'OK',
+      costUsd: response.usage.estimatedCostUsd,
+      tokenUsage: response.usage,
+      attributes: {
+        stage: 'approval_synthesis',
+        promptReceipt: userPrompt.receipt,
+      },
+    });
+    await recordUsageMetrics({
+      capabilityId: capability.id,
+      traceId,
+      scopeType: 'APPROVAL',
+      scopeId: wait.id,
+      totalTokens: response.usage.totalTokens,
+      costUsd: response.usage.estimatedCostUsd,
+      tags: {
+        model: response.model,
+        stage: 'approval_synthesis',
+      },
     });
 
     const parsed = parseJsonObject<{
@@ -551,6 +627,16 @@ const buildApprovalAiSummary = async ({
       suggestedClarifications: dedupeStrings(parsed.suggestedClarifications || [], 5),
     };
   } catch (error) {
+    await finishTelemetrySpan({
+      capabilityId: capability.id,
+      spanId: span.id,
+      status: 'ERROR',
+      attributes: {
+        stage: 'approval_synthesis',
+        promptReceipt: userPrompt.receipt,
+        error: error instanceof Error ? error.message : 'AI synthesis failed unexpectedly.',
+      },
+    }).catch(() => undefined);
     return {
       status: 'ERROR',
       topRisks: [],

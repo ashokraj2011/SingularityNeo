@@ -13,7 +13,12 @@ import type {
   MemorySourceType,
   MemoryStoreTier,
 } from '../src/types';
-import { getPlatformFeatureState, query, transaction } from './db';
+import {
+  getMemoryRetrievalDiagnostics,
+  getPlatformFeatureState,
+  query,
+  transaction,
+} from './db';
 import { getCapabilityBundle } from './repository';
 import { getAgentLearningProfile, queueAgentLearningJob } from './agentLearning/repository';
 import {
@@ -26,6 +31,10 @@ import {
   DEFAULT_EMBEDDING_PROVIDER_KEY,
   HASH_EMBEDDING_PROVIDER_KEY,
 } from './providerRegistry';
+import {
+  buildBudgetedMemoryPrompt,
+  resolveTokenOptimizationPolicy,
+} from './tokenOptimization';
 import { getWorkspaceFileIndex } from './workspaceIndex';
 
 const EMBEDDING_DIMENSIONS = getPlatformFeatureState().memoryEmbeddingDimensions;
@@ -283,6 +292,33 @@ const cosineSimilarity = (left: number[], right: number[]) => {
   return dot / magnitude;
 };
 
+const resolveMemorySearchDiagnostics = ({
+  embeddingProviderKey,
+  fallbackReason,
+}: {
+  embeddingProviderKey: EmbeddingProviderKey;
+  fallbackReason?: string;
+}) => {
+  const baseline = getMemoryRetrievalDiagnostics();
+  if (embeddingProviderKey === HASH_EMBEDDING_PROVIDER_KEY) {
+    return {
+      retrievalMode: 'deterministic-hash' as const,
+      pgvectorAvailable: getPlatformFeatureState().pgvectorAvailable,
+      embeddingConfigured: baseline.embeddingConfigured,
+      embeddingProviderKey,
+      fallbackReason:
+        fallbackReason || baseline.fallbackReason || 'Using deterministic hash retrieval fallback.',
+    };
+  }
+  return {
+    retrievalMode: baseline.retrievalMode,
+    pgvectorAvailable: getPlatformFeatureState().pgvectorAvailable,
+    embeddingConfigured: baseline.embeddingConfigured,
+    embeddingProviderKey,
+    fallbackReason: fallbackReason || baseline.fallbackReason,
+  };
+};
+
 const scoreMemoryCandidate = ({
   queryText,
   queryEmbedding,
@@ -320,6 +356,7 @@ const documentFromRow = (row: Record<string, any>): MemoryDocument => ({
   freshness: row.freshness || undefined,
   metadata: row.metadata || undefined,
   contentPreview: row.content_preview,
+  isGlobal: Boolean(row.is_global),
   createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
   updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
 });
@@ -440,6 +477,7 @@ const upsertMemoryDocument = async ({
   freshness,
   metadata,
   contentPreview,
+  isGlobal,
   vectorModel,
   chunks,
 }: {
@@ -454,6 +492,8 @@ const upsertMemoryDocument = async ({
   freshness?: MemoryDocument['freshness'];
   metadata?: Record<string, any>;
   contentPreview: string;
+  /** When true, this document is visible to every capability (global memory). */
+  isGlobal?: boolean;
   vectorModel: string;
   chunks: MemoryRefreshChunkPlan[];
 }) => {
@@ -471,9 +511,10 @@ const upsertMemoryDocument = async ({
         freshness,
         metadata,
         content_preview,
+        is_global,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
       ON CONFLICT (capability_id, id) DO UPDATE SET
         title = EXCLUDED.title,
         source_type = EXCLUDED.source_type,
@@ -483,6 +524,7 @@ const upsertMemoryDocument = async ({
         freshness = EXCLUDED.freshness,
         metadata = EXCLUDED.metadata,
         content_preview = EXCLUDED.content_preview,
+        is_global = EXCLUDED.is_global,
         updated_at = NOW()
     `,
     [
@@ -496,6 +538,7 @@ const upsertMemoryDocument = async ({
       freshness || null,
       metadata || {},
       contentPreview,
+      Boolean(isGlobal),
     ],
   );
 
@@ -1060,7 +1103,7 @@ export const listMemoryDocuments = async (
     `
       SELECT *
       FROM capability_memory_documents
-      WHERE capability_id = $1
+      WHERE (capability_id = $1 OR is_global = TRUE)
       ORDER BY updated_at DESC, id DESC
     `,
     [capabilityId],
@@ -1069,6 +1112,10 @@ export const listMemoryDocuments = async (
   return result.rows
     .map(documentFromRow)
     .filter(document => {
+      // Global documents are visible to all — bypass the per-agent filter.
+      if (document.isGlobal) {
+        return true;
+      }
       if (sourceFilter === null) {
         return true;
       }
@@ -1122,7 +1169,7 @@ export const searchCapabilityMemory = async ({
       JOIN capability_memory_embeddings embeddings
         ON embeddings.capability_id = chunks.capability_id
        AND embeddings.chunk_id = chunks.id
-      WHERE docs.capability_id = $1
+      WHERE (docs.capability_id = $1 OR docs.is_global = TRUE)
       ORDER BY docs.updated_at DESC, chunks.chunk_index ASC
     `,
     [capabilityId],
@@ -1143,6 +1190,10 @@ export const searchCapabilityMemory = async ({
         content: `${document.title}\n${document.contentPreview}\n${chunk.content}`,
         embedding,
       });
+      const diagnostics = resolveMemorySearchDiagnostics({
+        embeddingProviderKey: queryEmbeddingResult.providerKey,
+        fallbackReason: queryEmbeddingResult.fallbackReason,
+      });
 
       return {
         reference: {
@@ -1159,12 +1210,21 @@ export const searchCapabilityMemory = async ({
         } satisfies MemoryReference,
         document,
         chunk,
-        embeddingProviderKey: queryEmbeddingResult.providerKey,
+        embeddingProviderKey: diagnostics.embeddingProviderKey,
+        embeddingConfigured: diagnostics.embeddingConfigured,
+        retrievalMode: diagnostics.retrievalMode,
+        pgvectorAvailable: diagnostics.pgvectorAvailable,
+        fallbackReason: diagnostics.fallbackReason,
         vectorModel: String(record.vector_model || queryEmbeddingResult.model || ''),
       };
     })
     .sort((left, right) => (right.reference.rerankScore || 0) - (left.reference.rerankScore || 0))
     .filter(item => {
+      // Global documents bypass per-agent source filters — they are
+      // intentionally visible to every capability and agent.
+      if (item.document.isGlobal) {
+        return true;
+      }
       if (sourceFilter === null) {
         return true;
       }
@@ -1236,7 +1296,7 @@ export const getCapabilityMemoryCorpus = async (
       LEFT JOIN capability_memory_chunks chunks
         ON chunks.capability_id = docs.capability_id
        AND chunks.document_id = docs.id
-      WHERE docs.capability_id = $1
+      WHERE (docs.capability_id = $1 OR docs.is_global = TRUE)
       ORDER BY docs.updated_at DESC, docs.id DESC, chunks.chunk_index ASC
     `,
     [capabilityId],
@@ -1254,7 +1314,8 @@ export const getCapabilityMemoryCorpus = async (
   result.rows.forEach(row => {
     const record = row as Record<string, any>;
     const document = documentFromRow(record);
-    if (sourceFilter && !sourceFilter.has(document.id)) {
+    // Global documents bypass per-agent source filters.
+    if (!document.isGlobal && sourceFilter && !sourceFilter.has(document.id)) {
       return;
     }
 
@@ -1306,17 +1367,113 @@ export const buildMemoryContext = async ({
     });
   }
 
+  const capabilityBundle = await getCapabilityBundle(capabilityId).catch(() => null);
+  const tokenPolicy = resolveTokenOptimizationPolicy(capabilityBundle?.capability);
+  const agentProviderKey =
+    capabilityBundle?.workspace.agents.find(candidate => candidate.id === agentId)?.providerKey ||
+    capabilityBundle?.workspace.agents.find(candidate => candidate.id === agentId)?.provider;
+  const agentModel =
+    capabilityBundle?.workspace.agents.find(candidate => candidate.id === agentId)?.model;
   const results = await searchCapabilityMemory({ capabilityId, agentId, queryText, limit });
   return {
     results,
-    prompt:
-      results.length > 0
-        ? results
-            .map(
-              (result, index) =>
-                `[Memory ${index + 1}] ${result.document.title} (${result.document.sourceType}, ${result.document.tier})\n${result.chunk.content}`,
-            )
-            .join('\n\n')
-        : '',
+    prompt: buildBudgetedMemoryPrompt({
+      results,
+      providerKey: agentProviderKey,
+      model: agentModel,
+      maxPromptTokens: tokenPolicy.memoryPromptMaxTokens,
+      perChunkMaxTokens: tokenPolicy.memoryChunkMaxTokens,
+    }),
+  };
+};
+
+/**
+ * Persist a memory document that is globally visible to every capability.
+ *
+ * The `capabilityId` parameter identifies the writing capability (provenance);
+ * the document's chunks and embeddings are stored under that capability so
+ * the standard JOIN conditions continue to work without schema changes to the
+ * child tables.
+ *
+ * Only capabilities whose `executionConfig.globalMemory.canWrite` is `true`
+ * should call this function — callers are responsible for checking that guard
+ * before invoking.
+ */
+export const writeGlobalMemoryDocument = async ({
+  capabilityId,
+  title,
+  content,
+  sourceType,
+  tier,
+  sourceId,
+  sourceUri,
+  freshness,
+  metadata,
+}: {
+  capabilityId: string;
+  title: string;
+  content: string;
+  sourceType: MemorySourceType;
+  tier: MemoryStoreTier;
+  sourceId?: string;
+  sourceUri?: string;
+  freshness?: MemoryDocument['freshness'];
+  metadata?: Record<string, any>;
+}): Promise<MemoryDocument> => {
+  const id = createMemoryDocumentId(capabilityId, sourceType, sourceId || slugify(title));
+  const contentPreview = content.slice(0, 500);
+
+  // Build a single chunk for the full content.
+  const embeddingResult = await embedTexts([normalizeText(content) || content]);
+  const vectorModel = embeddingResult.model;
+  const vector = embeddingResult.vectors[0] || hashEmbedText(content);
+  const chunkId = `${id}-C0`;
+  const tokenEstimate = Math.ceil(content.length / 4);
+
+  const chunks: MemoryRefreshChunkPlan[] = [
+    {
+      id: chunkId,
+      embeddingId: `EMB-${chunkId}`,
+      chunkIndex: 0,
+      content,
+      tokenEstimate,
+      metadata: {},
+      embedding: vector,
+    },
+  ];
+
+  await transaction(async executor => {
+    await upsertMemoryDocument({
+      executor,
+      capabilityId,
+      id,
+      title,
+      sourceType,
+      tier,
+      sourceId,
+      sourceUri,
+      freshness,
+      metadata,
+      contentPreview,
+      isGlobal: true,
+      vectorModel,
+      chunks,
+    });
+  });
+
+  return {
+    id,
+    capabilityId,
+    title,
+    sourceType,
+    tier,
+    sourceId,
+    sourceUri,
+    freshness,
+    metadata,
+    contentPreview,
+    isGlobal: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   };
 };

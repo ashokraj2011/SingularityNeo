@@ -8,6 +8,12 @@ vi.mock('../db', () => ({
     pgvectorAvailable: false,
     memoryEmbeddingDimensions: 4,
   }),
+  getMemoryRetrievalDiagnostics: () => ({
+    retrievalMode: 'deterministic-hash',
+    embeddingConfigured: false,
+    embeddingProviderKey: 'deterministic-hash',
+    fallbackReason: 'Local embedding provider is not configured.',
+  }),
   query: vi.fn(),
   transaction: vi.fn(async callback => callback({ query: transactionExecutorQueryMock })),
 }));
@@ -272,6 +278,8 @@ describe('memory retrieval hardening', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]?.embeddingProviderKey).toBe('deterministic-hash');
+    expect(results[0]?.retrievalMode).toBe('deterministic-hash');
+    expect(results[0]?.pgvectorAvailable).toBe(false);
     expect(results[0]?.reference.retrievalMethod).toBe('BLENDED');
   });
 
@@ -293,6 +301,7 @@ describe('memory retrieval hardening', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]?.embeddingProviderKey).toBe('deterministic-hash');
+    expect(results[0]?.retrievalMode).toBe('deterministic-hash');
     expect(results[0]?.vectorModel).toBe('stored-vector-model');
   });
 

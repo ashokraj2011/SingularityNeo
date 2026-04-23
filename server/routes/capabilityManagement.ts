@@ -48,7 +48,11 @@ import {
   refreshCapabilityCopilotGuidance,
 } from '../repoGuidance';
 import { refreshCapabilityCodeIndex } from '../codeIndex/ingest';
-import { readCodeIndexSnapshot, searchCodeSymbols } from '../codeIndex/query';
+import {
+  readBlastRadiusSymbolGraph,
+  readCodeIndexSnapshot,
+  searchCodeSymbols,
+} from '../codeIndex/query';
 import { buildCodePatchPayload } from '../patch/validate';
 
 type WorkspacePatchBody = Partial<
@@ -359,6 +363,38 @@ export const registerCapabilityManagementRoutes = (
       }
       response.json(
         await searchCodeSymbols(request.params.capabilityId, q, { limit, kind }),
+      );
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.get('/api/capabilities/:capabilityId/code-index/blast-radius', async (request, response) => {
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.read',
+      });
+      const filePath = String(request.query?.filePath || '').trim();
+      const symbolId = String(request.query?.symbolId || '').trim();
+      const maxDepthRaw = Number.parseInt(String(request.query?.maxDepth || ''), 10);
+      const maxDepth = Number.isFinite(maxDepthRaw) ? maxDepthRaw : undefined;
+      const maxNodesRaw = Number.parseInt(String(request.query?.maxNodes || ''), 10);
+      const maxNodes = Number.isFinite(maxNodesRaw) ? maxNodesRaw : undefined;
+      if (!filePath && !symbolId) {
+        response.status(400).json({
+          error: 'filePath or symbolId query parameter is required.',
+        });
+        return;
+      }
+      response.json(
+        await readBlastRadiusSymbolGraph(request.params.capabilityId, {
+          filePath,
+          symbolId,
+          maxDepth,
+          maxNodes,
+        }),
       );
     } catch (error) {
       sendApiError(response, error);

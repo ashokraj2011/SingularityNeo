@@ -336,6 +336,15 @@ export const OrchestratorInboxPanel = ({
                       <StatusBadge tone={getStatusTone(entry.item.status)}>
                         {getStatusLabel(entry.item.status)}
                       </StatusBadge>
+                      {entry.item.storyPoints ? (
+                        <StatusBadge tone="neutral">{entry.item.storyPoints} pts</StatusBadge>
+                      ) : null}
+                      {entry.item.tShirtSize ? (
+                        <StatusBadge tone="neutral">{entry.item.tShirtSize}</StatusBadge>
+                      ) : null}
+                      {entry.item.parentWorkItemId ? (
+                        <StatusBadge tone="info">Child story</StatusBadge>
+                      ) : null}
                       {attention?.attentionLabel ? (
                         <StatusBadge tone="warning">{attention.attentionLabel}</StatusBadge>
                       ) : null}

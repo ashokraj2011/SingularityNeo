@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { StatusBadge } from '../EnterpriseUI';
 import { formatEnumLabel } from '../../lib/enterprise';
+import { cn } from '../../lib/utils';
 import { formatTimestamp } from '../../lib/orchestrator/support';
 import type { WorkItem, WorkflowRun, WorkflowRunStep, Workflow } from '../../types';
 
@@ -71,10 +72,6 @@ export const OrchestratorFailureRecoveryPanel = ({
   if (!isRunFailed && !isBlocked) return null;
 
   const tone = isRunFailed ? 'danger' : 'warning';
-  const borderColour = isRunFailed
-    ? 'border-red-200/80'
-    : 'border-amber-200/80';
-  const bgColour = isRunFailed ? 'bg-red-50/60' : 'bg-amber-50/60';
   const kicker = isRunFailed ? 'Run failed' : 'Execution blocked';
   const stepName = selectedCurrentStep?.name || failedRunStep?.name || null;
   const attemptCount = failedRunStep?.attemptCount ?? currentRun?.attemptNumber ?? null;
@@ -83,7 +80,12 @@ export const OrchestratorFailureRecoveryPanel = ({
 
   return (
     <div
-      className={`mx-4 mb-0 mt-3 rounded-[1.5rem] border px-5 py-4 ${borderColour} ${bgColour}`}
+      className={cn(
+        'mx-4 mb-0 mt-3 rounded-[1.5rem] border px-5 py-4',
+        isRunFailed
+          ? 'border-red-200/80 bg-red-50/60'
+          : 'border-amber-200/80 bg-amber-50/60',
+      )}
       aria-label="Failure recovery panel"
     >
       {/* ── Header row ──────────────────────────────────────── */}
@@ -117,7 +119,7 @@ export const OrchestratorFailureRecoveryPanel = ({
           ) : null}
           {attemptCount !== null && attemptCount > 1 ? (
             <StatusBadge tone={tone}>
-              {attemptCount} step attempt{attemptCount !== 1 ? 's' : ''}
+              {attemptCount} step attempts
             </StatusBadge>
           ) : null}
           {failedAt ? (

@@ -1,27 +1,18 @@
 /**
- * Lightweight Java symbol extraction.
+ * Java symbol extraction.
  *
- * We don't ship tree-sitter (native binding) or a full grammar like
- * java-parser (heavy). For "where is class X defined / where is method
- * Y declared" lookups a brace-depth walker over comment-and-string
- * stripped source is accurate enough:
+ * Preferred path: invoke a tiny helper backed by the JDK compiler AST
+ * so nested types, constructors, record members, and multiline
+ * signatures all get proper structural boundaries.
  *
- *   - Top-level: class / interface / enum / record / @interface
- *   - Inside a type body (depth 1): methods + fields + constructor
- *   - Imports + package → emitted as IMPORTS references
- *
- * Same `ParsedSourceFile` shape as the TS parser, so ingest.ts just
- * dispatches on file extension and every downstream table /query
- * stays untouched.
- *
- * Known gaps (acceptable for v1):
- *   - Nested inner classes aren't emitted (depth-1 only).
- *   - Annotations that span multiple lines can confuse the method-line
- *     detector; we fall back to "no symbol" rather than false-positive.
- *   - Generic methods where `<T>` appears before the return type parse
- *     correctly; lambdas and records' compact constructors are
- *     deliberately skipped.
+ * Fallback path: retain the prior brace-depth scanner so indexing still
+ * works on machines where `java` / `javac` is unavailable.
  */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import type { CapabilityCodeSymbolKind } from '../../src/types';
 import type {
   ExtractedReference,
@@ -30,6 +21,226 @@ import type {
 } from './parse';
 
 const SIGNATURE_CLIP = 240;
+const JAVA_AST_CLASS_NAME = 'JavaAstExtractor';
+const JAVA_AST_SOURCE_PATH = fileURLToPath(
+  new URL('./parsers/JavaAstExtractor.java', import.meta.url),
+);
+const JAVA_AST_BUILD_ROOT = path.join(os.tmpdir(), 'singularityneo-java-ast');
+const JAVA_AST_CLASS_FILE = path.join(
+  JAVA_AST_BUILD_ROOT,
+  `${JAVA_AST_CLASS_NAME}.class`,
+);
+
+type JavaAstPayload = {
+  symbols?: Array<{
+    symbolName?: string;
+    kind?: ExtractedSymbol['kind'];
+    parentSymbol?: string | null;
+    qualifiedSymbolName?: string | null;
+    startLine?: number;
+    endLine?: number;
+    sliceStartLine?: number;
+    sliceEndLine?: number;
+    signature?: string;
+    isExported?: boolean;
+  }>;
+  references?: Array<{
+    toModule?: string;
+    kind?: ExtractedReference['kind'];
+  }>;
+};
+
+let cachedJavaCommand: string | null | undefined;
+let cachedJavacCommand: string | null | undefined;
+let javaAstCompilationReady: boolean | null = null;
+
+const resolveJavaHomeBinary = (binaryName: string) => {
+  const javaHome = String(process.env.JAVA_HOME || '').trim();
+  if (!javaHome) return '';
+  return path.join(
+    javaHome,
+    'bin',
+    process.platform === 'win32' ? `${binaryName}.exe` : binaryName,
+  );
+};
+
+const getJavaCandidates = () => {
+  const configured = String(
+    process.env.SINGULARITY_JAVA_BIN || process.env.JAVA_BIN || '',
+  ).trim();
+  return Array.from(
+    new Set(
+      [
+        configured,
+        cachedJavaCommand || '',
+        resolveJavaHomeBinary('java'),
+        process.platform === 'win32' ? 'java.exe' : 'java',
+      ].filter(Boolean),
+    ),
+  );
+};
+
+const getJavacCandidates = () => {
+  const configured = String(
+    process.env.SINGULARITY_JAVAC_BIN || process.env.JAVAC_BIN || '',
+  ).trim();
+  return Array.from(
+    new Set(
+      [
+        configured,
+        cachedJavacCommand || '',
+        resolveJavaHomeBinary('javac'),
+        process.platform === 'win32' ? 'javac.exe' : 'javac',
+      ].filter(Boolean),
+    ),
+  );
+};
+
+const clip = (raw: string): string => {
+  const collapsed = raw.replace(/\s+/g, ' ').trim();
+  return collapsed.length > SIGNATURE_CLIP
+    ? `${collapsed.slice(0, SIGNATURE_CLIP - 1)}…`
+    : collapsed;
+};
+
+const ensureJavaAstHelperCompiled = (): boolean => {
+  const sourceStat = fs.statSync(JAVA_AST_SOURCE_PATH);
+
+  if (javaAstCompilationReady === true && fs.existsSync(JAVA_AST_CLASS_FILE)) {
+    const classStat = fs.statSync(JAVA_AST_CLASS_FILE);
+    if (classStat.mtimeMs >= sourceStat.mtimeMs) {
+      return true;
+    }
+  }
+
+  fs.mkdirSync(JAVA_AST_BUILD_ROOT, { recursive: true });
+
+  let needsCompile = true;
+  if (fs.existsSync(JAVA_AST_CLASS_FILE)) {
+    const classStat = fs.statSync(JAVA_AST_CLASS_FILE);
+    needsCompile = classStat.mtimeMs < sourceStat.mtimeMs;
+  }
+  if (!needsCompile) {
+    javaAstCompilationReady = true;
+    return true;
+  }
+
+  for (const command of getJavacCandidates()) {
+    const result = spawnSync(
+      command,
+      [
+        '--add-modules',
+        'jdk.compiler',
+        '-d',
+        JAVA_AST_BUILD_ROOT,
+        JAVA_AST_SOURCE_PATH,
+      ],
+      {
+        encoding: 'utf8',
+        maxBuffer: 4 * 1024 * 1024,
+        timeout: 30_000,
+      },
+    );
+
+    if (result.error) {
+      if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
+        continue;
+      }
+      continue;
+    }
+    if (typeof result.status === 'number' && result.status === 0) {
+      cachedJavacCommand = command;
+      javaAstCompilationReady = true;
+      return true;
+    }
+  }
+
+  javaAstCompilationReady = false;
+  return false;
+};
+
+const parseWithJavaAst = (
+  filePath: string,
+  rawContent: string,
+): ParsedSourceFile | null => {
+  if (!ensureJavaAstHelperCompiled()) {
+    return null;
+  }
+
+  for (const command of getJavaCandidates()) {
+    const result = spawnSync(
+      command,
+      [
+        '--add-modules',
+        'jdk.compiler',
+        '-cp',
+        JAVA_AST_BUILD_ROOT,
+        JAVA_AST_CLASS_NAME,
+        filePath,
+      ],
+      {
+        input: rawContent,
+        encoding: 'utf8',
+        maxBuffer: 8 * 1024 * 1024,
+        timeout: 15_000,
+      },
+    );
+
+    if (result.error) {
+      if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
+        continue;
+      }
+      continue;
+    }
+    if (typeof result.status === 'number' && result.status !== 0) {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(String(result.stdout || '{}')) as JavaAstPayload;
+      cachedJavaCommand = command;
+      return {
+        symbols: (parsed.symbols || [])
+          .filter(symbol => symbol?.symbolName && symbol?.kind)
+          .map(symbol => {
+            const startLine = Math.max(1, Number(symbol.startLine) || 1);
+            const endLine = Math.max(startLine, Number(symbol.endLine) || startLine);
+            return {
+              symbolName: String(symbol.symbolName || ''),
+              kind: symbol.kind as ExtractedSymbol['kind'],
+              parentSymbol: String(symbol.parentSymbol || '').trim() || undefined,
+              qualifiedSymbolName:
+                String(symbol.qualifiedSymbolName || '').trim() || undefined,
+              startLine,
+              endLine,
+              sliceStartLine:
+                Math.max(startLine, Number(symbol.sliceStartLine) || startLine),
+              sliceEndLine:
+                Math.max(
+                  Math.max(startLine, Number(symbol.sliceStartLine) || startLine),
+                  Number(symbol.sliceEndLine) || endLine,
+                ),
+              signature: clip(String(symbol.signature || '')),
+              isExported: Boolean(symbol.isExported),
+            };
+          }),
+        references: (parsed.references || [])
+          .filter(reference => reference?.toModule)
+          .map(reference => ({
+            toModule: String(reference.toModule || '').trim(),
+            kind:
+              String(reference.kind || '').trim() === 'REEXPORTS'
+                ? 'REEXPORTS'
+                : 'IMPORTS',
+          })),
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+};
 
 /**
  * Replace every comment / string / char-literal character with a space
@@ -44,7 +255,6 @@ const scrub = (source: string): string => {
     const c = source[i];
     const next = i + 1 < n ? source[i + 1] : '';
 
-    // Line comment
     if (c === '/' && next === '/') {
       while (i < n && source[i] !== '\n') {
         out.push(' ');
@@ -52,7 +262,6 @@ const scrub = (source: string): string => {
       }
       continue;
     }
-    // Block comment (also covers /** javadoc */)
     if (c === '/' && next === '*') {
       out.push(' ', ' ');
       i += 2;
@@ -66,7 +275,6 @@ const scrub = (source: string): string => {
       }
       continue;
     }
-    // Text block `"""..."""` (Java 15+)
     if (
       c === '"' &&
       next === '"' &&
@@ -88,7 +296,6 @@ const scrub = (source: string): string => {
       }
       continue;
     }
-    // String literal
     if (c === '"') {
       out.push(' ');
       i++;
@@ -107,7 +314,6 @@ const scrub = (source: string): string => {
       }
       continue;
     }
-    // Char literal
     if (c === "'") {
       out.push(' ');
       i++;
@@ -133,18 +339,6 @@ const scrub = (source: string): string => {
   return out.join('');
 };
 
-const clip = (raw: string): string => {
-  const collapsed = raw.replace(/\s+/g, ' ').trim();
-  return collapsed.length > SIGNATURE_CLIP
-    ? `${collapsed.slice(0, SIGNATURE_CLIP - 1)}…`
-    : collapsed;
-};
-
-/**
- * Walk forward from `startLine` (0-indexed) and return the 1-indexed
- * line number of the matching closing brace. Falls back to `startLine + 1`
- * if the block never closes (malformed source).
- */
 const findBlockEnd = (scrubbedLines: string[], startLine: number): number => {
   let depth = 0;
   let opened = false;
@@ -168,26 +362,16 @@ const RESERVED_KEYWORDS = new Set([
   'break', 'continue',
 ]);
 
-// Type declaration at the start of a (trimmed) line.
-// Capture group 1: kind literal. Capture group 2: name.
 const TYPE_DECL_RE =
   /\b(class|interface|enum|record|@interface)\s+([A-Z_][\w$]*)/;
-
-// Simple method detector: requires modifiers or annotation before name OR
-// a constructor-style `UpperName(` at line start. Captures method name.
-// We deliberately require `(` on the same line to avoid matching local
-// variables with call-site `method(...)` patterns.
 const METHOD_DECL_RE =
   /^(?:@\w[\w.]*(?:\([^)]*\))?\s+)*(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)+(?:<[^>]+>\s+)?(?:[A-Za-z_][\w.<>,\s\[\]?&]*\s+)?([A-Za-z_][\w$]*)\s*\(/;
 const CONSTRUCTOR_DECL_RE =
   /^(?:@\w[\w.]*(?:\([^)]*\))?\s+)*(?:public|private|protected)?\s*([A-Z][\w$]*)\s*\(/;
-
-// Field: no parens, ends with `=`, `;`, or `,` (multi-decl), with type+name pair.
 const FIELD_DECL_RE =
   /^(?:@\w[\w.]*(?:\([^)]*\))?\s+)*(?:(?:public|private|protected|static|final|volatile|transient)\s+)+(?:[A-Za-z_][\w.<>,\s\[\]?&]*\s+)([A-Za-z_][\w$]*)\s*[=;,]/;
 
-export const extractSymbolsFromJavaSource = (
-  filePath: string,
+const extractSymbolsFromJavaHeuristicSource = (
   rawContent: string,
 ): ParsedSourceFile => {
   const scrubbed = scrub(rawContent);
@@ -197,18 +381,15 @@ export const extractSymbolsFromJavaSource = (
   const symbols: ExtractedSymbol[] = [];
   const references: ExtractedReference[] = [];
 
-  // Imports — cheap separate pass.
   for (const line of lines) {
-    const m = line.match(
+    const match = line.match(
       /^\s*import\s+(?:static\s+)?([a-zA-Z_][\w.]*(?:\.\*)?)\s*;/,
     );
-    if (m) references.push({ toModule: m[1], kind: 'IMPORTS' });
+    if (match) references.push({ toModule: match[1], kind: 'IMPORTS' });
   }
 
-  // Pass 2: type declarations + members with brace-depth tracking.
   let depth = 0;
   let currentTypeName: string | null = null;
-  /** Remember the most recent top-level type declaration whose `{` hasn't been consumed yet. */
   let pendingTypeName: string | null = null;
 
   for (let i = 0; i < lines.length; i++) {
@@ -223,7 +404,7 @@ export const extractSymbolsFromJavaSource = (
         let kind: CapabilityCodeSymbolKind;
         if (kindRaw === 'interface' || kindRaw === '@interface') kind = 'interface';
         else if (kindRaw === 'enum') kind = 'enum';
-        else kind = 'class'; // class | record
+        else kind = 'class';
         const endLine = findBlockEnd(lines, i);
         symbols.push({
           symbolName: name,
@@ -236,8 +417,6 @@ export const extractSymbolsFromJavaSource = (
         pendingTypeName = name;
       }
     } else if (depth === 1 && currentTypeName) {
-      // Inside a top-level type body — extract member declarations.
-      // Annotation-only line: no-op, let subsequent non-annotation line match.
       if (trimmed && !trimmed.startsWith('@') && !trimmed.startsWith('//')) {
         const methodMatch = trimmed.match(METHOD_DECL_RE);
         if (methodMatch && !RESERVED_KEYWORDS.has(methodMatch[1])) {
@@ -287,7 +466,6 @@ export const extractSymbolsFromJavaSource = (
       }
     }
 
-    // Update depth from this line's brace count.
     for (const c of line) {
       if (c === '{') {
         depth++;
@@ -308,3 +486,10 @@ export const extractSymbolsFromJavaSource = (
 
   return { symbols, references };
 };
+
+export const extractSymbolsFromJavaSource = (
+  filePath: string,
+  rawContent: string,
+): ParsedSourceFile =>
+  parseWithJavaAst(filePath, rawContent) ||
+  extractSymbolsFromJavaHeuristicSource(rawContent);

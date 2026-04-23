@@ -1,8 +1,11 @@
 import { Pool, PoolClient, QueryResult } from 'pg';
 import type {
+  EmbeddingProviderKey,
+  MemoryRetrievalMode,
   WorkspaceDatabaseBootstrapConfig,
   WorkspaceDatabaseBootstrapStatus,
 } from '../src/types';
+import { isLocalOpenAIConfigured } from './localOpenAIProvider';
 
 type RuntimeDatabaseConfig = Required<
   Omit<WorkspaceDatabaseBootstrapConfig, 'password'>
@@ -43,6 +46,36 @@ const createRuntimeDatabaseConfig = (
 const MEMORY_EMBEDDING_DIMENSIONS = 64;
 const platformFeatureState = {
   pgvectorAvailable: false,
+};
+
+export const getMemoryRetrievalDiagnostics = (): {
+  retrievalMode: MemoryRetrievalMode;
+  embeddingConfigured: boolean;
+  embeddingProviderKey: EmbeddingProviderKey;
+  fallbackReason?: string;
+} => {
+  const embeddingConfigured = isLocalOpenAIConfigured();
+  if (!embeddingConfigured) {
+    return {
+      retrievalMode: 'deterministic-hash',
+      embeddingConfigured: false,
+      embeddingProviderKey: 'deterministic-hash',
+      fallbackReason: 'Local embedding provider is not configured.',
+    };
+  }
+  if (platformFeatureState.pgvectorAvailable) {
+    return {
+      retrievalMode: 'pgvector',
+      embeddingConfigured: true,
+      embeddingProviderKey: 'local-openai',
+    };
+  }
+  return {
+    retrievalMode: 'json-cosine',
+    embeddingConfigured: true,
+    embeddingProviderKey: 'local-openai',
+    fallbackReason: 'pgvector is not available; using JSON cosine retrieval fallback.',
+  };
 };
 
 let runtimeDatabaseConfig = createRuntimeDatabaseConfig();
@@ -323,6 +356,19 @@ export const schemaStatements = [
       approved_workspace_roots JSONB NOT NULL DEFAULT '{}'::jsonb,
       runtime_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
       heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS desktop_user_workspace_mappings (
+      id TEXT PRIMARY KEY,
+      executor_id TEXT NOT NULL REFERENCES desktop_executor_registrations(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES workspace_users(id) ON DELETE CASCADE,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      repository_id TEXT,
+      local_root_path TEXT NOT NULL,
+      working_directory_path TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
@@ -781,6 +827,12 @@ export const schemaStatements = [
       title TEXT NOT NULL,
       description TEXT NOT NULL,
       task_type TEXT,
+      parent_work_item_id TEXT,
+      story_points INTEGER,
+      t_shirt_size TEXT,
+      sizing_confidence TEXT,
+      planning_batch_id TEXT,
+      planning_proposal_item_id TEXT,
       phase_stakeholders JSONB NOT NULL DEFAULT '[]'::jsonb,
       phase TEXT NOT NULL,
       phase_owner_team_id TEXT,
@@ -802,6 +854,79 @@ export const schemaStatements = [
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_story_proposal_batches (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source_prompt TEXT,
+      selected_workflow_id TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      assumptions JSONB NOT NULL DEFAULT '[]'::jsonb,
+      dependencies JSONB NOT NULL DEFAULT '[]'::jsonb,
+      risks JSONB NOT NULL DEFAULT '[]'::jsonb,
+      sizing_policy TEXT NOT NULL,
+      generated_by_agent_id TEXT,
+      generation_mode TEXT NOT NULL DEFAULT 'FALLBACK',
+      planning_artifacts JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_by_user_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_story_proposal_items (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      batch_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      item_type TEXT NOT NULL,
+      parent_item_id TEXT,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      business_outcome TEXT,
+      acceptance_criteria JSONB NOT NULL DEFAULT '[]'::jsonb,
+      dependencies JSONB NOT NULL DEFAULT '[]'::jsonb,
+      risks JSONB NOT NULL DEFAULT '[]'::jsonb,
+      recommended_workflow_id TEXT NOT NULL,
+      recommended_task_type TEXT,
+      story_points INTEGER,
+      t_shirt_size TEXT,
+      sizing_confidence TEXT,
+      sizing_rationale TEXT,
+      implementation_notes TEXT,
+      tags TEXT[] NOT NULL DEFAULT '{}',
+      review_state TEXT NOT NULL DEFAULT 'PROPOSED',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      promoted_work_item_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, batch_id, id),
+      FOREIGN KEY (capability_id, batch_id)
+        REFERENCES capability_story_proposal_batches(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_story_proposal_decisions (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      batch_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      item_id TEXT,
+      disposition TEXT NOT NULL,
+      actor_user_id TEXT,
+      actor_display_name TEXT NOT NULL,
+      note TEXT,
+      field_changes JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, batch_id, id),
+      FOREIGN KEY (capability_id, batch_id)
+        REFERENCES capability_story_proposal_batches(capability_id, id)
+        ON DELETE CASCADE
     )
   `,
   `
@@ -861,6 +986,23 @@ export const schemaStatements = [
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, work_item_id, user_id, repository_id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS desktop_work_item_checkout_sessions (
+      executor_id TEXT NOT NULL REFERENCES desktop_executor_registrations(id) ON DELETE CASCADE,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      work_item_id TEXT NOT NULL,
+      user_id TEXT NOT NULL REFERENCES workspace_users(id) ON DELETE CASCADE,
+      repository_id TEXT NOT NULL,
+      local_path TEXT,
+      working_directory_path TEXT,
+      branch TEXT NOT NULL,
+      last_seen_head_sha TEXT,
+      last_synced_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (executor_id, capability_id, work_item_id, user_id, repository_id)
     )
   `,
   `
@@ -1445,11 +1587,17 @@ export const schemaStatements = [
       capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
       repository_id TEXT NOT NULL,
       file_path TEXT NOT NULL,
+      symbol_id TEXT,
+      container_symbol_id TEXT,
       symbol_name TEXT NOT NULL,
+      qualified_symbol_name TEXT,
       kind TEXT NOT NULL,
+      language TEXT,
       parent_symbol TEXT,
       start_line INTEGER NOT NULL,
       end_line INTEGER NOT NULL,
+      slice_start_line INTEGER,
+      slice_end_line INTEGER,
       signature TEXT NOT NULL DEFAULT '',
       is_exported BOOLEAN NOT NULL DEFAULT FALSE,
       sha TEXT,
@@ -1479,6 +1627,42 @@ export const schemaStatements = [
   `
     CREATE INDEX IF NOT EXISTS idx_capability_code_references_to
       ON capability_code_references (capability_id, to_module)
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_code_symbol_edges (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      repository_id TEXT NOT NULL,
+      from_symbol_id TEXT NOT NULL,
+      to_symbol_id TEXT NOT NULL,
+      from_file_path TEXT NOT NULL,
+      to_file_path TEXT NOT NULL,
+      edge_kind TEXT NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (
+        capability_id,
+        repository_id,
+        from_symbol_id,
+        to_symbol_id,
+        edge_kind
+      )
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_capability_code_symbol_edges_from
+      ON capability_code_symbol_edges (capability_id, from_symbol_id)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_capability_code_symbol_edges_to
+      ON capability_code_symbol_edges (capability_id, to_symbol_id)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_capability_code_symbol_edges_files
+      ON capability_code_symbol_edges (
+        capability_id,
+        repository_id,
+        from_file_path,
+        to_file_path
+      )
   `,
   `
     CREATE TABLE IF NOT EXISTS capability_code_index_runs (
@@ -1565,6 +1749,78 @@ export const schemaStatements = [
 ];
 
 export const migrationStatements = [
+  `
+    ALTER TABLE capability_code_symbols
+    ADD COLUMN IF NOT EXISTS symbol_id TEXT
+  `,
+  `
+    ALTER TABLE capability_code_symbols
+    ADD COLUMN IF NOT EXISTS container_symbol_id TEXT
+  `,
+  `
+    ALTER TABLE capability_code_symbols
+    ADD COLUMN IF NOT EXISTS qualified_symbol_name TEXT
+  `,
+  `
+    ALTER TABLE capability_code_symbols
+    ADD COLUMN IF NOT EXISTS language TEXT
+  `,
+  `
+    ALTER TABLE capability_code_symbols
+    ADD COLUMN IF NOT EXISTS slice_start_line INTEGER
+  `,
+  `
+    ALTER TABLE capability_code_symbols
+    ADD COLUMN IF NOT EXISTS slice_end_line INTEGER
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_capability_code_symbols_qualified_search
+      ON capability_code_symbols (capability_id, qualified_symbol_name)
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_code_symbol_edges (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      repository_id TEXT NOT NULL,
+      from_symbol_id TEXT NOT NULL,
+      to_symbol_id TEXT NOT NULL,
+      from_file_path TEXT NOT NULL DEFAULT '',
+      to_file_path TEXT NOT NULL DEFAULT '',
+      edge_kind TEXT NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (
+        capability_id,
+        repository_id,
+        from_symbol_id,
+        to_symbol_id,
+        edge_kind
+      )
+    )
+  `,
+  `
+    ALTER TABLE capability_code_symbol_edges
+    ADD COLUMN IF NOT EXISTS from_file_path TEXT
+  `,
+  `
+    ALTER TABLE capability_code_symbol_edges
+    ADD COLUMN IF NOT EXISTS to_file_path TEXT
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_capability_code_symbol_edges_from
+      ON capability_code_symbol_edges (capability_id, from_symbol_id)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_capability_code_symbol_edges_to
+      ON capability_code_symbol_edges (capability_id, to_symbol_id)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS idx_capability_code_symbol_edges_files
+      ON capability_code_symbol_edges (
+        capability_id,
+        repository_id,
+        from_file_path,
+        to_file_path
+      )
+  `,
   `
     CREATE TABLE IF NOT EXISTS capability_workspace_write_locks (
       capability_id TEXT PRIMARY KEY REFERENCES capabilities(id) ON DELETE CASCADE,
@@ -1857,6 +2113,30 @@ export const migrationStatements = [
   `
     ALTER TABLE capability_work_items
     ADD COLUMN IF NOT EXISTS task_type TEXT
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS parent_work_item_id TEXT
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS story_points INTEGER
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS t_shirt_size TEXT
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS sizing_confidence TEXT
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS planning_batch_id TEXT
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS planning_proposal_item_id TEXT
   `,
   `
     ALTER TABLE capability_work_item_handoff_packets
@@ -2202,6 +2482,30 @@ export const migrationStatements = [
   `
     CREATE INDEX IF NOT EXISTS desktop_executor_registrations_heartbeat_idx
     ON desktop_executor_registrations (heartbeat_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS desktop_user_workspace_mappings_lookup_idx
+    ON desktop_user_workspace_mappings (executor_id, user_id, capability_id, repository_id, updated_at DESC)
+  `,
+  `
+    CREATE UNIQUE INDEX IF NOT EXISTS desktop_user_workspace_mappings_repo_unique_idx
+    ON desktop_user_workspace_mappings (executor_id, user_id, capability_id, repository_id)
+    WHERE repository_id IS NOT NULL
+  `,
+  `
+    CREATE UNIQUE INDEX IF NOT EXISTS desktop_user_workspace_mappings_capability_unique_idx
+    ON desktop_user_workspace_mappings (executor_id, user_id, capability_id)
+    WHERE repository_id IS NULL
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS desktop_work_item_checkout_sessions_recent_idx
+    ON desktop_work_item_checkout_sessions (
+      executor_id,
+      capability_id,
+      work_item_id,
+      user_id,
+      updated_at DESC
+    )
   `,
   `
     CREATE INDEX IF NOT EXISTS capability_repositories_primary_idx
@@ -2724,6 +3028,7 @@ export const getDatabaseRuntimeInfo = () => ({
   adminDatabaseName: runtimeDatabaseConfig.adminDatabaseName,
   passwordConfigured: Boolean(runtimeDatabaseConfig.password),
   pgvectorAvailable: platformFeatureState.pgvectorAvailable,
+  ...getMemoryRetrievalDiagnostics(),
   lastConnectionError: lastDatabaseConnectionError || undefined,
 });
 

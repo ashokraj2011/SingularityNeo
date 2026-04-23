@@ -109,8 +109,13 @@ describe('buildRuntimeStatus', () => {
       databaseName: 'sing5',
       user: 'postgres',
       adminDatabaseName: 'postgres',
+      retrievalMode: 'deterministic-hash',
+      embeddingConfigured: false,
+      embeddingProviderKey: 'deterministic-hash',
     });
     expect(status.activeDatabaseProfileId).toBe('DBP-SING5');
     expect(status.activeDatabaseProfileLabel).toBe('sing5 @ 127.0.0.1:5432');
+    expect(status.retrievalMode).toBe('deterministic-hash');
+    expect(status.fallbackReason).toContain('Local embedding provider is not configured');
   });
 });

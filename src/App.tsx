@@ -26,6 +26,8 @@ const Operations = lazy(() => import('./pages/Operations'));
 const Incidents = lazy(() => import('./pages/Incidents'));
 const ModelRiskMonitoring = lazy(() => import('./pages/ModelRiskMonitoring'));
 const ApprovalWorkspace = lazy(() => import('./pages/ApprovalWorkspace'));
+const PlanningHub = lazy(() => import('./pages/PlanningHub'));
+const StoryProposalWorkspace = lazy(() => import('./pages/StoryProposalWorkspace'));
 const ArtifactDesigner = lazy(() => import('./pages/ArtifactDesigner'));
 const CapabilitySetup = lazy(() => import('./pages/CapabilitySetup'));
 const CapabilityMetadata = lazy(() => import('./pages/CapabilityMetadata'));
@@ -109,6 +111,11 @@ export default function App() {
                   <Route path="/operations" element={<Operations />} />
                   <Route path="/incidents" element={<Incidents />} />
                   <Route path="/mrm" element={<ModelRiskMonitoring />} />
+                  <Route path="/planning" element={<PlanningHub />} />
+                  <Route
+                    path="/planning/:capabilityId/story-proposals"
+                    element={<StoryProposalWorkspace />}
+                  />
                   <Route path="/artifact-designer" element={<ArtifactDesigner />} />
                   <Route path="/capabilities/new" element={<CapabilitySetup />} />
                   <Route path="/capabilities/metadata" element={<CapabilityMetadata />} />

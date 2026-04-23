@@ -130,6 +130,26 @@ export const OrchestratorWorkbenchDetailHeader = ({
           'No description was captured when this work item was staged into execution.'}
       </p>
       <div className="mt-3 flex flex-wrap gap-2 text-xs text-secondary">
+        {selectedWorkItem.storyPoints ? (
+          <span className="rounded-full bg-surface-container px-3 py-1">
+            Story points: {selectedWorkItem.storyPoints}
+          </span>
+        ) : null}
+        {selectedWorkItem.tShirtSize ? (
+          <span className="rounded-full bg-surface-container px-3 py-1">
+            T-shirt size: {selectedWorkItem.tShirtSize}
+          </span>
+        ) : null}
+        {selectedWorkItem.parentWorkItemId ? (
+          <span className="rounded-full bg-surface-container px-3 py-1">
+            Parent epic: {selectedWorkItem.parentWorkItemId}
+          </span>
+        ) : null}
+        {selectedWorkItem.planningBatchId ? (
+          <span className="rounded-full bg-surface-container px-3 py-1">
+            Planned in {selectedWorkItem.planningBatchId}
+          </span>
+        ) : null}
         {selectedPhaseOwnerTeamName ? (
           <span className="rounded-full bg-surface-container px-3 py-1">
             Phase owner team: {selectedPhaseOwnerTeamName}

@@ -70,6 +70,8 @@ export const buildRuntimeStatus = async () => {
       ? DEFAULT_EMBEDDING_PROVIDER_KEY
       : 'deterministic-hash',
     embeddingConfigured: localProviderConfigured,
+    retrievalMode: databaseRuntime.retrievalMode,
+    fallbackReason: databaseRuntime.fallbackReason || null,
     availableProviders: [
       {
         key: DEFAULT_PROVIDER_KEY,

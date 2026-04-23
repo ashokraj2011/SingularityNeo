@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { ExternalLink, ScrollText } from 'lucide-react';
+import { ExternalLink, FileCode2, ScrollText, Sparkles } from 'lucide-react';
 import { formatEnumLabel, getStatusTone } from '../../lib/enterprise';
 import { AdvancedDisclosure } from '../WorkspaceUI';
 import {
@@ -36,6 +36,10 @@ type Props = {
   agentsById: Map<string, CapabilityAgent>;
   getRunEventTone: (event: RunEvent) => React.ComponentProps<typeof StatusBadge>['tone'];
   getRunEventLabel: (event: RunEvent) => string;
+  /** Concatenated LLM token-delta text for the current run (Fix 4 streaming). */
+  liveStreamingText: string;
+  /** Deduplicated file paths written during the current run (Fix 4 file changes). */
+  recentlyChangedFiles: string[];
 };
 
 export const OrchestratorAttemptsPanel = ({
@@ -54,6 +58,8 @@ export const OrchestratorAttemptsPanel = ({
   agentsById,
   getRunEventTone,
   getRunEventLabel,
+  liveStreamingText,
+  recentlyChangedFiles,
 }: Props) => (
   <div className="space-y-4">
     <div className="grid gap-3 sm:grid-cols-2">
@@ -188,6 +194,47 @@ export const OrchestratorAttemptsPanel = ({
           <p className="workspace-meta-value">{selectedRunHistory.length} runs</p>
         </div>
       </div>
+
+      {/* ── Real-time LLM reasoning stream ──────────────────── */}
+      {liveStreamingText.length > 0 ? (
+        <div className="mt-4 workspace-meta-card">
+          <div className="flex items-start gap-2">
+            <Sparkles size={14} className="mt-0.5 shrink-0 text-primary" />
+            <p className="workspace-meta-label">Live reasoning stream</p>
+          </div>
+          <p className="mt-2 rounded-xl bg-surface-variant/40 px-3 py-2 font-mono text-[0.72rem] leading-relaxed text-on-surface">
+            {/* Show the most recent 600 characters so the card doesn't balloon. */}
+            {liveStreamingText.length > 600
+              ? `…${liveStreamingText.slice(-600)}`
+              : liveStreamingText}
+          </p>
+        </div>
+      ) : null}
+
+      {/* ── Files changed this run ───────────────────────────── */}
+      {recentlyChangedFiles.length > 0 ? (
+        <div className="mt-4 workspace-meta-card">
+          <div className="flex items-start gap-2">
+            <FileCode2 size={14} className="mt-0.5 shrink-0 text-primary" />
+            <p className="workspace-meta-label">Files changed this run</p>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {recentlyChangedFiles.map(filePath => (
+              <span
+                key={filePath}
+                className="rounded-full border border-outline-variant/40 bg-white px-3 py-1 font-mono text-[0.7rem] text-on-surface"
+                title={filePath}
+              >
+                {filePath.includes('/') ? filePath.split('/').pop() : filePath}
+              </span>
+            ))}
+          </div>
+          <p className="mt-2 text-[0.68rem] text-secondary">
+            {recentlyChangedFiles.length} file{recentlyChangedFiles.length !== 1 ? 's' : ''} written ·{' '}
+            hover a pill to see the full path
+          </p>
+        </div>
+      ) : null}
 
       <div className="mt-4 workspace-meta-card">
         <div className="flex flex-wrap items-start justify-between gap-3">

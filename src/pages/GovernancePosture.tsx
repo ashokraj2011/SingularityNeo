@@ -5,7 +5,9 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Coins,
   Clock,
+  Cpu,
   ExternalLink,
   FileBadge,
   Gauge,
@@ -22,8 +24,14 @@ import {
   StatTile,
   StatusBadge,
 } from '../components/EnterpriseUI';
-import { fetchGovernancePosture } from '../lib/api';
-import type { GovernancePostureSnapshot } from '../types';
+import {
+  fetchGovernanceCostAllocationSnapshot,
+  fetchGovernancePosture,
+} from '../lib/api';
+import type {
+  GovernanceCostAllocationSnapshot,
+  GovernancePostureSnapshot,
+} from '../types';
 
 /**
  * Slice 5 — governance posture dashboard.
@@ -59,6 +67,20 @@ const formatPercent = (ratio: number | null | undefined) => {
 const formatInt = (value: number | null | undefined) =>
   typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '—';
 
+const formatTokens = (value: number | null | undefined) => {
+  const numeric = Number(value || 0);
+  if (!numeric) return '—';
+  if (numeric >= 1_000_000) return `${(numeric / 1_000_000).toFixed(1)}M`;
+  if (numeric >= 1_000) return `${(numeric / 1_000).toFixed(1)}k`;
+  return numeric.toLocaleString();
+};
+
+const formatUsd = (value: number | null | undefined) => {
+  const numeric = Number(value || 0);
+  if (!numeric) return '—';
+  return numeric < 0.01 ? '<$0.01' : `$${numeric.toFixed(numeric >= 1 ? 2 : 4)}`;
+};
+
 const FRAMEWORK_LABELS: Record<string, string> = {
   NIST_CSF_2: 'NIST CSF 2.0',
   SOC2_TSC: 'SOC 2 TSC',
@@ -77,6 +99,9 @@ const STATUS_TONE: Record<string, 'success' | 'warning' | 'danger' | 'neutral'> 
 
 export default function GovernancePosture() {
   const [snapshot, setSnapshot] = useState<GovernancePostureSnapshot | null>(null);
+  const [costAllocation, setCostAllocation] = useState<GovernanceCostAllocationSnapshot | null>(
+    null,
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -96,8 +121,12 @@ export default function GovernancePosture() {
     else setRefreshing(true);
     setError(null);
     try {
-      const result = await fetchGovernancePosture();
-      setSnapshot(result);
+      const [posture, cost] = await Promise.all([
+        fetchGovernancePosture(),
+        fetchGovernanceCostAllocationSnapshot(7).catch(() => null),
+      ]);
+      setSnapshot(posture);
+      setCostAllocation(cost);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load posture');
     } finally {
@@ -250,6 +279,95 @@ export default function GovernancePosture() {
               tone={provenanceTone}
             />
           </div>
+
+          <SectionCard
+            title="Governance / Cost Allocation"
+            description="Prompt-receipt usage over the last seven days, grouped by capability and agent so leadership can see where model budget is being consumed."
+            icon={Cpu}
+          >
+            {!costAllocation || costAllocation.rows.length === 0 ? (
+              <EmptyState
+                title="No prompt allocation data yet"
+                description="Once workflow, chat, or approval spans land with prompt receipts and token usage, the weekly allocation table will render here."
+                icon={Coins}
+              />
+            ) : (
+              <div className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-3">
+                  <StatTile
+                    label={`${costAllocation.windowDays}d tokens`}
+                    value={formatTokens(costAllocation.totalTokens)}
+                    helper={`${formatInt(costAllocation.rows.length)} agent lanes`}
+                    icon={Cpu}
+                    tone="info"
+                  />
+                  <StatTile
+                    label={`${costAllocation.windowDays}d cost`}
+                    value={formatUsd(costAllocation.totalCostUsd)}
+                    helper={`${formatInt(costAllocation.capabilityCount)} capabilities tracked`}
+                    icon={Coins}
+                    tone="warning"
+                  />
+                  <StatTile
+                    label="Snapshot"
+                    value={formatDateTime(costAllocation.generatedAt)}
+                    helper="Grouped directly from telemetry spans"
+                    icon={Clock}
+                    tone="neutral"
+                  />
+                </div>
+
+                <div className="overflow-x-auto rounded-2xl border border-outline-variant/40">
+                  <table className="min-w-full divide-y divide-outline-variant/20 text-sm">
+                    <thead className="bg-surface-container-low text-left text-[0.68rem] font-bold uppercase tracking-[0.16em] text-secondary">
+                      <tr>
+                        <th className="px-4 py-3">Capability</th>
+                        <th className="px-4 py-3">Agent</th>
+                        <th className="px-4 py-3 text-right">Tokens</th>
+                        <th className="px-4 py-3 text-right">Prompt</th>
+                        <th className="px-4 py-3 text-right">Completion</th>
+                        <th className="px-4 py-3 text-right">Cost</th>
+                        <th className="px-4 py-3">Stages</th>
+                        <th className="px-4 py-3">Last seen</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-outline-variant/10 bg-white">
+                      {costAllocation.rows.map(row => (
+                        <tr key={`${row.capabilityId}:${row.agentId}`}>
+                          <td className="px-4 py-3 align-top">
+                            <div className="font-semibold text-on-surface">{row.capabilityName}</div>
+                            <code className="text-[0.72rem] text-secondary">{row.capabilityId}</code>
+                          </td>
+                          <td className="px-4 py-3 align-top">
+                            <div className="font-semibold text-on-surface">{row.agentName}</div>
+                            <code className="text-[0.72rem] text-secondary">{row.agentId}</code>
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono">{formatTokens(row.totalTokens)}</td>
+                          <td className="px-4 py-3 text-right font-mono text-secondary">{formatTokens(row.promptTokens)}</td>
+                          <td className="px-4 py-3 text-right font-mono text-secondary">{formatTokens(row.completionTokens)}</td>
+                          <td className="px-4 py-3 text-right font-mono">{formatUsd(row.totalCostUsd)}</td>
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap gap-2">
+                              {row.stages.length > 0 ? (
+                                row.stages.map(stage => (
+                                  <StatusBadge key={stage} tone="neutral">
+                                    {stage.replace(/_/g, ' ')}
+                                  </StatusBadge>
+                                ))
+                              ) : (
+                                <span className="text-secondary">—</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-secondary">{formatDateTime(row.lastSeenAt)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </SectionCard>
 
           <SectionCard
             title="Control coverage by framework"

@@ -7,6 +7,10 @@ This guide documents the recommended split when Singularity is used across two m
 
 It is the right setup when the shared system of record should live on a server, but the operator experience and Copilot runtime should live on the user's workstation.
 
+This guide also documents the current local-workspace rule: execution paths
+are resolved from **user-scoped desktop mappings**, not from shared
+capability metadata.
+
 ## Current Architecture Boundary
 
 Today, the platform is split like this:
@@ -30,6 +34,26 @@ Important current limitation:
 - automated workflow execution is still server-owned today
 
 That means the server still needs runtime access for background execution until the execution worker is moved fully to desktop mode.
+
+## Desktop Workspace Authority
+
+For local execution, SingularityNeo now treats the laptop as the authority
+for local roots and working directories.
+
+- shared capability metadata can still hold repository labels, default
+  branches, and local-root hints
+- the runtime does **not** claim, inspect, branch, or execute against those
+  paths directly
+- instead, the current operator on the current desktop saves validated
+  mappings in `Operations` → `Desktop Workspaces`
+
+Resolution precedence is:
+
+1. `(executor, user, capability, repository)`
+2. `(executor, user, capability)` fallback
+3. no metadata fallback
+
+`working_directory_path` must stay inside `local_root_path`.
 
 ## Recommended Topology
 
@@ -65,6 +89,8 @@ Use the laptop for:
 - Electron desktop app
 - local runtime integration
 - direct chat with agents
+- Desktop Workspaces configuration for this operator on this machine
+- validated local roots and working directories
 - future local execution ownership
 
 ## Server Machine Setup
@@ -149,6 +175,19 @@ GITHUB_MODELS_TOKEN="github_pat_..."
 
 In the split deployment model, the laptop does not need the Postgres variables if it is not running Express locally.
 
+### First-time desktop setup
+
+After the Electron shell connects:
+
+1. choose the current operator in the top bar
+2. open `Operations`
+3. go to `Desktop Workspaces`
+4. save a local root and optional working directory for each repo-backed
+   capability repository you plan to run here
+
+Repository mappings win over the capability fallback row. Saved mappings are
+scoped to this operator on this desktop only.
+
 ### Start Commands
 
 Foreground Electron start:
@@ -222,6 +261,8 @@ npm run desktop:down
 - runtime token handling
 - direct agent chat
 - streamed agent chat
+- desktop workspace validation
+- local branch / checkout setup for repo-backed work
 
 ## Current Important Caveat
 
@@ -236,6 +277,19 @@ So for the current version:
 
 - the laptop owns direct Copilot chat
 - the server still needs runtime configuration for automated runs
+- claim and local branch setup still depend on a validated desktop mapping on
+  the laptop
+
+## Branch Standard
+
+For work-item-owned repo flows, branch naming is now fixed:
+
+- branch name = exact `workItem.id`
+- base branch = repository default branch
+- local commit flow pushes `origin workItem.id`
+
+This keeps the local checkout, execution context, agent session, and remote
+push path aligned to one identifier.
 
 The target architecture is:
 
@@ -260,6 +314,23 @@ Check on the laptop:
 
 - `COPILOT_CLI_URL`
 - or `GITHUB_MODELS_TOKEN`
+
+### Claim fails because no approved local workspace roots are available
+
+This usually means the current operator has not saved a valid Desktop
+Workspaces mapping for this capability on this desktop.
+
+Check:
+
+- the correct operator is selected in the top bar
+- the Electron desktop has connected and published an executor id
+- `Operations` → `Desktop Workspaces` contains a row for the capability or
+  repository
+- the local root still exists on disk
+- the working directory, if set, is inside the local root
+
+If the repo path changed on the laptop, update the mapping there. Do not
+expect capability metadata to fix claim eligibility anymore.
 
 ### Workflow runs fail on the server due to runtime configuration
 
