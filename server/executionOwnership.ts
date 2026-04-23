@@ -499,7 +499,9 @@ export const reconcileDesktopExecutionOwnerships = async (): Promise<void> => {
         continue;
       }
 
-      await query(
+      // Move orphaned runs back to QUEUED and capture which run IDs were
+      // affected so we can transition any stuck RUNNING steps below.
+      const requeued = await query<{ id: string }>(
         `
           UPDATE capability_workflow_runs
           SET
@@ -518,9 +520,37 @@ export const reconcileDesktopExecutionOwnerships = async (): Promise<void> => {
           WHERE capability_id = $1
             AND assigned_executor_id = $2
             AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT')
+          RETURNING id
         `,
         [capabilityId, executorId],
       );
+
+      // Fail any steps that were mid-execution when the executor died.
+      // A step cannot safely resume from an arbitrary mid-point; marking
+      // it FAILED surfaces the problem immediately rather than leaving it
+      // stuck in RUNNING indefinitely. The run itself is QUEUED so the
+      // next executor will restart execution from the beginning of the
+      // pending steps.
+      const requeuedRunIds = requeued.rows
+        .map(r => String(r.id || '').trim())
+        .filter(Boolean);
+      if (requeuedRunIds.length > 0) {
+        await query(
+          `
+            UPDATE capability_workflow_run_steps
+            SET
+              status = 'FAILED',
+              output_summary = 'Executor disconnected while this step was running. '
+                || 'The run has been requeued and execution will restart.',
+              completed_at = NOW(),
+              updated_at = NOW()
+            WHERE capability_id = $1
+              AND run_id = ANY($2::text[])
+              AND status = 'RUNNING'
+          `,
+          [capabilityId, requeuedRunIds],
+        );
+      }
 
       await removeCapabilityFromExecutor(executorId, capabilityId);
     }

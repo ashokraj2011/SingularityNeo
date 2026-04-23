@@ -108,6 +108,27 @@ export const resolveCanonicalActorFromOrganization = ({
     ),
   });
 
+/**
+ * Authentication model — header-based, perimeter-delegated.
+ *
+ * Singularity Neo uses a simple trust model: the caller's identity is taken
+ * from the `x-singularity-actor-user-id` request header, which is resolved
+ * against the workspace organisation database to confirm the user exists and
+ * retrieve their roles.
+ *
+ * There is NO cryptographic verification of the header value itself. This is
+ * intentional: the server is designed to run on localhost or a private LAN
+ * where the reverse proxy is the trust boundary. The reverse proxy MUST:
+ *   a) Strip any incoming `x-singularity-actor-*` headers before forwarding
+ *      (to prevent clients from impersonating other users), and
+ *   b) Inject the verified user ID from its own session/auth mechanism.
+ *
+ * ⚠  Never expose port 3001 directly to an untrusted network. If you do, any
+ *    caller can set an arbitrary `x-singularity-actor-user-id` header and
+ *    act as any workspace member.
+ *
+ * See also: server/http/originPolicy.ts for CORS / origin trust rationale.
+ */
 export const bindRequestActorContext = async (
   request: express.Request,
   _response: express.Response,

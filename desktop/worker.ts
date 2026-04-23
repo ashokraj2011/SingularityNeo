@@ -293,8 +293,34 @@ const executeClaimedRun = async (run: WorkflowRun) => {
       actor: activeActorContext,
     },
     async () => {
+      // Track consecutive heartbeat failures. After MAX_HEARTBEAT_FAILURES
+      // consecutive failures the worker exits so the server-side
+      // reconciliation (30 s background loop) can reclaim the run and FAIL
+      // any stuck steps, rather than leaving the run orphaned indefinitely.
+      let heartbeatFailures = 0;
+      const MAX_HEARTBEAT_FAILURES = 5;
+
       const heartbeat = setInterval(() => {
-        void heartbeatActiveRun(run).catch(() => undefined);
+        void heartbeatActiveRun(run)
+          .then(() => {
+            heartbeatFailures = 0; // reset on success
+          })
+          .catch(err => {
+            heartbeatFailures += 1;
+            console.warn(
+              `[worker] run heartbeat failed (${heartbeatFailures}/${MAX_HEARTBEAT_FAILURES}):`,
+              err instanceof Error ? err.message : err,
+            );
+            if (heartbeatFailures >= MAX_HEARTBEAT_FAILURES) {
+              console.error(
+                '[worker] too many consecutive heartbeat failures — aborting run so ' +
+                'server-side reconciliation can reclaim it',
+              );
+              // Exit cleanly; server's 30 s background loop will FAIL the
+              // stuck step and requeue the run within ~75 s total.
+              process.exit(1);
+            }
+          });
       }, Math.max(8_000, Math.floor(EXECUTOR_LEASE_MS / 3)));
 
       try {

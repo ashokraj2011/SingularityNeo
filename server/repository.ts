@@ -4385,6 +4385,81 @@ export const updateCapabilityAgentModelsRecord = async (
     return getCapabilityBundleTx(client, capabilityId);
   });
 
+/**
+ * Lightweight audit-log insert for runtime chat turns.
+ *
+ * Writes both the user message and the agent response directly to
+ * `capability_messages` without loading the full workspace. Safe to call
+ * fire-and-forget — errors are logged and swallowed so they never block
+ * the HTTP response. This closes the audit gap where desktop runtime chat
+ * could happen with zero server-side record if the operator didn't
+ * explicitly save the turn as evidence.
+ */
+export const auditRuntimeChatTurn = async ({
+  capabilityId,
+  agentId,
+  agentName,
+  userMessage,
+  agentMessage,
+  model,
+  traceId,
+  sessionId,
+  sessionScope,
+  sessionScopeId,
+  workItemId,
+  runId,
+}: {
+  capabilityId: string;
+  agentId?: string | null;
+  agentName?: string | null;
+  userMessage: string;
+  agentMessage: string;
+  model?: string | null;
+  traceId?: string | null;
+  sessionId?: string | null;
+  sessionScope?: string | null;
+  sessionScopeId?: string | null;
+  workItemId?: string | null;
+  runId?: string | null;
+}): Promise<void> => {
+  const now = new Date().toISOString();
+  const makeId = () =>
+    `cau-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const baseParams = [
+    capabilityId,
+    agentId || null,
+    agentName || null,
+    traceId || null,
+    model || null,
+    sessionId || null,
+    sessionScope || null,
+    sessionScopeId || null,
+    workItemId || null,
+    runId || null,
+  ];
+
+  await query(
+    `INSERT INTO capability_messages
+       (capability_id, id, role, content, timestamp,
+        agent_id, agent_name, trace_id, model,
+        session_id, session_scope, session_scope_id,
+        work_item_id, run_id, workflow_step_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULL)`,
+    [capabilityId, makeId(), 'user', userMessage, now, ...baseParams.slice(1)],
+  );
+
+  await query(
+    `INSERT INTO capability_messages
+       (capability_id, id, role, content, timestamp,
+        agent_id, agent_name, trace_id, model,
+        session_id, session_scope, session_scope_id,
+        work_item_id, run_id, workflow_step_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULL)`,
+    [capabilityId, makeId(), 'agent', agentMessage, now, ...baseParams.slice(1)],
+  );
+};
+
 export const appendCapabilityMessageRecord = async (
   capabilityId: string,
   message: Omit<CapabilityChatMessage, 'capabilityId'>,

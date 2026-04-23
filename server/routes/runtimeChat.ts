@@ -1,7 +1,7 @@
 import type express from 'express';
 import type { Capability, CapabilityAgent, CapabilityWorkspace } from '../../src/types';
 import type { ChatHistoryMessage } from '../githubModels';
-import { getCapabilityBundle } from '../repository';
+import { auditRuntimeChatTurn, getCapabilityBundle } from '../repository';
 import { wakeExecutionWorker } from '../execution/worker';
 import { sendApiError } from '../api/errors';
 
@@ -201,6 +201,26 @@ export const registerRuntimeChatRoutes = (
         sessionMode: body.sessionMode || 'resume',
         memoryReferences: memoryContext.results.map(result => result.reference),
       });
+
+      // Fire-and-forget audit record so desktop chat turns are always
+      // traceable on the control plane, even if the operator never
+      // explicitly saves them as evidence.
+      void auditRuntimeChatTurn({
+        capabilityId: liveCapability.id,
+        agentId: liveAgent.id,
+        agentName: liveAgent.name,
+        userMessage: message,
+        agentMessage: publicChatResponse.content || '',
+        model: publicChatResponse.model || null,
+        traceId,
+        sessionId: publicChatResponse.sessionId || null,
+        sessionScope: chatContext.chatScope || null,
+        sessionScopeId: chatContext.chatScopeId || null,
+        workItemId: body.workItemId || null,
+        runId: body.runId || null,
+      }).catch(err => {
+        console.warn('[chat-audit] failed to persist chat turn:', err instanceof Error ? err.message : err);
+      });
     } catch (error) {
       sendApiError(response, error);
     }
@@ -374,6 +394,24 @@ export const registerRuntimeChatRoutes = (
         memoryReferences: memoryContext.results.map(result => result.reference),
       });
       response.end();
+
+      // Fire-and-forget audit record (same as the non-streaming route).
+      void auditRuntimeChatTurn({
+        capabilityId: liveCapability.id,
+        agentId: liveAgent.id,
+        agentName: liveAgent.name,
+        userMessage: message,
+        agentMessage: publicStreamed.content || '',
+        model: publicStreamed.model || null,
+        traceId,
+        sessionId: publicStreamed.sessionId || null,
+        sessionScope: chatContext.chatScope || null,
+        sessionScopeId: chatContext.chatScopeId || null,
+        workItemId: body.workItemId || null,
+        runId: body.runId || null,
+      }).catch(err => {
+        console.warn('[chat-audit] failed to persist stream chat turn:', err instanceof Error ? err.message : err);
+      });
     } catch (error) {
       writeSseEvent(response, 'error', {
         type: 'error',

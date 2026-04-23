@@ -35,6 +35,7 @@ import {
   normalizeAgentRoleStarterKey,
 } from '../src/lib/agentRuntime';
 import {
+  getPool,
   initializeDatabase,
   inspectDatabaseBootstrapStatus,
   setDatabaseRuntimeConfig,
@@ -108,7 +109,7 @@ import { registerPassportRoutes } from './routes/passport';
 import { registerBlastRadiusRoutes } from './routes/blastRadius';
 import { registerSentinelRoutes } from './routes/sentinel';
 import { registerWorkspaceAccessRoutes } from './routes/workspaceAccess';
-import { isDesktopExecutionRuntime } from './executionOwnership';
+import { isDesktopExecutionRuntime, reconcileDesktopExecutionOwnerships } from './executionOwnership';
 import { bindRequestActorContext, parseActorContext } from './requestActor';
 import { resolveCorsOriginHeader } from './http/originPolicy';
 import { buildCopilotSessionMonitorData } from './copilotSessions';
@@ -972,6 +973,19 @@ export const startServer = async (serverApp = app) => {
   server.on('listening', () => {
     console.log(`Singularity Neo API listening on http://localhost:${port}`);
   });
+
+  // Background reconciliation — proactively clean up stale executors and
+  // FAIL any steps that were RUNNING when the executor died, rather than
+  // waiting for the next executor to try to claim work. Runs every 30 s.
+  // Without this, a single-executor setup with a dead desktop can leave
+  // steps stuck in RUNNING indefinitely.
+  const reconciliationInterval = setInterval(() => {
+    void reconcileDesktopExecutionOwnerships().catch(err => {
+      console.error('[reconcile] background reconciliation failed:', err);
+    });
+  }, 30_000);
+  // Don't keep the process alive solely for this timer.
+  reconciliationInterval.unref();
   server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') {
       console.error(
@@ -984,6 +998,32 @@ export const startServer = async (serverApp = app) => {
     console.error('Singularity Neo API listener failed.', error);
     process.exit(1);
   });
+
+  // Graceful shutdown — drain in-flight requests then close the DB pool
+  // cleanly before exiting. Docker sends SIGTERM before SIGKILL (10 s
+  // grace); without this handler the pool leaks connections and requests
+  // are cut off mid-flight.
+  const shutdown = (signal: string) => {
+    console.log(`[server] ${signal} — draining connections…`);
+    server.close(async () => {
+      try {
+        const pool = await getPool();
+        await pool.end();
+      } catch {
+        // pool may already be closed; ignore
+      }
+      console.log('[server] clean exit');
+      process.exit(0);
+    });
+    // Force exit after 15 s in case an in-flight request never resolves.
+    setTimeout(() => {
+      console.error('[server] forced exit: drain timeout exceeded');
+      process.exit(1);
+    }, 15_000).unref();
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
 };
 
 const shouldAutoStartServer = () => {
