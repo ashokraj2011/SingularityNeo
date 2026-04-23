@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { LoaderCircle, RefreshCw, RotateCcw } from 'lucide-react';
+import { LoaderCircle, Play, RefreshCw, RotateCcw } from 'lucide-react';
 import { StatusBadge } from '../EnterpriseUI';
-import type { Capability, WorkItemSegment } from '../../types';
+import type { Capability, NextSegmentPreset, WorkItemSegment } from '../../types';
 import { getLifecyclePhaseLabel } from '../../lib/capabilityLifecycle';
 import {
   listCapabilityWorkItemSegments,
@@ -15,6 +15,10 @@ type Props = {
   workItemBrief?: string | null;
   actorDisplayName?: string;
   canEdit: boolean;
+  hasActiveRun?: boolean;
+  nextSegmentPreset?: NextSegmentPreset | null;
+  onStartSegment?: () => void;
+  onStartNextSegment?: () => void;
   onAfterRetry?: () => void;
 };
 
@@ -61,6 +65,10 @@ export const OrchestratorSegmentsSection: React.FC<Props> = ({
   workItemId,
   workItemBrief,
   canEdit,
+  hasActiveRun = false,
+  nextSegmentPreset,
+  onStartSegment,
+  onStartNextSegment,
   onAfterRetry,
 }) => {
   const [segments, setSegments] = useState<WorkItemSegment[]>([]);
@@ -152,6 +160,36 @@ export const OrchestratorSegmentsSection: React.FC<Props> = ({
 
   return (
     <section className="workspace-surface mt-4 p-4">
+      {/* Start / Start-next actions — only when no active run and canEdit. */}
+      {canEdit && !hasActiveRun && (onStartSegment || (nextSegmentPreset && onStartNextSegment)) ? (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          {onStartSegment ? (
+            <button
+              type="button"
+              onClick={onStartSegment}
+              className="enterprise-button enterprise-button-primary flex items-center gap-1.5 px-3 py-1.5 text-xs"
+            >
+              <Play size={12} />
+              Start segment…
+            </button>
+          ) : null}
+          {nextSegmentPreset && onStartNextSegment ? (
+            <button
+              type="button"
+              onClick={onStartNextSegment}
+              className="enterprise-button enterprise-button-secondary flex items-center gap-1.5 px-3 py-1.5 text-xs"
+              title={`Resume: ${nextSegmentPreset.intention}`}
+            >
+              <Play size={12} />
+              Start next
+              {nextSegmentPreset.stopAfterPhase
+                ? ` (→ ${nextSegmentPreset.stopAfterPhase})`
+                : ''}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* Brief: long-lived cross-segment goal. Distinct from description. */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
@@ -208,8 +246,10 @@ export const OrchestratorSegmentsSection: React.FC<Props> = ({
 
       {segments.length === 0 ? (
         <p className="mt-2 text-xs text-secondary">
-          No segments yet. Start one from the inbox "Start segment…" action to
-          scope a phase-bounded execution.
+          No segments yet.{' '}
+          {canEdit && !hasActiveRun
+            ? 'Use the "Start segment…" button above to scope a phase-bounded execution.'
+            : 'Start one from the "Start segment…" action to scope a phase-bounded execution.'}
         </p>
       ) : (
         <ul className="mt-2 space-y-2">

@@ -6412,6 +6412,14 @@ const Orchestrator = () => {
                           workItemId={selectedWorkItem.id}
                           workItemBrief={selectedWorkItem.brief}
                           canEdit={canControlWorkItems}
+                          hasActiveRun={Boolean(selectedWorkItem.activeRunId)}
+                          nextSegmentPreset={selectedWorkItem.nextSegmentPreset}
+                          onStartSegment={() => {
+                            openStartSegmentDialog(selectedWorkItem.id);
+                          }}
+                          onStartNextSegment={() => {
+                            void handleStartNextSegment(selectedWorkItem.id);
+                          }}
                           onAfterRetry={() => {
                             void refreshSelection(selectedWorkItem.id);
                           }}
