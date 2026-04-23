@@ -133,6 +133,9 @@ import {
   StoryProposalPromotionResult,
   StoryProposalItem,
   MemoryRetrievalMode,
+  RuntimePreflightSnapshot,
+  RuntimeReadinessCheck,
+  RuntimeReadinessState,
   WorkspaceDatabaseRuntimeInfo,
   WorkspaceWriteLock,
   DesktopWorkspaceMapping,
@@ -143,6 +146,11 @@ export interface RuntimeStatus {
   configured: boolean;
   provider: string;
   providerKey?: "github-copilot" | "local-openai";
+  readinessState?: RuntimeReadinessState;
+  checks?: RuntimeReadinessCheck[];
+  controlPlaneUrl?: string;
+  desktopExecutorId?: string;
+  workingDirectorySource?: "mapping" | "env" | "project-root" | "missing";
   embeddingProviderKey?: "local-openai" | "deterministic-hash";
   embeddingConfigured?: boolean;
   retrievalMode?: MemoryRetrievalMode;
@@ -390,6 +398,10 @@ export const fetchRuntimeStatus = async (): Promise<RuntimeStatus> => {
   }
 
   return requestJson<RuntimeStatus>("/api/runtime/status");
+};
+
+export const fetchRuntimePreflight = async (): Promise<RuntimePreflightSnapshot> => {
+  return requestJson<RuntimePreflightSnapshot>("/api/runtime/preflight");
 };
 
 export const fetchWorkspaceWriteLock = async (

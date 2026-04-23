@@ -34,6 +34,21 @@ const normalizeStartupRoute = value => {
   }
   return `#/${trimmed}`;
 };
+const isSafeExternalUrl = value => {
+  try {
+    const parsed = new URL(String(value || ''));
+    return ['https:', 'http:', 'mailto:'].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+};
+const openSafeExternalUrl = url => {
+  if (!isSafeExternalUrl(url)) {
+    console.warn(`Blocked unsafe external desktop navigation: ${String(url || '')}`);
+    return;
+  }
+  void shell.openExternal(url);
+};
 
 const controlPlaneUrl = normalizeUrl(
   process.env.SINGULARITY_CONTROL_PLANE_URL || 'http://127.0.0.1:3001',
@@ -299,8 +314,20 @@ const createWindow = async () => {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    openSafeExternalUrl(url);
     return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', event => {
+    const targetUrl = event.url;
+    const currentUrl = mainWindow?.webContents.getURL() || '';
+    if (!targetUrl || targetUrl === currentUrl || targetUrl.startsWith(`${currentUrl}#`)) {
+      return;
+    }
+    if (rendererDevUrl && targetUrl.startsWith(rendererDevUrl)) {
+      return;
+    }
+    event.preventDefault();
+    openSafeExternalUrl(targetUrl);
   });
 
   if (rendererDevUrl) {

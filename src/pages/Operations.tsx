@@ -73,6 +73,19 @@ const heartbeatTone = (status?: string) => {
   }
 };
 
+const readinessTone = (status?: string) => {
+  switch (status) {
+    case "healthy":
+      return "success" as const;
+    case "degraded":
+      return "warning" as const;
+    case "blocked":
+      return "danger" as const;
+    default:
+      return "neutral" as const;
+  }
+};
+
 const Operations = () => {
   const navigate = useNavigate();
   const {
@@ -147,6 +160,51 @@ const Operations = () => {
     activeCapability.localDirectories,
     activeCapability.repositories,
   ]);
+  const systemFacts = React.useMemo(
+    () => [
+      {
+        label: "Readiness",
+        value: runtimeStatus?.readinessState || "unknown",
+        tone: readinessTone(runtimeStatus?.readinessState),
+      },
+      {
+        label: "Active DB",
+        value:
+          runtimeStatus?.databaseRuntime?.databaseName ||
+          runtimeStatus?.activeDatabaseProfileLabel ||
+          "unknown",
+        helper: runtimeStatus?.databaseRuntime
+          ? `${runtimeStatus.databaseRuntime.host}:${runtimeStatus.databaseRuntime.port}`
+          : "No database runtime reported.",
+      },
+      {
+        label: "Control plane",
+        value: runtimeStatus?.controlPlaneUrl || "unknown",
+        helper:
+          runtimeStatus?.runtimeOwner === "DESKTOP"
+            ? "Reported by desktop runtime."
+            : "Reported by server runtime.",
+      },
+      {
+        label: "Executor",
+        value: runtimeStatus?.desktopExecutorId || runtimeStatus?.executorId || "not connected",
+        helper: runtimeStatus?.executorHeartbeatStatus
+          ? `Heartbeat ${runtimeStatus.executorHeartbeatStatus}`
+          : "No desktop heartbeat yet.",
+      },
+      {
+        label: "Operator",
+        value: runtimeStatus?.actorDisplayName || currentActorContext.displayName || "not selected",
+        helper: runtimeStatus?.actorUserId || currentActorContext.userId || "Choose an operator before claiming.",
+      },
+      {
+        label: "Workspace source",
+        value: runtimeStatus?.workingDirectorySource || "unknown",
+        helper: runtimeStatus?.workingDirectory || "No working directory published.",
+      },
+    ],
+    [currentActorContext, runtimeStatus],
+  );
 
   const refreshData = async () => {
     setLoading(true);
@@ -505,6 +563,63 @@ const Operations = () => {
           </>
         }
       />
+
+      <SectionCard
+        title="System facts"
+        description="Boring-startup diagnostics for the active DB, control plane, desktop executor, operator, and workspace source."
+        icon={ShieldCheck}
+        action={
+          <StatusBadge tone={readinessTone(runtimeStatus?.readinessState)}>
+            {runtimeStatus?.readinessState || "unknown"}
+          </StatusBadge>
+        }
+      >
+        <div className="grid gap-3 md:grid-cols-3">
+          {systemFacts.map((fact) => (
+            <div
+              key={fact.label}
+              className="rounded-2xl border border-outline-variant/40 bg-white px-4 py-4"
+            >
+              <p className="form-kicker">{fact.label}</p>
+              <p className="mt-2 break-words text-sm font-bold text-on-surface">
+                {fact.value}
+              </p>
+              {fact.helper ? (
+                <p className="mt-2 break-words text-xs leading-relaxed text-secondary">
+                  {fact.helper}
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </div>
+        {runtimeStatus?.checks?.length ? (
+          <div className="mt-4 grid gap-2 md:grid-cols-2">
+            {runtimeStatus.checks.slice(0, 6).map((check) => (
+              <div
+                key={check.id}
+                className="rounded-2xl border border-outline-variant/30 bg-surface-container-low px-4 py-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-on-surface">
+                    {check.label}
+                  </p>
+                  <StatusBadge tone={readinessTone(check.status)}>
+                    {check.status}
+                  </StatusBadge>
+                </div>
+                <p className="mt-2 text-xs leading-relaxed text-secondary">
+                  {check.message}
+                </p>
+                {check.remediation ? (
+                  <p className="mt-1 text-xs leading-relaxed text-secondary">
+                    Fix: {check.remediation}
+                  </p>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </SectionCard>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
         <SectionCard

@@ -1,6 +1,6 @@
 import type express from 'express';
 import type { Capability, CapabilityAgent, CapabilityWorkspace } from '../../src/types';
-import type { ChatHistoryMessage } from '../githubModels';
+import { GitHubProviderRateLimitError, type ChatHistoryMessage } from '../githubModels';
 import { auditRuntimeChatTurn, getCapabilityBundle } from '../repository';
 import { wakeExecutionWorker } from '../execution/worker';
 import { sendApiError } from '../api/errors';

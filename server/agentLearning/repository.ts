@@ -1436,7 +1436,14 @@ export const getOperatingPolicySnapshots = async (capabilityId: string): Promise
       created_at TEXT NOT NULL
     );
   `);
-  const result = await query(
+  const result = await query<{
+    id: string;
+    capability_id: string;
+    operating_policy_summary: string;
+    triggered_by_user_id: string | null;
+    chat_message_id: string | null;
+    created_at: string | Date;
+  }>(
     `SELECT * FROM operating_policy_snapshots WHERE capability_id = $1 ORDER BY created_at DESC`,
     [capabilityId]
   );

@@ -131,7 +131,12 @@ export const OrchestratorBoardSurface = ({
                     key={item.id}
                     id={`orchestrator-item-${item.id}`}
                     draggable
-                    onDragStart={event => onDragStartWorkItem(item.id, event)}
+                    onDragStart={event =>
+                      onDragStartWorkItem(
+                        item.id,
+                        event as unknown as React.DragEvent<HTMLButtonElement>,
+                      )
+                    }
                     onDragEnd={onDragEndWorkItem}
                     onClick={() => onSelectWorkItem(item.id)}
                     className={cn(

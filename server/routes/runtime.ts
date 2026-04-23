@@ -15,6 +15,23 @@ export const registerRuntimeRoutes = (app: express.Express) => {
     response.json(await buildRuntimeStatus());
   });
 
+  app.get('/api/runtime/preflight', async (_request, response) => {
+    try {
+      const status = await buildRuntimeStatus();
+      response.json({
+        generatedAt: new Date().toISOString(),
+        readinessState: status.readinessState,
+        checks: status.checks,
+        databaseRuntime: status.databaseRuntime,
+        activeDatabaseProfileId: status.activeDatabaseProfileId,
+        activeDatabaseProfileLabel: status.activeDatabaseProfileLabel,
+        controlPlaneUrl: status.controlPlaneUrl,
+      });
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
   app.post('/api/runtime/credentials', async (request, response) => {
     try {
       const body = request.body as RuntimeCredentialBody;

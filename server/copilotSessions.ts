@@ -48,7 +48,7 @@ export const buildCopilotSessionMonitorData = (
   summary: CopilotSessionMonitorSummary;
 } => {
   const rows = [...sessions]
-    .map(session => ({
+    .map<CopilotSessionMonitorRow>(session => ({
       sessionId: session.sessionId,
       agentId: session.agentId,
       agentName: session.agentName,

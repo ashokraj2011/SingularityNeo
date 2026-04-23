@@ -972,6 +972,25 @@ export const startServer = async (serverApp = app) => {
   const server = serverApp.listen(port);
   server.on('listening', () => {
     console.log(`Singularity Neo API listening on http://localhost:${port}`);
+    void buildRuntimeStatus()
+      .then(status => {
+        console.log(`Runtime preflight: ${status.readinessState || 'unknown'}.`);
+        (status.checks || [])
+          .filter(check => check.status !== 'healthy')
+          .slice(0, 6)
+          .forEach(check => {
+            console.warn(
+              `[preflight:${check.status}] ${check.label}: ${check.message}` +
+                (check.remediation ? ` Remediation: ${check.remediation}` : ''),
+            );
+          });
+      })
+      .catch(error => {
+        console.warn(
+          'Runtime preflight could not complete.',
+          error instanceof Error ? error.message : error,
+        );
+      });
   });
 
   // Background reconciliation — proactively clean up stale executors and

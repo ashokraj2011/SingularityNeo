@@ -27,5 +27,23 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "include": [
+    "src",
+    "server",
+    "desktop",
+    "scripts",
+    "tests",
+    "vite.config.ts",
+    "playwright.config.ts",
+    "verify-swarm.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "out",
+    ".singularity",
+    "**/__tests__/**",
+    "tests/**"
+  ]
 }

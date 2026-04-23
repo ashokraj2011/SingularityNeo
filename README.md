@@ -206,6 +206,11 @@ For a split deployment with a remote Express server and a local Electron desktop
 
 - [Desktop + Control Plane Deployment](./docs/desktop-control-plane-deployment.md)
 
+For boring startup diagnostics, open `Operations` and review **System facts**, or call
+`GET /api/runtime/preflight` on the control plane. The preflight response reports
+database readiness, active DB profile, model runtime status, renderer build
+availability, and governance signing configuration.
+
 ## First 10 Minutes
 
 If this is a fresh database or first run:
@@ -260,7 +265,8 @@ The runtime uses this precedence:
 
 1. repository-specific desktop mapping
 2. capability-level desktop fallback
-3. no runtime fallback to capability metadata
+3. desktop `SINGULARITY_WORKING_DIRECTORY` fallback
+4. no runtime fallback to capability metadata
 
 `working_directory_path` must stay inside `local_root_path`. Capability
 metadata fields such as repository `localRootHint`, `localDirectories`, and
@@ -296,7 +302,7 @@ Defined in [`package.json`](./package.json).
 
 | Command                 | Behaviour                                                                                                |
 | ----------------------- | -------------------------------------------------------------------------------------------------------- |
-| `npm run desktop:start` | Foreground launch — server + Electron shell in one terminal.                                             |
+| `npm run desktop:start` | Foreground Electron launch. Uses `SINGULARITY_CONTROL_PLANE_URL` for the server and rebuilds an unsafe desktop renderer when needed. |
 | `npm run desktop:up`    | Background launch. Writes PID to `.singularity/desktop-dev.pid`, logs to `.singularity/desktop-dev.log`. |
 | `npm run desktop:down`  | Stops the backgrounded desktop using the PID file.                                                       |
 | `npm run desktop:dev`   | Dev-mode Electron shell against a live-reloading Vite bundle.                                            |

@@ -76,7 +76,7 @@ type CapabilityManagementRouteDeps = {
   ensureAgentCreatePayload: (
     capabilityId: string,
     agent: Partial<Omit<CapabilityAgent, 'capabilityId'>> | undefined,
-  ) => CapabilityAgent | null;
+  ) => Omit<CapabilityAgent, 'capabilityId'> | null;
   normalizeCapabilityRepositoriesPayload: (
     capabilityId: string,
     repositories: unknown,

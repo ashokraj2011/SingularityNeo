@@ -17,6 +17,7 @@ import type {
   ExecutionLog,
   ExecutorHeartbeatStatus,
   MemoryReference,
+  RuntimeReadinessCheck,
   MemorySearchResult,
   Workflow,
   WorkflowRun,
@@ -114,6 +115,22 @@ const desktopWorkingDirectory = (() => {
   const root = String(projectRoot || '').trim();
   return root || undefined;
 })();
+const desktopWorkingDirectorySource: RuntimeStatus['workingDirectorySource'] =
+  process.env.SINGULARITY_WORKING_DIRECTORY?.trim()
+  ? 'env'
+  : desktopWorkingDirectory
+  ? 'project-root'
+  : 'missing';
+
+const deriveReadinessState = (checks: RuntimeReadinessCheck[]) => {
+  if (checks.some(check => check.status === 'blocked')) {
+    return 'blocked' as const;
+  }
+  if (checks.some(check => check.status === 'degraded')) {
+    return 'degraded' as const;
+  }
+  return 'healthy' as const;
+};
 
 let activeActorContext: ActorContext | null = null;
 let executorHeartbeatAt: string | undefined;
@@ -850,16 +867,28 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
   const tokenSource = getConfiguredTokenSource();
   const headlessCli = tokenSource === 'headless-cli';
   const configured = headlessCli || Boolean(token);
+  let controlPlaneReachable = true;
   const controlPlaneRuntimeStatus = await controlPlaneRequest<
     Pick<
       RuntimeStatus,
-      'databaseRuntime' | 'activeDatabaseProfileId' | 'activeDatabaseProfileLabel'
+      | 'databaseRuntime'
+      | 'activeDatabaseProfileId'
+      | 'activeDatabaseProfileLabel'
+      | 'readinessState'
+      | 'checks'
+      | 'controlPlaneUrl'
     >
-  >('/api/runtime/status').catch(() => ({
-    databaseRuntime: undefined,
-    activeDatabaseProfileId: null,
-    activeDatabaseProfileLabel: null,
-  }));
+  >('/api/runtime/status').catch(() => {
+    controlPlaneReachable = false;
+    return {
+      databaseRuntime: undefined,
+      activeDatabaseProfileId: null,
+      activeDatabaseProfileLabel: null,
+      readinessState: 'blocked' as const,
+      checks: [],
+      controlPlaneUrl,
+    };
+  });
   const { models, fromRuntime } = await listAvailableRuntimeModels();
   const runtimeDefaultModel = configured
     ? await getRuntimeDefaultModel()
@@ -867,10 +896,74 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
   const identityResult = configured
     ? await getConfiguredGitHubIdentity()
     : { identity: null, error: null };
+  const checks: RuntimeReadinessCheck[] = [
+    {
+      id: 'control-plane',
+      label: 'Control plane',
+      status: controlPlaneReachable ? 'healthy' : 'blocked',
+      message: controlPlaneReachable
+        ? `Desktop can reach ${controlPlaneUrl}.`
+        : `Desktop cannot reach ${controlPlaneUrl}.`,
+      remediation: controlPlaneReachable
+        ? undefined
+        : 'Start the server or set SINGULARITY_CONTROL_PLANE_URL to the reachable enterprise control-plane URL.',
+    },
+    {
+      id: 'desktop-runtime',
+      label: 'Desktop model runtime',
+      status: configured ? 'healthy' : 'degraded',
+      message: configured
+        ? `Desktop runtime credentials are resolved from ${tokenSource}.`
+        : 'Desktop model runtime is not configured.',
+      remediation: configured
+        ? undefined
+        : 'Start headless Copilot locally or configure GITHUB_MODELS_TOKEN for this desktop.',
+    },
+    {
+      id: 'desktop-executor',
+      label: 'Desktop executor',
+      status:
+        activeActorContext?.userId && executorHeartbeatStatus === 'FRESH'
+          ? 'healthy'
+          : 'degraded',
+      message: activeActorContext?.userId
+        ? `Executor ${executorId} is ${executorHeartbeatStatus}.`
+        : 'No current workspace operator is selected for this desktop executor.',
+      remediation: activeActorContext?.userId
+        ? undefined
+        : 'Choose the current operator from the top bar before claiming execution.',
+    },
+    {
+      id: 'desktop-working-directory',
+      label: 'Desktop working directory',
+      status:
+        desktopWorkingDirectorySource === 'env'
+          ? 'healthy'
+          : desktopWorkingDirectorySource === 'project-root'
+          ? 'degraded'
+          : 'blocked',
+      message:
+        desktopWorkingDirectorySource === 'env'
+          ? 'SINGULARITY_WORKING_DIRECTORY is configured for this desktop.'
+          : desktopWorkingDirectorySource === 'project-root'
+          ? 'Using the project root as the desktop working-directory fallback.'
+          : 'No desktop working directory is available.',
+      remediation:
+        desktopWorkingDirectorySource === 'env'
+          ? undefined
+          : 'Set SINGULARITY_WORKING_DIRECTORY in .env.local for predictable split-enterprise startup.',
+    },
+    ...(controlPlaneRuntimeStatus.checks || []),
+  ];
 
   return {
     configured,
     provider: 'GitHub Copilot SDK (Desktop Worker)',
+    readinessState: deriveReadinessState(checks),
+    checks,
+    controlPlaneUrl,
+    desktopExecutorId: executorId,
+    workingDirectorySource: desktopWorkingDirectorySource,
     runtimeOwner: 'DESKTOP',
     executionRuntimeOwner: 'DESKTOP',
     executorId,

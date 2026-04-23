@@ -11,18 +11,20 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { EmptyState, StatusBadge } from '../EnterpriseUI';
+import type { EnterpriseTone } from '../../lib/enterprise';
 import type { WorkItem } from '../../types';
 
 type Props = {
   selectedWorkItem: WorkItem | null;
-  emptyStateIcon: React.ComponentType<{ size?: number; className?: string }>;
+  emptyStateIcon: LucideIcon;
   phaseLabel: string;
-  phaseTone: string;
+  phaseTone: EnterpriseTone;
   workItemStatusLabel: string;
-  workItemStatusTone: string;
+  workItemStatusTone: EnterpriseTone;
   currentRunStatusLabel?: string | null;
-  currentRunStatusTone?: string | null;
+  currentRunStatusTone?: EnterpriseTone | null;
   canStartExecution: boolean;
   canReadChat: boolean;
   canControlWorkItems: boolean;

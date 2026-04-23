@@ -1248,12 +1248,12 @@ const EvidencePacketPage = () => {
                         <div className="flex flex-wrap items-center gap-2">
                           <StatusBadge tone="neutral">{group.phase}</StatusBadge>
                           <p className="text-sm font-semibold text-on-surface">
-                            {group.summary}
+                            {group.stepName || group.label}
                           </p>
                         </div>
                         <p className="mt-2 text-xs leading-relaxed text-secondary">
-                          {group.artifactCount} artifacts • {group.interactionCount} interactions •{' '}
-                          {group.eventCount} events
+                          {group.artifacts.length + group.handoffArtifacts.length} artifacts •{' '}
+                          {group.interactions.length} interactions • {group.events.length} events
                         </p>
                       </div>
                     ))}
@@ -1341,7 +1341,7 @@ const EvidencePacketPage = () => {
                         <StatusBadge tone="neutral">{task.status}</StatusBadge>
                       </div>
                       <p className="mt-2 text-xs leading-relaxed text-secondary">
-                        {task.summary || task.description || 'No task summary was captured.'}
+                        {task.executionNotes || task.prompt || 'No task summary was captured.'}
                       </p>
                     </div>
                   ))}

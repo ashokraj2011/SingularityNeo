@@ -51,7 +51,8 @@ Resolution precedence is:
 
 1. `(executor, user, capability, repository)`
 2. `(executor, user, capability)` fallback
-3. no metadata fallback
+3. executor `SINGULARITY_WORKING_DIRECTORY` fallback
+4. no metadata fallback
 
 `working_directory_path` must stay inside `local_root_path`.
 
@@ -148,6 +149,7 @@ npm run start
 The laptop must be able to reach:
 
 - `http://<server-host>:3001`
+- `http://<server-host>:3001/api/runtime/preflight`
 
 So make sure:
 
@@ -155,11 +157,22 @@ So make sure:
 - the firewall allows port `3001`
 - the hostname or IP is reachable from the laptop network
 
+The preflight endpoint returns `healthy`, `degraded`, or `blocked` plus
+actionable checks for database readiness, active DB profile, model runtime,
+renderer packaging, and governance signing.
+
 ## Laptop Setup
 
 ### Environment
 
 On the laptop, `.env.local` only needs the desktop/runtime-side values.
+
+Required for split enterprise:
+
+```env
+SINGULARITY_CONTROL_PLANE_URL="http://<server-host>:3001"
+SINGULARITY_WORKING_DIRECTORY="/Users/<you>/code"
+```
 
 Preferred:
 
@@ -187,6 +200,14 @@ After the Electron shell connects:
 
 Repository mappings win over the capability fallback row. Saved mappings are
 scoped to this operator on this desktop only.
+
+If `SINGULARITY_WORKING_DIRECTORY` is set, the desktop can claim execution even
+before a per-capability mapping exists; repository checkouts are created under
+that working directory. Explicit Desktop Workspaces mappings still win.
+
+The `Operations` page now includes a **System facts** panel. Use it as the first
+stop for startup issues: it shows active DB, control-plane URL, executor id,
+current operator, working-directory source, runtime mode, and readiness checks.
 
 ### Start Commands
 
@@ -306,7 +327,11 @@ Check:
 
 - `SINGULARITY_CONTROL_PLANE_URL` points at the real server host
 - port `3001` is open
-- `http://<server-host>:3001/api/state` responds
+- `http://<server-host>:3001/api/runtime/preflight` responds
+
+If the control plane is unreachable, the desktop should show degraded runtime
+diagnostics instead of hanging. If you see a blank window, run
+`npm run desktop:build` once, then retry `npm run desktop:start`.
 
 ### Desktop starts but chat says runtime is not configured
 

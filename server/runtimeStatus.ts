@@ -25,6 +25,7 @@ import {
   LOCAL_OPENAI_PROVIDER_KEY,
   resolveProviderDisplayName,
 } from './providerRegistry';
+import { buildRuntimePreflight } from './runtimePreflight';
 import { resolveRuntimeAccessMode } from './runtimePolicy';
 
 export const buildRuntimeStatus = async () => {
@@ -61,11 +62,26 @@ export const buildRuntimeStatus = async () => {
     configured && providerKey === DEFAULT_PROVIDER_KEY
     ? await getConfiguredGitHubIdentity()
     : { identity: null, error: null };
+  const provider = resolveProviderDisplayName(providerKey);
+  const runtimeAccessMode = resolveRuntimeAccessMode({
+    tokenSource,
+    token,
+    modelCatalogFromRuntime: fromRuntime,
+  });
+  const preflight = await buildRuntimePreflight({
+    runtimeConfigured: configured,
+    runtimeProvider: provider,
+    runtimeAccessMode,
+    tokenSource,
+  });
 
   return {
     configured,
-    provider: resolveProviderDisplayName(providerKey),
+    provider,
     providerKey,
+    readinessState: preflight.readinessState,
+    checks: preflight.checks,
+    controlPlaneUrl: preflight.controlPlaneUrl,
     embeddingProviderKey: localProviderConfigured
       ? DEFAULT_EMBEDDING_PROVIDER_KEY
       : 'deterministic-hash',
@@ -95,11 +111,7 @@ export const buildRuntimeStatus = async () => {
     tokenSource,
     defaultModel: runtimeDefaultModel,
     modelCatalogSource: fromRuntime ? 'runtime' : 'fallback',
-    runtimeAccessMode: resolveRuntimeAccessMode({
-      tokenSource,
-      token,
-      modelCatalogFromRuntime: fromRuntime,
-    }),
+    runtimeAccessMode,
     databaseRuntime,
     activeDatabaseProfileId,
     activeDatabaseProfileLabel: activeDatabaseProfile?.label || null,

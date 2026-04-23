@@ -660,6 +660,30 @@ export interface WorkspaceDatabaseRuntimeInfo {
   lastConnectionError?: string;
 }
 
+export type RuntimeReadinessState = "healthy" | "degraded" | "blocked";
+
+export type RuntimeReadinessCheckStatus = RuntimeReadinessState;
+
+export interface RuntimeReadinessCheck {
+  id: string;
+  label: string;
+  status: RuntimeReadinessCheckStatus;
+  message: string;
+  remediation?: string;
+}
+
+export interface RuntimePreflightSnapshot {
+  generatedAt: string;
+  readinessState: RuntimeReadinessState;
+  checks: RuntimeReadinessCheck[];
+  databaseRuntime: WorkspaceDatabaseRuntimeInfo;
+  activeDatabaseProfileId?: string | null;
+  activeDatabaseProfileLabel?: string | null;
+  controlPlaneUrl?: string;
+  desktopExecutorId?: string;
+  workingDirectorySource?: "mapping" | "env" | "project-root" | "missing";
+}
+
 export interface WorkspaceDatabaseBootstrapStatus {
   runtime: WorkspaceDatabaseRuntimeInfo;
   adminReachable: boolean;

@@ -238,7 +238,7 @@ export const OrchestratorCopilotStatusStack = ({
             <p className="mt-1 text-xs leading-relaxed text-secondary">
               {deliveryBlockingItem.nextRequiredAction ||
                 deliveryBlockingItem.blockingReason ||
-                deliveryBlockingItem.summary}
+                'Review the readiness blocker before continuing.'}
             </p>
           </div>
           <button

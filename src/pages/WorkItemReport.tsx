@@ -389,9 +389,9 @@ const WorkItemReport: React.FC = () => {
                         <td className="px-3 py-2.5">
                           <StatusBadge
                             tone={
-                              row.priority === 'High' || row.priority === 'HIGH'
+                              row.priority === 'High'
                                 ? 'danger'
-                                : row.priority === 'Med' || row.priority === 'MEDIUM'
+                                : row.priority === 'Med'
                                   ? 'warning'
                                   : 'neutral'
                             }

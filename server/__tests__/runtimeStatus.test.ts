@@ -52,6 +52,22 @@ vi.mock('../runtimePolicy', () => ({
   resolveRuntimeAccessMode: vi.fn(() => 'unconfigured'),
 }));
 
+vi.mock('../runtimePreflight', () => ({
+  buildRuntimePreflight: vi.fn(async () => ({
+    generatedAt: new Date('2026-04-23T00:00:00.000Z').toISOString(),
+    readinessState: 'degraded',
+    checks: [
+      {
+        id: 'runtime-provider',
+        label: 'Model runtime',
+        status: 'degraded',
+        message: 'No model runtime is configured on this server.',
+      },
+    ],
+    controlPlaneUrl: 'http://localhost:3001',
+  })),
+}));
+
 describe('buildRuntimeStatus', () => {
   const originalEnv = { ...process.env };
   const originalRuntime = getDatabaseRuntimeInfo();
@@ -117,5 +133,7 @@ describe('buildRuntimeStatus', () => {
     expect(status.activeDatabaseProfileLabel).toBe('sing5 @ 127.0.0.1:5432');
     expect(status.retrievalMode).toBe('deterministic-hash');
     expect(status.fallbackReason).toContain('Local embedding provider is not configured');
+    expect(status.readinessState).toBe('degraded');
+    expect(status.checks?.[0]?.id).toBe('runtime-provider');
   });
 });
