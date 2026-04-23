@@ -2322,7 +2322,14 @@ export const invokeBudgetModelSummary = async ({
     models: getStaticRuntimeModels(),
     fromRuntime: false,
   }));
-  const cheapest = pickLowestCostRuntimeModel(models);
+  // For local-openai agents, restrict to locally-served models so we never
+  // request a Copilot/GitHub model ID against the local endpoint. The local
+  // model list is a fresh fetch (cheap — already cached inside the helper).
+  const isLocalAgent = normalizeProviderKey(providerKey) === LOCAL_OPENAI_PROVIDER_KEY;
+  const candidates = isLocalAgent
+    ? await listLocalOpenAIModels().catch(() => models)
+    : models;
+  const cheapest = pickLowestCostRuntimeModel(candidates.length > 0 ? candidates : models);
   const chosenModel = cheapest?.apiModelId || normalizeModel('gpt-4o-mini');
 
   const transcript = newTurns
@@ -2364,8 +2371,33 @@ export const invokeBudgetModelSummary = async ({
     timeoutMs,
   });
 
+  // Validate that the budget model actually returned a JSON object as instructed.
+  // A malformed response (prose, markdown fences, partial JSON) would corrupt
+  // the synthetic prefix turn that rollupToolHistory embeds into the main prompt.
+  // On any parse failure we fall back to the prior summary so the main model
+  // continues with a known-good state note rather than garbage.
+  const rawContent = (result.content || '').trim();
+  let validatedSummary: string;
+  try {
+    const parsed: unknown = JSON.parse(rawContent);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      // Re-serialize to canonical form: no leading/trailing whitespace or fences.
+      validatedSummary = JSON.stringify(parsed);
+    } else {
+      // Valid JSON but wrong shape (array, primitive). Budget model ignored prompt.
+      console.warn('[invokeBudgetModelSummary] unexpected JSON shape from budget model; keeping prior summary');
+      validatedSummary = priorSummary;
+    }
+  } catch {
+    // Not valid JSON — model may have returned prose or markdown fences.
+    console.warn('[invokeBudgetModelSummary] non-JSON response from budget model; keeping prior summary');
+    validatedSummary = priorSummary;
+  }
+
   return {
-    summary: (result.content || priorSummary || '').trim(),
+    // Last resort: if both validated and prior are empty, store raw content
+    // so the caller at least has something to work with.
+    summary: validatedSummary || rawContent,
     model: result.model || chosenModel,
     usage: result.usage ?? null,
   };

@@ -54,6 +54,7 @@ import {
   searchCodeSymbols,
 } from '../codeIndex/query';
 import { buildCodePatchPayload } from '../patch/validate';
+import { estimateTokens } from '../execution/tokenEstimate';
 
 type WorkspacePatchBody = Partial<
   Pick<
@@ -528,6 +529,16 @@ export const registerCapabilityManagementRoutes = (
       return;
     }
 
+    if (agent.contract && Object.keys(agent.contract).length > 0) {
+      const tokenCount = estimateTokens(JSON.stringify(agent.contract), { provider: 'openai', kind: 'json' });
+      if (tokenCount > 4000) {
+        response.status(400).json({
+          error: `The Operations Contract is too large (${tokenCount.toLocaleString()} tokens). The maximum allowed size is 4,000 tokens context ceiling limit.`,
+        });
+        return;
+      }
+    }
+
     try {
       await assertCapabilityPermission({
         capabilityId: request.params.capabilityId,
@@ -585,6 +596,16 @@ export const registerCapabilityManagementRoutes = (
       const updates = request.body as Partial<CapabilityAgent>;
       if (updates.model) {
         updates.model = await resolveWritableAgentModel(updates.model);
+      }
+
+      if (updates.contract && Object.keys(updates.contract).length > 0) {
+        const tokenCount = estimateTokens(JSON.stringify(updates.contract), { provider: 'openai', kind: 'json' });
+        if (tokenCount > 4000) {
+          response.status(400).json({
+            error: `The Operations Contract is too large (${tokenCount.toLocaleString()} tokens). The maximum allowed size is 4,000 tokens context ceiling limit.`,
+          });
+          return;
+        }
       }
 
       await updateCapabilityAgentRecord(

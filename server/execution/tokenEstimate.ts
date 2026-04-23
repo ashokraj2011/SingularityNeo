@@ -39,7 +39,12 @@ const DIVISORS_BY_PROVIDER: Record<TokenEstimateProvider, ProviderDivisors> = {
 
 type TokenEstimateFamily = 'openai-exact' | 'heuristic';
 
-let cachedEncoder: Tiktoken | null = null;
+// Per-encoding lazy singletons. Two encodings are in play:
+//   o200k_base — GPT-4o, GPT-4.1, o1, o3, o4 families
+//   cl100k_base — GPT-4-turbo, GPT-4-32k, GPT-3.5-turbo (legacy)
+// Both are cached once loaded; a single unavailability flag covers both so
+// a WASM load failure doesn't retry on every call.
+const encoderCache = new Map<'o200k_base' | 'cl100k_base', Tiktoken>();
 let encoderUnavailable = false;
 
 const normalizeModelForEstimate = (model: string | null | undefined) => {
@@ -65,36 +70,37 @@ const isOpenAiFamilyModel = (model: string | null | undefined) => {
   );
 };
 
-const resolveEstimateFamily = ({
-  provider,
-  model,
-}: {
-  provider: TokenEstimateProvider;
-  model?: string | null;
-}): TokenEstimateFamily => {
-  if (isOpenAiFamilyModel(model)) {
-    return 'openai-exact';
+/**
+ * GPT-4o / GPT-4.1 / o-series use o200k_base.
+ * Older GPT-4 variants (gpt-4-turbo, gpt-4-32k, gpt-4 itself) and all
+ * GPT-3.5 models use cl100k_base.
+ */
+const resolveEncoding = (
+  model: string | null | undefined,
+): 'o200k_base' | 'cl100k_base' => {
+  const normalized = normalizeModelForEstimate(model);
+  if (
+    normalized.startsWith('gpt-3.5') ||
+    normalized === 'gpt-4' ||
+    normalized.startsWith('gpt-4-')
+  ) {
+    return 'cl100k_base';
   }
-  if (provider === 'openai' && !model) {
-    return 'heuristic';
-  }
-  if (provider === 'local-openai' && !model) {
-    return 'heuristic';
-  }
-  return 'heuristic';
+  return 'o200k_base';
 };
 
-const getEncoder = (): Tiktoken | null => {
-  if (cachedEncoder) {
-    return cachedEncoder;
-  }
-  if (encoderUnavailable) {
-    return null;
-  }
+// resolveEstimateFamily: single rule — GPT-family → exact BPE, everything else → heuristic.
+const resolveEstimateFamily = (model?: string | null): TokenEstimateFamily =>
+  isOpenAiFamilyModel(model) ? 'openai-exact' : 'heuristic';
 
+const getEncoder = (encoding: 'o200k_base' | 'cl100k_base'): Tiktoken | null => {
+  if (encoderUnavailable) return null;
+  const cached = encoderCache.get(encoding);
+  if (cached) return cached;
   try {
-    cachedEncoder = getEncoding('o200k_base');
-    return cachedEncoder;
+    const enc = getEncoding(encoding);
+    encoderCache.set(encoding, enc);
+    return enc;
   } catch {
     encoderUnavailable = true;
     return null;
@@ -112,13 +118,10 @@ export const estimateTokens = (
   if (!text) return 0;
   const provider = opts.provider || 'unknown';
   const kind = opts.kind || 'prose';
-  const family = resolveEstimateFamily({
-    provider,
-    model: opts.model,
-  });
+  const family = resolveEstimateFamily(opts.model);
 
   if (family === 'openai-exact') {
-    const encoder = getEncoder();
+    const encoder = getEncoder(resolveEncoding(opts.model));
     if (encoder) {
       try {
         return Math.max(1, encoder.encode(text).length);
