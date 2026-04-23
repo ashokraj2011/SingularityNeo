@@ -581,20 +581,15 @@ export const claimCapabilityExecution = async ({
     throw new Error('The desktop executor is registered for a different workspace operator.');
   }
 
+  // Use the caller-supplied approvedWorkspaceRoots directly.  The route
+  // handler already builds this list server-side (including the
+  // executor's SINGULARITY_WORKING_DIRECTORY fallback when no
+  // per-capability mapping exists), so re-querying here would discard
+  // that fallback and cause a spurious "no approved workspace root"
+  // error even when the operator has set a working directory.
   const normalizedRoots = Array.from(
     new Set(
-      (
-        actor?.userId
-          ? (
-              await listValidatedWorkspaceRootsByCapability({
-                executorId,
-                userId: actor.userId,
-              })
-            )[capabilityId] || []
-          : approvedWorkspaceRoots
-      )
-        .map(root => normalizeDirectoryPath(root))
-        .filter(Boolean),
+      approvedWorkspaceRoots.map(root => normalizeDirectoryPath(root)).filter(Boolean),
     ),
   );
   if (normalizedRoots.length === 0) {
