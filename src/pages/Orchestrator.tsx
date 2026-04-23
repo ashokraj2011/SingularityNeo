@@ -66,6 +66,8 @@ import {
   resolveCapabilityWorkflowRunConflict,
   restartCapabilityWorkflowRun,
   startCapabilityWorkflowRun,
+  startCapabilityWorkItemSegment,
+  startCapabilityWorkItemNextSegment,
   streamCapabilityChat,
   uploadCapabilityWorkItemFiles,
 } from "../lib/api";
@@ -95,6 +97,11 @@ import { OrchestratorQuickActionDialogs } from "../components/orchestrator/Orche
 import { OrchestratorLifecycleRail } from "../components/orchestrator/OrchestratorLifecycleRail";
 import { OrchestratorAttentionQueue } from "../components/orchestrator/OrchestratorAttentionQueue";
 import { OrchestratorInboxPanel } from "../components/orchestrator/OrchestratorInboxPanel";
+import {
+  StartSegmentDialog,
+  type StartSegmentDialogSubmit,
+} from "../components/orchestrator/StartSegmentDialog";
+import { OrchestratorSegmentsSection } from "../components/orchestrator/OrchestratorSegmentsSection";
 import { OrchestratorApprovalReviewModal } from "../components/orchestrator/OrchestratorApprovalReviewModal";
 import { OrchestratorDiffReviewModal } from "../components/orchestrator/OrchestratorDiffReviewModal";
 import { OrchestratorCapabilityCockpit } from "../components/orchestrator/OrchestratorCapabilityCockpit";
@@ -1643,6 +1650,31 @@ const Orchestrator = () => {
     selectedWorkItem,
     selectedHasCodeDiffApproval,
   });
+
+  // Phase-segment dialog state. A single work-item id is tracked; null
+  // means the dialog is closed. Kept here (not in useOrchestratorModals)
+  // to avoid widening that hook's contract for a feature it doesn't
+  // otherwise coordinate.
+  const [startSegmentWorkItemId, setStartSegmentWorkItemId] = useState<
+    string | null
+  >(null);
+  const [startSegmentError, setStartSegmentError] = useState<string | null>(
+    null,
+  );
+  const [startSegmentBusy, setStartSegmentBusy] = useState(false);
+
+  const openStartSegmentDialog = useCallback(
+    (workItemId: string) => {
+      setStartSegmentError(null);
+      setStartSegmentWorkItemId(workItemId);
+    },
+    [],
+  );
+  const closeStartSegmentDialog = useCallback(() => {
+    if (startSegmentBusy) return;
+    setStartSegmentWorkItemId(null);
+    setStartSegmentError(null);
+  }, [startSegmentBusy]);
   const selectedContrarianReview =
     selectedOpenWait?.type === "CONFLICT_RESOLUTION"
       ? getContrarianReview(selectedOpenWait)
@@ -4050,6 +4082,80 @@ const Orchestrator = () => {
     );
   };
 
+  // Phase-segment handlers.
+  // Submitting the StartSegmentDialog. Creates a segment + run in one
+  // step. On success, closes the dialog and refreshes the work item so
+  // the inbox re-renders with the active run and segment history.
+  const handleSubmitStartSegment = useCallback(
+    async (submit: StartSegmentDialogSubmit) => {
+      if (!startSegmentWorkItemId || !activeCapability) return;
+      setStartSegmentError(null);
+      setStartSegmentBusy(true);
+      try {
+        await startCapabilityWorkItemSegment(
+          activeCapability.id,
+          startSegmentWorkItemId,
+          {
+            startPhase: submit.startPhase,
+            stopAfterPhase: submit.stopAfterPhase,
+            intention: submit.intention,
+            saveAsPreset: submit.saveAsPreset,
+            guidedBy: currentActorContext.displayName,
+          },
+        );
+        await refreshSelection(startSegmentWorkItemId);
+        setStartSegmentWorkItemId(null);
+      } catch (error) {
+        setStartSegmentError(
+          error instanceof Error
+            ? error.message
+            : "Failed to start segment.",
+        );
+      } finally {
+        setStartSegmentBusy(false);
+      }
+    },
+    [
+      startSegmentWorkItemId,
+      activeCapability,
+      currentActorContext.displayName,
+      refreshSelection,
+    ],
+  );
+
+  // One-click "Start next" — fires the saved preset without opening the
+  // dialog. Uses the same action guard pattern as other inbox actions so
+  // the button gets a busy spinner.
+  const handleStartNextSegment = useCallback(
+    async (workItemId: string) => {
+      if (!activeCapability) return;
+      const targetItem = workItems.find((item) => item.id === workItemId);
+      const titleLabel = targetItem?.title || workItemId;
+      await withAction(
+        `start-next-${workItemId}`,
+        async () => {
+          await startCapabilityWorkItemNextSegment(
+            activeCapability.id,
+            workItemId,
+            { guidedBy: currentActorContext.displayName },
+          );
+          await refreshSelection(workItemId);
+        },
+        {
+          title: "Next segment started",
+          description: `${titleLabel} — running the saved "start next" preset.`,
+        },
+      );
+    },
+    [
+      activeCapability,
+      workItems,
+      currentActorContext.displayName,
+      withAction,
+      refreshSelection,
+    ],
+  );
+
   const handleDockStartExecution = async () => {
     if (
       !selectedWorkItem ||
@@ -5142,6 +5248,32 @@ const Orchestrator = () => {
     />
   );
 
+  // Phase-segment start dialog. Rendered as a sibling overlay so it stacks
+  // above the quick-action dialogs when both are open (e.g. operator opens
+  // Start Segment, then decides to archive instead — the archive dialog
+  // wins by z-index z-[93], this one sits at z-[94]).
+  const startSegmentDialogNode = (
+    <StartSegmentDialog
+      open={startSegmentWorkItemId !== null}
+      workItem={
+        startSegmentWorkItemId
+          ? workItems.find((item) => item.id === startSegmentWorkItemId) || null
+          : null
+      }
+      capability={activeCapability}
+      busy={startSegmentBusy}
+      error={startSegmentError}
+      defaultIntention={
+        startSegmentWorkItemId
+          ? workItems.find((item) => item.id === startSegmentWorkItemId)
+              ?.nextSegmentPreset?.intention || ""
+          : ""
+      }
+      onClose={closeStartSegmentDialog}
+      onSubmit={handleSubmitStartSegment}
+    />
+  );
+
   const stageControlOverlayNode = selectedWorkItem ? (
     <ErrorBoundary
       resetKey={`${selectedWorkItem.id}:${selectedAgent?.id || "none"}:${selectedCurrentStep?.id || "stage"}:${isStageControlOpen ? "open" : "closed"}`}
@@ -5517,6 +5649,11 @@ const Orchestrator = () => {
                     setCancelWorkItemNote("");
                     setIsCancelWorkItemOpen(true);
                   }}
+                  onOpenStartSegment={(workItemId) => {
+                    selectWorkItem(workItemId);
+                    openStartSegmentDialog(workItemId);
+                  }}
+                  onStartNextSegment={handleStartNextSegment}
                   getPhaseMeta={getPhaseMeta}
                   getStatusTone={getStatusTone}
                   getStatusLabel={(status) =>
@@ -5687,7 +5824,12 @@ const Orchestrator = () => {
           <OrchestratorSharedOverlays
             approvalReviewModal={approvalReviewModalNode}
             diffReviewModal={diffReviewModalNode}
-            quickActionDialogs={quickActionDialogsNode}
+            quickActionDialogs={
+              <>
+                {quickActionDialogsNode}
+                {startSegmentDialogNode}
+              </>
+            }
             quickCreateSheet={
               <OrchestratorListWorkbenchOverlays
                 quickCreateSheet={
@@ -6263,6 +6405,17 @@ const Orchestrator = () => {
                         onGuideBlockedAgent: focusGuidanceComposer,
                         onCancelRun: () => void handleCancelRun(),
                       }}
+                      segmentsPanel={
+                        <OrchestratorSegmentsSection
+                          capability={activeCapability}
+                          workItemId={selectedWorkItem.id}
+                          workItemBrief={selectedWorkItem.brief}
+                          canEdit={canControlWorkItems}
+                          onAfterRetry={() => {
+                            void refreshSelection(selectedWorkItem.id);
+                          }}
+                        />
+                      }
                     />
                   )}
                 </OrchestratorWorkbenchCanvas>

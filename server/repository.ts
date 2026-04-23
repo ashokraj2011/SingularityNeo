@@ -1105,6 +1105,14 @@ const workItemFromRow = (
       : Number(row.record_version || 1) || 1,
   executionContext,
   history: asJsonArray<WorkItem['history'][number]>(row.history),
+  // Phase-segment additions (columns may not exist on legacy rows — the
+  // DDL uses ADD COLUMN IF NOT EXISTS so every fresh or migrated DB has
+  // them; hydrate as undefined when null).
+  brief: row.brief || undefined,
+  nextSegmentPreset:
+    row.next_segment_preset && typeof row.next_segment_preset === 'object'
+      ? (row.next_segment_preset as WorkItem['nextSegmentPreset'])
+      : undefined,
 });
 
 const workspaceCreatedAt = (row: Record<string, any> | undefined) =>

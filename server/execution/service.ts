@@ -127,6 +127,15 @@ import {
   updateWorkflowRunStep,
 } from "./repository";
 import {
+  createSegment,
+  getSegmentById,
+  getSegmentForRun,
+  listSegmentsForWorkItem,
+  markSegmentComplete,
+  mirrorRunStatusToSegment,
+  propagatePriorityChange,
+} from "./segments";
+import {
   classifyToolExecutionError,
   executeTool,
   listToolDescriptions,
@@ -2746,6 +2755,65 @@ const resolveGraphTransition = async ({
           step.id === getDisplayStepIdForNode(workflow, nextCurrentNode?.id),
       )
     : undefined;
+
+  // --- Phase-segment stop-at-phase seam ------------------------------
+  // If the run belongs to a segment with a stop_after_phase set, and the
+  // just-completed node was the final node of that phase (next node
+  // lives in a later phase), halt the run here with
+  // terminal_outcome = 'SEGMENT_COMPLETE'. The work item's phase
+  // advances to the next phase (so it sits at the new boundary in the
+  // inbox), active_run_id clears, and the segment's status mirrors to
+  // COMPLETED via markSegmentComplete.
+  const segment = await getSegmentForRun(detail.run);
+  const stopAfter = segment?.stopAfterPhase || detail.run.stopAfterPhase;
+  const crossedPhaseBoundary = Boolean(
+    nextCurrentNode && nextCurrentNode.phase !== completedNode.phase,
+  );
+  const shouldHaltSegment = Boolean(
+    stopAfter && completedNode.phase === stopAfter && crossedPhaseBoundary,
+  );
+
+  if (shouldHaltSegment && nextCurrentNode) {
+    const haltedRun = (
+      await updateWorkflowRun({
+        ...detail.run,
+        workflowSnapshot: workflow,
+        status: "COMPLETED",
+        currentNodeId: undefined,
+        currentStepId: undefined,
+        // Advance to the boundary phase so the work item projection lands
+        // on the next phase (operator sees "ready to pick up at BUILD").
+        currentPhase: nextCurrentNode.phase,
+        assignedAgentId: undefined,
+        branchState: nextBranchState,
+        pauseReason: undefined,
+        currentWaitId: undefined,
+        leaseOwner: undefined,
+        leaseExpiresAt: undefined,
+        completedAt: new Date().toISOString(),
+        terminalOutcome: "SEGMENT_COMPLETE",
+      })
+    ).run;
+
+    if (segment) {
+      await markSegmentComplete({
+        capabilityId: segment.capabilityId,
+        segmentId: segment.id,
+        terminalOutcome: "SEGMENT_COMPLETE",
+      });
+    }
+
+    return {
+      nextRun: haltedRun,
+      nextDetail: await getWorkflowRunDetail(
+        detail.run.capabilityId,
+        haltedRun.id,
+      ),
+      nextStep: undefined,
+    };
+  }
+  // --- end stop-at-phase seam ---------------------------------------
+
   const nextRun = (
     await updateWorkflowRun({
       ...detail.run,
@@ -2767,6 +2835,13 @@ const resolveGraphTransition = async ({
       terminalOutcome: nextCurrentNode ? undefined : summary,
     })
   ).run;
+
+  // Mirror the run's new status onto its owning segment. No-op for legacy
+  // runs without a segmentId. Fire-and-forget is fine (same DB connection
+  // semantics as mirrorRunStatusToSegment which uses its own query).
+  if (nextRun.segmentId) {
+    await mirrorRunStatusToSegment(nextRun);
+  }
 
   return {
     nextRun,
@@ -4642,6 +4717,9 @@ export const startWorkflowExecution = async ({
   guidance,
   guidedBy,
   actor,
+  stopAfterPhase,
+  intention,
+  segmentId,
 }: {
   capabilityId: string;
   workItemId: string;
@@ -4649,6 +4727,13 @@ export const startWorkflowExecution = async ({
   guidance?: string;
   guidedBy?: string;
   actor?: ActorContext;
+  // Phase-segment model: when `intention` is provided (or `segmentId` for
+  // a retry), a segment row is created/linked and the run is bound to it.
+  // Legacy callers that pass none of the three get today's behavior:
+  // no segment row, a run that traverses to DONE.
+  stopAfterPhase?: WorkItemPhase;
+  intention?: string;
+  segmentId?: string;
 }) => {
   const existingActiveRun = await getActiveRunForWorkItem(
     capabilityId,
@@ -4754,6 +4839,59 @@ export const startWorkflowExecution = async ({
         "This capability is not ready to start delivery yet.",
     );
   }
+  // Phase-segment resolution. Three cases:
+  //  (a) segmentId provided -> this is a retry against an existing segment.
+  //  (b) intention provided (no segmentId) -> create a fresh segment.
+  //  (c) neither -> legacy path; no segment row; run traverses to DONE.
+  let segmentForRun: {
+    id: string;
+    prioritySnapshot: "High" | "Med" | "Low";
+    isRetry: boolean;
+  } | undefined;
+  let effectiveStopAfterPhase = stopAfterPhase;
+
+  if (segmentId) {
+    const existing = await getSegmentById({ capabilityId, segmentId });
+    if (!existing) {
+      throw new Error(`Segment ${segmentId} does not exist for this capability.`);
+    }
+    if (existing.workItemId !== workItemId) {
+      throw new Error(
+        `Segment ${segmentId} belongs to a different work item.`,
+      );
+    }
+    if (
+      existing.status !== "FAILED" &&
+      existing.status !== "CANCELLED"
+    ) {
+      throw new Error(
+        `Segment ${segmentId} is not in a retryable state (status=${existing.status}).`,
+      );
+    }
+    segmentForRun = {
+      id: existing.id,
+      prioritySnapshot: existing.prioritySnapshot,
+      isRetry: true,
+    };
+    effectiveStopAfterPhase = existing.stopAfterPhase;
+  } else if (intention && intention.trim()) {
+    const effectiveStartPhase =
+      restartFromPhase || projection.workItem.phase;
+    const created = await createSegment({
+      capabilityId,
+      workItem: projection.workItem,
+      startPhase: effectiveStartPhase,
+      stopAfterPhase: stopAfterPhase || null,
+      intention: intention.trim(),
+      actorUserId: actor?.userId,
+    });
+    segmentForRun = {
+      id: created.id,
+      prioritySnapshot: created.prioritySnapshot,
+      isRetry: false,
+    };
+  }
+
   const detail = await (
     await import("./repository")
   ).createWorkflowRun({
@@ -4761,7 +4899,13 @@ export const startWorkflowExecution = async ({
     workItem: projection.workItem,
     workflow: projection.workflow,
     restartFromPhase,
+    segment: segmentForRun,
   });
+
+  // Note: stop_after_phase lives on the segment row, not duplicated on
+  // the run. resolveGraphTransition reads it lazily via
+  // getSegmentForRun when it needs to decide whether to halt.
+  void effectiveStopAfterPhase;
 
   await syncRunningProjection({
     detail,
@@ -6128,6 +6272,9 @@ export const restartWorkflowRun = async ({
   guidance,
   guidedBy,
   actor,
+  stopAfterPhase,
+  intention,
+  segmentId,
 }: {
   capabilityId: string;
   runId: string;
@@ -6135,6 +6282,9 @@ export const restartWorkflowRun = async ({
   guidance?: string;
   guidedBy?: string;
   actor?: ActorContext;
+  stopAfterPhase?: WorkItemPhase;
+  intention?: string;
+  segmentId?: string;
 }) => {
   const latest = await getWorkflowRunDetail(capabilityId, runId);
   return startWorkflowExecution({
@@ -6147,8 +6297,224 @@ export const restartWorkflowRun = async ({
     guidance,
     guidedBy,
     actor,
+    stopAfterPhase,
+    intention,
+    segmentId,
   });
 };
+
+// ---------------------------------------------------------------------
+// Phase-segment work-item helpers
+// ---------------------------------------------------------------------
+
+/**
+ * Start a new segment for a work item. This is the public entry point
+ * used by the new `POST /work-items/:wiId/segments` endpoint. When
+ * `saveAsPreset` is true, the start/stop/intention are also persisted
+ * to `capability_work_items.next_segment_preset` so the inbox can
+ * render a one-click "Start next" button next time.
+ */
+export const startWorkItemSegment = async ({
+  capabilityId,
+  workItemId,
+  startPhase,
+  stopAfterPhase,
+  intention,
+  saveAsPreset,
+  guidance,
+  actor,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  startPhase?: WorkItemPhase;
+  stopAfterPhase?: WorkItemPhase;
+  intention: string;
+  saveAsPreset?: boolean;
+  guidance?: string;
+  actor?: ActorContext;
+}) => {
+  const trimmed = intention?.trim();
+  if (!trimmed) {
+    throw new Error("Segment intention is required.");
+  }
+
+  if (saveAsPreset) {
+    const preset = {
+      startPhase: startPhase || null,
+      stopAfterPhase: stopAfterPhase || null,
+      intention: trimmed,
+    };
+    await transaction(async (client) => {
+      await client.query(
+        `UPDATE capability_work_items
+         SET next_segment_preset = $3::jsonb, updated_at = NOW()
+         WHERE capability_id = $1 AND id = $2`,
+        [capabilityId, workItemId, JSON.stringify(preset)],
+      );
+    });
+  }
+
+  return startWorkflowExecution({
+    capabilityId,
+    workItemId,
+    restartFromPhase: startPhase,
+    stopAfterPhase,
+    intention: trimmed,
+    guidance,
+    guidedBy: actor ? getActorDisplayName(actor, "Capability Owner") : undefined,
+    actor,
+  });
+};
+
+/**
+ * Retry a FAILED or CANCELLED segment. A new run is created under the
+ * same segment row so the intention and phase range are preserved.
+ */
+export const retryWorkItemSegment = async ({
+  capabilityId,
+  segmentId,
+  actor,
+}: {
+  capabilityId: string;
+  segmentId: string;
+  actor?: ActorContext;
+}) => {
+  const segment = await getSegmentById({ capabilityId, segmentId });
+  if (!segment) {
+    throw new Error(`Segment ${segmentId} not found.`);
+  }
+  return startWorkflowExecution({
+    capabilityId,
+    workItemId: segment.workItemId,
+    restartFromPhase: segment.startPhase,
+    stopAfterPhase: segment.stopAfterPhase,
+    // intention is inherited from the segment row; passing undefined
+    // causes startWorkflowExecution to use the segmentId path (retry)
+    // rather than creating a fresh segment.
+    intention: undefined,
+    segmentId,
+    guidedBy: actor ? getActorDisplayName(actor, "Capability Owner") : undefined,
+    actor,
+  });
+};
+
+/**
+ * Kick off the next segment using the work item's saved preset. 409-eq
+ * if no preset is set or a run is already active.
+ */
+export const startNextSegmentFromPreset = async ({
+  capabilityId,
+  workItemId,
+  actor,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  actor?: ActorContext;
+}) => {
+  const result = await transaction(async (client) =>
+    client.query(
+      `SELECT next_segment_preset, active_run_id, phase
+       FROM capability_work_items
+       WHERE capability_id = $1 AND id = $2
+       LIMIT 1`,
+      [capabilityId, workItemId],
+    ),
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Work item ${workItemId} not found.`);
+  }
+  if (row.active_run_id) {
+    throw new Error(`Work item ${workItemId} already has an active run.`);
+  }
+  const preset = row.next_segment_preset as
+    | { startPhase?: string | null; stopAfterPhase?: string | null; intention?: string }
+    | null;
+  if (!preset || !preset.intention) {
+    throw new Error(
+      `Work item ${workItemId} has no saved "start next" preset. Use the Start Segment dialog instead.`,
+    );
+  }
+
+  return startWorkflowExecution({
+    capabilityId,
+    workItemId,
+    restartFromPhase: (preset.startPhase || row.phase) as WorkItemPhase,
+    stopAfterPhase: (preset.stopAfterPhase || undefined) as
+      | WorkItemPhase
+      | undefined,
+    intention: preset.intention,
+    guidedBy: actor ? getActorDisplayName(actor, "Capability Owner") : undefined,
+    actor,
+  });
+};
+
+export const listWorkItemSegments = async ({
+  capabilityId,
+  workItemId,
+}: {
+  capabilityId: string;
+  workItemId: string;
+}) => listSegmentsForWorkItem({ capabilityId, workItemId });
+
+export const updateWorkItemBrief = async ({
+  capabilityId,
+  workItemId,
+  brief,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  brief: string | null;
+}) => {
+  const trimmed = brief == null ? null : String(brief).trim() || null;
+  await transaction(async (client) => {
+    await client.query(
+      `UPDATE capability_work_items
+       SET brief = $3, updated_at = NOW()
+       WHERE capability_id = $1 AND id = $2`,
+      [capabilityId, workItemId, trimmed],
+    );
+  });
+  return { brief: trimmed };
+};
+
+export const updateWorkItemNextSegmentPreset = async ({
+  capabilityId,
+  workItemId,
+  preset,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  preset: {
+    startPhase?: string | null;
+    stopAfterPhase?: string | null;
+    intention?: string;
+  } | null;
+}) => {
+  const serialized =
+    preset && preset.intention
+      ? JSON.stringify({
+          startPhase: preset.startPhase || null,
+          stopAfterPhase: preset.stopAfterPhase || null,
+          intention: String(preset.intention).trim(),
+        })
+      : null;
+  await transaction(async (client) => {
+    await client.query(
+      `UPDATE capability_work_items
+       SET next_segment_preset = $3::jsonb, updated_at = NOW()
+       WHERE capability_id = $1 AND id = $2`,
+      [capabilityId, workItemId, serialized],
+    );
+  });
+  return { preset: serialized ? JSON.parse(serialized) : null };
+};
+
+/**
+ * Called from wherever a work item's priority changes so the claim SQL
+ * sees the new value on already-queued segments/runs.
+ */
+export const propagateWorkItemPriorityChange = propagatePriorityChange;
 
 const completeRunWithWait = async ({
   detail,

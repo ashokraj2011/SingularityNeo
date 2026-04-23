@@ -139,6 +139,8 @@ import {
   WorkspaceDatabaseRuntimeInfo,
   WorkspaceWriteLock,
   DesktopWorkspaceMapping,
+  WorkItemSegment,
+  NextSegmentPreset,
 } from "../types";
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from "./desktop";
 
@@ -2390,7 +2392,13 @@ export const startCapabilityWorkflowRun = async (
   capabilityId: string,
   workItemId: string,
   payload?: {
+    // Legacy name; still accepted by the server.
     restartFromPhase?: WorkItemPhase;
+    // Phase-segment aliases. `startPhase` reads more naturally in the
+    // new model; the server treats it as an alias for `restartFromPhase`.
+    startPhase?: WorkItemPhase;
+    stopAfterPhase?: WorkItemPhase;
+    intention?: string;
     guidance?: string;
     guidedBy?: string;
     executorId?: string;
@@ -2402,6 +2410,99 @@ export const startCapabilityWorkflowRun = async (
       method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload || {}),
+    },
+  );
+
+// --- Phase-segment client API -------------------------------------------
+
+/**
+ * Start a new segment for a work item (intention required). Optionally
+ * save the start/stop/intention as the work item's "start next" preset
+ * so the inbox can render a one-click resume next time.
+ */
+export const startCapabilityWorkItemSegment = async (
+  capabilityId: string,
+  workItemId: string,
+  payload: {
+    startPhase?: WorkItemPhase;
+    stopAfterPhase?: WorkItemPhase;
+    intention: string;
+    saveAsPreset?: boolean;
+    guidance?: string;
+    guidedBy?: string;
+  },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/segments`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const retryCapabilityWorkItemSegment = async (
+  capabilityId: string,
+  workItemId: string,
+  segmentId: string,
+  payload?: { guidedBy?: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/segments/${encodeURIComponent(segmentId)}/retry`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
+    },
+  );
+
+export const startCapabilityWorkItemNextSegment = async (
+  capabilityId: string,
+  workItemId: string,
+  payload?: { guidedBy?: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/start-next`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload || {}),
+    },
+  );
+
+export const listCapabilityWorkItemSegments = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<WorkItemSegment[]> =>
+  requestJson<WorkItemSegment[]>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/segments`,
+  );
+
+export const updateCapabilityWorkItemBrief = async (
+  capabilityId: string,
+  workItemId: string,
+  brief: string | null,
+): Promise<{ brief: string | null }> =>
+  requestJson<{ brief: string | null }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/brief`,
+    {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ brief }),
+    },
+  );
+
+export const updateCapabilityWorkItemNextSegmentPreset = async (
+  capabilityId: string,
+  workItemId: string,
+  preset: NextSegmentPreset | null,
+): Promise<{ preset: NextSegmentPreset | null }> =>
+  requestJson<{ preset: NextSegmentPreset | null }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/next-segment-preset`,
+    {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ preset }),
     },
   );
 

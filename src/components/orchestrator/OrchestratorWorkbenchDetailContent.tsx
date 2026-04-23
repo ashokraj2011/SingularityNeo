@@ -17,6 +17,8 @@ type Props = {
   attemptsProps: React.ComponentProps<typeof OrchestratorAttemptsPanel>;
   receiptsProps: React.ComponentProps<typeof PromptReceiptPanel>;
   failureRecoveryProps: React.ComponentProps<typeof OrchestratorFailureRecoveryPanel>;
+  // Optional — the Segments tab is rendered only when a panel is supplied.
+  segmentsPanel?: React.ReactNode;
 };
 
 export const OrchestratorWorkbenchDetailContent = ({
@@ -28,6 +30,7 @@ export const OrchestratorWorkbenchDetailContent = ({
   attemptsProps,
   receiptsProps,
   failureRecoveryProps,
+  segmentsPanel,
 }: Props) => (
   <div className="flex h-full flex-col">
     <OrchestratorWorkbenchDetailHeader {...headerProps} />
@@ -40,6 +43,7 @@ export const OrchestratorWorkbenchDetailContent = ({
       artifactsPanel={<OrchestratorArtifactsPanel {...artifactsProps} />}
       attemptsPanel={<OrchestratorAttemptsPanel {...attemptsProps} />}
       receiptsPanel={<PromptReceiptPanel {...receiptsProps} />}
+      segmentsPanel={segmentsPanel}
     />
   </div>
 );

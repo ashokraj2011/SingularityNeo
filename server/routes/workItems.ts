@@ -28,9 +28,15 @@ import {
   archiveWorkItemControl,
   cancelWorkItemControl,
   createWorkItemRecord,
+  listWorkItemSegments,
   moveWorkItemToPhaseControl,
   restoreWorkItemControl,
+  retryWorkItemSegment,
+  startNextSegmentFromPreset,
   startWorkflowExecution,
+  startWorkItemSegment,
+  updateWorkItemBrief,
+  updateWorkItemNextSegmentPreset,
 } from "../execution/service";
 import { wakeExecutionWorker } from "../execution/worker";
 import { parseActorContext } from "../requestActor";
@@ -1121,18 +1127,218 @@ export const registerWorkItemRoutes = (
             return;
           }
         }
+        // `startPhase` is a client-side alias for `restartFromPhase` that
+        // reads more naturally in the new segment model. Accept either;
+        // precedence: explicit startPhase > legacy restartFromPhase.
+        const startPhase =
+          (request.body?.startPhase as WorkItemPhase | undefined) ||
+          (request.body?.restartFromPhase as WorkItemPhase | undefined);
+        const stopAfterPhase = request.body?.stopAfterPhase as
+          | WorkItemPhase
+          | undefined;
+        const intention =
+          typeof request.body?.intention === "string"
+            ? request.body.intention.trim() || undefined
+            : undefined;
+
         const detail = await startWorkflowExecution({
           capabilityId: request.params.capabilityId,
           workItemId: request.params.workItemId,
-          restartFromPhase: request.body?.restartFromPhase as
-            | WorkItemPhase
-            | undefined,
+          restartFromPhase: startPhase,
+          stopAfterPhase,
+          intention,
           guidance: String(request.body?.guidance || "").trim() || undefined,
           guidedBy: actor.displayName,
           actor,
         });
         wakeExecutionWorker();
         response.status(201).json(detail);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // --- Phase-segment routes ----------------------------------------------
+
+  // Create + start a new segment. Body: { startPhase?, stopAfterPhase?,
+  // intention (required), saveAsPreset? }. Intention is required at the
+  // route level because the segment row enforces it NOT NULL.
+  app.post(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/segments",
+    async (request, response) => {
+      try {
+        assertCapabilitySupportsExecution(
+          (await getCapabilityBundle(request.params.capabilityId)).capability,
+        );
+        const actor = parseActorContext(
+          request,
+          parseActor(request.body?.guidedBy, "Capability Owner"),
+        );
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.control",
+        });
+        const intention =
+          typeof request.body?.intention === "string"
+            ? request.body.intention.trim()
+            : "";
+        if (!intention) {
+          response
+            .status(400)
+            .json({ error: "Segment intention is required." });
+          return;
+        }
+        const detail = await startWorkItemSegment({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          startPhase: request.body?.startPhase as WorkItemPhase | undefined,
+          stopAfterPhase: request.body?.stopAfterPhase as
+            | WorkItemPhase
+            | undefined,
+          intention,
+          saveAsPreset: Boolean(request.body?.saveAsPreset),
+          guidance: String(request.body?.guidance || "").trim() || undefined,
+          actor,
+        });
+        wakeExecutionWorker();
+        response.status(201).json(detail);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // Retry a FAILED/CANCELLED segment: spawn a new run under the same segment
+  // row so the intention and phase range are preserved for audit.
+  app.post(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/segments/:segmentId/retry",
+    async (request, response) => {
+      try {
+        assertCapabilitySupportsExecution(
+          (await getCapabilityBundle(request.params.capabilityId)).capability,
+        );
+        const actor = parseActorContext(
+          request,
+          parseActor(request.body?.guidedBy, "Capability Owner"),
+        );
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.control",
+        });
+        const detail = await retryWorkItemSegment({
+          capabilityId: request.params.capabilityId,
+          segmentId: request.params.segmentId,
+          actor,
+        });
+        wakeExecutionWorker();
+        response.status(201).json(detail);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // One-click "Start next" using the work item's saved preset.
+  app.post(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/start-next",
+    async (request, response) => {
+      try {
+        assertCapabilitySupportsExecution(
+          (await getCapabilityBundle(request.params.capabilityId)).capability,
+        );
+        const actor = parseActorContext(
+          request,
+          parseActor(request.body?.guidedBy, "Capability Owner"),
+        );
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.control",
+        });
+        const detail = await startNextSegmentFromPreset({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          actor,
+        });
+        wakeExecutionWorker();
+        response.status(201).json(detail);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // List all segments for a work item, newest first.
+  app.get(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/segments",
+    async (request, response) => {
+      try {
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor: parseActorContext(request, "Workspace Operator"),
+          action: "workitem.read",
+        });
+        const segments = await listWorkItemSegments({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+        });
+        response.json(segments);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // Update the long-lived work item brief (cross-segment goal).
+  app.patch(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/brief",
+    async (request, response) => {
+      try {
+        const actor = parseActorContext(request, "Capability Owner");
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.control",
+        });
+        const brief =
+          typeof request.body?.brief === "string"
+            ? request.body.brief
+            : request.body?.brief === null
+            ? null
+            : "";
+        const result = await updateWorkItemBrief({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          brief,
+        });
+        response.json(result);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // Save or clear the "start next" preset. Body: { preset: { startPhase,
+  // stopAfterPhase, intention } | null }
+  app.patch(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/next-segment-preset",
+    async (request, response) => {
+      try {
+        const actor = parseActorContext(request, "Capability Owner");
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.control",
+        });
+        const result = await updateWorkItemNextSegmentPreset({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          preset: request.body?.preset ?? null,
+        });
+        response.json(result);
       } catch (error) {
         sendApiError(response, error);
       }

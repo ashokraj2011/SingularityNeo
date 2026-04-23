@@ -2663,6 +2663,52 @@ export interface WorkItem {
   recordVersion?: number;
   executionContext?: WorkItemExecutionContext;
   history: WorkItemHistoryEntry[];
+  // Long-lived cross-segment goal, visible at every segment start.
+  // Separate from `description` (the original request) — brief captures
+  // the operator's ongoing framing that persists across retries and
+  // subsequent segments.
+  brief?: string;
+  // Operator-saved preset that feeds the one-click "Start next" flow
+  // from the inbox. Persists across sessions; cleared explicitly.
+  nextSegmentPreset?: NextSegmentPreset;
+}
+
+export interface NextSegmentPreset {
+  startPhase: WorkItemPhase;
+  stopAfterPhase?: WorkItemPhase;
+  intention: string;
+}
+
+// A Segment is one operator-scoped advance of a work item across a
+// contiguous phase range. One segment spawns N runs (retries share the
+// segment's intention). See plan section §1.
+export type WorkItemSegmentStatus =
+  | "QUEUED"
+  | "RUNNING"
+  | "WAITING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
+
+export interface WorkItemSegment {
+  id: string;
+  capabilityId: string;
+  workItemId: string;
+  segmentIndex: number;
+  startPhase: WorkItemPhase;
+  stopAfterPhase?: WorkItemPhase;
+  intention: string;
+  status: WorkItemSegmentStatus;
+  terminalOutcome?: string;
+  prioritySnapshot: "High" | "Med" | "Low";
+  currentRunId?: string;
+  firstRunId?: string;
+  attemptCount: number;
+  actorUserId?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type StoryProposalStatus =
@@ -2875,6 +2921,13 @@ export interface WorkflowRun {
   currentWaitId?: string;
   terminalOutcome?: string;
   restartFromPhase?: WorkItemPhase;
+  // Phase-segment model: the segment this run belongs to, and the
+  // snapshotted priority used by claim ordering. Both NULL on legacy
+  // runs that predate the segment migration.
+  segmentId?: string;
+  stopAfterPhase?: WorkItemPhase;
+  intention?: string;
+  prioritySnapshot?: "High" | "Med" | "Low";
   traceId?: string;
   leaseOwner?: string;
   leaseExpiresAt?: string;

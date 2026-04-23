@@ -77,6 +77,10 @@ type OrchestratorInboxPanelProps = {
   onOpenRestore: (workItemId: string) => void;
   onOpenArchive: (workItemId: string) => void;
   onOpenCancel: (workItemId: string) => void;
+  // Phase-segment additions. Both optional so callers that haven't
+  // upgraded yet (tests, embedded views) continue to render the panel.
+  onOpenStartSegment?: (workItemId: string) => void;
+  onStartNextSegment?: (workItemId: string) => void;
   getPhaseMeta: (phase?: WorkItemPhase) => { label: string; accent: string };
   getStatusTone: (status?: string) => EnterpriseTone;
   getStatusLabel: (status: WorkItem['status']) => string;
@@ -117,6 +121,8 @@ export const OrchestratorInboxPanel = ({
   onOpenRestore,
   onOpenArchive,
   onOpenCancel,
+  onOpenStartSegment,
+  onStartNextSegment,
   getPhaseMeta,
   getStatusTone,
   getStatusLabel,
@@ -366,6 +372,44 @@ export const OrchestratorInboxPanel = ({
                     ) : null}
                     {isSelected ? (
                       <div className="mt-3 flex flex-wrap gap-2">
+                        {/* Phase-segment actions: offered only when there is
+                            no active run (work item is between segments).
+                            "Start next" is a one-click if a preset is saved;
+                            "Start segment…" opens the dialog to compose one. */}
+                        {!entry.item.activeRunId &&
+                        entry.item.status !== 'ARCHIVED' &&
+                        entry.item.status !== 'COMPLETED' &&
+                        entry.item.nextSegmentPreset &&
+                        onStartNextSegment ? (
+                          <button
+                            type="button"
+                            onClick={() => onStartNextSegment(entry.item.id)}
+                            disabled={busyAction !== null}
+                            className="enterprise-button enterprise-button-primary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+                            title={`Intention: ${entry.item.nextSegmentPreset.intention}`}
+                          >
+                            {busyAction === `start-next-${entry.item.id}` ? (
+                              <LoaderCircle size={14} className="animate-spin" />
+                            ) : (
+                              <Play size={14} />
+                            )}
+                            Start next
+                          </button>
+                        ) : null}
+                        {!entry.item.activeRunId &&
+                        entry.item.status !== 'ARCHIVED' &&
+                        entry.item.status !== 'COMPLETED' &&
+                        onOpenStartSegment ? (
+                          <button
+                            type="button"
+                            onClick={() => onOpenStartSegment(entry.item.id)}
+                            disabled={busyAction !== null}
+                            className="enterprise-button enterprise-button-secondary px-3 py-2 text-[0.68rem] disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <Play size={14} />
+                            Start segment…
+                          </button>
+                        ) : null}
                         {entry.item.activeRunId && entry.item.status !== 'PAUSED' ? (
                           <button
                             type="button"

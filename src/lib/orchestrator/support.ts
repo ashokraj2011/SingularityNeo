@@ -26,7 +26,7 @@ import type {
 import { readViewPreference } from '../viewPreferences';
 
 export type OrchestratorView = 'board' | 'list';
-export type DetailTab = 'operate' | 'artifacts' | 'attempts' | 'receipts';
+export type DetailTab = 'operate' | 'artifacts' | 'attempts' | 'receipts' | 'segments';
 export type WorkItemStatusFilter = 'ALL' | WorkItem['status'];
 export type WorkItemPriorityFilter = 'ALL' | WorkItem['priority'];
 export type ArtifactWorkbenchFilter =

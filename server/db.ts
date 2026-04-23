@@ -3018,6 +3018,67 @@ export const migrationStatements = [
     CREATE INDEX IF NOT EXISTS idx_agent_branch_commits_work_item
       ON agent_branch_commits (capability_id, work_item_id, created_at DESC)
   `,
+  // Phase-segment workflow model (plan: Phase-Segment Workflow Model).
+  // A "segment" is an operator-scoped advance of a work item across a
+  // phase range. One segment → N runs (retries share the same intention).
+  // Legacy runs with segment_id IS NULL behave exactly as before —
+  // they traverse to DONE with no stop boundary.
+  `
+    CREATE TABLE IF NOT EXISTS capability_work_item_segments (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      work_item_id TEXT NOT NULL,
+      segment_index INTEGER NOT NULL,
+      start_phase TEXT NOT NULL,
+      stop_after_phase TEXT,
+      intention TEXT NOT NULL,
+      status TEXT NOT NULL,
+      terminal_outcome TEXT,
+      priority_snapshot TEXT NOT NULL,
+      current_run_id TEXT,
+      first_run_id TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      actor_user_id TEXT,
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      UNIQUE (capability_id, work_item_id, segment_index)
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_work_item_segments_queue_idx
+      ON capability_work_item_segments (status, priority_snapshot, updated_at)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_work_item_segments_wi_idx
+      ON capability_work_item_segments (capability_id, work_item_id, segment_index DESC)
+  `,
+  // Runs need to know which segment they belong to; the priority snapshot
+  // is duplicated here so claim SQL can ORDER BY without a join.
+  `
+    ALTER TABLE capability_workflow_runs
+    ADD COLUMN IF NOT EXISTS segment_id TEXT
+  `,
+  `
+    ALTER TABLE capability_workflow_runs
+    ADD COLUMN IF NOT EXISTS priority_snapshot TEXT
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_workflow_runs_claim_order_idx
+      ON capability_workflow_runs (status, priority_snapshot, updated_at)
+  `,
+  // Work items carry a long-lived brief (cross-segment context) and an
+  // optional preset used by the one-click "Start next" flow.
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS brief TEXT
+  `,
+  `
+    ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS next_segment_preset JSONB
+  `,
 ];
 
 const detectOptionalPlatformExtensions = async (client: PoolClient) => {

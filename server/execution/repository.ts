@@ -39,6 +39,7 @@ import {
   getWorkflowNodeOrder,
   getWorkflowNodes,
 } from '../../src/lib/workflowGraph';
+import { attachRunToSegmentTx } from './segments';
 
 const asIso = (value: unknown) =>
   value instanceof Date ? value.toISOString() : String(value || '');
@@ -98,6 +99,13 @@ const runFromRow = (row: Record<string, any>): WorkflowRun => ({
   currentWaitId: row.current_wait_id || undefined,
   terminalOutcome: row.terminal_outcome || undefined,
   restartFromPhase: row.restart_from_phase || undefined,
+  segmentId: row.segment_id || undefined,
+  prioritySnapshot:
+    row.priority_snapshot === 'High' ||
+    row.priority_snapshot === 'Med' ||
+    row.priority_snapshot === 'Low'
+      ? row.priority_snapshot
+      : undefined,
   traceId: row.trace_id || undefined,
   leaseOwner: row.lease_owner || undefined,
   leaseExpiresAt: row.lease_expires_at ? asIso(row.lease_expires_at) : undefined,
@@ -511,11 +519,21 @@ export const createWorkflowRun = async ({
   workItem,
   workflow,
   restartFromPhase,
+  segment,
 }: {
   capabilityId: string;
   workItem: WorkItem;
   workflow: Workflow;
   restartFromPhase?: WorkItemPhase;
+  // Phase-segment linkage: when the caller is starting a new segment
+  // or retrying a failed segment, it passes the segment descriptor here
+  // so the run row captures segment_id + priority_snapshot and the
+  // segment's current_run_id / attempt_count update in the same tx.
+  segment?: {
+    id: string;
+    prioritySnapshot: 'High' | 'Med' | 'Low';
+    isRetry: boolean;
+  };
 }): Promise<WorkflowRunDetail> =>
   transaction(async client => {
     const normalizedWorkflow = workflow;
@@ -593,6 +611,8 @@ export const createWorkflowRun = async ({
         visitCount: 0,
       },
       restartFromPhase,
+      segmentId: segment?.id,
+      prioritySnapshot: segment?.prioritySnapshot,
       traceId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -616,9 +636,11 @@ export const createWorkflowRun = async ({
           assigned_agent_id,
           branch_state,
           restart_from_phase,
-          trace_id
+          trace_id,
+          segment_id,
+          priority_snapshot
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
       `,
       [
         capabilityId,
@@ -637,8 +659,25 @@ export const createWorkflowRun = async ({
         JSON.stringify(run.branchState || {}),
         run.restartFromPhase || null,
         run.traceId,
+        run.segmentId || null,
+        run.prioritySnapshot || null,
       ],
     );
+
+    // Link the run to its segment (if supplied). This update the
+    // segment's current_run_id, first_run_id (if null), attempt_count,
+    // and status within the same transaction so a transaction failure
+    // rolls back both sides together — no dangling run without a
+    // segment owner, no half-initialized segment.
+    if (segment?.id) {
+      await attachRunToSegmentTx(client, {
+        capabilityId,
+        segmentId: segment.id,
+        runId: run.id,
+        isRetry: segment.isRetry,
+        initialStatus: run.status,
+      });
+    }
 
     for (const [index, node] of orderedNodes.entries()) {
       await client.query(
@@ -756,6 +795,8 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
           lease_expires_at = $18,
           started_at = $19,
           completed_at = $20,
+          segment_id = COALESCE(segment_id, $21),
+          priority_snapshot = COALESCE($22, priority_snapshot),
           updated_at = NOW()
         WHERE capability_id = $1
           AND id = $2
@@ -782,6 +823,8 @@ export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDe
         run.leaseExpiresAt || null,
         run.startedAt || null,
         run.completedAt || null,
+        run.segmentId || null,
+        run.prioritySnapshot || null,
       ],
     );
 
@@ -817,6 +860,8 @@ export const updateWorkflowRunControl = async (run: WorkflowRun): Promise<Workfl
           lease_expires_at = $18,
           started_at = $19,
           completed_at = $20,
+          segment_id = COALESCE(segment_id, $21),
+          priority_snapshot = COALESCE($22, priority_snapshot),
           updated_at = NOW()
         WHERE capability_id = $1
           AND id = $2
@@ -843,6 +888,8 @@ export const updateWorkflowRunControl = async (run: WorkflowRun): Promise<Workfl
         run.leaseExpiresAt || null,
         run.startedAt || null,
         run.completedAt || null,
+        run.segmentId || null,
+        run.prioritySnapshot || null,
       ],
     );
 
@@ -1573,7 +1620,20 @@ export const claimRunnableRuns = async ({
               OR lease_expires_at IS NULL
               OR lease_expires_at <= NOW()
             )
-          ORDER BY updated_at ASC
+          -- Phase-segment claim order: High > Med > Low, then FIFO within
+          -- tier. priority_snapshot is a string column; the CASE folds
+          -- it to a numeric rank for ORDER BY without a join to
+          -- capability_work_items. Legacy runs with NULL snapshot fall
+          -- into the 'Med' bucket so they don't silently outrun newer
+          -- High-priority work.
+          ORDER BY
+            CASE COALESCE(priority_snapshot, 'Med')
+              WHEN 'High' THEN 0
+              WHEN 'Med'  THEN 1
+              WHEN 'Low'  THEN 2
+              ELSE 1
+            END ASC,
+            updated_at ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED
         )
@@ -1625,7 +1685,18 @@ export const claimNextRunnableRunForExecutor = async ({
               lease_expires_at IS NULL
               OR lease_expires_at <= NOW()
             )
-          ORDER BY updated_at ASC, created_at ASC
+          -- Same priority ordering as claimRunnableRuns above, applied
+          -- to the desktop-executor-scoped claim so both paths respect
+          -- operator priority.
+          ORDER BY
+            CASE COALESCE(priority_snapshot, 'Med')
+              WHEN 'High' THEN 0
+              WHEN 'Med'  THEN 1
+              WHEN 'Low'  THEN 2
+              ELSE 1
+            END ASC,
+            updated_at ASC,
+            created_at ASC
           LIMIT 1
           FOR UPDATE SKIP LOCKED
         )

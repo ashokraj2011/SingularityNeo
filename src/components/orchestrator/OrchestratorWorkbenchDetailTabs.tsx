@@ -9,6 +9,10 @@ type Props = {
   artifactsPanel: React.ReactNode;
   attemptsPanel: React.ReactNode;
   receiptsPanel: React.ReactNode;
+  // Optional so legacy call-sites that don't render a segments panel
+  // (tests, embedded workbench) continue to compile. When absent, the
+  // tab is not shown.
+  segmentsPanel?: React.ReactNode;
 };
 
 export const OrchestratorWorkbenchDetailTabs = ({
@@ -18,6 +22,7 @@ export const OrchestratorWorkbenchDetailTabs = ({
   artifactsPanel,
   attemptsPanel,
   receiptsPanel,
+  segmentsPanel,
 }: Props) => (
   <>
     <div className="orchestrator-detail-tabs">
@@ -26,6 +31,7 @@ export const OrchestratorWorkbenchDetailTabs = ({
         ['artifacts', 'Artifacts'],
         ['attempts', 'Attempts'],
         ['receipts', 'Receipts'],
+        ...(segmentsPanel ? ([['segments', 'Segments']] as const) : []),
       ] as const).map(([id, label]) => (
         <button
           key={id}
@@ -43,6 +49,7 @@ export const OrchestratorWorkbenchDetailTabs = ({
       {detailTab === 'artifacts' ? artifactsPanel : null}
       {detailTab === 'attempts' ? attemptsPanel : null}
       {detailTab === 'receipts' ? receiptsPanel : null}
+      {detailTab === 'segments' ? segmentsPanel : null}
     </div>
   </>
 );
