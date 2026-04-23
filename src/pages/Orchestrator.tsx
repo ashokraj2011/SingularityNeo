@@ -5664,102 +5664,338 @@ const Orchestrator = () => {
                 />
               }
               selectedWorkPanel={
-                <OrchestratorSelectedWorkPanel
+                <OrchestratorWorkbenchCanvas
                   selectedWorkItem={selectedWorkItem}
-                  emptyStateIcon={WorkflowIcon}
-                  phaseLabel={
-                    selectedWorkItem
-                      ? getPhaseMeta(selectedWorkItem.phase).label
-                      : "Unknown"
-                  }
-                  phaseTone={
-                    selectedWorkItem
-                      ? getStatusTone(selectedWorkItem.phase)
-                      : "neutral"
-                  }
-                  workItemStatusLabel={
-                    selectedWorkItem
-                      ? WORK_ITEM_STATUS_META[selectedWorkItem.status].label
-                      : "No selection"
-                  }
-                  workItemStatusTone={
-                    selectedWorkItem
-                      ? getStatusTone(selectedWorkItem.status)
-                      : "neutral"
-                  }
-                  currentRunStatusLabel={
-                    currentRun ? RUN_STATUS_META[currentRun.status].label : null
-                  }
-                  currentRunStatusTone={
-                    currentRun ? getStatusTone(currentRun.status) : null
-                  }
-                  canStartExecution={canStartExecution}
-                  canReadChat={canReadChat}
-                  canControlWorkItems={canControlWorkItems}
-                  currentRunIsActive={Boolean(
-                    currentRunIsActive &&
-                    currentRun &&
-                    currentRun.status !== "PAUSED",
+                >
+                  {selectedWorkItem && (
+                    <OrchestratorWorkbenchDetailContent
+                      detailTab={detailTab}
+                      onDetailTabChange={setDetailTab}
+                      headerProps={{
+                        selectedWorkItem,
+                        phaseLabel: getPhaseMeta(selectedWorkItem.phase).label,
+                        phaseTone: getStatusTone(selectedWorkItem.phase),
+                        taskTypeLabel: getWorkItemTaskTypeLabel(
+                          selectedWorkItem.taskType,
+                        ),
+                        workItemStatusLabel:
+                          WORK_ITEM_STATUS_META[selectedWorkItem.status].label,
+                        workItemStatusTone: getStatusTone(
+                          selectedWorkItem.status,
+                        ),
+                        currentRunStatusLabel: currentRun
+                          ? RUN_STATUS_META[currentRun.status].label
+                          : null,
+                        currentRunStatusTone: currentRun
+                          ? getStatusTone(currentRun.status)
+                          : null,
+                        selectedPhaseOwnerTeamName:
+                          selectedPhaseOwnerTeam?.name,
+                        selectedClaimOwnerName: selectedClaimOwner?.name,
+                        selectedPresenceUserNames: selectedPresenceUsers.map(
+                          (user) => user.name,
+                        ),
+                        selectedCanGuideBlockedAgent,
+                        showApprovalReviewButton:
+                          selectedOpenWait?.type === "APPROVAL",
+                        canStartExecution,
+                        startExecutionLabel:
+                          selectedRunHistory.length > 0
+                            ? "Start current phase"
+                            : "Start execution",
+                        canRestartFromPhase,
+                        restartPhaseLabel: `Restart ${getPhaseMeta(selectedWorkItem.phase).label}`,
+                        canResetAndRestart,
+                        selectedCanTakeControl,
+                        currentActorOwnsSelectedWorkItem,
+                        canControlWorkItems,
+                        currentRunIsActive,
+                        busyAction,
+                        canReadChat,
+                        hasSelectedAgent: Boolean(selectedAgent),
+                        onBackToFlowMap: () =>
+                          clearSelectedWorkItem({ focusBoard: true }),
+                        onExplain: () => setIsExplainOpen(true),
+                        onCreateEvidencePacket: () =>
+                          void handleCreateEvidencePacket(),
+                        canOpenReleasePassport,
+                        onOpenReleasePassport: handleOpenReleasePassport,
+                        onOpenFullChat: () => void handleOpenFullChat(),
+                        onTakeControl: () => setIsStageControlOpen(true),
+                        onToggleControl: () =>
+                          void (currentActorOwnsSelectedWorkItem
+                            ? handleReleaseControl()
+                            : handleClaimControl()),
+                        onApprovalReviewMouseDown:
+                          handleApprovalReviewMouseDown,
+                        onOpenApprovalReview: handleOpenApprovalReview,
+                        onStartExecution: () => void handleStartExecution(),
+                        onRestartExecution: () => void handleRestartExecution(),
+                        onResetAndRestart: () => void handleResetAndRestart(),
+                        onGuideBlockedAgent: focusGuidanceComposer,
+                        onCancelRun: () => void handleCancelRun(),
+                        onOpenRestore: () => {
+                          setActionError("");
+                          setRestoreWorkItemNote("");
+                          setIsRestoreWorkItemOpen(true);
+                        },
+                        onOpenArchive: () => {
+                          setActionError("");
+                          setArchiveWorkItemNote("");
+                          setIsArchiveWorkItemOpen(true);
+                        },
+                        onOpenCancel: () => {
+                          setActionError("");
+                          setCancelWorkItemNote("");
+                          setIsCancelWorkItemOpen(true);
+                        },
+                      }}
+                      operateProps={{
+                        briefing: workspace.briefing,
+                        selectedAgentKnowledgeLens,
+                        selectedStateSummary,
+                        selectedBlockerSummary,
+                        selectedNextActionSummary,
+                        readinessContract,
+                        primaryReadinessGate,
+                        selectedTasks,
+                        onOpenTaskList: () => navigate("/tasks"),
+                        onOpenTask: (taskId) =>
+                          navigate(
+                            "/tasks?taskId=" + encodeURIComponent(taskId),
+                          ),
+                        selectedAgent,
+                        selectedInteractionFeed,
+                        onOpenArtifactFromTimeline:
+                          handleOpenArtifactFromTimeline,
+                        onOpenRunFromTimeline: (runId) =>
+                          void handleOpenRunFromTimeline(runId),
+                        onOpenTaskFromTimeline: handleOpenTaskFromTimeline,
+                        selectedAttentionReason,
+                        selectedAttentionLabel,
+                        selectedAttentionRequestedBy,
+                        selectedAttentionTimestamp,
+                        agentsById,
+                        selectedCanGuideBlockedAgent,
+                        selectedOpenWait,
+                        requestChangesIsAvailable,
+                        onGuideAndRestart: () => void handleGuideAndRestart(),
+                        canGuideAndRestart,
+                        busyAction,
+                        actionError,
+                        onApprovalReviewMouseDown:
+                          handleApprovalReviewMouseDown,
+                        onOpenApprovalReview: handleOpenApprovalReview,
+                        onResolveWait: () => void handleResolveWait(),
+                        canResolveSelectedWait,
+                        actionButtonLabel,
+                        selectedFailureReason,
+                        selectedWorkItem,
+                        canRestartWorkItems,
+                        onUseBlockerInGuidance: () =>
+                          setResolutionNote((current) =>
+                            current.trim()
+                              ? `${buildBlockedGuidanceSeed(selectedAttentionReason)}${current.trim()}`
+                              : buildBlockedGuidanceSeed(
+                                  selectedAttentionReason,
+                                ),
+                          ),
+                        resolutionNoteRef,
+                        resolutionNote,
+                        onResolutionNoteChange: setResolutionNote,
+                        resolutionPlaceholder,
+                        guidanceSuggestions,
+                        onAppendGuidanceSuggestion: (suggestion) =>
+                          setResolutionNote((current) =>
+                            current.trim()
+                              ? `${current.trim()}\n- ${suggestion}`
+                              : `- ${suggestion}`,
+                          ),
+                        resolutionIsRequired,
+                        selectedWorkflow,
+                        selectedCurrentStep,
+                        currentRun,
+                        currentRunStatusLabel: currentRun
+                          ? `Started ${formatTimestamp(currentRun.startedAt || currentRun.createdAt)}`
+                          : null,
+                        selectedSharedBranch,
+                        selectedExecutionRepository,
+                        selectedEffectiveExecutionContext,
+                        selectedActiveWriterLabel:
+                          selectedActiveWriter?.name ||
+                          selectedEffectiveExecutionContext?.activeWriterUserId ||
+                          "No one has claimed write control",
+                        onInitializeExecutionContext: () =>
+                          void handleInitializeExecutionContext(),
+                        canInitializeExecutionContext,
+                        onCreateSharedBranch: () =>
+                          void handleCreateSharedBranch(),
+                        canCreateSharedBranch,
+                        currentActorOwnsWriteControl,
+                        onToggleWriteControl: () =>
+                          void (currentActorOwnsWriteControl
+                            ? handleReleaseWriteControl()
+                            : handleClaimWriteControl()),
+                        canControlWorkItems,
+                        latestSelectedHandoff,
+                        onCreateHandoff: () => void handleCreateHandoff(),
+                        onAcceptLatestHandoff: () =>
+                          void handleAcceptLatestHandoff(),
+                        selectedCompiledStepContext,
+                        workspaceTeamsById,
+                        renderStructuredInputs,
+                        renderArtifactChecklist,
+                        renderAgentArtifactExpectations,
+                        selectedCompiledWorkItemPlan,
+                        selectedArtifacts,
+                        selectedArtifact,
+                        onOpenArtifactsTab: () => setDetailTab("artifacts"),
+                        onSelectArtifactAndOpen: (artifactId) => {
+                          setSelectedArtifactId(artifactId);
+                          setDetailTab("artifacts");
+                        },
+                        selectedCurrentPhaseStakeholders,
+                        selectedPhaseStakeholderAssignments,
+                        getLifecyclePhaseLabelForPhase: (phase) =>
+                          getLifecyclePhaseLabel(activeCapability, phase),
+                        formatPhaseStakeholderLine:
+                          formatWorkItemPhaseStakeholderLine,
+                        selectedWorkItemTaskTypeLabel: getWorkItemTaskTypeLabel(
+                          selectedWorkItem.taskType,
+                        ),
+                        selectedWorkItemTaskTypeDescription:
+                          getWorkItemTaskTypeDescription(
+                            selectedWorkItem.taskType,
+                          ),
+                        runtimeReady,
+                        runtimeError,
+                        selectedRequestedInputFields,
+                        focusGuidanceComposer,
+                        onOpenExecutionPolicyConfig: () =>
+                          navigate("/operations#desktop-workspaces"),
+                        hasMissingWorkspaceInput,
+                        waitRequiresApprovedWorkspace,
+                        hasApprovedWorkspaceConfigured,
+                        approvedWorkspaceRoots,
+                        approvedWorkspaceDraft,
+                        onApprovedWorkspaceDraftChange: (value) => {
+                          setApprovedWorkspaceDraft(value);
+                          setApprovedWorkspaceValidation(null);
+                        },
+                        onApproveWorkspacePath: (options) =>
+                          void handleApproveWorkspacePath(options),
+                        activeCapabilityLocalDirectories: [],
+                        approvedWorkspaceValidation,
+                        canEditCapability,
+                        selectedCodeDiffArtifactId,
+                        selectedCodeDiffArtifact,
+                        selectedCodeDiffRepositoryCount,
+                        selectedCodeDiffTouchedFileCount,
+                        onOpenDiffReview: () => setIsDiffReviewOpen(true),
+                        selectedContrarianReviewTone,
+                        selectedContrarianReview,
+                        selectedContrarianReviewIsReady,
+                        renderReviewList,
+                        selectedCanTakeControl,
+                        onOpenStageControl: () => setIsStageControlOpen(true),
+                        stageChatSuggestedPrompts,
+                        onSelectStageChatPrompt: (prompt) =>
+                          setStageChatInput(prompt),
+                        stageChatThreadRef,
+                        onStageChatScroll: handleStageChatScroll,
+                        selectedStageChatMessages,
+                        stageChatDraft,
+                        isStageChatSending,
+                        stageChatError,
+                        onOpenFullChat: handleOpenFullChat,
+                        stageChatInput,
+                        onStageChatInputChange: setStageChatInput,
+                        onStageChatSend: handleStageChatSend,
+                        canWriteChat,
+                        selectedResetStep,
+                        selectedResetPhase,
+                        selectedResetAgentName:
+                          selectedResetAgent?.name ||
+                          selectedResetStep?.agentId ||
+                          null,
+                        getPhaseMeta,
+                      }}
+                      artifactsProps={{
+                        filteredArtifacts,
+                        artifactFilter,
+                        onArtifactFilterChange: setArtifactFilter,
+                        selectedArtifact,
+                        latestArtifactDocument,
+                        onSelectArtifact: setSelectedArtifactId,
+                        selectedTasks,
+                        selectedLogs,
+                        onOpenRunConsole: () => navigate("/run-console"),
+                        onOpenLedger: () => navigate("/ledger"),
+                        onOpenWorkflowDesigner: () => navigate("/designer"),
+                      }}
+                      attemptsProps={{
+                        capabilityId: activeCapability.id,
+                        currentRun,
+                        selectedOpenWait,
+                        previousRunSummary: previousRunSummary?.id || null,
+                        attemptComparisonLines,
+                        selectedWorkflow,
+                        selectedRunSteps,
+                        getPhaseMeta,
+                        selectedRunEvents,
+                        selectedRunDetail,
+                        selectedRunHistory,
+                        recentRunActivity,
+                        agentsById,
+                        getRunEventTone,
+                        getRunEventLabel,
+                        liveStreamingText,
+                        recentlyChangedFiles,
+                      }}
+                      receiptsProps={{
+                        selectedRunEvents,
+                        capabilityId: activeCapability.id,
+                        runId: currentRun?.id ?? null,
+                      }}
+                      failureRecoveryProps={{
+                        selectedWorkItem,
+                        currentRun,
+                        selectedFailureReason,
+                        selectedCurrentStep,
+                        failedRunStep: selectedRunStep,
+                        busyAction,
+                        canRestartFromPhase,
+                        restartPhaseLabel: `Restart ${getPhaseMeta(selectedWorkItem.phase).label}`,
+                        canResetAndRestart,
+                        selectedCanGuideBlockedAgent,
+                        currentRunIsActive,
+                        onRestartExecution: () => void handleRestartExecution(),
+                        onResetAndRestart: () => void handleResetAndRestart(),
+                        onGuideBlockedAgent: focusGuidanceComposer,
+                        onCancelRun: () => void handleCancelRun(),
+                      }}
+                      segmentsPanel={
+                        <OrchestratorSegmentsSection
+                          capability={activeCapability}
+                          workItemId={selectedWorkItem.id}
+                          workItemBrief={selectedWorkItem.brief}
+                          canEdit={canControlWorkItems}
+                          hasActiveRun={Boolean(selectedWorkItem.activeRunId)}
+                          nextSegmentPreset={selectedWorkItem.nextSegmentPreset}
+                          onStartSegment={() => {
+                            openStartSegmentDialog(selectedWorkItem.id);
+                          }}
+                          onStartNextSegment={() => {
+                            void handleStartNextSegment(selectedWorkItem.id);
+                          }}
+                          onAfterRetry={() => {
+                            void refreshSelection(selectedWorkItem.id);
+                          }}
+                        />
+                      }
+                    />
                   )}
-                  currentRunIsPaused={Boolean(
-                    currentRun && currentRun.status === "PAUSED",
-                  )}
-                  selectedCurrentStepLabel={
-                    selectedCurrentStep?.name || "Awaiting orchestration"
-                  }
-                  selectedAgentLabel={
-                    selectedAgent?.name || selectedAgent?.id || "Unassigned"
-                  }
-                  selectedAttentionTimestamp={selectedAttentionTimestamp}
-                  selectedAttentionLabel={selectedAttentionLabel}
-                  selectedNextActionSummary={selectedNextActionSummary}
-                  selectedStateSummary={selectedStateSummary}
-                  selectedBlockerSummary={selectedBlockerSummary}
-                  actionError={actionError}
-                  busyAction={busyAction}
-                  onStartExecution={() => void handleStartExecution()}
-                  onExplain={() => setIsExplainOpen(true)}
-                  onCreateEvidencePacket={() =>
-                    void handleCreateEvidencePacket()
-                  }
-                  canOpenReleasePassport={canOpenReleasePassport}
-                  onOpenReleasePassport={handleOpenReleasePassport}
-                  onOpenFullChat={() => void handleOpenFullChat()}
-                  onPauseRun={() =>
-                    currentRun && selectedWorkItem
-                      ? void handlePauseRunById({
-                          runId: currentRun.id,
-                          workItemId: selectedWorkItem.id,
-                          workItemTitle: selectedWorkItem.title,
-                        })
-                      : undefined
-                  }
-                  onResumeRun={() =>
-                    currentRun && selectedWorkItem
-                      ? void handleResumeRunById({
-                          runId: currentRun.id,
-                          workItemId: selectedWorkItem.id,
-                          workItemTitle: selectedWorkItem.title,
-                        })
-                      : undefined
-                  }
-                  onOpenRestore={() => {
-                    setActionError("");
-                    setRestoreWorkItemNote("");
-                    setIsRestoreWorkItemOpen(true);
-                  }}
-                  onOpenArchive={() => {
-                    setActionError("");
-                    setArchiveWorkItemNote("");
-                    setIsArchiveWorkItemOpen(true);
-                  }}
-                  onOpenCancel={() => {
-                    setActionError("");
-                    setCancelWorkItemNote("");
-                    setIsCancelWorkItemOpen(true);
-                  }}
-                  formatTimestamp={formatTimestamp}
-                />
+                </OrchestratorWorkbenchCanvas>
               }
               copilotDock={
                 <OrchestratorCopilotDock
