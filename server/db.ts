@@ -3162,6 +3162,105 @@ export const migrationStatements = [
       )
       WHERE status IN ('RUNNING', 'AWAITING_REVIEW', 'PENDING')
   `,
+  // ── Step Kit: configurable palette templates ──────────────────────────────
+  `
+    CREATE TABLE IF NOT EXISTS workspace_step_templates (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      capability_id TEXT,
+      node_type TEXT NOT NULL CHECK (node_type IN ('HUMAN_TASK','AGENT_TASK')),
+      label TEXT NOT NULL,
+      description TEXT,
+      icon TEXT,
+      default_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS workspace_step_templates_workspace_idx
+      ON workspace_step_templates (workspace_id, capability_id)
+  `,
+  // ── Workflow versioning + immutability ────────────────────────────────────
+  `
+    ALTER TABLE capability_workflows
+    ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1
+  `,
+  `
+    ALTER TABLE capability_workflows
+    ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ
+  `,
+  `
+    ALTER TABLE capability_workflows
+    ADD COLUMN IF NOT EXISTS locked_by TEXT
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_workflow_versions (
+      id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      capability_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      nodes JSONB NOT NULL DEFAULT '[]'::jsonb,
+      edges JSONB NOT NULL DEFAULT '[]'::jsonb,
+      publish_state TEXT NOT NULL,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      change_summary TEXT,
+      UNIQUE (workflow_id, version)
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_workflow_versions_wf_idx
+      ON capability_workflow_versions (workflow_id, version DESC)
+  `,
+  // ── Human task email assignment ───────────────────────────────────────────
+  `
+    ALTER TABLE capability_approval_assignments
+    ADD COLUMN IF NOT EXISTS assignee_email TEXT
+  `,
+  // ── Sub-workflow composition ──────────────────────────────────────────────
+  `
+    ALTER TABLE capability_workflow_runs
+    ADD COLUMN IF NOT EXISTS parent_run_id TEXT
+  `,
+  `
+    ALTER TABLE capability_workflow_runs
+    ADD COLUMN IF NOT EXISTS parent_run_node_id TEXT
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_workflow_runs_parent_idx
+      ON capability_workflow_runs (parent_run_id)
+      WHERE parent_run_id IS NOT NULL
+  `,
+  // ── In-app notifications for alert dispatcher ─────────────────────────────
+  `
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      run_id TEXT,
+      capability_id TEXT,
+      node_id TEXT,
+      severity TEXT NOT NULL,
+      message TEXT NOT NULL,
+      acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS notifications_user_idx
+      ON notifications (user_id, acknowledged, created_at DESC)
+  `,
+  // ── Policy templates library ──────────────────────────────────────────────
+  `
+    CREATE TABLE IF NOT EXISTS workspace_policy_templates (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      policy_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+      category TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
 ];
 
 const detectOptionalPlatformExtensions = async (client: PoolClient) => {

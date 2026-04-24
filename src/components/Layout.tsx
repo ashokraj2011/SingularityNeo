@@ -70,7 +70,7 @@ const companionNavItems = [
   { name: "Chat", shortName: "Chat", icon: MessageSquare, path: "/chat" },
   { name: "Planning", shortName: "Plan", icon: ClipboardList, path: "/planning" },
   { name: "Agents", shortName: "Agents", icon: Users, path: "/team" },
-  { name: "Evidence", shortName: "Evidence", icon: Wallet, path: "/ledger" },
+  { name: "Activity Record", shortName: "Record", icon: Wallet, path: "/ledger" },
   { name: "Designer", shortName: "Design", icon: Workflow, path: "/designer" },
 ] as const;
 

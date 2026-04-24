@@ -38,7 +38,7 @@ type Props = {
   onResolveWait: () => void;
   dockCanResolveWait: boolean;
   dockPrimaryActionLabel: string;
-  selectedOpenWaitType?: 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION' | null;
+  selectedOpenWaitType?: 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION' | 'SUB_WORKFLOW_WAIT' | null;
   selectedCanGuideBlockedAgent: boolean;
   onGuideAndRestart: () => void;
   canStartExecution: boolean;

@@ -19,6 +19,8 @@ const Agents = lazy(() => import('./pages/Agents'));
 const SkillLibrary = lazy(() => import('./pages/SkillLibrary'));
 const ToolsLibrary = lazy(() => import('./pages/ToolsLibrary'));
 const PoliciesLibrary = lazy(() => import('./pages/PoliciesLibrary'));
+const StepTemplateLibrary = lazy(() => import('./pages/StepTemplateLibrary'));
+const DesignerConfigPage = lazy(() => import('./pages/DesignerConfig'));
 const Studio = lazy(() => import('./pages/Studio'));
 const Chat = lazy(() => import('./pages/Chat'));
 const Orchestrator = lazy(() => import('./pages/Orchestrator'));
@@ -101,6 +103,8 @@ export default function App() {
                   <Route path="/skills" element={<SkillLibrary />} />
                   <Route path="/tools" element={<ToolsLibrary />} />
                   <Route path="/policies" element={<PoliciesLibrary />} />
+                  <Route path="/studio/step-templates" element={<StepTemplateLibrary />} />
+                  <Route path="/studio/designer-config" element={<DesignerConfigPage />} />
                   <Route path="/studio" element={<Studio />} />
                   <Route path="/chat" element={<Chat />} />
                   <Route path="/orchestrator" element={<Orchestrator />} />

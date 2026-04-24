@@ -50,6 +50,10 @@ import {
   StatusBadge,
 } from '../components/EnterpriseUI';
 import CapabilityLifecycleEditor from '../components/CapabilityLifecycleEditor';
+import {
+  loadDesignerConfig,
+  type DesignerConfig,
+} from './DesignerConfig';
 import { normalizeAgentOperatingContract } from '../lib/agentRuntime';
 import {
   applyWorkflowTemplateArtifacts,
@@ -94,9 +98,15 @@ import type {
   ApprovalPolicy,
   ApprovalRuleTarget,
   Artifact,
+  HumanTaskConfig,
+  AgentTaskConfig,
+  StepTemplate,
+  SubWorkflowConfig,
+  WorkflowVersion,
   ToolAdapterId,
   WorkItemPhase,
   Workflow,
+  WorkflowAlertChannel,
   WorkflowEdge,
   WorkflowNode,
   WorkflowNodeType,
@@ -110,6 +120,9 @@ const NODE_TYPE_OPTIONS: Array<{
   description: string;
 }> = [
   { type: 'DELIVERY', label: 'Delivery Step', description: 'Agent-owned work inside a delivery phase.' },
+  { type: 'HUMAN_TASK', label: 'Human Task', description: 'A human-owned task: upload documents, verify items, fill a form, or review a checklist.' },
+  { type: 'AGENT_TASK', label: 'Agent Task', description: 'A configurable agent step with custom parameters and timeout.' },
+  { type: 'SUB_WORKFLOW', label: 'Sub-Workflow', description: 'Embed and run an existing published workflow as a single composable step.' },
   { type: 'EVENT', label: 'Event', description: 'Emit a workflow event or signal for downstream systems and evidence.' },
   { type: 'ALERT', label: 'Alert', description: 'Raise an operational alert with severity, routing, and acknowledgement rules.' },
   { type: 'DECISION', label: 'Decision', description: 'Route the work item based on review or execution outcome.' },
@@ -211,8 +224,11 @@ const NODE_TYPE_TONE: Record<WorkflowNodeType, string> = {
   ALERT: 'bg-red-100 text-red-700 border-red-200',
   GOVERNANCE_GATE: 'bg-amber-100 text-amber-800 border-amber-200',
   HUMAN_APPROVAL: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200',
+  HUMAN_TASK: 'bg-rose-100 text-rose-700 border-rose-200',
+  AGENT_TASK: 'bg-teal-100 text-teal-700 border-teal-200',
+  SUB_WORKFLOW: 'bg-violet-100 text-violet-700 border-violet-200',
   DECISION: 'bg-sky-100 text-sky-700 border-sky-200',
-  PARALLEL_SPLIT: 'bg-violet-100 text-violet-700 border-violet-200',
+  PARALLEL_SPLIT: 'bg-blue-100 text-blue-700 border-blue-200',
   PARALLEL_JOIN: 'bg-indigo-100 text-indigo-700 border-indigo-200',
   RELEASE: 'bg-emerald-100 text-emerald-700 border-emerald-200',
   END: 'bg-slate-900 text-white border-slate-900',
@@ -249,6 +265,7 @@ const PALETTE_GROUPS: Array<{
       { type: 'DELIVERY', label: 'Implementation Task', defaultPhase: 'DEVELOPMENT', action: 'Implement the code or system change and capture technical evidence.' },
       { type: 'DELIVERY', label: 'QA Task', defaultPhase: 'QA', action: 'Test the change, verify acceptance criteria, and record outcomes.' },
       { type: 'RELEASE', label: 'Release Task', defaultPhase: 'RELEASE', action: 'Prepare and complete the release with deployment evidence.' },
+      { type: 'AGENT_TASK', label: 'Agent Task', defaultPhase: 'DEVELOPMENT', action: 'Run a specific agent with configurable parameters and timeout.' },
     ],
   },
   {
@@ -268,6 +285,7 @@ const PALETTE_GROUPS: Array<{
     items: [
       { type: 'GOVERNANCE_GATE', label: 'Governance Gate', defaultPhase: 'GOVERNANCE', action: 'Check controls, evidence, policy, and governance requirements.' },
       { type: 'HUMAN_APPROVAL', label: 'Human Approval', defaultPhase: 'GOVERNANCE', action: 'Pause for human approval, clarification, or unblock.' },
+      { type: 'HUMAN_TASK', label: 'Human Task', defaultPhase: 'GOVERNANCE', action: 'Assign a task to a human: upload documents, fill a form, verify items, or complete a checklist.' },
       { type: 'END', label: 'End', defaultPhase: 'RELEASE', action: 'Close the workflow path and mark the run complete.' },
     ],
   },
@@ -278,6 +296,14 @@ const PALETTE_GROUPS: Array<{
     items: [
       { type: 'EVENT', label: 'Workflow Event', defaultPhase: 'DEVELOPMENT', action: 'Emit a workflow event with a structured payload for telemetry, automation, or hand-off triggers.' },
       { type: 'ALERT', label: 'Operational Alert', defaultPhase: 'GOVERNANCE', action: 'Raise an alert with severity, routing, and acknowledgement expectations for operators or stakeholders.' },
+    ],
+  },
+  {
+    title: 'Compositions',
+    description: 'Embed an existing workflow as a single composable step inside this workflow.',
+    phase: 'DEVELOPMENT',
+    items: [
+      { type: 'SUB_WORKFLOW', label: 'Sub-Workflow', defaultPhase: 'DEVELOPMENT', action: 'Run a referenced workflow as a composable step; optionally wait for it to complete.' },
     ],
   },
 ];
@@ -439,8 +465,11 @@ const getArtifactPreview = (artifacts: string[], max = 2) =>
 const isLegacyEtlNodeType = (type: WorkflowNodeType) =>
   type === 'EXTRACT' || type === 'TRANSFORM' || type === 'LOAD' || type === 'FILTER';
 
-const getNodeTypeLabel = (type: WorkflowNodeType) =>
-  NODE_TYPE_OPTIONS.find(option => option.type === type)?.label || type;
+const getNodeTypeLabel = (type: WorkflowNodeType, config?: DesignerConfig) => {
+  const override = config?.nodeLabels?.[type]?.label;
+  if (override) return override;
+  return NODE_TYPE_OPTIONS.find(option => option.type === type)?.label || type;
+};
 
 const getNodeIcon = (type: WorkflowNodeType) => {
   switch (type) {
@@ -458,6 +487,12 @@ const getNodeIcon = (type: WorkflowNodeType) => {
       return ShieldCheck;
     case 'HUMAN_APPROVAL':
       return CheckCircle2;
+    case 'HUMAN_TASK':
+      return Hand;
+    case 'AGENT_TASK':
+      return Wrench;
+    case 'SUB_WORKFLOW':
+      return WorkflowIcon;
     case 'RELEASE':
       return Sparkles;
     default:
@@ -894,18 +929,65 @@ export default function WorkflowStudio({
     },
     [capabilityLifecycle, lifecyclePhaseIds],
   );
-  const paletteGroups = useMemo(
-    () =>
-      PALETTE_GROUPS.map(group => ({
-        ...group,
-        phase: resolveLifecycleTemplatePhase(group.phase),
-        items: group.items.map(item => ({
-          ...item,
-          defaultPhase: resolveLifecycleTemplatePhase(item.defaultPhase),
-        })),
-      })),
-    [resolveLifecycleTemplatePhase],
+  // Step Kit dynamic palette — must be declared before paletteGroups useMemo
+  const [stepTemplates, setStepTemplates] = useState<StepTemplate[]>([]);
+
+  // Designer configuration (per-capability localStorage)
+  const [designerConfig, setDesignerConfig] = useState<DesignerConfig>(
+    () => loadDesignerConfig(activeCapability.id),
   );
+  // Reload config whenever the active capability changes
+  useEffect(() => {
+    setDesignerConfig(loadDesignerConfig(activeCapability.id));
+  }, [activeCapability.id]);
+
+  const paletteGroups = useMemo(() => {
+    const visibility = designerConfig.paletteGroupVisibility;
+    const baseGroups = PALETTE_GROUPS
+      .filter(group => visibility[group.title] !== false)
+      .map(group => ({
+      ...group,
+      phase: resolveLifecycleTemplatePhase(group.phase),
+      items: group.items.map(item => ({
+        ...item,
+        defaultPhase: resolveLifecycleTemplatePhase(item.defaultPhase),
+      })),
+    }));
+
+    // Dynamic Step Kit groups from workspace_step_templates
+    const humanTemplates = stepTemplates.filter(t => t.nodeType === 'HUMAN_TASK');
+    const agentTemplates = stepTemplates.filter(t => t.nodeType === 'AGENT_TASK');
+
+    if (humanTemplates.length > 0 && visibility['General Steps'] !== false) {
+      baseGroups.push({
+        title: 'General Steps',
+        description: 'Configurable human task steps — upload documents, verify items, checklists, and more.',
+        phase: resolveLifecycleTemplatePhase('DEVELOPMENT'),
+        items: humanTemplates.map(t => ({
+          type: 'HUMAN_TASK' as const,
+          label: t.label,
+          defaultPhase: resolveLifecycleTemplatePhase('DEVELOPMENT'),
+          action: (t.defaultConfig as { instructions?: string })?.instructions || t.description || 'Complete the assigned task.',
+        })),
+      });
+    }
+
+    if (agentTemplates.length > 0 && visibility['Agent Steps'] !== false) {
+      baseGroups.push({
+        title: 'Agent Steps',
+        description: 'Configurable agent task steps from your step template library.',
+        phase: resolveLifecycleTemplatePhase('DEVELOPMENT'),
+        items: agentTemplates.map(t => ({
+          type: 'AGENT_TASK' as const,
+          label: t.label,
+          defaultPhase: resolveLifecycleTemplatePhase('DEVELOPMENT'),
+          action: t.description || 'Run the configured agent step.',
+        })),
+      });
+    }
+
+    return baseGroups;
+  }, [resolveLifecycleTemplatePhase, stepTemplates, designerConfig]);
   const normalizeWorkflowForCapability = useCallback(
     (workflow: Workflow) =>
       buildWorkflowFromGraph(
@@ -943,8 +1025,12 @@ export default function WorkflowStudio({
   const [dragLinkPosition, setDragLinkPosition] = useState<{ x: number; y: number } | null>(
     null,
   );
-  const [canvasScale, setCanvasScale] = useState(initialNeoLayout.canvasScale);
-  const [snapToGrid, setSnapToGrid] = useState(true);
+  const [canvasScale, setCanvasScale] = useState(
+    () => initialNeoLayout.canvasScale * (loadDesignerConfig(activeCapability.id).canvasPreferences.defaultZoom ?? 1),
+  );
+  const [snapToGrid, setSnapToGrid] = useState(
+    () => loadDesignerConfig(activeCapability.id).canvasPreferences.snapToGrid,
+  );
   const [isCreateWorkflowOpen, setIsCreateWorkflowOpen] = useState(false);
   const [isLifecycleManagerOpen, setIsLifecycleManagerOpen] = useState(false);
   const [isNodeDetailsOpen, setIsNodeDetailsOpen] = useState(false);
@@ -1047,6 +1133,18 @@ export default function WorkflowStudio({
   }, [capabilityLifecycle, isLifecycleManagerOpen, workflows]);
   const [nodeDraft, setNodeDraft] = useState<WorkflowNode | null>(null);
   const [edgeDraft, setEdgeDraft] = useState<WorkflowEdge | null>(null);
+  // Advanced node details tabs + view toggle
+  const [nodeDetailTab, setNodeDetailTab] = useState<'overview' | 'task' | 'io' | 'governance' | 'execution'>('overview');
+  const [businessView, setBusinessView] = useState<boolean>(() => {
+    try { return localStorage.getItem('wf-business-view') === 'true'; } catch { return false; }
+  });
+  // Workflow versioning
+  const [workflowVersions, setWorkflowVersions] = useState<WorkflowVersion[]>([]);
+  const [isVersionHistoryOpen, setIsVersionHistoryOpen] = useState(false);
+  const [isLocking, setIsLocking] = useState(false);
+  // Sub-workflow picker
+  const [isSubWorkflowPickerOpen, setIsSubWorkflowPickerOpen] = useState(false);
+  const [pendingSubWorkflowNodeId, setPendingSubWorkflowNodeId] = useState<string | null>(null);
   const [marqueeSelection, setMarqueeSelection] = useState<{
     startX: number;
     startY: number;
@@ -1081,6 +1179,7 @@ export default function WorkflowStudio({
       setSelectedWorkflowId(activeWorkflows[0]?.id || '');
     }
   }, [activeWorkflows, selectedWorkflow, selectedWorkflowId]);
+
 
   useEffect(() => {
     const baselineEntry = createHistoryEntry(
@@ -1430,6 +1529,28 @@ export default function WorkflowStudio({
     };
   }, [neoContextMenu]);
 
+  // Load step templates for dynamic palette groups
+  useEffect(() => {
+    const capId = activeCapability.id;
+    if (!capId) return;
+    fetch(`/api/step-templates?capabilityId=${encodeURIComponent(capId)}&workspaceId=default`)
+      .then(r => r.ok ? r.json() : [])
+      .then((templates: StepTemplate[]) => setStepTemplates(templates))
+      .catch(() => undefined);
+  }, [activeCapability.id]);
+
+  // Load version history when a PUBLISHED/locked workflow is opened
+  useEffect(() => {
+    const wf = selectedWorkflow;
+    if (!wf?.lockedAt && !wf?.version) return;
+    const capId = activeCapability.id;
+    if (!capId || !wf?.id) return;
+    fetch(`/api/capabilities/${encodeURIComponent(capId)}/workflows/${encodeURIComponent(wf.id)}/versions`)
+      .then(r => r.ok ? r.json() : [])
+      .then((versions: WorkflowVersion[]) => setWorkflowVersions(versions))
+      .catch(() => undefined);
+  }, [selectedWorkflow?.id, selectedWorkflow?.lockedAt, activeCapability.id]);
+
   const persistWorkflows = async (
     nextWorkflows: Workflow[],
     toastTitle: string,
@@ -1460,6 +1581,17 @@ export default function WorkflowStudio({
     } catch {
       // Context mutation paths already emit failure toasts.
     }
+  };
+
+  const toggleBusinessView = (next: boolean) => {
+    setBusinessView(next);
+    try { localStorage.setItem('wf-business-view', String(next)); } catch { /* ignore */ }
+  };
+
+  // Determine default view mode when a node is selected
+  const getDefaultBusinessView = (nodeType: WorkflowNodeType): boolean => {
+    const businessFirst: WorkflowNodeType[] = ['HUMAN_APPROVAL', 'HUMAN_TASK', 'GOVERNANCE_GATE'];
+    return businessFirst.includes(nodeType);
   };
 
   const lifecyclePhaseViews = useMemo(
@@ -2353,10 +2485,19 @@ export default function WorkflowStudio({
     }
 
     replaceSelectedWorkflow(
-      workflow => ({ ...workflow, publishState: 'PUBLISHED', status: 'STABLE' }),
+      workflow => ({ ...workflow, publishState: 'PUBLISHED', status: 'STABLE', lockedAt: new Date().toISOString() }),
       'Workflow published',
       `${selectedWorkflow.name} is now published for enterprise execution.`,
     );
+
+    // Async server-side lock — fire-and-forget; reload fetches fresh lock state
+    const capId = activeCapability.id;
+    const wfId = selectedWorkflow.id;
+    if (capId && wfId) {
+      fetch(`/api/capabilities/${encodeURIComponent(capId)}/workflows/${encodeURIComponent(wfId)}/lock`, {
+        method: 'POST',
+      }).catch(err => console.warn('[WorkflowStudio] lock after publish failed:', err));
+    }
   };
 
   const handleAutoLayout = () => {
@@ -2477,10 +2618,20 @@ export default function WorkflowStudio({
       parsedTemplate.phase,
     );
 
-    const _newNodeName =
+    const _baseNodeLabel =
       parsedTemplate.label ||
       NODE_TYPE_OPTIONS.find(option => option.type === parsedTemplate.type)?.label ||
       'New Node';
+    const _configPrefix = designerConfig.namingConventions.prefixByNodeType[parsedTemplate.type];
+    const _labelWithPrefix = _configPrefix
+      ? `${_configPrefix} ${_baseNodeLabel}`
+      : _baseNodeLabel;
+    const _newNodeName = designerConfig.namingConventions.useTitleCase
+      ? _labelWithPrefix
+          .split(' ')
+          .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+          .join(' ')
+      : _labelWithPrefix;
 
     // Control-flow nodes (DECISION, PARALLEL_SPLIT, PARALLEL_JOIN) are
     // orchestration primitives — they don't execute agent work, so they
@@ -2520,6 +2671,12 @@ export default function WorkflowStudio({
           ? 'Raise an alert with severity and routing so operators can respond quickly.'
           : parsedTemplate.type === 'RELEASE'
           ? 'Complete release work and attach evidence.'
+          : parsedTemplate.type === 'HUMAN_TASK'
+          ? 'Complete the assigned human task and mark it done.'
+          : parsedTemplate.type === 'AGENT_TASK'
+          ? 'Run the configured agent and capture outputs.'
+          : parsedTemplate.type === 'SUB_WORKFLOW'
+          ? 'Run a referenced workflow as a composable step.'
           : isLegacyEtlNodeType(parsedTemplate.type)
           ? 'Legacy ETL step imported from an older workflow.'
           : 'Complete the assigned work and prepare the next hand-off.'),
@@ -2535,9 +2692,17 @@ export default function WorkflowStudio({
         parsedTemplate.type === 'ALERT'
           ? {
               severity: 'WARNING',
-              channel: 'ops-console',
+              channel: 'IN_APP',
               requiresAcknowledgement: true,
             }
+          : undefined,
+      humanTaskConfig:
+        parsedTemplate.type === 'HUMAN_TASK'
+          ? { kind: 'HUMAN_TASK', instructions: 'Complete the required task and mark it done.' }
+          : undefined,
+      agentTaskConfig:
+        parsedTemplate.type === 'AGENT_TASK'
+          ? { kind: 'AGENT_TASK', agentRef: '', timeoutMinutes: 60 }
           : undefined,
     }, capabilityLifecycle);
 
@@ -2588,6 +2753,11 @@ export default function WorkflowStudio({
     if (isNeo) {
       setNeoInspectorCollapsed(false);
       setNeoInspectorMode('node');
+    }
+    // For SUB_WORKFLOW nodes, immediately open the workflow picker
+    if (parsedTemplate.type === 'SUB_WORKFLOW') {
+      setPendingSubWorkflowNodeId(nextNode.id);
+      setIsSubWorkflowPickerOpen(true);
     }
   };
 
@@ -3264,7 +3434,7 @@ export default function WorkflowStudio({
                           ...current,
                           alertConfig: {
                             ...(current.alertConfig || {}),
-                            channel: event.target.value,
+                            channel: event.target.value as WorkflowAlertChannel,
                           },
                         }
                       : current,
@@ -5840,11 +6010,24 @@ export default function WorkflowStudio({
                           <div className="min-w-0">
                             <p className="truncate text-sm font-semibold text-white">
                               {selectedWorkflow?.name || 'Create a new workflow graph'}
+                              {selectedWorkflow?.version ? (
+                                <span className="ml-2 rounded-full bg-slate-700 px-1.5 py-0.5 text-[0.6rem] font-bold text-slate-300">
+                                  v{selectedWorkflow.version}
+                                </span>
+                              ) : null}
                             </p>
                             <div className="flex min-w-0 flex-wrap items-center gap-2 text-[0.6875rem] text-slate-400">
                               <StatusBadge tone={selectedWorkflow ? PUBLISH_STATE_TONE[publishState] : 'neutral'}>
                                 {selectedWorkflow ? publishState : 'No workflow selected'}
                               </StatusBadge>
+                              {selectedWorkflow?.lockedAt ? (
+                                <span className="flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-300">
+                                  🔒 Locked · <button type="button" className="underline" onClick={async () => { if (!activeCapability.id || !selectedWorkflow?.id) return; setIsLocking(true); try { await fetch(`/api/capabilities/${activeCapability.id}/workflows/${selectedWorkflow.id}/unlock`, { method: 'POST' }); window.location.reload(); } catch { /* ignore */ } finally { setIsLocking(false); } }}>{isLocking ? 'Unlocking…' : 'Unlock'}</button>
+                                </span>
+                              ) : null}
+                              {workflowVersions.length > 0 && (
+                                <button type="button" className="underline text-slate-400 hover:text-slate-200" onClick={() => setIsVersionHistoryOpen(true)}>History</button>
+                              )}
                               <span className="whitespace-nowrap">
                                 {lastSavedAt
                                   ? `Saved ${new Date(lastSavedAt).toLocaleTimeString([], {
@@ -6045,6 +6228,29 @@ export default function WorkflowStudio({
                                 >
                                   <Download size={14} />
                                   Export JSON
+                                </button>
+                                <div className="my-1 border-t border-slate-700" />
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setIsNeoOverflowOpen(false);
+                                    navigate('/studio/designer-config');
+                                  }}
+                                  className="workflow-neo-menu-item"
+                                >
+                                  <Wrench size={14} />
+                                  Designer settings
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setIsNeoOverflowOpen(false);
+                                    navigate('/studio/step-templates');
+                                  }}
+                                  className="workflow-neo-menu-item"
+                                >
+                                  <LayoutTemplate size={14} />
+                                  Step templates
                                 </button>
                               </div>
                             ) : null}
@@ -6705,7 +6911,7 @@ export default function WorkflowStudio({
 
                           <div className="flex items-center gap-2">
                             <StatusBadge tone={isVisibleWorkflowNode(node.type) ? 'brand' : 'neutral'}>
-                              {getNodeTypeLabel(node.type)}
+                              {getNodeTypeLabel(node.type, designerConfig)}
                             </StatusBadge>
                             {node.agentId ? (
                               <span className="truncate text-[0.6875rem] font-medium text-outline">
@@ -7589,52 +7795,566 @@ export default function WorkflowStudio({
         <div className="fixed inset-0 z-[95] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-20 backdrop-blur-sm">
           <div className="w-full max-w-4xl">
             <ModalShell
-              eyebrow="Advanced Node Details"
+              eyebrow="Node Configuration"
               title={nodeDraft.name || 'Workflow node'}
-              description="Edit runtime, artifact, approval, and execution details in the full advanced configuration sheet."
+              description={NODE_TYPE_OPTIONS.find(o => o.type === nodeDraft.type)?.description || 'Configure this workflow node.'}
               actions={
-                <button
-                  type="button"
-                  onClick={() => setIsNodeDetailsOpen(false)}
-                  className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface"
-                >
-                  <X size={18} />
-                </button>
+                <div className="flex items-center gap-2">
+                  {/* Business / Technical view toggle */}
+                  <div className="flex items-center gap-1.5 rounded-full border border-outline-variant/40 bg-surface-container-low px-3 py-1.5">
+                    <button
+                      type="button"
+                      onClick={() => toggleBusinessView(true)}
+                      className={cn('rounded-full px-2.5 py-0.5 text-xs font-semibold transition', businessView ? 'bg-primary text-white' : 'text-outline hover:text-on-surface')}
+                    >
+                      Business
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => toggleBusinessView(false)}
+                      className={cn('rounded-full px-2.5 py-0.5 text-xs font-semibold transition', !businessView ? 'bg-primary text-white' : 'text-outline hover:text-on-surface')}
+                    >
+                      Technical
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsNodeDetailsOpen(false)}
+                    className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
               }
             >
               <div className="grid gap-5">
+                {/* Summary cards */}
                 <div className="grid gap-3 md:grid-cols-3">
                   <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">
-                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
-                      Phase
-                    </p>
-                    <p className="mt-2 text-sm font-semibold text-on-surface">
-                      {phaseLabel(nodeDraft.phase)}
-                    </p>
+                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">Phase</p>
+                    <p className="mt-2 text-sm font-semibold text-on-surface">{phaseLabel(nodeDraft.phase)}</p>
                   </div>
                   <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">
-                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
-                      Type
-                    </p>
-                    <p className="mt-2 text-sm font-semibold text-on-surface">
-                      {getNodeTypeLabel(nodeDraft.type)}
-                    </p>
+                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">Type</p>
+                    <p className="mt-2 text-sm font-semibold text-on-surface">{getNodeTypeLabel(nodeDraft.type, designerConfig)}</p>
                   </div>
                   <div className="rounded-2xl border border-outline-variant/50 bg-surface-container-low px-4 py-3">
-                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">
-                      Assigned
-                    </p>
+                    <p className="text-[0.6875rem] font-bold uppercase tracking-[0.18em] text-outline">Assigned</p>
                     <p className="mt-2 text-sm font-semibold text-on-surface">
-                      {workspace.agents.find(agent => agent.id === nodeDraft.agentId)?.name || 'Control node'}
+                      {workspace.agents.find(agent => agent.id === nodeDraft.agentId)?.name || 'Control / Human node'}
                     </p>
                   </div>
                 </div>
-                {renderNodeEditorFields('modal')}
+
+                {/* Tab navigation */}
+                <div className="flex gap-1 rounded-2xl border border-outline-variant/30 bg-surface-container-low p-1">
+                  {([ 'overview', 'task', 'io', 'governance', ...(!businessView ? ['execution'] : []) ] as const).map(tab => (
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setNodeDetailTab(tab as typeof nodeDetailTab)}
+                      className={cn(
+                        'flex-1 rounded-xl px-3 py-2 text-xs font-semibold capitalize transition',
+                        nodeDetailTab === tab
+                          ? 'bg-white text-on-surface shadow-sm'
+                          : 'text-outline hover:text-on-surface',
+                      )}
+                    >
+                      {tab === 'io' ? 'I/O & Artifacts' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Tab content */}
+                {nodeDetailTab === 'overview' && (
+                  <div className="grid gap-4">
+                    <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                      <span>Name</span>
+                      <input value={nodeDraft.name} onChange={e => setNodeDraft(c => c ? { ...c, name: e.target.value } : c)} className="enterprise-input" />
+                    </label>
+                    <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                      <span>Node Type</span>
+                      <select value={nodeDraft.type} onChange={e => setNodeDraft(c => c ? { ...c, type: e.target.value as WorkflowNodeType } : c)} className="enterprise-input">
+                        {NODE_TYPE_OPTIONS.map(o => <option key={o.type} value={o.type}>{o.label}</option>)}
+                      </select>
+                    </label>
+                    <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                      <span>Phase Lane</span>
+                      <select value={nodeDraft.phase} onChange={e => setNodeDraft(c => c ? { ...c, phase: e.target.value as WorkItemPhase } : c)} className="enterprise-input">
+                        {lifecyclePhaseIds.map(p => <option key={p} value={p}>{phaseLabel(p)}</option>)}
+                      </select>
+                    </label>
+                    <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                      <span>Description</span>
+                      <textarea rows={4} value={nodeDraft.description || ''} onChange={e => setNodeDraft(c => c ? { ...c, description: e.target.value } : c)} className="enterprise-input min-h-[7rem]" />
+                    </label>
+                  </div>
+                )}
+
+                {nodeDetailTab === 'task' && (
+                  <div className="grid gap-4">
+                    {/* DELIVERY / RELEASE */}
+                    {(nodeDraft.type === 'DELIVERY' || nodeDraft.type === 'RELEASE') && (
+                      <>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Assigned Agent</span>
+                          <select value={nodeDraft.agentId || ''} onChange={e => setNodeDraft(c => c ? { ...c, agentId: e.target.value || undefined } : c)} className="enterprise-input">
+                            <option value="">Unassigned</option>
+                            {workspace.agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                          </select>
+                        </label>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Action</span>
+                          <input value={nodeDraft.action || ''} onChange={e => setNodeDraft(c => c ? { ...c, action: e.target.value } : c)} className="enterprise-input" />
+                        </label>
+                      </>
+                    )}
+
+                    {/* HUMAN_TASK */}
+                    {nodeDraft.type === 'HUMAN_TASK' && (
+                      <>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Instructions</span>
+                          <textarea rows={4} value={nodeDraft.humanTaskConfig?.instructions || ''} onChange={e => setNodeDraft(c => c ? { ...c, humanTaskConfig: { ...((c.humanTaskConfig as HumanTaskConfig) || { kind: 'HUMAN_TASK', instructions: '' }), instructions: e.target.value } as HumanTaskConfig } : c)} className="enterprise-input min-h-[7rem]" />
+                        </label>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Checklist Items (one per line)</span>
+                          <textarea rows={4} value={(nodeDraft.humanTaskConfig?.checklist || []).join('\n')} onChange={e => setNodeDraft(c => c ? { ...c, humanTaskConfig: { ...((c.humanTaskConfig as HumanTaskConfig) || { kind: 'HUMAN_TASK', instructions: '' }), checklist: e.target.value.split('\n').map(s => s.trim()).filter(Boolean) } as HumanTaskConfig } : c)} className="enterprise-input min-h-[6rem]" placeholder="Check item 1&#10;Check item 2" />
+                        </label>
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>SLA Hours</span>
+                            <input type="number" min={1} value={(nodeDraft.humanTaskConfig as HumanTaskConfig)?.slaHours ?? ''} onChange={e => setNodeDraft(c => c ? { ...c, humanTaskConfig: { ...((c.humanTaskConfig as HumanTaskConfig) || { kind: 'HUMAN_TASK', instructions: '' }), slaHours: Number(e.target.value) || undefined } as HumanTaskConfig } : c)} className="enterprise-input" />
+                          </label>
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>Assignee Role</span>
+                            <input value={(nodeDraft.humanTaskConfig as HumanTaskConfig)?.assigneeRole || ''} onChange={e => setNodeDraft(c => c ? { ...c, humanTaskConfig: { ...((c.humanTaskConfig as HumanTaskConfig) || { kind: 'HUMAN_TASK', instructions: '' }), assigneeRole: e.target.value } as HumanTaskConfig } : c)} className="enterprise-input" placeholder="e.g. Finance Manager" />
+                          </label>
+                        </div>
+                        <div className="rounded-2xl border border-outline-variant/25 bg-white px-4 py-3">
+                          <label className="flex items-center gap-3 text-sm text-secondary">
+                            <input type="checkbox" checked={Boolean((nodeDraft.humanTaskConfig as HumanTaskConfig)?.requiresDocumentUpload)} onChange={e => setNodeDraft(c => c ? { ...c, humanTaskConfig: { ...((c.humanTaskConfig as HumanTaskConfig) || { kind: 'HUMAN_TASK', instructions: '' }), requiresDocumentUpload: e.target.checked } as HumanTaskConfig } : c)} className="h-4 w-4 rounded" />
+                            Requires document upload from assignee
+                          </label>
+                        </div>
+                      </>
+                    )}
+
+                    {/* AGENT_TASK */}
+                    {nodeDraft.type === 'AGENT_TASK' && (
+                      <>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Agent</span>
+                          <select value={nodeDraft.agentId || ''} onChange={e => setNodeDraft(c => c ? { ...c, agentId: e.target.value || undefined } : c)} className="enterprise-input">
+                            <option value="">Select an agent…</option>
+                            {workspace.agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                          </select>
+                        </label>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Action / Objective</span>
+                          <input value={nodeDraft.action || ''} onChange={e => setNodeDraft(c => c ? { ...c, action: e.target.value } : c)} className="enterprise-input" />
+                        </label>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Parameters (JSON)</span>
+                          <textarea rows={4} value={nodeDraft.agentTaskConfig?.parameters ? JSON.stringify(nodeDraft.agentTaskConfig.parameters, null, 2) : ''} onChange={e => { try { const p = JSON.parse(e.target.value); setNodeDraft(c => c ? { ...c, agentTaskConfig: { ...((c.agentTaskConfig as AgentTaskConfig) || { kind: 'AGENT_TASK' }), parameters: p } as AgentTaskConfig } : c); } catch { /* ignore invalid JSON while typing */ } }} className="enterprise-input font-mono text-xs min-h-[6rem]" placeholder="{}" />
+                        </label>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Timeout (minutes)</span>
+                          <input type="number" min={1} value={(nodeDraft.agentTaskConfig as AgentTaskConfig)?.timeoutMinutes ?? ''} onChange={e => setNodeDraft(c => c ? { ...c, agentTaskConfig: { ...((c.agentTaskConfig as AgentTaskConfig) || { kind: 'AGENT_TASK' }), timeoutMinutes: Number(e.target.value) || undefined } as AgentTaskConfig } : c)} className="enterprise-input" />
+                        </label>
+                      </>
+                    )}
+
+                    {/* SUB_WORKFLOW */}
+                    {nodeDraft.type === 'SUB_WORKFLOW' && (
+                      <>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Referenced Workflow</span>
+                          <select value={nodeDraft.subWorkflowConfig?.referencedWorkflowId || ''} onChange={e => {
+                            const wf = workflows.find(w => w.id === e.target.value);
+                            if (wf) setNodeDraft(c => c ? { ...c, subWorkflowConfig: { ...(c.subWorkflowConfig || { waitForCompletion: true }), referencedWorkflowId: wf.id, referencedWorkflowName: wf.name } as SubWorkflowConfig } : c);
+                          }} className="enterprise-input">
+                            <option value="">Select a workflow…</option>
+                            {workflows.filter(w => w.id !== selectedWorkflow?.id).map(w => <option key={w.id} value={w.id}>{w.name} {w.publishState ? `(${w.publishState})` : ''}</option>)}
+                          </select>
+                        </label>
+                        <div className="rounded-2xl border border-outline-variant/25 bg-white px-4 py-3">
+                          <label className="flex items-center gap-3 text-sm text-secondary">
+                            <input type="checkbox" checked={Boolean(nodeDraft.subWorkflowConfig?.waitForCompletion ?? true)} onChange={e => setNodeDraft(c => c ? { ...c, subWorkflowConfig: { ...(c.subWorkflowConfig || { referencedWorkflowId: '', referencedWorkflowName: '' }), waitForCompletion: e.target.checked } as SubWorkflowConfig } : c)} className="h-4 w-4 rounded" />
+                            Wait for sub-workflow to complete before advancing
+                          </label>
+                        </div>
+                        {nodeDraft.subWorkflowConfig?.referencedWorkflowId && (
+                          <button type="button" onClick={() => navigate(`/capabilities/${activeCapability.id}/workflows?wf=${nodeDraft.subWorkflowConfig?.referencedWorkflowId}`)} className="enterprise-button enterprise-button-secondary self-start">
+                            ↗ Open Referenced Workflow
+                          </button>
+                        )}
+                      </>
+                    )}
+
+                    {/* HUMAN_APPROVAL */}
+                    {nodeDraft.type === 'HUMAN_APPROVAL' && (
+                      <div className="grid gap-4">
+                        <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Approval Policy</p>
+                              <p className="mt-1 text-xs leading-relaxed text-secondary">Configure who must approve and how many approvals are needed.</p>
+                            </div>
+                            <button type="button" onClick={() => setNodeDraft(c => c ? { ...c, approvalPolicy: c.approvalPolicy ? undefined : createDefaultApprovalPolicy(c) } : c)} className="enterprise-button enterprise-button-secondary">
+                              {nodeDraft.approvalPolicy ? 'Clear policy' : 'Add policy'}
+                            </button>
+                          </div>
+                        </div>
+                        {nodeDraft.approvalPolicy && (
+                          <div className="grid gap-4">
+                            <div className="grid gap-4 md:grid-cols-2">
+                              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                                <span>Policy Name</span>
+                                <input value={nodeDraft.approvalPolicy.name} onChange={e => setNodeDraft(c => c ? { ...c, approvalPolicy: { ...(c.approvalPolicy || createDefaultApprovalPolicy(c)), name: e.target.value } } : c)} className="enterprise-input" />
+                              </label>
+                              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                                <span>Approval Mode</span>
+                                <select value={nodeDraft.approvalPolicy.mode} onChange={e => setNodeDraft(c => c ? { ...c, approvalPolicy: { ...(c.approvalPolicy || createDefaultApprovalPolicy(c)), mode: e.target.value as ApprovalMode } } : c)} className="enterprise-input">
+                                  <option value="ANY_ONE">Any one approver</option>
+                                  <option value="ALL_REQUIRED">All approvers required</option>
+                                  <option value="QUORUM">Quorum (minimum count)</option>
+                                </select>
+                              </label>
+                            </div>
+                            <div className="grid gap-4 md:grid-cols-2">
+                              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                                <span>Minimum Approvals</span>
+                                <input type="number" min={1} value={nodeDraft.approvalPolicy.minimumApprovals ?? ''} onChange={e => setNodeDraft(c => c ? { ...c, approvalPolicy: { ...(c.approvalPolicy || createDefaultApprovalPolicy(c)), minimumApprovals: Number(e.target.value) } } : c)} className="enterprise-input" />
+                              </label>
+                              <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                                <span>Escalate After (minutes)</span>
+                                <input type="number" min={1} value={nodeDraft.approvalPolicy.escalationAfterMinutes ?? ''} onChange={e => setNodeDraft(c => c ? { ...c, approvalPolicy: { ...(c.approvalPolicy || createDefaultApprovalPolicy(c)), escalationAfterMinutes: Number(e.target.value) } } : c)} className="enterprise-input" />
+                              </label>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* GOVERNANCE_GATE */}
+                    {nodeDraft.type === 'GOVERNANCE_GATE' && (
+                      <>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Gate Name</span>
+                          <input value={nodeDraft.governanceGate || ''} onChange={e => setNodeDraft(c => c ? { ...c, governanceGate: e.target.value } : c)} className="enterprise-input" placeholder="e.g. SOC 2 Evidence Gate" />
+                        </label>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Exit Criteria (one per line)</span>
+                          <textarea rows={4} value={(nodeDraft.exitCriteria || []).join('\n')} onChange={e => setNodeDraft(c => c ? { ...c, exitCriteria: e.target.value.split('\n').map(s => s.trim()).filter(Boolean) } : c)} className="enterprise-input min-h-[7rem]" />
+                        </label>
+                      </>
+                    )}
+
+                    {/* ALERT */}
+                    {nodeDraft.type === 'ALERT' && (
+                      <>
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>Severity</span>
+                            <select value={nodeDraft.alertConfig?.severity || 'WARNING'} onChange={e => setNodeDraft(c => c ? { ...c, alertConfig: { ...(c.alertConfig || {}), severity: e.target.value as 'INFO'|'WARNING'|'CRITICAL' } } : c)} className="enterprise-input">
+                              <option value="INFO">Info</option>
+                              <option value="WARNING">Warning</option>
+                              <option value="CRITICAL">Critical</option>
+                            </select>
+                          </label>
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>Channel</span>
+                            <select value={nodeDraft.alertConfig?.channel || 'IN_APP'} onChange={e => setNodeDraft(c => c ? { ...c, alertConfig: { ...(c.alertConfig || {}), channel: e.target.value as WorkflowAlertChannel } } : c)} className="enterprise-input">
+                              <option value="IN_APP">In-App</option>
+                              <option value="EMAIL">Email</option>
+                              <option value="SLACK">Slack</option>
+                              <option value="WEBHOOK">Webhook</option>
+                            </select>
+                          </label>
+                        </div>
+                        {(nodeDraft.alertConfig?.channel === 'EMAIL') && (
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>Recipients (comma-separated emails)</span>
+                            <input value={(nodeDraft.alertConfig?.recipients || []).join(', ')} onChange={e => setNodeDraft(c => c ? { ...c, alertConfig: { ...(c.alertConfig || {}), recipients: e.target.value.split(',').map(s => s.trim()).filter(Boolean) } } : c)} className="enterprise-input" />
+                          </label>
+                        )}
+                        {(nodeDraft.alertConfig?.channel === 'SLACK') && (
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>Slack Channel</span>
+                            <input value={nodeDraft.alertConfig?.slackChannel || ''} onChange={e => setNodeDraft(c => c ? { ...c, alertConfig: { ...(c.alertConfig || {}), slackChannel: e.target.value } } : c)} className="enterprise-input" placeholder="#ops-alerts" />
+                          </label>
+                        )}
+                        {(nodeDraft.alertConfig?.channel === 'WEBHOOK' || nodeDraft.alertConfig?.channel === 'SLACK') && (
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>Webhook URL</span>
+                            <input value={nodeDraft.alertConfig?.webhookUrl || ''} onChange={e => setNodeDraft(c => c ? { ...c, alertConfig: { ...(c.alertConfig || {}), webhookUrl: e.target.value } } : c)} className="enterprise-input" placeholder="https://hooks.example.com/…" />
+                          </label>
+                        )}
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Notify Roles (comma-separated)</span>
+                          <input value={(nodeDraft.alertConfig?.notifyRoles || []).join(', ')} onChange={e => setNodeDraft(c => c ? { ...c, alertConfig: { ...(c.alertConfig || {}), notifyRoles: e.target.value.split(',').map(s => s.trim()).filter(Boolean) } } : c)} className="enterprise-input" />
+                        </label>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Message Template</span>
+                          <textarea rows={4} value={nodeDraft.alertConfig?.messageTemplate || ''} onChange={e => setNodeDraft(c => c ? { ...c, alertConfig: { ...(c.alertConfig || {}), messageTemplate: e.target.value } } : c)} className="enterprise-input min-h-[7rem]" />
+                        </label>
+                        <div className="rounded-2xl border border-outline-variant/25 bg-white px-4 py-3">
+                          <label className="flex items-center gap-3 text-sm text-secondary">
+                            <input type="checkbox" checked={Boolean(nodeDraft.alertConfig?.requiresAcknowledgement)} onChange={e => setNodeDraft(c => c ? { ...c, alertConfig: { ...(c.alertConfig || {}), requiresAcknowledgement: e.target.checked } } : c)} className="h-4 w-4 rounded" />
+                            Requires acknowledgement before workflow continues
+                          </label>
+                        </div>
+                      </>
+                    )}
+
+                    {/* EVENT */}
+                    {nodeDraft.type === 'EVENT' && (
+                      <>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Event Name</span>
+                          <input value={nodeDraft.eventConfig?.eventName || ''} onChange={e => setNodeDraft(c => c ? { ...c, eventConfig: { ...(c.eventConfig || {}), eventName: e.target.value } } : c)} className="enterprise-input" />
+                        </label>
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>Event Source</span>
+                            <input value={nodeDraft.eventConfig?.eventSource || ''} onChange={e => setNodeDraft(c => c ? { ...c, eventConfig: { ...(c.eventConfig || {}), eventSource: e.target.value } } : c)} className="enterprise-input" />
+                          </label>
+                          <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                            <span>Emit Trigger</span>
+                            <select value={nodeDraft.eventConfig?.trigger || 'ON_SUCCESS'} onChange={e => setNodeDraft(c => c ? { ...c, eventConfig: { ...(c.eventConfig || {}), trigger: e.target.value as 'ON_ENTER'|'ON_SUCCESS'|'ON_FAILURE' } } : c)} className="enterprise-input">
+                              <option value="ON_ENTER">On enter</option>
+                              <option value="ON_SUCCESS">On success</option>
+                              <option value="ON_FAILURE">On failure</option>
+                            </select>
+                          </label>
+                        </div>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Payload Template</span>
+                          <textarea rows={4} value={nodeDraft.eventConfig?.payloadTemplate || ''} onChange={e => setNodeDraft(c => c ? { ...c, eventConfig: { ...(c.eventConfig || {}), payloadTemplate: e.target.value } } : c)} className="enterprise-input font-mono text-xs min-h-[7rem]" />
+                        </label>
+                      </>
+                    )}
+
+                    {/* Control nodes / START / END */}
+                    {['START', 'END', 'DECISION', 'PARALLEL_SPLIT', 'PARALLEL_JOIN'].includes(nodeDraft.type) && (
+                      <p className="text-sm text-secondary">This is a control-flow node — it routes execution automatically. Use edges to connect it to the next step.</p>
+                    )}
+                  </div>
+                )}
+
+                {nodeDetailTab === 'io' && !['START', 'END', 'DECISION', 'PARALLEL_SPLIT', 'PARALLEL_JOIN'].includes(nodeDraft.type) && (
+                  <div className="grid gap-4">
+                    {!businessView && (
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Primary Input Reference (Artifact ID)</span>
+                          <input value={nodeDraft.inputArtifactId || ''} onChange={e => setNodeDraft(c => c ? { ...c, inputArtifactId: e.target.value || undefined } : c)} className="enterprise-input font-mono text-xs" />
+                        </label>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Primary Output Reference (Artifact ID)</span>
+                          <input value={nodeDraft.outputArtifactId || ''} onChange={e => setNodeDraft(c => c ? { ...c, outputArtifactId: e.target.value || undefined } : c)} className="enterprise-input font-mono text-xs" />
+                        </label>
+                      </div>
+                    )}
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                        <span>Input Documents (one per line)</span>
+                        <textarea rows={5} value={(nodeDraft.artifactContract?.requiredInputs || []).join('\n')} onChange={e => setNodeDraft(c => c ? { ...c, artifactContract: { ...(c.artifactContract || {}), requiredInputs: e.target.value.split('\n').map(s => s.trim()).filter(Boolean), expectedOutputs: c.artifactContract?.expectedOutputs || [], notes: c.artifactContract?.notes } } : c)} className="enterprise-input min-h-[8rem]" />
+                      </label>
+                      <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                        <span>Output Documents (one per line)</span>
+                        <textarea rows={5} value={(nodeDraft.artifactContract?.expectedOutputs || []).join('\n')} onChange={e => setNodeDraft(c => c ? { ...c, artifactContract: { ...(c.artifactContract || {}), requiredInputs: c.artifactContract?.requiredInputs || [], expectedOutputs: e.target.value.split('\n').map(s => s.trim()).filter(Boolean), notes: c.artifactContract?.notes } } : c)} className="enterprise-input min-h-[8rem]" />
+                      </label>
+                    </div>
+                    <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                      <span>Artifact Guidance</span>
+                      <textarea rows={3} value={nodeDraft.artifactContract?.notes || ''} onChange={e => setNodeDraft(c => c ? { ...c, artifactContract: { ...(c.artifactContract || {}), requiredInputs: c.artifactContract?.requiredInputs || [], expectedOutputs: c.artifactContract?.expectedOutputs || [], notes: e.target.value || undefined } } : c)} className="enterprise-input min-h-[5rem]" />
+                    </label>
+                    <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                      <span>Exit Criteria (one per line)</span>
+                      <textarea rows={3} value={(nodeDraft.exitCriteria || []).join('\n')} onChange={e => setNodeDraft(c => c ? { ...c, exitCriteria: e.target.value.split('\n').map(s => s.trim()).filter(Boolean) } : c)} className="enterprise-input min-h-[5rem]" />
+                    </label>
+                  </div>
+                )}
+
+                {nodeDetailTab === 'governance' && (
+                  <div className="grid gap-4">
+                    <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                      <span>Approver Roles (comma-separated)</span>
+                      <input value={(nodeDraft.approverRoles || []).join(', ')} onChange={e => setNodeDraft(c => c ? { ...c, approverRoles: e.target.value.split(',').map(s => s.trim()).filter(Boolean) } : c)} className="enterprise-input" />
+                    </label>
+                    {nodeDraft.type !== 'HUMAN_APPROVAL' && (
+                      <div className="grid gap-4">
+                        <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Approval Policy</p>
+                              <p className="mt-1 text-xs leading-relaxed text-secondary">Optionally require formal approval before this step completes.</p>
+                            </div>
+                            <button type="button" onClick={() => setNodeDraft(c => c ? { ...c, approvalPolicy: c.approvalPolicy ? undefined : createDefaultApprovalPolicy(c) } : c)} className="enterprise-button enterprise-button-secondary">
+                              {nodeDraft.approvalPolicy ? 'Clear policy' : 'Add policy'}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-3">
+                      <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">Ownership & Routing</p>
+                      <p className="mt-1 text-xs leading-relaxed text-secondary">Override default phase ownership for this step.</p>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                        <span>Primary Owner Team Override</span>
+                        <select value={nodeDraft.ownershipRule?.primaryOwnerTeamId || ''} onChange={e => setNodeDraft(c => c ? { ...c, ownershipRule: { ...(c.ownershipRule || createDefaultOwnershipRule()), primaryOwnerTeamId: e.target.value || undefined } } : c)} className="enterprise-input">
+                          <option value="">Use phase default</option>
+                          {workspaceTeamOptions.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                        </select>
+                      </label>
+                      <div className="space-y-2">
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-outline">Require Handoff Acceptance</p>
+                        <div className="rounded-2xl border border-outline-variant/25 bg-white px-4 py-3">
+                          <label className="flex items-center gap-3 text-sm text-secondary">
+                            <input type="checkbox" checked={Boolean(nodeDraft.ownershipRule?.requireHandoffAcceptance)} onChange={e => setNodeDraft(c => c ? { ...c, ownershipRule: { ...(c.ownershipRule || createDefaultOwnershipRule()), requireHandoffAcceptance: e.target.checked } } : c)} className="h-4 w-4 rounded" />
+                            Team must accept handoff before step activates
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-3">
+                      {(['secondaryOwnerTeamIds', 'approvalTeamIds', 'escalationTeamIds'] as const).map(field => (
+                        <label key={field} className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>{field === 'secondaryOwnerTeamIds' ? 'Secondary Owners' : field === 'approvalTeamIds' ? 'Approval Teams' : 'Escalation Teams'}</span>
+                          <select multiple value={nodeDraft.ownershipRule?.[field] || []} onChange={e => setNodeDraft(c => c ? { ...c, ownershipRule: { ...(c.ownershipRule || createDefaultOwnershipRule()), [field]: Array.from(e.target.selectedOptions).map(o => o.value) } } : c)} className="enterprise-input min-h-[7rem]">
+                            {workspaceTeamOptions.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                          </select>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {!businessView && nodeDetailTab === 'execution' && ['DELIVERY', 'AGENT_TASK', 'RELEASE'].includes(nodeDraft.type) && (
+                  <div className="grid gap-4">
+                    <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                      <span>Allowed Tools</span>
+                      <select multiple value={nodeDraft.allowedToolIds || []} onChange={e => setNodeDraft(c => c ? { ...c, allowedToolIds: Array.from(e.target.selectedOptions).map(o => o.value as ToolAdapterId) } : c)} className="enterprise-input min-h-[9rem]">
+                        {TOOL_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                      <p className="text-[0.72rem] font-medium normal-case tracking-normal text-secondary">This allowlist is the real execution gate. Agent preferred tools stay advisory and do not bypass these permissions.</p>
+                    </label>
+                    <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                      <span>Preferred Workspace Path</span>
+                      <input value={nodeDraft.preferredWorkspacePath || ''} onChange={e => setNodeDraft(c => c ? { ...c, preferredWorkspacePath: e.target.value || undefined } : c)} className="enterprise-input font-mono text-xs" />
+                    </label>
+                    <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                      <span>Execution Notes</span>
+                      <textarea rows={4} value={nodeDraft.executionNotes || ''} onChange={e => setNodeDraft(c => c ? { ...c, executionNotes: e.target.value } : c)} className="enterprise-input min-h-[7rem]" />
+                    </label>
+                  </div>
+                )}
+
+                {/* Save / Close */}
+                <div className="flex flex-wrap justify-end gap-3">
+                  <button type="button" onClick={() => setIsNodeDetailsOpen(false)} className="enterprise-button enterprise-button-secondary">Close</button>
+                  <button type="button" onClick={() => { handleApplyNodeDraft(); setIsNodeDetailsOpen(false); }} className="enterprise-button enterprise-button-primary">Save Changes</button>
+                </div>
               </div>
             </ModalShell>
           </div>
         </div>
       ) : null}
+
+      {/* Sub-Workflow Picker Dialog */}
+      {isSubWorkflowPickerOpen && (
+        <div className="fixed inset-0 z-[96] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-20 backdrop-blur-sm">
+          <div className="w-full max-w-2xl">
+            <ModalShell
+              eyebrow="Compositions"
+              title="Select a workflow to embed"
+              description="Choose a workflow from this capability to run as a composable step. Select it and the node will be configured automatically."
+              actions={
+                <button type="button" onClick={() => { setIsSubWorkflowPickerOpen(false); setPendingSubWorkflowNodeId(null); }} className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface">
+                  <X size={18} />
+                </button>
+              }
+            >
+              <div className="grid gap-3">
+                {workflows.filter(w => w.id !== selectedWorkflow?.id).length === 0 ? (
+                  <p className="text-sm text-secondary">No other workflows available in this capability.</p>
+                ) : workflows.filter(w => w.id !== selectedWorkflow?.id).map(wf => (
+                  <button
+                    key={wf.id}
+                    type="button"
+                    onClick={() => {
+                      if (pendingSubWorkflowNodeId) {
+                        replaceSelectedWorkflow(
+                          workflow => ({
+                            ...workflow,
+                            nodes: (workflow.nodes || []).map(n =>
+                              n.id === pendingSubWorkflowNodeId
+                                ? { ...n, name: wf.name, subWorkflowConfig: { referencedWorkflowId: wf.id, referencedWorkflowName: wf.name, waitForCompletion: true } }
+                                : n
+                            ),
+                          }),
+                          'Sub-workflow configured',
+                          `Now embedding "${wf.name}".`,
+                        );
+                      }
+                      setIsSubWorkflowPickerOpen(false);
+                      setPendingSubWorkflowNodeId(null);
+                    }}
+                    className="flex items-center justify-between rounded-2xl border border-outline-variant/40 bg-surface-container-low px-4 py-3 text-left transition hover:border-primary/40 hover:bg-primary/5"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-on-surface">{wf.name}</p>
+                      {wf.summary && <p className="mt-0.5 text-xs text-secondary">{wf.summary}</p>}
+                    </div>
+                    {wf.publishState && (
+                      <StatusBadge tone={wf.publishState === 'PUBLISHED' ? 'success' : 'neutral'}>{wf.publishState}</StatusBadge>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </ModalShell>
+          </div>
+        </div>
+      )}
+
+      {/* Version History Panel */}
+      {isVersionHistoryOpen && (
+        <div className="fixed inset-0 z-[96] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-20 backdrop-blur-sm">
+          <div className="w-full max-w-2xl">
+            <ModalShell
+              eyebrow="Workflow History"
+              title={`Version history — ${selectedWorkflow?.name}`}
+              description="Browse prior published snapshots. Each unlock creates a new version."
+              actions={
+                <button type="button" onClick={() => setIsVersionHistoryOpen(false)} className="rounded-full p-2 text-outline transition hover:bg-surface-container-low hover:text-on-surface">
+                  <X size={18} />
+                </button>
+              }
+            >
+              <div className="grid gap-3">
+                {workflowVersions.length === 0 ? (
+                  <p className="text-sm text-secondary">No previous versions yet. Publish and unlock this workflow to create version snapshots.</p>
+                ) : workflowVersions.map(v => (
+                  <div key={v.id} className="rounded-2xl border border-outline-variant/40 bg-surface-container-low px-4 py-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-on-surface">Version {v.version}</p>
+                        <p className="mt-0.5 text-xs text-secondary">{new Date(v.createdAt).toLocaleString()} {v.createdBy ? `· by ${v.createdBy}` : ''}</p>
+                        {v.changeSummary && <p className="mt-1 text-xs text-secondary italic">{v.changeSummary}</p>}
+                      </div>
+                      <StatusBadge tone={v.publishState === 'PUBLISHED' ? 'success' : 'neutral'}>{v.publishState}</StatusBadge>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </ModalShell>
+          </div>
+        </div>
+      )}
 
       {isCreateWorkflowOpen ? (
         <div className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-20 backdrop-blur-sm">

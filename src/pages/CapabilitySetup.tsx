@@ -1278,7 +1278,7 @@ export default function CapabilitySetup() {
                           onChange={event =>
                             updateDraft({ defaultWorkspacePath: event.target.value })
                           }
-                          placeholder="/Users/ashokraj/Documents/workDir/service"
+                          placeholder="/Users/<you>/Documents/workDir/service"
                           className="field-input"
                         />
                       </label>

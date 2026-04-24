@@ -8,8 +8,18 @@ export const getConfiguredCopilotCliUrl = () => process.env.COPILOT_CLI_URL?.tri
 
 export const isHeadlessCliConfigured = () => Boolean(getConfiguredCopilotCliUrl());
 
-export const isHttpFallbackAllowed = () =>
-  !isHeadlessCliConfigured() || process.env.ALLOW_GITHUB_MODELS_HTTP_FALLBACK === 'true';
+export const isHttpFallbackAllowed = () => {
+  // Always allowed when the Copilot CLI is not the primary transport.
+  if (!isHeadlessCliConfigured()) return true;
+  // Explicitly opted in.
+  if (process.env.ALLOW_GITHUB_MODELS_HTTP_FALLBACK === 'true') return true;
+  // Automatically allow when the user has BOTH COPILOT_CLI_URL and a
+  // GITHUB_MODELS_TOKEN / GITHUB_TOKEN configured — the CLI is primary but the
+  // HTTP token acts as a ready fallback when the CLI rejects a model due to an
+  // org-level "Additional AI models" policy.
+  if (process.env.GITHUB_MODELS_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim()) return true;
+  return false;
+};
 
 export const resolveRuntimeAccessMode = ({
   tokenSource,

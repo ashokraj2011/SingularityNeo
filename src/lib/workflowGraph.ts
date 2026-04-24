@@ -47,6 +47,9 @@ export const isVisibleWorkflowNode = (nodeType: WorkflowNodeType) =>
   nodeType === 'ALERT' ||
   nodeType === 'GOVERNANCE_GATE' ||
   nodeType === 'HUMAN_APPROVAL' ||
+  nodeType === 'HUMAN_TASK' ||
+  nodeType === 'AGENT_TASK' ||
+  nodeType === 'SUB_WORKFLOW' ||
   nodeType === 'RELEASE' ||
   nodeType === 'EXTRACT' ||
   nodeType === 'TRANSFORM' ||
@@ -64,11 +67,18 @@ export const mapNodeTypeToStepType = (nodeType: WorkflowNodeType): WorkflowStepT
   if (nodeType === 'GOVERNANCE_GATE' || nodeType === 'FILTER') {
     return 'GOVERNANCE_GATE';
   }
-
   if (nodeType === 'HUMAN_APPROVAL') {
     return 'HUMAN_APPROVAL';
   }
-
+  if (nodeType === 'HUMAN_TASK') {
+    return 'HUMAN_TASK';
+  }
+  if (nodeType === 'AGENT_TASK') {
+    return 'AGENT_TASK';
+  }
+  if (nodeType === 'SUB_WORKFLOW') {
+    return 'SUB_WORKFLOW';
+  }
   return 'DELIVERY';
 };
 

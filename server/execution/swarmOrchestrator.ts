@@ -2,8 +2,7 @@
  * Swarm Orchestrator
  *
  * Runs a bounded 2-3 agent planning debate against an anchor capability.
- * See `/Users/ashokraj/.claude/plans/iridescent-tinkering-cocoa.md` §3c for
- * the conceptual model — the code below is the concrete implementation of:
+ * The code below is the concrete implementation of:
  *
  *   1. Bundle cache (anchor + per-participant home capabilities) for the
  *      lifetime of a single session so we don't re-hydrate workspaces on

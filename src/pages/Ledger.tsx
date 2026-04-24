@@ -448,7 +448,7 @@ const Ledger = () => {
         setError(
           nextError instanceof Error
             ? nextError.message
-            : 'Ledger evidence could not be loaded.',
+            : 'Activity record could not be loaded.',
         );
       })
       .finally(() => {
@@ -1561,10 +1561,10 @@ const Ledger = () => {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow="Evidence Hub"
+        eyebrow="Activity Record"
         context={activeCapability.id}
-        title={`${activeCapability.name} Ledger`}
-        description="Audit-ready workspace for phase artifacts, handoff packets, completed work-order evidence, approvals, human comments, logs, and downloadable delivery bundles."
+        title={`${activeCapability.name} — Activity Record`}
+        description="Complete audit trail for this capability: phase artifacts, handoff packets, completed work-order evidence, approvals, human decisions, execution logs, and downloadable delivery bundles."
         actions={
           <button
             type="button"
@@ -1626,7 +1626,7 @@ const Ledger = () => {
                   setError(
                     nextError instanceof Error
                       ? nextError.message
-                      : 'Ledger evidence could not be refreshed.',
+                      : 'Activity record could not be refreshed.',
                   );
                 })
                 .finally(() => {
@@ -1943,7 +1943,7 @@ const Ledger = () => {
         <section className="space-y-6">
           {isLoading ? (
             <EmptyState
-              title="Loading Ledger evidence"
+              title="Loading activity record"
               description="Refreshing durable artifacts, phase outputs, and completed work-order evidence."
               icon={Clock3}
             />
@@ -1971,7 +1971,7 @@ const Ledger = () => {
                       {compactMarkdownPreview(
                         selectedArtifact.artifact.summary ||
                           selectedArtifact.artifact.description ||
-                          'This evidence record is stored in the capability ledger.',
+                          'This record is stored in the capability activity record.',
                         320,
                       )}
                     </p>

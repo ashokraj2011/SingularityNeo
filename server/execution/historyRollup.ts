@@ -1,6 +1,6 @@
 /**
  * Tool-loop history rollup — Lever 3 of the token-optimization program
- * (see /Users/ashokraj/.claude/plans/iridescent-tinkering-cocoa.md).
+ * (see docs/token-optimization.md).
  *
  * The execution engine's inner loop (`runStepExecution` in service.ts)
  * accumulates every tool call into a single `toolHistory` array and

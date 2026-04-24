@@ -1985,6 +1985,9 @@ export type WorkflowStepType =
   | "DELIVERY"
   | "GOVERNANCE_GATE"
   | "HUMAN_APPROVAL"
+  | "HUMAN_TASK"
+  | "AGENT_TASK"
+  | "SUB_WORKFLOW"
   // BUILD is a step whose contractual output is a CODE_PATCH artifact:
   // the agent is expected to produce an applicable unified diff, which
   // downstream Phase-C wiring can turn into a branch + commit + PR.
@@ -2165,6 +2168,8 @@ export type WorkflowNodeType =
   | "ALERT"
   | "GOVERNANCE_GATE"
   | "HUMAN_APPROVAL"
+  | "HUMAN_TASK"
+  | "AGENT_TASK"
   | "DECISION"
   | "PARALLEL_SPLIT"
   | "PARALLEL_JOIN"
@@ -2173,7 +2178,8 @@ export type WorkflowNodeType =
   | "EXTRACT"
   | "TRANSFORM"
   | "LOAD"
-  | "FILTER";
+  | "FILTER"
+  | "SUB_WORKFLOW";
 
 export interface WorkflowNodeEtlConfig {
   subType?: string;
@@ -2201,15 +2207,90 @@ export interface WorkflowEventConfig {
 
 export type WorkflowAlertSeverity = "INFO" | "WARNING" | "CRITICAL";
 
+export type WorkflowAlertChannel = "EMAIL" | "SLACK" | "WEBHOOK" | "IN_APP";
+
 export interface WorkflowAlertConfig {
   severity?: WorkflowAlertSeverity;
-  channel?: string;
+  channel?: WorkflowAlertChannel;
   notifyRoles?: string[];
+  recipients?: string[];
+  webhookUrl?: string;
+  slackChannel?: string;
   messageTemplate?: string;
   requiresAcknowledgement?: boolean;
 }
 
 export type WorkflowPublishState = "DRAFT" | "VALIDATED" | "PUBLISHED";
+
+// ── Step Kit ────────────────────────────────────────────────────────────────
+
+export interface HumanTaskConfig {
+  kind: "HUMAN_TASK";
+  instructions: string;
+  checklist?: string[];
+  requiresDocumentUpload?: boolean;
+  slaHours?: number;
+  assigneeRole?: string;
+}
+
+export interface AgentTaskConfig {
+  kind: "AGENT_TASK";
+  agentRef?: string;
+  parameters?: Record<string, unknown>;
+  timeoutMinutes?: number;
+}
+
+export interface StepTemplate {
+  id: string;
+  workspaceId: string;
+  capabilityId?: string;
+  nodeType: "HUMAN_TASK" | "AGENT_TASK";
+  label: string;
+  description?: string;
+  icon?: string;
+  defaultConfig: HumanTaskConfig | AgentTaskConfig;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ── Sub-Workflow composition ─────────────────────────────────────────────────
+
+export interface SubWorkflowConfig {
+  referencedWorkflowId: string;
+  referencedWorkflowName: string;
+  referencedCapabilityId?: string;
+  waitForCompletion: boolean;
+  inputMapping?: Record<string, string>;
+  outputMapping?: Record<string, string>;
+}
+
+// ── Workflow versioning ──────────────────────────────────────────────────────
+
+export interface WorkflowVersion {
+  id: string;
+  workflowId: string;
+  capabilityId: string;
+  version: number;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  publishState: WorkflowPublishState;
+  createdBy?: string;
+  createdAt: string;
+  changeSummary?: string;
+}
+
+// ── Pre-flight human task assignment ────────────────────────────────────────
+
+export interface HumanStepAssignment {
+  nodeId: string;
+  nodeLabel: string;
+  nodeType: "HUMAN_APPROVAL" | "HUMAN_TASK";
+  assigneeEmail: string;
+}
+
+export interface WorkflowRunPreflight {
+  assignments: HumanStepAssignment[];
+}
 
 export type WorkflowEdgeConditionType =
   | "DEFAULT"
@@ -2238,6 +2319,7 @@ export interface ApprovalPolicyTarget {
   targetType: ApprovalRuleTarget;
   targetId: string;
   label?: string;
+  assigneeEmail?: string;
 }
 
 export interface ApprovalPolicy {
@@ -2360,6 +2442,7 @@ export interface CompiledWorkItemPlan {
   currentStep: CompiledStepContext;
 }
 
+
 export interface WorkflowNode {
   id: string;
   name: string;
@@ -2387,6 +2470,14 @@ export interface WorkflowNode {
   requiredInputs?: RequiredInputField[];
   completionGates?: string[];
   executionBoundary?: Partial<ExecutionBoundary>;
+  // Step Kit
+  humanTaskConfig?: HumanTaskConfig;
+  agentTaskConfig?: AgentTaskConfig;
+  stepTemplateId?: string;
+  // Sub-workflow composition
+  subWorkflowConfig?: SubWorkflowConfig;
+  // Pre-flight assignment
+  assigneeEmail?: string;
 }
 
 export interface WorkflowEdge {
@@ -2448,6 +2539,9 @@ export interface Workflow {
   capabilityId: string;
   templateId?: string;
   schemaVersion?: number;
+  version?: number;
+  lockedAt?: string;
+  lockedBy?: string;
   entryNodeId?: string;
   nodes?: WorkflowNode[];
   edges?: WorkflowEdge[];
@@ -2740,7 +2834,7 @@ export interface WorkspaceWriteLock {
 }
 
 export interface WorkItemPendingRequest {
-  type: "APPROVAL" | "INPUT" | "CONFLICT_RESOLUTION";
+  type: "APPROVAL" | "INPUT" | "CONFLICT_RESOLUTION" | "SUB_WORKFLOW_WAIT";
   message: string;
   requestedBy: string;
   timestamp: string;
@@ -3072,7 +3166,7 @@ export type ToolInvocationStatus =
   | "FAILED"
   | "CANCELLED";
 
-export type RunWaitType = "APPROVAL" | "INPUT" | "CONFLICT_RESOLUTION";
+export type RunWaitType = "APPROVAL" | "INPUT" | "CONFLICT_RESOLUTION" | "SUB_WORKFLOW_WAIT";
 
 export type RunWaitStatus = "OPEN" | "RESOLVED" | "CANCELLED";
 

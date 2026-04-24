@@ -47,9 +47,9 @@ const PRIMARY: Record<string, RouteDescription> = {
       'Full-page chat with capability context and memory-backed grounding. Supports code-aware lookups via `find <symbol>`.',
   },
   '/ledger': {
-    label: 'Evidence',
+    label: 'Activity Record',
     purpose:
-      'Artifacts, approvals, handoffs, completed work, and flight recorder history for this capability. Code changes open in a side-by-side diff viewer.',
+      'Complete audit trail for this capability — artifacts, approvals, decisions, handoffs, completed work orders, human interactions, and flight recorder history. Code changes open in a side-by-side diff viewer.',
   },
   '/designer': {
     label: 'Designer',

@@ -406,7 +406,7 @@ export default function ToolsLibrary() {
                             onClick={() => navigate('/ledger')}
                             className="text-[0.6875rem] font-semibold text-primary hover:underline"
                           >
-                            Open ledger
+                            Open Activity Record
                           </button>
                         ) : null}
                       </div>

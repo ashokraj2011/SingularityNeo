@@ -82,9 +82,10 @@ describe('OrchestratorCopilotStatusStack', () => {
     const onSelectApprovedWorkspaceDraft = vi.fn();
     const onApproveWorkspacePathAndContinue = vi.fn();
     const onApproveWorkspacePathOnly = vi.fn();
+    const suggestedWorkspacePath = '/Users/example/project';
     const validation: WorkspacePathValidationResult = {
-      path: '/Users/ashokraj/project',
-      normalizedPath: '/Users/ashokraj/project',
+      path: suggestedWorkspacePath,
+      normalizedPath: suggestedWorkspacePath,
       valid: true,
       exists: true,
       isDirectory: true,
@@ -116,7 +117,7 @@ describe('OrchestratorCopilotStatusStack', () => {
         approvedWorkspaceRoots={[]}
         approvedWorkspaceDraft=""
         onApprovedWorkspaceDraftChange={vi.fn()}
-        approvedWorkspaceSuggestions={['/Users/ashokraj/project']}
+        approvedWorkspaceSuggestions={[suggestedWorkspacePath]}
         onSelectApprovedWorkspaceDraft={onSelectApprovedWorkspaceDraft}
         onApproveWorkspacePathAndContinue={onApproveWorkspacePathAndContinue}
         onApproveWorkspacePathOnly={onApproveWorkspacePathOnly}
@@ -133,8 +134,8 @@ describe('OrchestratorCopilotStatusStack', () => {
     await user.click(screen.getByRole('button', { name: 'Approved workspace path' }));
     expect(onFieldChipClick).toHaveBeenCalledWith('Approved workspace path');
 
-    await user.click(screen.getByRole('button', { name: '/Users/ashokraj/project' }));
-    expect(onSelectApprovedWorkspaceDraft).toHaveBeenCalledWith('/Users/ashokraj/project');
+    await user.click(screen.getByRole('button', { name: suggestedWorkspacePath }));
+    expect(onSelectApprovedWorkspaceDraft).toHaveBeenCalledWith(suggestedWorkspacePath);
 
     await user.click(screen.getByRole('button', { name: 'Approve and continue' }));
     expect(onApproveWorkspacePathAndContinue).toHaveBeenCalledTimes(1);

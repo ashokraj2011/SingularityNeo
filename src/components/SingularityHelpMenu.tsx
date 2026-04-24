@@ -70,10 +70,10 @@ const PRIMARY_WORKSPACES: Array<{
     icon: MessageSquare,
   },
   {
-    title: 'Evidence',
+    title: 'Activity Record',
     path: '/ledger',
     description:
-      'Inspect artifacts, approvals, handoffs, completed work, and flight recorder history when you need proof. Code-change artifacts open in a VS Code-style diff viewer.',
+      'Complete audit trail — artifacts, approvals, decisions, handoffs, completed work, and flight recorder history. Code-change artifacts open in a VS Code-style diff viewer.',
     icon: Wallet,
   },
   {

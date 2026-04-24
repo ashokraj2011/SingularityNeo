@@ -534,8 +534,8 @@ export const createWorkflowRun = async ({
     prioritySnapshot: 'High' | 'Med' | 'Low';
     isRetry: boolean;
   };
-}): Promise<WorkflowRunDetail> =>
-  transaction(async client => {
+}): Promise<WorkflowRunDetail> => {
+  return transaction(async client => {
     const normalizedWorkflow = workflow;
     const activeRunResult = await client.query(
       `
@@ -765,6 +765,7 @@ export const createWorkflowRun = async ({
 
     return getRunDetailTx(client, capabilityId, run.id);
   });
+};
 
 export const updateWorkflowRun = async (run: WorkflowRun): Promise<WorkflowRunDetail> =>
   isRemoteExecutionClient()

@@ -74,6 +74,7 @@ import {
   isWorkflowControlNode,
   isVisibleWorkflowNode,
 } from "../../src/lib/workflowGraph";
+import { dispatchAlert } from "../lib/notificationDispatcher";
 import {
   getWorkItemTaskTypeLabel,
   normalizeWorkItemTaskType,
@@ -103,7 +104,7 @@ import {
 import { wakeAgentLearningWorker } from "../agentLearning/worker";
 import { buildMemoryContext, refreshCapabilityMemory } from "../memory";
 import { evaluateToolPolicy } from "../policy";
-import { transaction } from "../db";
+import { transaction, query as dbQuery } from "../db";
 import {
   createApprovalAssignments,
   createApprovalDecision,
@@ -2846,6 +2847,136 @@ const resolveGraphTransition = async ({
           },
         });
       }
+      selectEdgesForNode(candidateNode).forEach((edge) =>
+        enqueueNode(edge.toNodeId),
+      );
+      continue;
+    }
+
+    // ALERT nodes: fire the dispatcher and auto-advance (fire-and-forget delivery)
+    if (candidateNode.type === "ALERT" && candidateNode.alertConfig) {
+      nextBranchState.pendingNodeIds.shift();
+      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(
+        (nodeId) => nodeId !== candidateNode.id,
+      );
+      nextBranchState.completedNodeIds = Array.from(
+        new Set([...nextBranchState.completedNodeIds, candidateNode.id]),
+      );
+      // Dispatch alert asynchronously — don't block graph advancement
+      dispatchAlert(candidateNode.alertConfig, {
+        workflowName: workflow.name,
+        capabilityId: detail.run.capabilityId,
+        runId: detail.run.id,
+        nodeId: candidateNode.id,
+        resolvedRecipients: [],
+      }).catch((err) =>
+        console.error("[execution/service] Alert dispatch failed:", err),
+      );
+      const alertRunStep = detail.steps.find(
+        (step) => step.workflowNodeId === candidateNode.id,
+      );
+      if (alertRunStep && alertRunStep.status !== "COMPLETED") {
+        await updateWorkflowRunStep({
+          ...alertRunStep,
+          status: "COMPLETED",
+          completedAt: new Date().toISOString(),
+          outputSummary: `Alert dispatched: ${candidateNode.alertConfig.severity ?? "INFO"}`,
+          evidenceSummary: `Alert sent via ${candidateNode.alertConfig.channel ?? "IN_APP"}.`,
+          metadata: { ...(alertRunStep.metadata || {}), nodeType: "ALERT" },
+        });
+      }
+      selectEdgesForNode(candidateNode).forEach((edge) =>
+        enqueueNode(edge.toNodeId),
+      );
+      continue;
+    }
+
+    // SUB_WORKFLOW nodes: spawn a child run then advance (or pause) the parent
+    if (candidateNode.type === "SUB_WORKFLOW" && candidateNode.subWorkflowConfig) {
+      const swConfig = candidateNode.subWorkflowConfig;
+      const childRunId = `CHILD-${detail.run.id}-${candidateNode.id}-${Date.now()}`;
+      // synthetic work_item_id — no FK constraint on this column
+      const syntheticWorkItemId = `sub-wf-${detail.run.workItemId}-${candidateNode.id}`;
+
+      // Attempt to load the referenced workflow from the current capability bundle
+      let referencedWorkflowSnapshot: unknown = null;
+      try {
+        const bundle = await getCapabilityBundle(swConfig.referencedCapabilityId ?? detail.run.capabilityId);
+        const refWf = bundle.workspace.workflows.find(
+          (wf) => wf.id === swConfig.referencedWorkflowId,
+        );
+        if (refWf) referencedWorkflowSnapshot = refWf;
+      } catch (err) {
+        console.warn("[execution/service] SUB_WORKFLOW: could not load referenced workflow:", err);
+      }
+
+      // Insert a child run row (direct insert bypasses the active-run check)
+      try {
+        await dbQuery(
+          `INSERT INTO capability_workflow_runs
+             (capability_id, id, work_item_id, workflow_id, status, attempt_number,
+              workflow_snapshot, branch_state, parent_run_id, parent_run_node_id,
+              created_at, updated_at)
+           VALUES ($1,$2,$3,$4,'QUEUED',1,$5,'{}', $6, $7, NOW(), NOW())
+           ON CONFLICT DO NOTHING`,
+          [
+            detail.run.capabilityId,
+            childRunId,
+            syntheticWorkItemId,
+            swConfig.referencedWorkflowId,
+            JSON.stringify(referencedWorkflowSnapshot ?? {}),
+            detail.run.id,
+            candidateNode.id,
+          ],
+        );
+        console.log(
+          `[execution/service] SUB_WORKFLOW: spawned child run ${childRunId} ` +
+          `(referencedWorkflow=${swConfig.referencedWorkflowId}, waitForCompletion=${swConfig.waitForCompletion})`,
+        );
+      } catch (err) {
+        console.error("[execution/service] SUB_WORKFLOW: failed to create child run:", err);
+      }
+
+      // Advance the step record
+      const subWfStep = detail.steps.find(
+        (step) => step.workflowNodeId === candidateNode.id,
+      );
+      if (subWfStep && subWfStep.status !== "COMPLETED") {
+        await updateWorkflowRunStep({
+          ...subWfStep,
+          status: swConfig.waitForCompletion ? "WAITING" : "COMPLETED",
+          outputSummary: `Sub-workflow ${swConfig.referencedWorkflowName ?? swConfig.referencedWorkflowId} ${swConfig.waitForCompletion ? "spawned — awaiting completion" : "spawned (fire-and-forget)"}`,
+          metadata: { ...(subWfStep.metadata || {}), nodeType: "SUB_WORKFLOW", childRunId },
+        });
+      }
+
+      if (swConfig.waitForCompletion) {
+        // Pause parent with a SUB_WORKFLOW_WAIT
+        await createRunWait({
+          capabilityId: detail.run.capabilityId,
+          runId: detail.run.id,
+          runStepId: subWfStep?.id ?? candidateNode.id,
+          type: "SUB_WORKFLOW_WAIT" as RunWaitType,
+          status: "OPEN",
+          message: `Waiting for sub-workflow "${swConfig.referencedWorkflowName ?? swConfig.referencedWorkflowId}" (${childRunId}) to complete.`,
+          requestedBy: "system",
+        });
+        nextBranchState.pendingNodeIds.shift();
+        nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(
+          (nodeId) => nodeId !== candidateNode.id,
+        );
+        nextCurrentNode = candidateNode;
+        break;
+      }
+
+      // Fire-and-forget: advance parent to next nodes
+      nextBranchState.pendingNodeIds.shift();
+      nextBranchState.activeNodeIds = nextBranchState.activeNodeIds.filter(
+        (nodeId) => nodeId !== candidateNode.id,
+      );
+      nextBranchState.completedNodeIds = Array.from(
+        new Set([...nextBranchState.completedNodeIds, candidateNode.id]),
+      );
       selectEdgesForNode(candidateNode).forEach((edge) =>
         enqueueNode(edge.toNodeId),
       );

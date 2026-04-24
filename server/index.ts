@@ -110,6 +110,7 @@ import { registerPassportRoutes } from './routes/passport';
 import { registerBlastRadiusRoutes } from './routes/blastRadius';
 import { registerSentinelRoutes } from './routes/sentinel';
 import { registerWorkspaceAccessRoutes } from './routes/workspaceAccess';
+import { registerStepTemplateRoutes } from './routes/stepTemplates';
 import { isDesktopExecutionRuntime, reconcileDesktopExecutionOwnerships } from './executionOwnership';
 import { bindRequestActorContext, parseActorContext } from './requestActor';
 import { resolveCorsOriginHeader } from './http/originPolicy';
@@ -922,6 +923,7 @@ registerCodeWorkspaceRoutes(app, {
 
 registerRuntimeRoutes(app);
 registerExecutionRuntimeRoutes(app);
+registerStepTemplateRoutes(app);
 registerIncidentRoutes(app, { parseActorContext });
 registerPassportRoutes(app);
 registerBlastRadiusRoutes(app);

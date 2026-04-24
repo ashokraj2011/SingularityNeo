@@ -21,7 +21,7 @@ describe('getRouteDescription', () => {
     expect(getRouteDescription('/home')?.label).toBe('Home');
     expect(getRouteDescription('/team')?.label).toBe('Agents');
     expect(getRouteDescription('/chat')?.label).toBe('Chat');
-    expect(getRouteDescription('/ledger')?.label).toBe('Evidence');
+    expect(getRouteDescription('/ledger')?.label).toBe('Activity Record');
     expect(getRouteDescription('/designer')?.label).toBe('Designer');
   });
 

@@ -2624,7 +2624,7 @@ export default function CapabilityMetadata() {
                     setField('repositoriesCatalog', event.target.value)
                   }
                   placeholder={
-                    'Payments Core | ssh://git.example.com/payments/payments-core.git | main | /Users/ashokraj/Documents/payments-core | primary\nGateway Adapter | ssh://git.example.com/payments/payment-gateway.git | develop | /Users/ashokraj/Documents/payment-gateway |'
+                    'Payments Core | ssh://git.example.com/payments/payments-core.git | main | /Users/<you>/Documents/payments-core | primary\nGateway Adapter | ssh://git.example.com/payments/payment-gateway.git | develop | /Users/<you>/Documents/payment-gateway |'
                   }
                   className="field-textarea h-32"
                 />
@@ -2881,7 +2881,7 @@ export default function CapabilityMetadata() {
                     setField('localDirectories', event.target.value)
                   }
                   placeholder={
-                    '/Users/ashokraj/Documents/payments-core\n/Users/ashokraj/Documents/payment-gateway'
+                    '/Users/<you>/Documents/payments-core\n/Users/<you>/Documents/payment-gateway'
                   }
                   className="field-textarea h-28"
                 />
@@ -2913,7 +2913,7 @@ export default function CapabilityMetadata() {
                   onChange={event =>
                     setField('defaultWorkspacePath', event.target.value)
                   }
-                  placeholder="/Users/ashokraj/Documents/agentGoogle"
+                  placeholder="/Users/<you>/Documents/workspaces"
                   className="field-input"
                 />
               </label>
@@ -2927,7 +2927,7 @@ export default function CapabilityMetadata() {
                   onChange={event =>
                     setField('allowedWorkspacePaths', event.target.value)
                   }
-                  placeholder={'/Users/ashokraj/Documents/agentGoogle\n/Users/ashokraj/Documents/other-repo'}
+                  placeholder={'/Users/<you>/Documents/workspaces\n/Users/<you>/Documents/other-repo'}
                   className="field-textarea h-28"
                 />
               </label>

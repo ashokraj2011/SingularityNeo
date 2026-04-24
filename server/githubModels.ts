@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import {
   CopilotClient,
   approveAll,
@@ -189,6 +190,7 @@ const modelAliases: Record<string, string> = {
 
 const managedChatSessions = new Map<string, ManagedChatSessionRecord>();
 const sessionLocks = new Map<string, Promise<unknown>>();
+const DEFAULT_CHAT_HTTP_FALLBACK_TIMEOUT_MS = 90_000;
 
 let copilotClient: CopilotClient | null = null;
 let copilotClientPromise: Promise<CopilotClient> | null = null;
@@ -435,9 +437,24 @@ const splitMessages = (messages: GitHubModelsMessage[]) => {
   };
 };
 
-const selectWorkingDirectory = (capability?: Partial<Capability>) =>
-  getCapabilityWorkspaceRoots(capability).find(directory => existsSync(directory)) ||
-  process.cwd();
+const selectExistingDirectory = (candidates: Array<string | null | undefined>) =>
+  candidates
+    .map(value => String(value || '').trim())
+    .find(directory => directory && existsSync(directory));
+
+/**
+ * Resolve a safe session working directory without falling back to the
+ * SingularityNeo app repo itself.
+ */
+export const resolveRuntimeWorkingDirectory = (
+  capability?: Partial<Capability>,
+) =>
+  selectExistingDirectory([
+    process.env.SINGULARITY_WORKING_DIRECTORY,
+    ...getCapabilityWorkspaceRoots(capability),
+    homedir(),
+    tmpdir(),
+  ]) || tmpdir();
 
 const getConfiguredTokenState = (): {
   token: string;
@@ -718,6 +735,24 @@ export const isGitHubProviderRateLimitError = (error: unknown) => {
   return RATE_LIMIT_PATTERNS.some(pattern => pattern.test(message));
 };
 
+/**
+ * Returns true when the error is "retryable with the next model candidate" or
+ * "worth attempting the HTTP fallback path". This is used in two places:
+ *
+ *  1. Inside the `for (candidateModel of modelCandidates)` loop in
+ *     `getManagedScopedSession` — if true, the loop continues to the next
+ *     candidate instead of throwing immediately.
+ *  2. After the loop, to decide whether to attempt the HTTP fallback path
+ *     (subject to `shouldAllowHttpFallback()`).
+ *
+ * IMPORTANT: "not authorized" / org-policy errors from GitHub's API are
+ * model-specific — GitHub has separate org-level "Additional AI models"
+ * policies per model family (GPT-4.1, Claude, o3, …). Adding these patterns
+ * here means the loop tries every candidate before giving up, which lets the
+ * session succeed on whichever models the org has approved, and falls back to
+ * HTTP (with a `GITHUB_MODELS_TOKEN`) if all Copilot CLI model candidates are
+ * policy-blocked.
+ */
 const shouldFallbackToHttp = (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error || '');
   return (
@@ -728,6 +763,13 @@ const shouldFallbackToHttp = (error: unknown) => {
     /Copilot SDK timed out while waiting for an assistant response/i.test(message) ||
     /Copilot SDK stopped sending output before the assistant finished responding/i.test(message) ||
     /Copilot SDK session returned an empty response/i.test(message) ||
+    // GitHub API returns this when the model requires an org-level "Additional
+    // AI models" or "GitHub Models" policy that the admin has not yet enabled.
+    // Treat it as "this model isn't available, try the next candidate" rather
+    // than a hard fatal error so the model-candidate loop can continue.
+    /not authorized to use this Copilot feature/i.test(message) ||
+    /enterprise or organization policy/i.test(message) ||
+    /requires an enterprise/i.test(message) ||
     isGitHubProviderRateLimitError(error)
   );
 };
@@ -856,7 +898,13 @@ export const listAvailableRuntimeModels = async ({
 
   try {
     const client = await getCopilotClient();
-    const discoveredModels = await client.listModels();
+    // listModels() can also hang if the CLI lost its connection to GitHub after
+    // start(). Give it a reasonable ceiling so status polls stay snappy.
+    const discoveredModels = await withStartTimeout(
+      client.listModels(),
+      COPILOT_CLIENT_START_TIMEOUT_MS,
+      'listModels',
+    );
     const normalized = discoveredModels
       .map(toRuntimeModelOption)
       .filter(model => Boolean(model.id))
@@ -1067,6 +1115,25 @@ const toUsageFromCopilot = (usageEvent: CopilotUsageEvent | null, fallbackOutput
 const getMissingTokenError = () =>
   getMissingRuntimeConfigurationMessage();
 
+// How long to wait for the Copilot CLI to accept the initial connection before
+// giving up and throwing so callers can fall back to HTTP or static models.
+// The CLI needs to complete its auth handshake with GitHub after startup; 15 s
+// is generous enough for a slow network while still keeping the desktop UI
+// responsive (the IPC timeout in main.mjs is 45 s).
+const COPILOT_CLIENT_START_TIMEOUT_MS = 15_000;
+
+const withStartTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> =>
+  Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`Copilot CLI did not respond within ${ms / 1000} s (${label}). ` +
+          `Ensure 'copilot --headless --port 4321' is running and reachable.`)),
+        ms,
+      ),
+    ),
+  ]);
+
 const getCopilotClient = async () => {
   const cliUrl = getConfiguredCopilotCliUrl();
   const token = getConfiguredToken();
@@ -1097,7 +1164,13 @@ const getCopilotClient = async () => {
             }
           : undefined,
       });
-      await client.start();
+      // Wrap client.start() with a timeout so a slow / unreachable CLI process
+      // doesn't block the desktop UI for 45 s before the IPC timeout fires.
+      await withStartTimeout(
+        client.start(),
+        COPILOT_CLIENT_START_TIMEOUT_MS,
+        cliUrl ? `cliUrl=${cliUrl}` : 'token auth',
+      );
       copilotClient = client;
       return client;
     })().catch(error => {
@@ -1298,7 +1371,9 @@ const requestGitHubModelsHttp = async ({
       }
 
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error('GitHub Models HTTP request timed out.');
+        throw new Error(
+          `GitHub Models HTTP request timed out after ${timeoutMs}ms.`,
+        );
       }
 
       throw error;
@@ -1777,13 +1852,17 @@ const buildSessionModelCandidates = async (requestedModel?: string) => {
     candidates.push(requested);
   }
 
+  // Static fallback order: gpt-4o-mini and gpt-4o first because they are
+  // the most broadly approved across Copilot Individual / Business / Enterprise
+  // plans. The GPT-4.1 family and reasoning models (o4-mini, o3) require an
+  // org admin to enable the "Additional AI models" policy, so they come after.
   candidates.push(
-    normalizeModel(defaultModel),
-    normalizeModel('gpt-4.1'),
     normalizeModel('gpt-4o-mini'),
     normalizeModel('gpt-4o'),
-    normalizeModel('o4-mini'),
-    normalizeModel('o3'),
+    normalizeModel(defaultModel),   // gpt-4.1-mini — needs org policy
+    normalizeModel('gpt-4.1'),      // needs org policy
+    normalizeModel('o4-mini'),      // needs org policy
+    normalizeModel('o3'),           // needs org policy
   );
 
   return [...new Set(candidates.filter(Boolean))];
@@ -1814,7 +1893,7 @@ const getManagedScopedSession = async ({
   // Dynamic model routing: use the caller-supplied override when present so
   // the session is created/looked up with the right model (budget vs primary).
   const effectiveModel = modelOverride ?? agent.model;
-  const workingDirectory = selectWorkingDirectory(capability);
+  const workingDirectory = resolveRuntimeWorkingDirectory(capability);
   const providerKey = resolveAgentProviderKey(agent);
   const fingerprint = getChatSessionFingerprint({
     capability,
@@ -1966,6 +2045,22 @@ const getManagedScopedSession = async ({
   }
 
   if (!session) {
+    // If every model candidate was rejected with a policy error, surface a
+    // clear actionable message instead of the raw GitHub API text.
+    const lastMsg = lastError instanceof Error ? lastError.message : String(lastError || '');
+    if (
+      /not authorized to use this Copilot feature/i.test(lastMsg) ||
+      /enterprise or organization policy/i.test(lastMsg) ||
+      /requires an enterprise/i.test(lastMsg)
+    ) {
+      throw new Error(
+        'All available models were blocked by a GitHub Copilot organization policy. ' +
+        'Ask your GitHub org admin to enable "Additional AI models" (or "GitHub Models") ' +
+        'at Organization Settings → Copilot → Policies. ' +
+        'Alternatively, set GITHUB_MODELS_TOKEN in your .env to use the GitHub Models HTTP API directly, ' +
+        'or set DEFAULT_MODEL=gpt-4o in .env to prefer a model that does not require an extra policy.',
+      );
+    }
     throw (lastError instanceof Error
       ? lastError
       : new Error('Unable to create or resume a Copilot session.'));
@@ -2271,19 +2366,24 @@ export const invokeScopedCapabilitySession = async ({
       content: effectivePrompt,
     },
   ];
+  const fallbackTimeoutMs =
+    timeoutMs ||
+    (scope === 'GENERAL_CHAT' || onDelta
+      ? DEFAULT_CHAT_HTTP_FALLBACK_TIMEOUT_MS
+      : 45_000);
   const fallbackResult =
     resolveAgentProviderKey(agent) === LOCAL_OPENAI_PROVIDER_KEY
       ? await requestLocalOpenAIModel({
           model: effectiveModel,
           messages: fallbackMessages,
-          timeoutMs,
+          timeoutMs: fallbackTimeoutMs,
           tools,
           tool_choice,
         })
       : await requestGitHubModelsHttp({
           model: await resolveRuntimeModel(effectiveModel),
           messages: fallbackMessages,
-          timeoutMs,
+          timeoutMs: fallbackTimeoutMs,
           maxAttempts: scope === 'GENERAL_CHAT' ? 1 : 3,
           maxRetryAfterMs: scope === 'GENERAL_CHAT' ? 5_000 : 120_000,
           tools,
@@ -2317,7 +2417,7 @@ export interface BudgetSummaryResult {
 
 /**
  * Cheap-model summarizer for long tool-loop transcripts (Lever 3 of the
- * token-optimization program — see /Users/ashokraj/.claude/plans/iridescent-tinkering-cocoa.md).
+ * token-optimization program — see docs/token-optimization.md).
  *
  * Reuses the capability's provider but forces the lowest-affordability model
  * available, using the existing BUDGET_MODEL_HINTS scoring via
@@ -2518,11 +2618,13 @@ export const requestGitHubModel = async ({
   model,
   providerKey,
   messages,
+  workingDirectory,
   timeoutMs = 45000,
 }: {
   model?: string;
   providerKey?: ProviderKey | string;
   messages: GitHubModelsMessage[];
+  workingDirectory?: string;
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
@@ -2551,12 +2653,13 @@ export const requestGitHubModel = async ({
       conversation,
       includeHistory: true,
     });
-    const workingDirectory = process.cwd();
+    const resolvedWorkingDirectory =
+      workingDirectory || resolveRuntimeWorkingDirectory();
     const session = await (await getCopilotClient()).createSession(
       createSessionConfig({
         model: await resolveRuntimeModel(model),
         systemPrompt,
-        workingDirectory,
+        workingDirectory: resolvedWorkingDirectory,
         streaming: false,
         infinite: false,
         sessionId: `singularity-tmp-${randomUUID()}`,
@@ -2590,12 +2693,14 @@ export const requestGitHubModelStream = async ({
   model,
   providerKey,
   messages,
+  workingDirectory,
   timeoutMs = 45000,
   onDelta,
 }: {
   model?: string;
   providerKey?: ProviderKey | string;
   messages: GitHubModelsMessage[];
+  workingDirectory?: string;
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
@@ -2629,12 +2734,13 @@ export const requestGitHubModelStream = async ({
     conversation,
     includeHistory: true,
   });
-  const workingDirectory = process.cwd();
+  const resolvedWorkingDirectory =
+    workingDirectory || resolveRuntimeWorkingDirectory();
   const session = await (await getCopilotClient()).createSession(
     createSessionConfig({
       model: await resolveRuntimeModel(model),
       systemPrompt,
-      workingDirectory,
+      workingDirectory: resolvedWorkingDirectory,
       streaming: true,
       infinite: false,
       sessionId: `singularity-tmp-stream-${randomUUID()}`,

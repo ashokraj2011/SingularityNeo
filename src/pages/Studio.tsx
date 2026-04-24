@@ -469,13 +469,29 @@ const Studio = () => {
             icon={BookOpen}
             tone="brand"
           >
-            <button
-              onClick={() => navigate("/team")}
-              className="enterprise-button w-full justify-between bg-primary text-on-primary hover:bg-primary/90"
-            >
-              <span>Open Agents</span>
-              <ArrowRight size={16} />
-            </button>
+            <div className="space-y-2">
+              <button
+                onClick={() => navigate("/team")}
+                className="enterprise-button w-full justify-between bg-primary text-on-primary hover:bg-primary/90"
+              >
+                <span>Open Agents</span>
+                <ArrowRight size={16} />
+              </button>
+              <button
+                onClick={() => navigate("/studio/designer-config")}
+                className="enterprise-button enterprise-button-secondary w-full justify-between"
+              >
+                <span>Designer Settings</span>
+                <Settings2 size={16} />
+              </button>
+              <button
+                onClick={() => navigate("/studio/step-templates")}
+                className="enterprise-button enterprise-button-secondary w-full justify-between"
+              >
+                <span>Step Templates</span>
+                <ArrowRight size={16} />
+              </button>
+            </div>
           </SectionCard>
         </div>
       </div>

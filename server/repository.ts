@@ -52,6 +52,9 @@ import {
   WorkItemStatus,
   WorkItemHandoffPacket,
   Workflow,
+  WorkflowEdge,
+  WorkflowNode,
+  WorkflowVersion,
 } from '../src/types';
 import {
   applyCapabilityArchitecture,
@@ -936,6 +939,9 @@ const workflowFromRow = (
       capabilityId: row.capability_id,
       templateId: row.template_id || undefined,
       schemaVersion: row.schema_version ? Number(row.schema_version) : undefined,
+      version: row.version ? Number(row.version) : 1,
+      lockedAt: row.locked_at ? new Date(row.locked_at).toISOString() : undefined,
+      lockedBy: row.locked_by || undefined,
       entryNodeId: row.entry_node_id || undefined,
       nodes: asJsonArray<Workflow['nodes'][number]>(row.nodes),
       edges: asJsonArray<Workflow['edges'][number]>(row.edges),
@@ -4715,4 +4721,222 @@ export const replaceCapabilityWorkspaceContentRecord = async (
   }
 
   return freshWorkspace;
+};
+
+// ── Workflow Versioning & Immutability ────────────────────────────────────────
+
+export const snapshotWorkflowVersion = async (
+  capabilityId: string,
+  workflowId: string,
+  version: number,
+  nodes: unknown[],
+  edges: unknown[],
+  publishState: string,
+  createdBy?: string,
+  changeSummary?: string,
+): Promise<void> => {
+  const id = `wfv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await query(
+    `INSERT INTO capability_workflow_versions
+       (id, workflow_id, capability_id, version, nodes, edges, publish_state, created_by, change_summary)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     ON CONFLICT (workflow_id, version) DO NOTHING`,
+    [id, workflowId, capabilityId, version, JSON.stringify(nodes), JSON.stringify(edges), publishState, createdBy ?? null, changeSummary ?? null],
+  );
+};
+
+export const lockWorkflow = async (
+  capabilityId: string,
+  workflowId: string,
+  lockedBy: string,
+): Promise<void> => {
+  await query(
+    `UPDATE capability_workflows
+     SET locked_at = NOW(), locked_by = $1, publish_state = 'PUBLISHED', updated_at = NOW()
+     WHERE capability_id = $2 AND id = $3`,
+    [lockedBy, capabilityId, workflowId],
+  );
+};
+
+export const unlockWorkflow = async (
+  capabilityId: string,
+  workflowId: string,
+  unlockedBy: string,
+): Promise<{ newVersion: number }> => {
+  const result = await query<{ version: number; nodes: unknown; edges: unknown; publish_state: string }>(
+    `SELECT version, nodes, edges, publish_state FROM capability_workflows
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, workflowId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new Error(`Workflow ${workflowId} not found`);
+
+  // Snapshot current state before unlocking
+  await snapshotWorkflowVersion(
+    capabilityId,
+    workflowId,
+    Number(row.version),
+    row.nodes as unknown[],
+    row.edges as unknown[],
+    row.publish_state as string,
+    unlockedBy,
+    `Unlocked by ${unlockedBy}`,
+  );
+
+  const newVersion = Number(row.version) + 1;
+  await query(
+    `UPDATE capability_workflows
+     SET locked_at = NULL, locked_by = NULL, publish_state = 'VALIDATED',
+         version = $1, updated_at = NOW()
+     WHERE capability_id = $2 AND id = $3`,
+    [newVersion, capabilityId, workflowId],
+  );
+
+  return { newVersion };
+};
+
+export const getWorkflowVersions = async (
+  capabilityId: string,
+  workflowId: string,
+): Promise<WorkflowVersion[]> => {
+  const result = await query<Record<string, unknown>>(
+    `SELECT * FROM capability_workflow_versions
+     WHERE capability_id = $1 AND workflow_id = $2
+     ORDER BY version DESC`,
+    [capabilityId, workflowId],
+  );
+
+  return result.rows.map(row => ({
+    id: row.id as string,
+    workflowId: row.workflow_id as string,
+    capabilityId: row.capability_id as string,
+    version: Number(row.version),
+    nodes: ((row.nodes as unknown) as WorkflowNode[]) ?? [],
+    edges: ((row.edges as unknown) as WorkflowEdge[]) ?? [],
+    publishState: row.publish_state as WorkflowVersion['publishState'],
+    createdBy: (row.created_by as string) ?? undefined,
+    createdAt: new Date(row.created_at as string).toISOString(),
+    changeSummary: (row.change_summary as string) ?? undefined,
+  }));
+};
+
+// ── Sub-Workflow Execution Helpers ────────────────────────────────────────────
+
+export const getChildWorkflowRuns = async (
+  parentRunId: string,
+): Promise<Array<{ id: string; capabilityId: string; status: string; parentRunNodeId: string }>> => {
+  const result = await query<Record<string, unknown>>(
+    `SELECT id, capability_id, status, parent_run_node_id
+     FROM capability_workflow_runs
+     WHERE parent_run_id = $1`,
+    [parentRunId],
+  );
+  return result.rows.map(row => ({
+    id: row.id as string,
+    capabilityId: row.capability_id as string,
+    status: row.status as string,
+    parentRunNodeId: row.parent_run_node_id as string,
+  }));
+};
+
+// ── Policy Templates ──────────────────────────────────────────────────────────
+
+const DEFAULT_POLICY_TEMPLATES = [
+  {
+    id: 'pt-two-approver',
+    name: 'Two-Approver Sign-off',
+    description: 'Requires any two members from the approval team to approve before proceeding.',
+    category: 'Approval',
+    policy_config: JSON.stringify({
+      mode: 'QUORUM',
+      minimumApprovals: 2,
+      delegationAllowed: false,
+      escalationAfterMinutes: 1440,
+    }),
+  },
+  {
+    id: 'pt-single-manager',
+    name: 'Manager Sign-off',
+    description: 'Single manager approval required. Escalates after 24 hours.',
+    category: 'Approval',
+    policy_config: JSON.stringify({
+      mode: 'ANY_ONE',
+      minimumApprovals: 1,
+      delegationAllowed: true,
+      escalationAfterMinutes: 1440,
+    }),
+  },
+  {
+    id: 'pt-all-required',
+    name: 'All Stakeholders Required',
+    description: 'Every assigned approver must approve. Use for high-risk or regulated changes.',
+    category: 'Governance',
+    policy_config: JSON.stringify({
+      mode: 'ALL_REQUIRED',
+      minimumApprovals: 0,
+      delegationAllowed: false,
+      escalationAfterMinutes: 2880,
+    }),
+  },
+  {
+    id: 'pt-ciso-critical',
+    name: 'CISO Sign-off (Critical)',
+    description: 'Required for CRITICAL severity changes. Routes to CISO role with 4-hour SLA.',
+    category: 'Security',
+    policy_config: JSON.stringify({
+      mode: 'ANY_ONE',
+      minimumApprovals: 1,
+      delegationAllowed: false,
+      escalationAfterMinutes: 240,
+    }),
+  },
+  {
+    id: 'pt-fast-track',
+    name: 'Fast-Track Approval',
+    description: 'Single approver, delegation allowed, escalates in 2 hours. For low-risk changes.',
+    category: 'Approval',
+    policy_config: JSON.stringify({
+      mode: 'ANY_ONE',
+      minimumApprovals: 1,
+      delegationAllowed: true,
+      escalationAfterMinutes: 120,
+    }),
+  },
+];
+
+export const seedPolicyTemplates = async (): Promise<void> => {
+  const existing = await query<{ count: string }>('SELECT COUNT(*) as count FROM workspace_policy_templates');
+  if (Number(existing.rows[0]?.count) > 0) return;
+
+  for (const tpl of DEFAULT_POLICY_TEMPLATES) {
+    await query(
+      `INSERT INTO workspace_policy_templates (id, name, description, policy_config, category)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (id) DO NOTHING`,
+      [tpl.id, tpl.name, tpl.description, tpl.policy_config, tpl.category],
+    );
+  }
+  console.log('[repository] Seeded default policy templates');
+};
+
+export const getPolicyTemplates = async (): Promise<Array<{
+  id: string;
+  name: string;
+  description?: string;
+  policyConfig: Record<string, unknown>;
+  category?: string;
+  createdAt: string;
+}>> => {
+  await seedPolicyTemplates();
+  const result = await query<Record<string, unknown>>(
+    'SELECT * FROM workspace_policy_templates ORDER BY category, name',
+  );
+  return result.rows.map(row => ({
+    id: row.id as string,
+    name: row.name as string,
+    description: (row.description as string) ?? undefined,
+    policyConfig: row.policy_config as Record<string, unknown>,
+    category: (row.category as string) ?? undefined,
+    createdAt: new Date(row.created_at as string).toISOString(),
+  }));
 };

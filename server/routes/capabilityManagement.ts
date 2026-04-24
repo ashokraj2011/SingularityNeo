@@ -31,6 +31,10 @@ import {
   updateCapabilityAgentRecord,
   updateCapabilityRecord,
   updateCapabilityRepositoriesRecord,
+  getWorkflowVersions,
+  lockWorkflow,
+  unlockWorkflow,
+  getPolicyTemplates,
 } from '../repository';
 import { parseActorContext } from '../requestActor';
 import { refreshCapabilityMemory } from '../memory';
@@ -735,6 +739,49 @@ export const registerCapabilityManagementRoutes = (
         wakeAgentLearningWorker();
       }
       response.json(workspace);
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  // ── Workflow Versioning ──────────────────────────────────────────────────
+  app.get('/api/capabilities/:capabilityId/workflows/:workflowId/versions', async (request, response) => {
+    try {
+      const { capabilityId, workflowId } = request.params;
+      const versions = await getWorkflowVersions(capabilityId, workflowId);
+      response.json(versions);
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.post('/api/capabilities/:capabilityId/workflows/:workflowId/lock', async (request, response) => {
+    try {
+      const { capabilityId, workflowId } = request.params;
+      const actor = parseActorContext(request, 'system');
+      await lockWorkflow(capabilityId, workflowId, actor.userId ?? 'system');
+      response.json({ locked: true });
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.post('/api/capabilities/:capabilityId/workflows/:workflowId/unlock', async (request, response) => {
+    try {
+      const { capabilityId, workflowId } = request.params;
+      const actor = parseActorContext(request, 'system');
+      const result = await unlockWorkflow(capabilityId, workflowId, actor.userId ?? 'system');
+      response.json(result);
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  // ── Policy Templates ─────────────────────────────────────────────────────
+  app.get('/api/policy-templates', async (_request, response) => {
+    try {
+      const templates = await getPolicyTemplates();
+      response.json(templates);
     } catch (error) {
       sendApiError(response, error);
     }

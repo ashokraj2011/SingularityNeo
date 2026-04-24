@@ -1,6 +1,6 @@
 /**
  * PromptReceiptPanel — Phase 2 / Lever 7 observability surface for the
- * context-budgeter (see plan: /Users/ashokraj/.claude/plans/iridescent-tinkering-cocoa.md).
+ * context-budgeter (see docs/token-optimization.md).
  *
  * Every main-model LLM call in `requestStepDecision` emits a
  * `PROMPT_RECEIPT` run event whose `details` payload describes exactly

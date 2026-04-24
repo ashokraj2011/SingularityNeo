@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertCircle, ArrowRight } from 'lucide-react';
+import { AlertCircle, ArrowRight, Mail } from 'lucide-react';
 import { StatusBadge } from '../EnterpriseUI';
 import { cn } from '../../lib/utils';
 import type {
@@ -16,6 +16,8 @@ type AttentionItem = {
   attentionTimestamp?: string;
   hasConflictReview: boolean;
   callToAction: string;
+  /** Assignee email captured at run start via the pre-flight dialog */
+  assigneeEmail?: string;
 };
 
 type OrchestratorAttentionQueueProps = {
@@ -123,6 +125,12 @@ export const OrchestratorAttentionQueue = ({
                   <span>{resolveAgentName(attention.agentId)}</span>
                   <span>{formatRelativeTime(attention.attentionTimestamp)}</span>
                 </div>
+                {attention.assigneeEmail ? (
+                  <div className="mt-1.5 flex items-center gap-1.5 text-[0.6875rem] text-secondary">
+                    <Mail size={11} className="shrink-0 text-outline" />
+                    <span className="truncate font-medium">{attention.assigneeEmail}</span>
+                  </div>
+                ) : null}
               </div>
               <div className="orchestrator-attention-cta">
                 <span>{attention.callToAction}</span>
