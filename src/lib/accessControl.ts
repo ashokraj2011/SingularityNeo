@@ -39,6 +39,7 @@ export const ALL_PERMISSION_ACTIONS: PermissionAction[] = [
   'telemetry.read',
   'chat.read',
   'chat.write',
+  'chat.participate',
   'report.view.operations',
   'report.view.portfolio',
   'report.view.executive',
@@ -62,6 +63,7 @@ const LIVE_DETAIL_ACTIONS: PermissionAction[] = [
   'telemetry.read',
   'chat.read',
   'chat.write',
+  'chat.participate',
 ];
 
 const WORKSPACE_ROLE_ACTIONS: Record<WorkspaceRole, PermissionAction[]> = {
@@ -102,6 +104,7 @@ const WORKSPACE_ROLE_ACTIONS: Record<WorkspaceRole, PermissionAction[]> = {
     'telemetry.read',
     'chat.read',
     'chat.write',
+    'chat.participate',
     'report.view.operations',
   ],
   AUDITOR: [
@@ -134,6 +137,7 @@ const CAPABILITY_ROLE_ACTIONS: Record<CapabilityAccessRole, PermissionAction[]> 
     'telemetry.read',
     'chat.read',
     'chat.write',
+    'chat.participate',
     'report.view.operations',
     'report.view.portfolio',
   ],
@@ -149,6 +153,7 @@ const CAPABILITY_ROLE_ACTIONS: Record<CapabilityAccessRole, PermissionAction[]> 
     'telemetry.read',
     'chat.read',
     'chat.write',
+    'chat.participate',
     'report.view.operations',
   ],
   APPROVER: [
@@ -157,6 +162,7 @@ const CAPABILITY_ROLE_ACTIONS: Record<CapabilityAccessRole, PermissionAction[]> 
     'workitem.read',
     'approval.decide',
     'artifact.read',
+    'chat.participate',
     'report.view.operations',
   ],
   VIEWER: ['capability.read', 'capability.read.rollup', 'artifact.read'],
@@ -432,6 +438,14 @@ export const evaluateCapabilityPermissions = ({
   }
   if (descendantGrants.length > 0) {
     reasoning.push('Explicit descendant grants unlock deeper child visibility.');
+  }
+
+  // Backwards-compat: anyone who already has chat.write is implicitly allowed
+  // to participate as a foreign agent in swarm debates, even if the new
+  // 'chat.participate' action has not been explicitly granted. New grants
+  // that want participate-only access can still grant it independently.
+  if (allowedActions.has('chat.write') && !allowedActions.has('chat.participate')) {
+    allowedActions.add('chat.participate');
   }
 
   return {

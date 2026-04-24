@@ -101,6 +101,7 @@ import { registerDeliveryAssetRoutes } from './routes/deliveryAssets';
 import { registerGovernanceRoutes } from './routes/governance';
 import { registerReportingEvidenceRoutes } from './routes/reportingEvidence';
 import { registerRuntimeChatRoutes } from './routes/runtimeChat';
+import { registerSwarmChatRoutes } from './routes/swarmChat';
 import { registerAgentGitRoutes } from './routes/agentGit';
 import { registerWorkItemRoutes } from './routes/workItems';
 import { registerWorkflowRunRoutes } from './routes/workflowRuns';
@@ -940,6 +941,10 @@ registerRuntimeChatRoutes(app, {
   recordUsageMetrics,
   resolveChatRuntimeContext,
   startTelemetrySpan,
+  writeSseEvent,
+});
+registerSwarmChatRoutes(app, {
+  parseActor,
   writeSseEvent,
 });
 

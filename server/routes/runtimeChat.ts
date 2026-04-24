@@ -1,7 +1,10 @@
 import type express from 'express';
 import type { Capability, CapabilityAgent, CapabilityWorkspace } from '../../src/types';
+import { assertCapabilityPermission } from '../access';
 import { GitHubProviderRateLimitError, type ChatHistoryMessage } from '../githubModels';
 import { auditRuntimeChatTurn, getCapabilityBundle } from '../repository';
+import { parseActorContext } from '../requestActor';
+import { resolveAuthorizedSwarmParticipants } from '../swarmParticipants';
 import { wakeExecutionWorker } from '../execution/worker';
 import { sendApiError } from '../api/errors';
 
@@ -17,6 +20,33 @@ type ChatRequestBody = {
   workItemId?: string;
   runId?: string;
   workflowStepId?: string;
+  /**
+   * Cross-capability participants tagged from the composer.
+   *   - length 0 or undefined → legacy single-agent chat (body.capability/body.agent).
+   *   - length 1              → cross-capability single-agent chat: the anchor
+   *     stays `body.capability`, but the speaking agent resolves out of the
+   *     participant's home bundle.
+   *   - length 2-3            → swarm debate; this endpoint returns 409 with
+   *     a pointer to /api/runtime/chat/swarm so the caller switches lanes.
+   *   - length >3             → 400.
+   */
+  participants?: Array<{ capabilityId: string; agentId: string }>;
+};
+
+const normalizeParticipants = (
+  participants?: Array<{ capabilityId?: string; agentId?: string }>,
+): Array<{ capabilityId: string; agentId: string }> => {
+  if (!participants || participants.length === 0) return [];
+  const seen = new Set<string>();
+  const out: Array<{ capabilityId: string; agentId: string }> = [];
+  for (const item of participants) {
+    if (!item?.capabilityId || !item?.agentId) continue;
+    const key = `${item.capabilityId}::${item.agentId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ capabilityId: item.capabilityId, agentId: item.agentId });
+  }
+  return out;
 };
 
 type ChatContext = {
@@ -87,10 +117,69 @@ export const registerRuntimeChatRoutes = (
       return;
     }
 
+    // Participants routing (G22): 0/1 participants stay on the single-agent
+    // chat path; 2-3 participants are a swarm debate (wrong endpoint); >3 is
+    // always a bad request.
+    const normalizedParticipants = normalizeParticipants(body.participants);
+    if (normalizedParticipants.length > 3) {
+      response.status(400).json({
+        error: 'Chat supports at most 3 tagged participants; received more.',
+      });
+      return;
+    }
+    if (normalizedParticipants.length >= 2) {
+      response.status(409).json({
+        error:
+          'Tagging 2 or 3 participants starts a Swarm Debate; call POST /api/runtime/chat/swarm instead.',
+        swarmEndpoint: '/api/runtime/chat/swarm',
+      });
+      return;
+    }
+
     try {
-      const bundle = await getCapabilityBundle(body.capability.id);
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertCapabilityPermission({
+        capabilityId: body.capability.id,
+        actor,
+        action: 'chat.write',
+      });
+      const anchorBundle = await getCapabilityBundle(body.capability.id);
+      const resolvedParticipants =
+        normalizedParticipants.length === 1
+          ? await resolveAuthorizedSwarmParticipants({
+              anchorCapabilityId: body.capability.id,
+              actor,
+              participants: normalizedParticipants,
+            })
+          : [];
+
+      // Foreign-agent (single-participant) path: the anchor stays the caller's
+      // capability, but the speaking agent may resolve from a tagged
+      // participant in the anchor capability or in an authorized linked one.
+      const taggedParticipant = resolvedParticipants[0];
+      const usingForeignAgent = Boolean(
+        taggedParticipant &&
+          taggedParticipant.capabilityId !== body.capability.id,
+      );
+      const homeBundle = taggedParticipant?.bundle || anchorBundle;
+
       const liveAgent =
-        bundle.workspace.agents.find(agent => agent.id === body.agent?.id) || body.agent;
+        taggedParticipant?.agent ||
+        anchorBundle.workspace.agents.find(agent => agent.id === body.agent?.id) ||
+        body.agent;
+
+      if (!liveAgent) {
+        response.status(404).json({
+          error: usingForeignAgent
+            ? `Agent ${taggedParticipant!.agentId} not found in capability ${taggedParticipant!.capabilityId}.`
+            : `Agent ${body.agent?.id} not found in capability ${body.capability.id}.`,
+        });
+        return;
+      }
+
+      // The anchor capability is still the conversation anchor; foreign agents
+      // never mutate anchor workspace state.
+      const bundle = anchorBundle;
       const liveCapability = bundle.capability;
       const chatAction = await maybeHandleCapabilityChatAction({
         bundle,
@@ -143,11 +232,31 @@ export const registerRuntimeChatRoutes = (
         bundle,
         liveAgent,
       });
-      const memoryContext = await buildMemoryContext({
+      const anchorMemoryContext = await buildMemoryContext({
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
         queryText: chatContext.memoryQueryText || message,
       });
+      // Merged-memory slice (plan §3c) — when the speaking agent lives in a
+      // different capability, pull its home memory too so it brings its own
+      // lived context into the anchor conversation.
+      const homeMemoryContext =
+        usingForeignAgent && taggedParticipant
+          ? await buildMemoryContext({
+              capabilityId: taggedParticipant.capabilityId,
+              agentId: taggedParticipant.agentId,
+              queryText: chatContext.memoryQueryText || message,
+            }).catch(() => null)
+          : null;
+      const memoryContext = anchorMemoryContext;
+      const mergedMemoryPrompt = [
+        anchorMemoryContext.prompt,
+        homeMemoryContext?.prompt
+          ? `Home-capability memory (${taggedParticipant!.capabilityId}):\n${homeMemoryContext.prompt}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
       const chatResponse = await invokeCapabilityChat({
         capability: liveCapability,
         agent: liveAgent,
@@ -159,7 +268,7 @@ export const registerRuntimeChatRoutes = (
         developerPrompt: chatContext.developerPrompt,
         memoryPrompt: buildChatMemoryPrompt({
           liveBriefing: chatContext.liveBriefing,
-          memoryPrompt: memoryContext.prompt,
+          memoryPrompt: mergedMemoryPrompt,
         }),
       });
       const { promptReceipt, tokenPolicy, ...publicChatResponse } = chatResponse as typeof chatResponse & {
@@ -218,6 +327,7 @@ export const registerRuntimeChatRoutes = (
         sessionScopeId: chatContext.chatScopeId || null,
         workItemId: body.workItemId || null,
         runId: body.runId || null,
+        sourceCapabilityId: taggedParticipant?.capabilityId || liveCapability.id,
       }).catch(err => {
         console.warn('[chat-audit] failed to persist chat turn:', err instanceof Error ? err.message : err);
       });
@@ -232,6 +342,25 @@ export const registerRuntimeChatRoutes = (
     if (!message || !body.capability || !body.agent) {
       response.status(400).json({
         error: 'Capability, agent, and message are required.',
+      });
+      return;
+    }
+
+    // Participants routing — same semantics as /api/runtime/chat but applied
+    // before headers go out so we can still reply with a JSON error instead
+    // of a half-opened SSE channel.
+    const streamParticipants = normalizeParticipants(body.participants);
+    if (streamParticipants.length > 3) {
+      response.status(400).json({
+        error: 'Chat supports at most 3 tagged participants; received more.',
+      });
+      return;
+    }
+    if (streamParticipants.length >= 2) {
+      response.status(409).json({
+        error:
+          'Tagging 2 or 3 participants starts a Swarm Debate; call POST /api/runtime/chat/swarm instead.',
+        swarmEndpoint: '/api/runtime/chat/swarm',
       });
       return;
     }
@@ -251,9 +380,48 @@ export const registerRuntimeChatRoutes = (
     });
 
     try {
-      const bundle = await getCapabilityBundle(body.capability.id);
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertCapabilityPermission({
+        capabilityId: body.capability.id,
+        actor,
+        action: 'chat.write',
+      });
+      const anchorBundle = await getCapabilityBundle(body.capability.id);
+      const resolvedParticipants =
+        streamParticipants.length === 1
+          ? await resolveAuthorizedSwarmParticipants({
+              anchorCapabilityId: body.capability.id,
+              actor,
+              participants: streamParticipants,
+            })
+          : [];
+
+      const foreignParticipant = resolvedParticipants[0];
+      const usingForeignAgent = Boolean(
+        foreignParticipant &&
+          foreignParticipant.capabilityId !== body.capability.id,
+      );
+      const homeBundle = foreignParticipant?.bundle || anchorBundle;
+
       const liveAgent =
-        bundle.workspace.agents.find(agent => agent.id === body.agent?.id) || body.agent;
+        foreignParticipant?.agent ||
+        anchorBundle.workspace.agents.find(agent => agent.id === body.agent?.id) ||
+        body.agent;
+
+      if (!liveAgent) {
+        writeSseEvent(response, 'error', {
+          type: 'error',
+          traceId,
+          sessionMode: body.sessionMode || 'resume',
+          error: usingForeignAgent
+            ? `Agent ${foreignParticipant!.agentId} not found in capability ${foreignParticipant!.capabilityId}.`
+            : `Agent ${body.agent?.id} not found in capability ${body.capability.id}.`,
+        });
+        response.end();
+        return;
+      }
+
+      const bundle = anchorBundle;
       const liveCapability = bundle.capability;
       const chatAction = await maybeHandleCapabilityChatAction({
         bundle,
@@ -298,11 +466,28 @@ export const registerRuntimeChatRoutes = (
         bundle,
         liveAgent,
       });
-      const memoryContext = await buildMemoryContext({
+      const anchorMemoryContext = await buildMemoryContext({
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
         queryText: chatContext.memoryQueryText || message,
       });
+      const streamHomeMemoryContext =
+        usingForeignAgent && foreignParticipant
+          ? await buildMemoryContext({
+              capabilityId: foreignParticipant.capabilityId,
+              agentId: foreignParticipant.agentId,
+              queryText: chatContext.memoryQueryText || message,
+            }).catch(() => null)
+          : null;
+      const memoryContext = anchorMemoryContext;
+      const streamMergedMemoryPrompt = [
+        anchorMemoryContext.prompt,
+        streamHomeMemoryContext?.prompt
+          ? `Home-capability memory (${foreignParticipant!.capabilityId}):\n${streamHomeMemoryContext.prompt}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
       writeSseEvent(response, 'memory', {
         type: 'memory',
         traceId,
@@ -333,7 +518,7 @@ export const registerRuntimeChatRoutes = (
         developerPrompt: chatContext.developerPrompt,
         memoryPrompt: buildChatMemoryPrompt({
           liveBriefing: chatContext.liveBriefing,
-          memoryPrompt: memoryContext.prompt,
+          memoryPrompt: streamMergedMemoryPrompt,
         }),
         onDelta: delta => {
           writeSseEvent(response, 'delta', {
@@ -409,6 +594,9 @@ export const registerRuntimeChatRoutes = (
         sessionScopeId: chatContext.chatScopeId || null,
         workItemId: body.workItemId || null,
         runId: body.runId || null,
+        sourceCapabilityId: usingForeignAgent
+          ? foreignParticipant!.capabilityId
+          : liveCapability.id,
       }).catch(err => {
         console.warn('[chat-audit] failed to persist stream chat turn:', err instanceof Error ? err.message : err);
       });

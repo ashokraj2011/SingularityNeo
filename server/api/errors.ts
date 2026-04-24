@@ -27,7 +27,16 @@ export const toApiErrorPayload = (error: unknown) => {
   };
 };
 
-export const sendApiError = (response: express.Response, error: unknown) => {
+export const sendApiError = (
+  response: express.Response,
+  error: unknown,
+  defaultStatus?: number,
+) => {
   const { status, payload } = toApiErrorPayload(error);
-  response.status(status).json(payload);
+  // When the message-pattern heuristic lands on 500 but the caller has a
+  // more specific idea of the right status (e.g. 404 for a missing record
+  // whose message doesn't literally contain "not found"), honour the hint.
+  const finalStatus =
+    typeof defaultStatus === 'number' && status === 500 ? defaultStatus : status;
+  response.status(finalStatus).json(payload);
 };

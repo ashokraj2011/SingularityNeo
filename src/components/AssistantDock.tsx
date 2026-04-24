@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
+  AtSign,
   Loader2,
   MessageSquareText,
   Minimize2,
@@ -15,6 +16,14 @@ import { getRouteDescription, type RouteDescription } from '../lib/routeDescript
 import { cn } from '../lib/utils';
 import { StatusBadge } from './EnterpriseUI';
 import MarkdownContent from './MarkdownContent';
+import {
+  SwarmComposerRibbon,
+  SwarmMentionPicker,
+  SwarmReviewCard,
+  SwarmTranscript,
+  useSwarmSession,
+  type TaggedParticipant,
+} from './swarm';
 
 /**
  * Always-available assistant dock.
@@ -137,7 +146,13 @@ const readSelectedWorkItemId = (): string | null => {
 
 export const AssistantDock: React.FC = () => {
   const location = useLocation();
-  const { activeCapability, appendCapabilityMessage, getCapabilityWorkspace } = useCapability();
+  const navigate = useNavigate();
+  const {
+    activeCapability,
+    appendCapabilityMessage,
+    getCapabilityWorkspace,
+    refreshCapabilityBundle,
+  } = useCapability();
 
   const [isOpen, setIsOpen] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
@@ -148,6 +163,13 @@ export const AssistantDock: React.FC = () => {
   const [streamingDraft, setStreamingDraft] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState('');
+
+  // Swarm-debate state. `taggedParticipants` drives the composer ribbon; an
+  // `activeSwarmSessionId` switches the transcript over to `SwarmTranscript`
+  // + `SwarmReviewCard`. Cleared with the regular chat via `handleClear`.
+  const [taggedParticipants, setTaggedParticipants] = useState<TaggedParticipant[]>([]);
+  const [showMentionPicker, setShowMentionPicker] = useState(false);
+  const [activeSwarmSessionId, setActiveSwarmSessionId] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -219,6 +241,15 @@ export const AssistantDock: React.FC = () => {
     [location.pathname],
   );
   const currentPageLabel = currentRoute?.label || 'Workspace';
+
+  // Swarm session subscription (no-op until `activeSwarmSessionId` is set).
+  const swarmSession = useSwarmSession(
+    activeCapability?.id ?? null,
+    activeSwarmSessionId,
+  );
+
+  const hasTaggedParticipants = taggedParticipants.length > 0;
+  const hasEnoughForSwarm = taggedParticipants.length >= 2;
 
   const sendMessage = async (text: string) => {
     const trimmed = text.trim();
@@ -365,6 +396,42 @@ export const AssistantDock: React.FC = () => {
     setMessages([]);
     setStreamingDraft('');
     setError('');
+    // Clearing the thread should also drop any in-flight swarm context so
+    // the next operator turn starts clean.
+    setActiveSwarmSessionId(null);
+    setTaggedParticipants([]);
+    setShowMentionPicker(false);
+  };
+
+  const handleTagParticipant = (participant: TaggedParticipant) => {
+    setTaggedParticipants(current => {
+      const key = `${participant.capabilityId}::${participant.agentId}`;
+      if (current.some(p => `${p.capabilityId}::${p.agentId}` === key)) {
+        return current;
+      }
+      // Hard cap at 3 — the server also enforces this, but we stop earlier
+      // so the UI never looks like a 4th tag is legal.
+      if (current.length >= 3) return current;
+      return [...current, participant];
+    });
+    setShowMentionPicker(false);
+  };
+
+  const handleRemoveParticipant = (participant: TaggedParticipant) => {
+    const key = `${participant.capabilityId}::${participant.agentId}`;
+    setTaggedParticipants(current =>
+      current.filter(p => `${p.capabilityId}::${p.agentId}` !== key),
+    );
+  };
+
+  const handleDebateStarted = (sessionId: string) => {
+    setActiveSwarmSessionId(sessionId);
+    setInput('');
+  };
+
+  const handleCancelSwarmComposer = () => {
+    setTaggedParticipants([]);
+    setShowMentionPicker(false);
   };
 
   const handleQuickAction = (prompt: QuickAction['prompt']) => {
@@ -463,7 +530,55 @@ export const AssistantDock: React.FC = () => {
 
       {/* Transcript */}
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        {messages.length === 0 && !streamingDraft ? (
+        {activeSwarmSessionId && swarmSession.detail ? (
+          <div className="space-y-3">
+            <SwarmTranscript
+              transcript={swarmSession.transcript}
+              participants={swarmSession.detail.participants}
+              status={swarmSession.status}
+              streaming={swarmSession.streaming}
+              initiatingPrompt={swarmSession.detail.session.initiatingPrompt}
+              resolveCapabilityName={id =>
+                taggedParticipants.find(p => p.capabilityId === id)?.capabilityName
+                ?? (id === activeCapability.id ? activeCapability.name : undefined)
+              }
+              resolveAgentName={id =>
+                taggedParticipants.find(p => p.agentId === id)?.agentName
+              }
+            />
+            {swarmSession.status &&
+            ['AWAITING_REVIEW', 'APPROVED', 'REJECTED', 'NO_CONSENSUS', 'BUDGET_EXHAUSTED'].includes(
+              swarmSession.status,
+            ) ? (
+              <SwarmReviewCard
+                capabilityId={activeCapability.id}
+                session={swarmSession.detail}
+                onRefresh={() => void swarmSession.refresh()}
+                onWorkItemCreated={async ({ workItem }) => {
+                  if (typeof window !== 'undefined') {
+                    window.sessionStorage.setItem(
+                      ORCHESTRATOR_SELECTED_KEY,
+                      workItem.id,
+                    );
+                  }
+                  await refreshCapabilityBundle(activeCapability.id);
+                  setMessages(current => [
+                    ...current,
+                    {
+                      id: `swarm-work-item-${workItem.id}`,
+                      role: 'agent',
+                      content: `Created work item ${workItem.id}: ${workItem.title}. Opening Work so you can continue from the new queue item.`,
+                      createdAt: Date.now(),
+                    },
+                  ]);
+                  navigate('/work');
+                }}
+                onError={message => setError(message)}
+              />
+            ) : null}
+            <div ref={scrollAnchorRef} />
+          </div>
+        ) : messages.length === 0 && !streamingDraft ? (
           <div className="flex h-full flex-col items-center justify-center gap-4 px-2 text-center">
             <div className="section-card-icon h-12 w-12 rounded-2xl">
               <MessageSquareText size={20} />
@@ -553,21 +668,88 @@ export const AssistantDock: React.FC = () => {
       {/* Composer */}
       <form
         onSubmit={handleSubmit}
-        className="border-t border-outline-variant/40 bg-surface-container-low px-3 py-3"
+        className="relative border-t border-outline-variant/40 bg-surface-container-low px-3 py-3"
       >
+        <SwarmMentionPicker
+          open={showMentionPicker}
+          anchorCapabilityId={activeCapability.id}
+          selected={taggedParticipants}
+          onSelect={handleTagParticipant}
+          onDismiss={() => setShowMentionPicker(false)}
+          maxSelections={3}
+        />
+
+        {hasEnoughForSwarm && !activeSwarmSessionId ? (
+          <div className="mb-2">
+            <SwarmComposerRibbon
+              anchorCapabilityId={activeCapability.id}
+              workItemId={selectedWorkItemId ?? undefined}
+              sessionScope={selectedWorkItemId ? 'WORK_ITEM' : 'GENERAL_CHAT'}
+              participants={taggedParticipants}
+              prompt={input}
+              onRemoveParticipant={handleRemoveParticipant}
+              onDebateStarted={handleDebateStarted}
+              onCancel={handleCancelSwarmComposer}
+              onError={message => setError(message)}
+            />
+          </div>
+        ) : hasTaggedParticipants && !activeSwarmSessionId ? (
+          <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            {taggedParticipants.map(participant => (
+              <span
+                key={`${participant.capabilityId}::${participant.agentId}`}
+                className="inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/5 px-2.5 py-1 text-[0.7rem]"
+              >
+                <span className="font-semibold">@{participant.agentName}</span>
+                <span className="text-secondary">· {participant.capabilityName}</span>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveParticipant(participant)}
+                  aria-label={`Remove ${participant.agentName}`}
+                  className="rounded-full p-0.5 text-secondary transition hover:bg-surface-container"
+                >
+                  <X size={10} />
+                </button>
+              </span>
+            ))}
+            <StatusBadge tone="neutral">Tag one more to start a swarm debate</StatusBadge>
+          </div>
+        ) : null}
+
         <div className="flex items-end gap-2">
+          <button
+            type="button"
+            onClick={() => setShowMentionPicker(open => !open)}
+            disabled={!activeCapability?.id || !!activeSwarmSessionId}
+            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-outline-variant/50 bg-white text-secondary transition hover:border-primary/30 hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label="Tag an agent"
+            title="Tag an agent (@)"
+          >
+            <AtSign size={16} />
+          </button>
           <textarea
             ref={textareaRef}
             value={input}
             onChange={event => setInput(event.target.value)}
-            onKeyDown={handleKeyDown}
+            onKeyDown={event => {
+              if (event.key === '@' && !event.shiftKey && !event.altKey) {
+                // Let the `@` land in the textarea but also pop the picker so
+                // operators who know the shortcut get it for free.
+                setShowMentionPicker(true);
+              }
+              handleKeyDown(event);
+            }}
             placeholder={
-              activeAgent
-                ? `Message ${ASSISTANT_NAME}…  (Enter to send, Shift+Enter for newline)`
-                : `Configure an agent for this capability so ${ASSISTANT_NAME} can reply.`
+              activeSwarmSessionId
+                ? 'Swarm debate in progress. Clear to start a new thread.'
+                : hasEnoughForSwarm
+                  ? 'Write the initiating prompt for the debate…'
+                  : activeAgent
+                    ? `Message ${ASSISTANT_NAME}…  (Enter to send, Shift+Enter for newline, @ to tag)`
+                    : `Configure an agent for this capability so ${ASSISTANT_NAME} can reply.`
             }
             rows={2}
-            disabled={!activeAgent || isSending}
+            disabled={!activeAgent || isSending || !!activeSwarmSessionId || hasEnoughForSwarm}
             className="min-h-[2.5rem] max-h-40 flex-1 resize-none rounded-2xl border border-outline-variant/50 bg-white px-3 py-2 text-sm leading-6 text-on-surface outline-none transition focus:border-primary/40 focus:ring-2 focus:ring-primary/15 disabled:cursor-not-allowed disabled:bg-surface-container"
           />
           {isSending ? (
@@ -580,10 +762,10 @@ export const AssistantDock: React.FC = () => {
             >
               <X size={16} />
             </button>
-          ) : (
+          ) : hasEnoughForSwarm && !activeSwarmSessionId ? null : (
             <button
               type="submit"
-              disabled={!input.trim() || !activeAgent}
+              disabled={!input.trim() || !activeAgent || !!activeSwarmSessionId}
               className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-primary text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
               aria-label="Send"
               title="Send"

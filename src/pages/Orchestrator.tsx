@@ -8,6 +8,7 @@ import React, {
 import {
   AlertCircle,
   ArrowRight,
+  AtSign,
   Bot,
   Clock3,
   ExternalLink,
@@ -20,6 +21,7 @@ import {
   Send,
   Square,
   Workflow as WorkflowIcon,
+  X,
 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import ErrorBoundary from "../components/ErrorBoundary";
@@ -129,6 +131,14 @@ import { useOrchestratorDock } from "../hooks/orchestrator/useOrchestratorDock";
 import { useOrchestratorModals } from "../hooks/orchestrator/useOrchestratorModals";
 import { useOrchestratorRuntime } from "../hooks/orchestrator/useOrchestratorRuntime";
 import { useOrchestratorSelection } from "../hooks/orchestrator/useOrchestratorSelection";
+import { useOrchestratorSwarm } from "../hooks/orchestrator/useOrchestratorSwarm";
+import {
+  SwarmComposerRibbon,
+  SwarmMentionPicker,
+  SwarmReviewCard,
+  SwarmTranscript,
+} from "../components/swarm";
+import type { TaggedParticipant } from "../components/swarm";
 import {
   type ArtifactWorkbenchFilter,
   buildApprovalWorkspacePath,
@@ -901,6 +911,12 @@ const Orchestrator = () => {
     selectedWorkItemId,
     workspaceMessageCount: workspace.messages.length,
     showError,
+  });
+
+  // ── Swarm-debate state ────────────────────────────────────────────────────
+  const orchestratorSwarm = useOrchestratorSwarm({
+    anchorCapabilityId: activeCapability.id,
+    selectedWorkItemId,
   });
 
   const workflowsById = useMemo(
@@ -2652,6 +2668,180 @@ const Orchestrator = () => {
       ) : null}
     </>
   );
+
+  // ── Swarm slot nodes ──────────────────────────────────────────────────────
+  // Each of these is passed as a prop to OrchestratorCopilotDock /
+  // OrchestratorAttentionQueue. They render as null when swarm isn't active.
+
+  /** @`-button + popover. Mounted unconditionally so it can manage its own
+   *  focus without parent rerenders. */
+  const swarmMentionPickerNode = selectedWorkItem ? (
+    <div className="relative">
+      <SwarmMentionPicker
+        open={orchestratorSwarm.showMentionPicker}
+        anchorCapabilityId={activeCapability.id}
+        selected={orchestratorSwarm.taggedParticipants}
+        onSelect={orchestratorSwarm.handleTagParticipant}
+        onDismiss={() => orchestratorSwarm.setShowMentionPicker(false)}
+        maxSelections={3}
+      />
+      <button
+        type="button"
+        onClick={() =>
+          orchestratorSwarm.setShowMentionPicker((open) => !open)
+        }
+        disabled={!!orchestratorSwarm.activeSwarmSessionId}
+        className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant/50 bg-white px-3 py-1.5 text-[0.72rem] font-semibold text-secondary transition hover:border-primary/30 hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
+        title="Tag an agent from a linked capability"
+        aria-label="Tag an agent"
+      >
+        <AtSign size={13} />
+        Tag agent
+      </button>
+    </div>
+  ) : null;
+
+  /** Chips shown when 1 participant is tagged but not yet enough for swarm. */
+  const swarmTagChipsNode =
+    orchestratorSwarm.hasTaggedParticipants &&
+    !orchestratorSwarm.hasEnoughForSwarm &&
+    !orchestratorSwarm.activeSwarmSessionId ? (
+      <div className="flex flex-wrap items-center gap-1.5 py-1">
+        {orchestratorSwarm.taggedParticipants.map(
+          (participant: TaggedParticipant) => (
+            <span
+              key={`${participant.capabilityId}::${participant.agentId}`}
+              className="inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/5 px-2.5 py-1 text-[0.7rem]"
+            >
+              <span className="font-semibold">@{participant.agentName}</span>
+              <span className="text-secondary">· {participant.capabilityName}</span>
+              <button
+                type="button"
+                onClick={() =>
+                  orchestratorSwarm.handleRemoveParticipant(participant)
+                }
+                aria-label={`Remove ${participant.agentName}`}
+                className="rounded-full p-0.5 text-secondary transition hover:bg-surface-container"
+              >
+                <X size={10} />
+              </button>
+            </span>
+          ),
+        )}
+        <StatusBadge tone="neutral">Tag one more to start a debate</StatusBadge>
+      </div>
+    ) : null;
+
+  /** Full ribbon shown when 2–3 agents are tagged. */
+  const swarmRibbonNode =
+    orchestratorSwarm.hasEnoughForSwarm &&
+    !orchestratorSwarm.activeSwarmSessionId ? (
+      <SwarmComposerRibbon
+        anchorCapabilityId={activeCapability.id}
+        workItemId={selectedWorkItem?.id}
+        sessionScope={selectedWorkItem ? "WORK_ITEM" : "GENERAL_CHAT"}
+        participants={orchestratorSwarm.taggedParticipants}
+        prompt={dockInput}
+        onRemoveParticipant={orchestratorSwarm.handleRemoveParticipant}
+        onDebateStarted={(sessionId) => {
+          orchestratorSwarm.handleDebateStarted(sessionId, dockInput);
+          setDockInput("");
+        }}
+        onCancel={orchestratorSwarm.handleCancelSwarmComposer}
+        onError={(message) => setDockError(message)}
+      />
+    ) : null;
+
+  /** Full swarm ribbon slot: tag button + chip row + full ribbon (composed). */
+  const swarmRibbonSlot =
+    selectedWorkItem && (swarmMentionPickerNode || swarmTagChipsNode || swarmRibbonNode) ? (
+      <div className="flex flex-col gap-2">
+        {swarmMentionPickerNode}
+        {swarmTagChipsNode}
+        {swarmRibbonNode}
+      </div>
+    ) : null;
+
+  /** Transcript override — replaces OrchestratorCopilotThread when active. */
+  const swarmTranscriptOverrideSlot =
+    orchestratorSwarm.activeSwarmSessionId && orchestratorSwarm.swarmDetail ? (
+      <div className="orchestrator-copilot-dock-thread px-5 py-3">
+        <SwarmTranscript
+          transcript={orchestratorSwarm.swarmTranscript}
+          participants={orchestratorSwarm.swarmDetail.participants}
+          status={orchestratorSwarm.swarmStatus}
+          streaming={orchestratorSwarm.swarmStreaming}
+          initiatingPrompt={
+            orchestratorSwarm.swarmDetail.session.initiatingPrompt
+          }
+          resolveCapabilityName={(id) =>
+            orchestratorSwarm.taggedParticipants.find(
+              (p) => p.capabilityId === id,
+            )?.capabilityName ??
+            (id === activeCapability.id ? activeCapability.name : undefined)
+          }
+          resolveAgentName={(id) =>
+            orchestratorSwarm.taggedParticipants.find((p) => p.agentId === id)
+              ?.agentName
+          }
+        />
+      </div>
+    ) : null;
+
+  const handleSwarmWorkItemCreated = async ({
+    workItem,
+  }: {
+    workItem: WorkItem;
+    swarmSessionId: string;
+    linkedArtifactId?: string;
+  }) => {
+    await refreshCapabilityBundle(activeCapability.id);
+    setSelectedWorkItemId(workItem.id);
+    setDetailTab("operate");
+    await refreshSelection(workItem.id).catch(() => undefined);
+  };
+
+  /** Review card slot — shown when the session is terminal. */
+  const swarmReviewCardSlot =
+    orchestratorSwarm.activeSwarmSessionId &&
+    orchestratorSwarm.swarmDetail &&
+    orchestratorSwarm.swarmStatus &&
+    ["AWAITING_REVIEW", "APPROVED", "REJECTED", "NO_CONSENSUS", "BUDGET_EXHAUSTED"].includes(
+      orchestratorSwarm.swarmStatus,
+    ) ? (
+      <SwarmReviewCard
+        capabilityId={activeCapability.id}
+        session={orchestratorSwarm.swarmDetail}
+        onRefresh={() => void orchestratorSwarm.handleRefreshSession()}
+        onWorkItemCreated={handleSwarmWorkItemCreated}
+        onError={(message) => setDockError(message)}
+      />
+    ) : null;
+
+  /** Attention-queue review cards — sessions awaiting review for the WI. */
+  const swarmQueueCards =
+    orchestratorSwarm.reviewSessions.length > 0
+      ? orchestratorSwarm.reviewSessions.map((summary) => (
+          <SwarmReviewCard
+            key={summary.id}
+            capabilityId={activeCapability.id}
+            session={{
+              session: summary,
+              participants: [],
+              transcript: [],
+              producedArtifactId: undefined,
+            }}
+            onRefresh={() => void orchestratorSwarm.handleRefreshSession()}
+            onWorkItemCreated={handleSwarmWorkItemCreated}
+            onError={(message) => setDockError(message)}
+          />
+        ))
+      : null;
+
+  const swarmAttentionQueueNode =
+    swarmQueueCards && swarmQueueCards.length > 0 ? (
+      <>{swarmQueueCards}</>
+    ) : null;
 
   useEffect(() => {
     stageChatRequestRef.current += 1;
@@ -6054,6 +6244,9 @@ const Orchestrator = () => {
                   canStartExecution={canStartExecution}
                   onStartExecution={() => void handleDockStartExecution()}
                   dockTextareaRef={dockTextareaRef}
+                  swarmRibbon={swarmRibbonSlot}
+                  swarmTranscriptOverride={swarmTranscriptOverrideSlot}
+                  swarmReviewCard={swarmReviewCardSlot}
                 />
               }
             />
@@ -6313,6 +6506,7 @@ const Orchestrator = () => {
               }
               getPhaseMeta={getPhaseMeta}
               formatRelativeTime={formatRelativeTime}
+              swarmReviewCards={swarmAttentionQueueNode}
             />
           }
           boardSurface={

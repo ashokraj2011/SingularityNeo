@@ -1,5 +1,13 @@
 import { EventEmitter } from 'node:events';
-import type { AgentBounty, AgentBountySignal, ChatStreamEvent, RunEvent } from '../src/types';
+import type {
+  AgentBounty,
+  AgentBountySignal,
+  CapabilityChatMessage,
+  ChatStreamEvent,
+  RunEvent,
+  SwarmSessionStatus,
+  SwarmTerminalReason,
+} from '../src/types';
 
 const emitter = new EventEmitter();
 emitter.setMaxListeners(100);
@@ -11,6 +19,7 @@ const capabilityChannel = (capabilityId: string) => `capability:${capabilityId}`
 const chatChannel = (capabilityId: string) => `chat:${capabilityId}`;
 const bountyChannel = (capabilityId: string) => `bounty:${capabilityId}`;
 const signalChannel = (bountyId: string) => `signal:${bountyId}`;
+const swarmChannel = (sessionId: string) => `swarm:${sessionId}`;
 
 export const publishBounty = (bounty: AgentBounty) => {
   if (activeBounties.has(bounty.id)) {
@@ -104,4 +113,49 @@ export const subscribeToCapabilityChat = (
 ) => {
   emitter.on(chatChannel(capabilityId), listener);
   return () => emitter.off(chatChannel(capabilityId), listener);
+};
+
+/**
+ * Swarm-debate stream events. One channel per swarm session; the orchestrator
+ * emits a `turn` event for every message it appends and a `terminal` event
+ * when the session transitions to its final state. The client UI subscribes
+ * for the lifetime of the debate.
+ *
+ * Kept on its own channel (rather than reusing `chat:...`) because:
+ *   - Multiple swarms can run against the same capability concurrently.
+ *   - The payload shape differs enough from `ChatStreamEvent` that conflating
+ *     them would force every chat consumer to branch on discriminators.
+ */
+export type SwarmStreamEvent =
+  | {
+      kind: 'status';
+      sessionId: string;
+      status: SwarmSessionStatus;
+    }
+  | {
+      kind: 'turn';
+      sessionId: string;
+      turn: CapabilityChatMessage;
+    }
+  | {
+      kind: 'terminal';
+      sessionId: string;
+      status: SwarmSessionStatus;
+      terminalReason: SwarmTerminalReason;
+      artifactId?: string;
+    };
+
+export const publishSwarmStreamEvent = (
+  sessionId: string,
+  event: SwarmStreamEvent,
+) => {
+  emitter.emit(swarmChannel(sessionId), event);
+};
+
+export const subscribeToSwarmStream = (
+  sessionId: string,
+  listener: (event: SwarmStreamEvent) => void,
+) => {
+  emitter.on(swarmChannel(sessionId), listener);
+  return () => emitter.off(swarmChannel(sessionId), listener);
 };

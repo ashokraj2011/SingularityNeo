@@ -1794,6 +1794,53 @@ export const schemaStatements = [
     CREATE INDEX IF NOT EXISTS idx_prompt_receipts_work_item
       ON run_step_prompt_receipts (capability_id, work_item_id, created_at DESC)
   `,
+  // Swarm debate: multi-agent planning sessions anchored to a capability
+  // (and optionally a work item). A session has 2-3 participants drawn from
+  // the current capability, its parent, children, or explicit shared refs.
+  `
+    CREATE TABLE IF NOT EXISTS capability_swarm_sessions (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      work_item_id TEXT,
+      session_scope TEXT NOT NULL,
+      initiator_user_id TEXT,
+      status TEXT NOT NULL,
+      lead_participant_id TEXT,
+      promoted_work_item_id TEXT,
+      initiating_prompt TEXT NOT NULL,
+      token_budget_used INTEGER NOT NULL DEFAULT 0,
+      max_token_budget INTEGER NOT NULL,
+      terminal_reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ,
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_swarm_session_participants (
+      capability_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      participant_capability_id TEXT NOT NULL,
+      participant_agent_id TEXT NOT NULL,
+      participant_role TEXT NOT NULL,
+      tag_order INTEGER NOT NULL,
+      last_vote TEXT,
+      vote_rationale TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, session_id, id)
+    )
+  `,
+  `
+    CREATE UNIQUE INDEX IF NOT EXISTS capability_swarm_sessions_open_scope_uidx
+      ON capability_swarm_sessions (
+        capability_id,
+        session_scope,
+        COALESCE(work_item_id, '__none__')
+      )
+      WHERE status IN ('PENDING', 'RUNNING', 'AWAITING_REVIEW')
+  `,
 ];
 
 export const migrationStatements = [
@@ -3078,6 +3125,42 @@ export const migrationStatements = [
   `
     ALTER TABLE capability_work_items
     ADD COLUMN IF NOT EXISTS next_segment_preset JSONB
+  `,
+  // Swarm debate additive columns. Legacy rows keep NULL on every column
+  // and behave exactly as today; no backfill required.
+  `
+    ALTER TABLE capability_messages
+    ADD COLUMN IF NOT EXISTS swarm_session_id TEXT
+  `,
+  `
+    ALTER TABLE capability_messages
+    ADD COLUMN IF NOT EXISTS swarm_turn_type TEXT
+  `,
+  `
+    ALTER TABLE capability_messages
+    ADD COLUMN IF NOT EXISTS source_capability_id TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS swarm_session_id TEXT
+  `,
+  `
+    ALTER TABLE capability_swarm_sessions
+    ADD COLUMN IF NOT EXISTS promoted_work_item_id TEXT
+  `,
+  // Partial index over open swarm sessions so the concurrency check
+  // (one active session per work item) is a cheap single-row lookup.
+  `
+    DROP INDEX IF EXISTS capability_swarm_sessions_open_idx
+  `,
+  `
+    CREATE UNIQUE INDEX IF NOT EXISTS capability_swarm_sessions_open_scope_uidx
+      ON capability_swarm_sessions (
+        capability_id,
+        session_scope,
+        COALESCE(work_item_id, '__none__')
+      )
+      WHERE status IN ('RUNNING', 'AWAITING_REVIEW', 'PENDING')
   `,
 ];
 

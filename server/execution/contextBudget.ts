@@ -42,7 +42,9 @@ export type ContextSource =
   | 'PLAN_SUMMARY'         // compiled work-item plan summary
   | 'APPROVAL_PACKET'      // compact approval synthesis context
   | 'POLICY_DOCUMENT'     // step-level policy/template loaded from templatePath
-  | 'STEP_CONTRACT';       // compiled step context (objective, inputs, etc.)
+  | 'STEP_CONTRACT'        // compiled step context (objective, inputs, etc.)
+  | 'SWARM_SHARED_MEMORY'  // anchor-capability memory slice shared across swarm participants
+  | 'SWARM_HOME_MEMORY';   // participant's own home-capability memory slice
 
 export interface BudgetFragment {
   source: ContextSource;
@@ -120,6 +122,8 @@ const DEFAULT_PRIORITY: Record<ContextSource, number> = {
   APPROVAL_PACKET: 250,
   CODE_HUNKS: 200,
   MEMORY_HITS: 100,
+  SWARM_SHARED_MEMORY: 160,
+  SWARM_HOME_MEMORY: 140,
 };
 
 /**

@@ -100,14 +100,35 @@ export const listLocalOpenAIModels = async () => {
   }
 };
 
+// Minimal tool-call types for OpenAI-compatible API requests.
+export interface ProviderTool {
+  type: 'function';
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+  };
+}
+
+export type ProviderToolChoice =
+  | 'auto'
+  | 'none'
+  | { type: 'function'; function: { name: string } };
+
 export const requestLocalOpenAIModel = async ({
   model,
   messages,
   timeoutMs = 45_000,
+  tools,
+  tool_choice,
 }: {
   model?: string;
   messages: ProviderMessage[];
   timeoutMs?: number;
+  /** Optional tool definitions for tool-call mode. */
+  tools?: ProviderTool[];
+  /** Force a specific tool call. */
+  tool_choice?: ProviderToolChoice;
 }): Promise<ProviderCompletion> => {
   if (!isLocalOpenAIConfigured()) {
     throw new Error(
@@ -131,6 +152,8 @@ export const requestLocalOpenAIModel = async ({
         messages,
         temperature: 0.2,
         stream: false,
+        ...(tools && tools.length > 0 ? { tools } : {}),
+        ...(tool_choice != null ? { tool_choice } : {}),
       }),
     });
 
@@ -149,12 +172,21 @@ export const requestLocalOpenAIModel = async ({
       };
       choices?: Array<{
         message?: {
-          content?: string;
+          content?: string | null;
+          tool_calls?: Array<{
+            id?: string;
+            type?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
         };
       }>;
     };
 
-    const content = payload.choices?.[0]?.message?.content?.trim() || '';
+    // Prefer tool-call content over text when tools were requested.
+    const toolCall = payload.choices?.[0]?.message?.tool_calls?.[0];
+    const content = toolCall?.function?.arguments?.trim()
+      || payload.choices?.[0]?.message?.content?.trim()
+      || '';
     if (!content) {
       throw new Error('The local OpenAI-compatible provider returned an empty response.');
     }

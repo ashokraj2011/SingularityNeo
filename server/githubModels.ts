@@ -1178,12 +1178,16 @@ const requestGitHubModelsHttp = async ({
   timeoutMs = 45000,
   maxAttempts = 3,
   maxRetryAfterMs = 120_000,
+  tools,
+  tool_choice,
 }: {
   model?: string;
   messages: GitHubModelsMessage[];
   timeoutMs?: number;
   maxAttempts?: number;
   maxRetryAfterMs?: number;
+  tools?: import('./localOpenAIProvider').ProviderTool[];
+  tool_choice?: import('./localOpenAIProvider').ProviderToolChoice;
 }) => {
   const token = getConfiguredHttpTokenState().token;
   if (!token) {
@@ -1210,6 +1214,8 @@ const requestGitHubModelsHttp = async ({
           max_tokens: 1200,
           temperature: 0.2,
           stream: false,
+          ...(tools && tools.length > 0 ? { tools } : {}),
+          ...(tool_choice != null ? { tool_choice } : {}),
         }),
       });
 
@@ -1241,12 +1247,21 @@ const requestGitHubModelsHttp = async ({
         usage?: InferenceUsage;
         choices?: Array<{
           message?: {
-            content?: string;
+            content?: string | null;
+            tool_calls?: Array<{
+              id?: string;
+              type?: string;
+              function?: { name?: string; arguments?: string };
+            }>;
           };
         }>;
       };
 
-      const content = result.choices?.[0]?.message?.content?.trim() || '';
+      // Prefer tool-call arguments over text content when tools were used.
+      const toolCall = result.choices?.[0]?.message?.tool_calls?.[0];
+      const content = toolCall?.function?.arguments?.trim()
+        || result.choices?.[0]?.message?.content?.trim()
+        || '';
       if (!content) {
         throw new Error('GitHub Models HTTP fallback returned an empty response.');
       }
@@ -2006,6 +2021,8 @@ export const invokeScopedCapabilitySession = async ({
   resetSession = false,
   workItemPhase,
   modelOverride,
+  tools,
+  tool_choice,
 }: {
   capability: Partial<Capability>;
   agent: Partial<CapabilityAgent>;
@@ -2035,6 +2052,13 @@ export const invokeScopedCapabilitySession = async ({
    * Falls back to agent.model when absent.
    */
   modelOverride?: string;
+  /**
+   * Tool definitions forwarded to HTTP / local-OpenAI backends.
+   * The Copilot session SDK does not expose these params — swarm VOTE turns
+   * fall back to forced-JSON extraction on that path.
+   */
+  tools?: import('./localOpenAIProvider').ProviderTool[];
+  tool_choice?: import('./localOpenAIProvider').ProviderToolChoice;
 }) => {
   // Dynamic model routing: prefer the caller-supplied override so the
   // execution engine can direct trivial tool turns to a cheaper model.
@@ -2253,6 +2277,8 @@ export const invokeScopedCapabilitySession = async ({
           model: effectiveModel,
           messages: fallbackMessages,
           timeoutMs,
+          tools,
+          tool_choice,
         })
       : await requestGitHubModelsHttp({
           model: await resolveRuntimeModel(effectiveModel),
@@ -2260,6 +2286,8 @@ export const invokeScopedCapabilitySession = async ({
           timeoutMs,
           maxAttempts: scope === 'GENERAL_CHAT' ? 1 : 3,
           maxRetryAfterMs: scope === 'GENERAL_CHAT' ? 5_000 : 120_000,
+          tools,
+          tool_choice,
         });
 
   if (onDelta && fallbackResult.content) {
@@ -2636,6 +2664,8 @@ export const invokeCapabilityChat = async ({
   scope = 'GENERAL_CHAT',
   scopeId,
   resetSession = false,
+  tools,
+  tool_choice,
 }: {
   capability: Partial<Capability>;
   agent: Partial<CapabilityAgent>;
@@ -2647,6 +2677,15 @@ export const invokeCapabilityChat = async ({
   scopeId?: string;
   temperature?: number;
   resetSession?: boolean;
+  /**
+   * Tool definitions to pass to the underlying provider. When supplied, the
+   * model is expected to respond with a tool call rather than free text.
+   * Only honoured on HTTP-fallback and local-OpenAI paths; the Copilot
+   * session SDK does not expose tool-choice — those calls fall back to the
+   * forced-JSON text mode (see `extractVoteJson` in swarmOrchestrator).
+   */
+  tools?: import('./localOpenAIProvider').ProviderTool[];
+  tool_choice?: import('./localOpenAIProvider').ProviderToolChoice;
 }) => {
   const normalizedHistory = (history || [])
     .filter(item => item?.content?.trim())
@@ -2703,6 +2742,8 @@ export const invokeCapabilityChat = async ({
     developerPrompt,
     memoryPrompt: undefined,
     resetSession,
+    tools,
+    tool_choice,
   });
 
   return {

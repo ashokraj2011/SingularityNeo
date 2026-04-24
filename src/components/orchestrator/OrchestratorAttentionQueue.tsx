@@ -31,6 +31,12 @@ type OrchestratorAttentionQueueProps = {
   resolveAgentName: (agentId?: string) => string;
   getPhaseMeta: (phase?: WorkItemPhase) => { label: string; accent: string };
   formatRelativeTime: (value?: string) => string;
+  /**
+   * Swarm review cards (0–N `<SwarmReviewCard />`). Rendered above the
+   * attention cards so reviewers see them before triaging other work.
+   * Each card should already be bound to its own capability + session id.
+   */
+  swarmReviewCards?: React.ReactNode;
 };
 
 export const OrchestratorAttentionQueue = ({
@@ -40,6 +46,7 @@ export const OrchestratorAttentionQueue = ({
   resolveAgentName,
   getPhaseMeta,
   formatRelativeTime,
+  swarmReviewCards,
 }: OrchestratorAttentionQueueProps) => {
   return (
     <section className="workspace-surface orchestrator-attention-shell">
@@ -56,6 +63,12 @@ export const OrchestratorAttentionQueue = ({
           {attentionItems.length > 0 ? `${attentionItems.length} items waiting` : 'All clear'}
         </StatusBadge>
       </div>
+
+      {swarmReviewCards ? (
+        <div className="orchestrator-attention-swarm mb-3 flex flex-col gap-2">
+          {swarmReviewCards}
+        </div>
+      ) : null}
 
       {attentionItems.length === 0 ? (
         <div className="orchestrator-attention-empty">

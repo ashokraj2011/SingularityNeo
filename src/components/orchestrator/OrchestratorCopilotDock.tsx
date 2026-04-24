@@ -45,6 +45,22 @@ type Props = {
   canStartExecution: boolean;
   onStartExecution: () => void;
   dockTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  /**
+   * Optional swarm-composer ribbon. Rendered between the thread and the
+   * composer when 2–3 participants are tagged. When no swarm is staged the
+   * parent should pass `null` so the ribbon doesn't eat vertical space.
+   */
+  swarmRibbon?: React.ReactNode;
+  /**
+   * Optional full replacement for the transcript when a swarm session is
+   * active. Falls back to `threadContent` when undefined.
+   */
+  swarmTranscriptOverride?: React.ReactNode;
+  /**
+   * Optional review card (plan vs. disagreement) rendered below the
+   * transcript when the active swarm session has reached a terminal state.
+   */
+  swarmReviewCard?: React.ReactNode;
 };
 
 export const OrchestratorCopilotDock = ({
@@ -86,6 +102,9 @@ export const OrchestratorCopilotDock = ({
   canStartExecution,
   onStartExecution,
   dockTextareaRef,
+  swarmRibbon,
+  swarmTranscriptOverride,
+  swarmReviewCard,
 }: Props) => (
   <section className="workspace-surface orchestrator-copilot-dock-shell flex min-h-0 flex-col p-0">
     <div className="orchestrator-copilot-dock-header border-b border-outline-variant/25 px-5 pb-4 pt-5">
@@ -143,7 +162,13 @@ export const OrchestratorCopilotDock = ({
     <div className="orchestrator-copilot-dock-body">
       <div className="orchestrator-copilot-dock-status custom-scrollbar">{statusContent}</div>
 
-      {threadContent}
+      {swarmTranscriptOverride ?? threadContent}
+
+      {swarmReviewCard ? (
+        <div className="px-5 pb-2">{swarmReviewCard}</div>
+      ) : null}
+
+      {swarmRibbon ? <div className="px-5 pt-2">{swarmRibbon}</div> : null}
 
       {dockError ? (
         <div className="workspace-inline-alert workspace-inline-alert-danger mx-5 mt-4">

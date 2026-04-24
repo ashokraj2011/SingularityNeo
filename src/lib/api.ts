@@ -141,6 +141,9 @@ import {
   DesktopWorkspaceMapping,
   WorkItemSegment,
   NextSegmentPreset,
+  ChatParticipantDirectory,
+  SwarmSessionDetail,
+  SwarmSessionSummary,
 } from "../types";
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from "./desktop";
 
@@ -307,6 +310,13 @@ interface CapabilityChatRequest {
   workItemId?: string;
   runId?: string;
   workflowStepId?: string;
+  /**
+   * Optional cross-capability participants. The anchor (`capability`) is
+   * unchanged; participants identify which agents the operator tagged from
+   * linked capabilities. 0 or 1 participants stay on the single-agent path;
+   * 2-3 participants should be routed through `startSwarmDebate` instead.
+   */
+  participants?: Array<{ capabilityId: string; agentId: string }>;
 }
 
 const getError = async (response: Response) => {
@@ -573,6 +583,161 @@ export const sendCapabilityChat = async (
     headers: jsonHeaders,
     body: JSON.stringify(payload),
   });
+};
+
+// ─── Swarm Debate ─────────────────────────────────────────────────────────
+// Client helpers for the multi-agent debate flow. Kept near sendCapabilityChat
+// so callers can pivot from single-agent chat to a swarm without hunting for
+// the right module.
+
+export interface SwarmKickoffInput {
+  capabilityId: string;
+  workItemId?: string;
+  sessionScope?: "WORK_ITEM" | "GENERAL_CHAT";
+  initiatingPrompt: string;
+  leadParticipantIndex?: number;
+  maxTokenBudget?: number;
+  participants: Array<{ capabilityId: string; agentId: string }>;
+}
+
+export interface SwarmKickoffResponse {
+  sessionId: string;
+  session: SwarmSessionSummary;
+  participants: SwarmSessionDetail["participants"];
+  voteTool: { name: string; schema: Record<string, unknown> };
+}
+
+export const getChatParticipants = async (
+  capabilityId: string,
+): Promise<ChatParticipantDirectory> =>
+  requestJson<ChatParticipantDirectory>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/chat-participants`,
+  );
+
+export const startSwarmDebate = async (
+  input: SwarmKickoffInput,
+): Promise<SwarmKickoffResponse> =>
+  requestJson<SwarmKickoffResponse>("/api/runtime/chat/swarm", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(input),
+  });
+
+export const getSwarmSession = async (
+  capabilityId: string,
+  sessionId: string,
+): Promise<SwarmSessionDetail> =>
+  requestJson<SwarmSessionDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/swarm-sessions/${encodeURIComponent(sessionId)}`,
+  );
+
+export const listSwarmSessionsForWorkItem = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<{ sessions: SwarmSessionSummary[] }> =>
+  requestJson<{ sessions: SwarmSessionSummary[] }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/swarm-sessions`,
+  );
+
+export const reviewSwarmSession = async (
+  capabilityId: string,
+  sessionId: string,
+  decision: "APPROVE" | "REJECT",
+  comment?: string,
+): Promise<SwarmSessionDetail> =>
+  requestJson<SwarmSessionDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/swarm-sessions/${encodeURIComponent(sessionId)}/review`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ decision, comment }),
+    },
+  );
+
+export const promoteSwarmSessionToWorkItem = async (
+  capabilityId: string,
+  sessionId: string,
+  overrides?: { title?: string; brief?: string },
+): Promise<{
+  workItem: WorkItem;
+  swarmSessionId: string;
+  linkedArtifactId?: string;
+}> =>
+  requestJson(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/swarm-sessions/${encodeURIComponent(sessionId)}/promote-to-work-item`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(overrides || {}),
+    },
+  );
+
+export const cancelSwarmSession = async (
+  capabilityId: string,
+  sessionId: string,
+): Promise<void> => {
+  await requestJson(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/swarm-sessions/${encodeURIComponent(sessionId)}/cancel`,
+    { method: "POST", headers: jsonHeaders },
+  );
+};
+
+/**
+ * Subscribe to a swarm session's SSE event stream. Returns an unsubscribe
+ * function; the caller is responsible for invoking it when the UI unmounts
+ * (or when the session reaches a terminal state, whichever comes first).
+ */
+export const streamSwarmDebate = (
+  capabilityId: string,
+  sessionId: string,
+  handlers: {
+    onTurn?: (turn: CapabilityChatMessage) => void;
+    onStatus?: (status: string) => void;
+    onTerminal?: (payload: {
+      status: string;
+      terminalReason: string;
+      artifactId?: string;
+    }) => void;
+    onError?: (error: Error) => void;
+  },
+): (() => void) => {
+  const url = resolveApiUrl(
+    `/api/runtime/chat/swarm/stream?sessionId=${encodeURIComponent(sessionId)}&capabilityId=${encodeURIComponent(capabilityId)}`,
+  );
+  const source = new EventSource(url, { withCredentials: false });
+  source.addEventListener("turn", (event: MessageEvent) => {
+    try {
+      const payload = JSON.parse(event.data) as { turn: CapabilityChatMessage };
+      handlers.onTurn?.(payload.turn);
+    } catch (error) {
+      handlers.onError?.(error as Error);
+    }
+  });
+  source.addEventListener("status", (event: MessageEvent) => {
+    try {
+      const payload = JSON.parse(event.data) as { status: string };
+      handlers.onStatus?.(payload.status);
+    } catch (error) {
+      handlers.onError?.(error as Error);
+    }
+  });
+  source.addEventListener("terminal", (event: MessageEvent) => {
+    try {
+      const payload = JSON.parse(event.data) as {
+        status: string;
+        terminalReason: string;
+        artifactId?: string;
+      };
+      handlers.onTerminal?.(payload);
+      source.close();
+    } catch (error) {
+      handlers.onError?.(error as Error);
+    }
+  });
+  source.addEventListener("error", () => {
+    handlers.onError?.(new Error("Swarm stream disconnected."));
+  });
+  return () => source.close();
 };
 
 const createCapabilityChatStreamAccumulator =

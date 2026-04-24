@@ -467,6 +467,7 @@ export type PermissionAction =
   | "telemetry.read"
   | "chat.read"
   | "chat.write"
+  | "chat.participate"
   | "report.view.operations"
   | "report.view.portfolio"
   | "report.view.executive"
@@ -1678,6 +1679,149 @@ export interface CapabilityChatMessage {
   workItemId?: string;
   runId?: string;
   workflowStepId?: string;
+  // Swarm-debate metadata. Populated only when this row is part of a
+  // multi-agent debate; legacy single-agent chat leaves all three NULL.
+  // `sourceCapabilityId` is the speaking agent's home capability (which
+  // may differ from `capabilityId`, the session anchor).
+  swarmSessionId?: string;
+  swarmTurnType?: SwarmTurnType;
+  sourceCapabilityId?: string;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Swarm Debate
+//
+// A SwarmSession is a bounded multi-agent planning exchange: 2–3 agents
+// drawn from the current capability or its linked capabilities (parent,
+// direct children, explicit shared refs) take turns OPENING → REBUTTAL →
+// SYNTHESIS → VOTE, ending in either an EXECUTION_PLAN artifact
+// (AWAITING_REVIEW → APPROVED/REJECTED) or a DISAGREEMENT_SUMMARY
+// artifact (NO_CONSENSUS / BUDGET_EXHAUSTED). The session stays anchored
+// to the initiating capability; foreign-capability agents are advisory.
+// ────────────────────────────────────────────────────────────────────────────
+
+export type SwarmSessionStatus =
+  | "PENDING"          // created but no turns yet
+  | "RUNNING"          // at least one turn emitted
+  | "AWAITING_REVIEW"  // consensus reached; waiting on human Approve/Reject
+  | "APPROVED"         // reviewer approved the EXECUTION_PLAN
+  | "REJECTED"         // reviewer rejected the plan
+  | "NO_CONSENSUS"     // vote failed or post-synthesis objection
+  | "BUDGET_EXHAUSTED" // token budget ran out mid-debate
+  | "CANCELLED";       // operator aborted
+
+export type SwarmTurnType = "OPENING" | "REBUTTAL" | "SYNTHESIS" | "VOTE";
+
+export type SwarmTerminalReason =
+  | "CONSENSUS"
+  | "NO_CONSENSUS"
+  | "BUDGET_EXHAUSTED"
+  | "CANCELLED";
+
+export type SwarmParticipantRole = "LEAD" | "PEER";
+
+export type SwarmVote = "APPROVE" | "OBJECT";
+
+export type SwarmSessionScope = "WORK_ITEM" | "GENERAL_CHAT";
+
+export interface SwarmParticipant {
+  id: string;                          // unique within the session
+  capabilityId: string;                // session-anchor capability
+  sessionId: string;
+  participantCapabilityId: string;     // home capability of the agent
+  participantAgentId: string;
+  participantRole: SwarmParticipantRole;
+  tagOrder: number;                    // insertion order; drives turn ordering
+  lastVote?: SwarmVote;
+  voteRationale?: string;
+  createdAt: string;
+}
+
+export interface SwarmSessionSummary {
+  id: string;
+  capabilityId: string;                // anchor capability
+  workItemId?: string;
+  sessionScope: SwarmSessionScope;
+  initiatorUserId?: string;
+  status: SwarmSessionStatus;
+  leadParticipantId?: string;
+  promotedWorkItemId?: string;
+  initiatingPrompt: string;
+  tokenBudgetUsed: number;
+  maxTokenBudget: number;
+  terminalReason?: SwarmTerminalReason;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface SwarmSessionDetail {
+  session: SwarmSessionSummary;
+  participants: SwarmParticipant[];
+  transcript: CapabilityChatMessage[];     // swarm-tagged messages, chronological
+  producedArtifactId?: string;             // EXECUTION_PLAN or DISAGREEMENT_SUMMARY
+}
+
+export interface ChatParticipantDirectoryEntry {
+  capabilityId: string;
+  capabilityName: string;
+  capabilityKind: CapabilityKind;
+  agent: CapabilityAgent;
+}
+
+export interface ChatParticipantDirectory {
+  current: ChatParticipantDirectoryEntry[];
+  parent: ChatParticipantDirectoryEntry[];    // one level up (parent_capability_id)
+  children: ChatParticipantDirectoryEntry[];  // direct children
+  shared: ChatParticipantDirectoryEntry[];    // via capability_shared_references
+}
+
+// Artifact content payloads — stored under Artifact.contentJson when
+// artifactKind is one of the swarm-produced kinds. The structure lets the
+// UI render a plan card or disagreement card without re-parsing free text.
+export interface ExecutionPlanArtifactPayload {
+  swarmSessionId: string;
+  participants: Array<{
+    capabilityId: string;
+    agentId: string;
+    role: SwarmParticipantRole;
+  }>;
+  steps: Array<{
+    id: string;
+    title: string;
+    owner?: string;      // agentId of step owner if assigned
+    detail: string;
+  }>;
+  rationale: string;
+  risks: string[];
+  alternativesConsidered: string[];
+  evidence?: {
+    symbols?: string[];
+    artifactIds?: string[];
+    blastRadiusSnapshotId?: string;
+  };
+}
+
+export interface DisagreementSummaryArtifactPayload {
+  swarmSessionId: string;
+  terminalReason: Extract<SwarmTerminalReason, "NO_CONSENSUS" | "BUDGET_EXHAUSTED">;
+  participants: Array<{
+    capabilityId: string;
+    agentId: string;
+    role: SwarmParticipantRole;
+  }>;
+  positions: Array<{
+    agentId: string;
+    stance: string;
+    vote?: SwarmVote;
+    rationale?: string;
+  }>;
+  blockers: string[];
+  evidence?: {
+    symbols?: string[];
+    artifactIds?: string[];
+    blastRadiusSnapshotId?: string;
+  };
 }
 
 export interface WorkPackage {
@@ -1760,6 +1904,10 @@ export type ArtifactKind =
   | "CONFLICT_RESOLUTION"
   | "CONTRARIAN_REVIEW"
   | "EXECUTION_PLAN"
+  // Swarm-debate output when agents fail to reach consensus (either genuine
+  // disagreement or mid-session budget exhaustion). Carries per-participant
+  // positions + blockers; routed to human escalation.
+  | "DISAGREEMENT_SUMMARY"
   | "REVIEW_PACKET"
   | "EXECUTION_SUMMARY";
 
@@ -1813,6 +1961,9 @@ export interface Artifact {
   sourceRunId?: string;
   sourceRunStepId?: string;
   sourceWaitId?: string;
+  // Links an artifact to the swarm session that produced it (EXECUTION_PLAN
+  // and DISAGREEMENT_SUMMARY kinds). NULL for all non-swarm artifacts.
+  swarmSessionId?: string;
   handoffFromAgentId?: string;
   handoffToAgentId?: string;
   contentFormat?: ArtifactContentFormat;

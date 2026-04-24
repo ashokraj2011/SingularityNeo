@@ -119,7 +119,7 @@ import {
 import { buildCapabilityReadinessContract } from './readinessContract';
 import { getCapabilityWorkspaceRoots } from './workspacePaths';
 
-type CapabilityBundle = {
+export type CapabilityBundle = {
   capability: Capability;
   workspace: CapabilityWorkspace;
 };
@@ -4416,6 +4416,7 @@ export const auditRuntimeChatTurn = async ({
   sessionScopeId,
   workItemId,
   runId,
+  sourceCapabilityId,
 }: {
   capabilityId: string;
   agentId?: string | null;
@@ -4429,11 +4430,19 @@ export const auditRuntimeChatTurn = async ({
   sessionScopeId?: string | null;
   workItemId?: string | null;
   runId?: string | null;
+  /**
+   * Home capability of the speaking agent. When the anchor capability
+   * differs (cross-capability single-agent chat), this lets audit readers
+   * filter by the speaker's origin without recomputing it from agent ids.
+   */
+  sourceCapabilityId?: string | null;
 }): Promise<void> => {
   const now = new Date().toISOString();
   const makeId = () =>
     `cau-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
+  // $1..$14 match the columns up to workflow_step_id; $15 carries the new
+  // source_capability_id column.
   const baseParams = [
     capabilityId,
     agentId || null,
@@ -4445,6 +4454,7 @@ export const auditRuntimeChatTurn = async ({
     sessionScopeId || null,
     workItemId || null,
     runId || null,
+    sourceCapabilityId || null,
   ];
 
   await query(
@@ -4452,8 +4462,9 @@ export const auditRuntimeChatTurn = async ({
        (capability_id, id, role, content, timestamp,
         agent_id, agent_name, trace_id, model,
         session_id, session_scope, session_scope_id,
-        work_item_id, run_id, workflow_step_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULL)`,
+        work_item_id, run_id, workflow_step_id,
+        source_capability_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULL,$15)`,
     [capabilityId, makeId(), 'user', userMessage, now, ...baseParams.slice(1)],
   );
 
@@ -4462,8 +4473,9 @@ export const auditRuntimeChatTurn = async ({
        (capability_id, id, role, content, timestamp,
         agent_id, agent_name, trace_id, model,
         session_id, session_scope, session_scope_id,
-        work_item_id, run_id, workflow_step_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULL)`,
+        work_item_id, run_id, workflow_step_id,
+        source_capability_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULL,$15)`,
     [capabilityId, makeId(), 'agent', agentMessage, now, ...baseParams.slice(1)],
   );
 };
