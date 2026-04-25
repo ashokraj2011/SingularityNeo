@@ -34,15 +34,19 @@ import {
   deleteDesktopWorkspaceMapping,
   fetchDesktopPreferences,
   fetchExecutorRegistry,
+  fetchRuntimeProviders,
   fetchDesktopWorkspaceMappings,
   fetchRuntimeStatus,
   fetchWorkspaceWriteLock,
+  probeRuntimeProvider,
   releaseCapabilityExecution,
   removeDesktopExecutor,
+  saveRuntimeProviderConfig,
   saveDesktopPreferences,
   syncCapabilityRepositories,
   updateLocalEmbeddingSettings,
   updateRuntimeCredentials,
+  validateRuntimeProvider,
   updateDesktopWorkspaceMapping,
   type RuntimeStatus,
 } from "../lib/api";
@@ -50,6 +54,9 @@ import type {
   DesktopPreferences,
   DesktopWorkspaceMapping,
   ExecutorRegistrySummary,
+  ProviderKey,
+  RuntimeProviderStatus,
+  RuntimeProviderConfig,
   WorkspaceWriteLock,
 } from "../types";
 
@@ -97,6 +104,31 @@ const readinessTone = (status?: string) => {
   }
 };
 
+const parseProviderEnvText = (value: string) => {
+  const entries = value
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const divider = line.indexOf("=");
+      if (divider <= 0) return null;
+      const key = line.slice(0, divider).trim();
+      const envValue = line.slice(divider + 1).trim();
+      return key && envValue ? ([key, envValue] as const) : null;
+    })
+    .filter((entry): entry is readonly [string, string] => Boolean(entry));
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+};
+
+const stringifyProviderEnv = (env?: Record<string, unknown> | null) =>
+  env
+    ? Object.entries(env)
+        .map(([key, value]) => `${key}=${String(value ?? "").trim()}`)
+        .filter(line => !line.endsWith("="))
+        .join("\n")
+    : "";
+
 const Operations = () => {
   const navigate = useNavigate();
   const {
@@ -113,9 +145,27 @@ const Operations = () => {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(
     null,
   );
+  const [runtimeProviders, setRuntimeProviders] = useState<RuntimeProviderStatus[]>([]);
   const [runtimeStatusError, setRuntimeStatusError] = useState("");
   const [runtimeTokenInput, setRuntimeTokenInput] = useState("");
   const [isUpdatingRuntime, setIsUpdatingRuntime] = useState(false);
+  const [runtimeProviderBusyKey, setRuntimeProviderBusyKey] = useState("");
+  const [defaultRuntimeProviderKey, setDefaultRuntimeProviderKey] =
+    useState<ProviderKey>("github-copilot");
+  const [runtimeProviderDrafts, setRuntimeProviderDrafts] = useState<
+    Record<
+      string,
+      {
+        command: string;
+        model: string;
+        profile: string;
+        workingMode: string;
+        enabled: boolean;
+        envText: string;
+        setDefault: boolean;
+      }
+    >
+  >({});
   const [embeddingBaseUrlInput, setEmbeddingBaseUrlInput] = useState("");
   const [embeddingApiKeyInput, setEmbeddingApiKeyInput] = useState("");
   const [embeddingModelInput, setEmbeddingModelInput] = useState("");
@@ -245,8 +295,12 @@ const Operations = () => {
 
   const refreshRuntimeIdentity = async () => {
     try {
-      const status = await fetchRuntimeStatus();
+      const [status, providers] = await Promise.all([
+        fetchRuntimeStatus(),
+        fetchRuntimeProviders().catch(() => []),
+      ]);
       setRuntimeStatus(status);
+      setRuntimeProviders(providers);
       setRuntimeStatusError("");
     } catch (error) {
       const message =
@@ -307,6 +361,304 @@ const Operations = () => {
       showError("Desktop runtime clear failed", message);
     } finally {
       setIsUpdatingRuntime(false);
+    }
+  };
+
+  const handleRuntimeProviderDraftChange = (
+    providerKey: ProviderKey,
+    patch: Partial<{
+      command: string;
+      model: string;
+      profile: string;
+      workingMode: string;
+      enabled: boolean;
+      envText: string;
+      setDefault: boolean;
+    }>,
+  ) => {
+    setRuntimeProviderDrafts(current => {
+      const nextDrafts = {
+        ...current,
+        [providerKey]: {
+          command: "",
+          model: "",
+          profile: "",
+          workingMode: "read-only",
+          enabled: false,
+          envText: "",
+          setDefault: false,
+          ...(current[providerKey] || {}),
+          ...patch,
+        },
+      };
+
+      if (patch.setDefault) {
+        for (const key of Object.keys(nextDrafts)) {
+          if (key !== providerKey && nextDrafts[key]) {
+            nextDrafts[key] = {
+              ...nextDrafts[key],
+              setDefault: false,
+            };
+          }
+        }
+      }
+
+      return nextDrafts;
+    });
+  };
+
+  const handleRuntimeProviderSave = async (providerKey: ProviderKey) => {
+    const draft = runtimeProviderDrafts[providerKey];
+    if (!draft?.command.trim()) {
+      showError("Provider command required", "Enter a local command before saving this runtime provider.");
+      return;
+    }
+
+    setRuntimeProviderBusyKey(providerKey);
+    try {
+      const response = await saveRuntimeProviderConfig({
+        providerKey,
+        config: {
+          command: draft.command.trim(),
+          model: draft.model.trim() || undefined,
+          profile: draft.profile.trim() || undefined,
+          workingMode: draft.workingMode as RuntimeProviderConfig["workingMode"],
+          enabled: draft.enabled,
+          env: parseProviderEnvText(draft.envText),
+        },
+        setDefault: draft.setDefault,
+      });
+      setRuntimeProviders(response.providers);
+      const status = await fetchRuntimeStatus().catch(() => null);
+      if (status) {
+        setRuntimeStatus(status);
+      }
+      success(
+        "Runtime provider saved",
+        `${response.provider.label} is now stored on this desktop${draft.setDefault ? " and selected as the default runtime." : "."}`,
+      );
+    } catch (error) {
+      showError(
+        "Provider save failed",
+        error instanceof Error ? error.message : "Unable to save the runtime provider configuration.",
+      );
+    } finally {
+      setRuntimeProviderBusyKey("");
+    }
+  };
+
+  const handleRuntimeProviderValidate = async (providerKey: ProviderKey) => {
+    const draft = runtimeProviderDrafts[providerKey];
+    setRuntimeProviderBusyKey(`${providerKey}:validate`);
+    try {
+      const validation = await validateRuntimeProvider({
+        providerKey,
+        config: {
+          command: draft?.command.trim() || undefined,
+          model: draft?.model.trim() || undefined,
+          profile: draft?.profile.trim() || undefined,
+          workingMode: draft?.workingMode as RuntimeProviderConfig["workingMode"],
+          enabled: draft?.enabled,
+          env: parseProviderEnvText(draft?.envText || ""),
+        },
+      });
+      const refreshedProviders = await fetchRuntimeProviders();
+      setRuntimeProviders(
+        refreshedProviders.map(provider =>
+          provider.key === providerKey
+            ? {
+                ...provider,
+                validation,
+              }
+            : provider,
+        ),
+      );
+      if (validation.ok) {
+        success("Runtime provider validated", validation.message);
+      } else {
+        showError("Runtime provider validation failed", validation.message);
+      }
+    } catch (error) {
+      showError(
+        "Runtime provider validation failed",
+        error instanceof Error ? error.message : "Unable to validate the runtime provider.",
+      );
+    } finally {
+      setRuntimeProviderBusyKey("");
+    }
+  };
+
+  const handleProbeDefaultRuntimeProvider = async () => {
+    const providerKey = defaultRuntimeProviderKey;
+    if (!providerKey) {
+      return;
+    }
+
+    const draft = runtimeProviderDrafts[providerKey];
+    setRuntimeProviderBusyKey(`probe:${providerKey}`);
+    try {
+      const probe = await probeRuntimeProvider({
+        providerKey,
+        endpointHint:
+          providerKey === "github-copilot"
+            ? prefsDraft.copilotCliUrl.trim() || undefined
+            : providerKey === "local-openai"
+              ? embeddingBaseUrlInput.trim() || prefsDraft.embeddingBaseUrl.trim() || undefined
+              : undefined,
+        commandHint:
+          providerKey !== "github-copilot" && providerKey !== "local-openai"
+            ? draft?.command.trim() || undefined
+            : undefined,
+        modelHint:
+          providerKey === "local-openai"
+            ? embeddingModelInput.trim() || prefsDraft.embeddingModel.trim() || undefined
+            : draft?.model.trim() || undefined,
+      });
+
+      if (probe.ok && probe.preferencePatch) {
+        const savedPrefs = await saveDesktopPreferences(probe.preferencePatch);
+        setDesktopPrefs(savedPrefs);
+        setPrefsDraft({
+          workingDirectory: savedPrefs.workingDirectory ?? "",
+          copilotCliUrl: savedPrefs.copilotCliUrl ?? "",
+          allowHttpFallback: savedPrefs.allowHttpFallback ?? false,
+          embeddingBaseUrl: savedPrefs.embeddingBaseUrl ?? "",
+          embeddingModel: savedPrefs.embeddingModel ?? "",
+        });
+        setEmbeddingBaseUrlInput(savedPrefs.embeddingBaseUrl ?? "");
+        setEmbeddingModelInput(savedPrefs.embeddingModel ?? "");
+      }
+
+      if (
+        probe.ok &&
+        probe.config &&
+        (providerKey === "claude-code-cli" ||
+          providerKey === "codex-cli" ||
+          providerKey === "aider-cli")
+      ) {
+        const response = await saveRuntimeProviderConfig({
+          providerKey,
+          config: {
+            ...probe.config,
+            profile: draft?.profile.trim() || probe.config.profile || undefined,
+            workingMode:
+              (draft?.workingMode as RuntimeProviderConfig["workingMode"]) ||
+              probe.config.workingMode ||
+              "read-only",
+            enabled: true,
+            env: parseProviderEnvText(draft?.envText || "") || probe.config.env,
+          },
+        });
+        setRuntimeProviders(response.providers);
+      }
+
+      const [status, providers] = await Promise.all([
+        fetchRuntimeStatus().catch(() => null),
+        fetchRuntimeProviders().catch(() => runtimeProviders),
+      ]);
+      if (status) {
+        setRuntimeStatus(status);
+        setRuntimeStatusError("");
+      }
+      setRuntimeProviders(providers);
+
+      setRuntimeProviderDrafts(current => {
+        const currentDraft = current[providerKey];
+        if (!currentDraft) {
+          return current;
+        }
+        return {
+          ...current,
+          [providerKey]: {
+            ...currentDraft,
+            command: probe.detectedCommand || probe.config?.command || currentDraft.command,
+            model: probe.config?.model || currentDraft.model,
+            enabled:
+              providerKey === "claude-code-cli" ||
+              providerKey === "codex-cli" ||
+              providerKey === "aider-cli"
+                ? true
+                : currentDraft.enabled,
+          },
+        };
+      });
+
+      if (probe.ok) {
+        success(
+          "Runtime provider probed",
+          probe.message,
+        );
+      } else {
+        showError("Runtime probe failed", probe.message);
+      }
+    } catch (error) {
+      showError(
+        "Runtime probe failed",
+        error instanceof Error
+          ? error.message
+          : "Unable to probe the selected runtime provider.",
+      );
+    } finally {
+      setRuntimeProviderBusyKey("");
+    }
+  };
+
+  const handleSaveDefaultRuntimeProvider = async () => {
+    if (!defaultRuntimeProviderKey) {
+      return;
+    }
+
+    setRuntimeProviderBusyKey(`default:${defaultRuntimeProviderKey}`);
+    try {
+      const response = await saveRuntimeProviderConfig({
+        providerKey: defaultRuntimeProviderKey,
+        config: {},
+        setDefault: true,
+      });
+      setRuntimeProviders(response.providers);
+      const status = await fetchRuntimeStatus().catch(() => null);
+      if (status) {
+        setRuntimeStatus(status);
+      }
+      success(
+        "Default runtime updated",
+        `${response.providers.find(provider => provider.key === defaultRuntimeProviderKey)?.label || defaultRuntimeProviderKey} is now the desktop default provider.`,
+      );
+    } catch (error) {
+      showError(
+        "Default runtime update failed",
+        error instanceof Error ? error.message : "Unable to update the desktop default provider.",
+      );
+    } finally {
+      setRuntimeProviderBusyKey("");
+    }
+  };
+
+  const handleUseRuntimeProviderNow = async (providerKey: ProviderKey) => {
+    setDefaultRuntimeProviderKey(providerKey);
+    setRuntimeProviderBusyKey(`default:${providerKey}`);
+    try {
+      const response = await saveRuntimeProviderConfig({
+        providerKey,
+        config: {},
+        setDefault: true,
+      });
+      setRuntimeProviders(response.providers);
+      const status = await fetchRuntimeStatus().catch(() => null);
+      if (status) {
+        setRuntimeStatus(status);
+      }
+      success(
+        "Runtime switched",
+        `${response.providers.find(provider => provider.key === providerKey)?.label || providerKey} is now the active desktop default runtime.`,
+      );
+    } catch (error) {
+      showError(
+        "Runtime switch failed",
+        error instanceof Error ? error.message : "Unable to switch the active desktop runtime.",
+      );
+    } finally {
+      setRuntimeProviderBusyKey("");
     }
   };
 
@@ -376,7 +728,7 @@ const Operations = () => {
   const refreshData = async () => {
     setLoading(true);
     try {
-      const [nextRegistry, nextRuntimeStatus] = await Promise.all([
+      const [nextRegistry, nextRuntimeStatus, nextRuntimeProviders] = await Promise.all([
         fetchExecutorRegistry(),
         fetchRuntimeStatus().catch((error) => {
           setRuntimeStatusError(
@@ -384,9 +736,11 @@ const Operations = () => {
           );
           return null;
         }),
+        fetchRuntimeProviders().catch(() => []),
       ]);
       setRegistry(nextRegistry);
       setRuntimeStatus(nextRuntimeStatus);
+      setRuntimeProviders(nextRuntimeProviders);
       if (nextRuntimeStatus) {
         setRuntimeStatusError("");
       }
@@ -460,6 +814,42 @@ const Operations = () => {
     setEmbeddingBaseUrlInput(runtimeStatus?.embeddingEndpoint || "");
     setEmbeddingModelInput(runtimeStatus?.embeddingModel || "");
   }, [runtimeStatus?.embeddingEndpoint, runtimeStatus?.embeddingModel]);
+
+  useEffect(() => {
+    if (runtimeProviders.length === 0) {
+      return;
+    }
+
+    const nextDefault =
+      runtimeProviders.find(provider => provider.defaultSelected)?.key ||
+      runtimeProviders.find(provider => provider.key === runtimeStatus?.providerKey)?.key ||
+      runtimeProviders[0]?.key;
+    if (nextDefault) {
+      setDefaultRuntimeProviderKey(nextDefault);
+    }
+
+    setRuntimeProviderDrafts(current => {
+      const nextDrafts = { ...current };
+      for (const provider of runtimeProviders) {
+        nextDrafts[provider.key] = {
+          command: provider.config?.command || provider.command || nextDrafts[provider.key]?.command || "",
+          model: provider.config?.model || provider.model || nextDrafts[provider.key]?.model || "",
+          profile: provider.config?.profile || nextDrafts[provider.key]?.profile || "",
+          workingMode:
+            provider.config?.workingMode ||
+            nextDrafts[provider.key]?.workingMode ||
+            "read-only",
+          enabled: provider.config?.enabled ?? nextDrafts[provider.key]?.enabled ?? provider.configured,
+          envText:
+            provider.config?.env
+              ? stringifyProviderEnv(provider.config.env)
+              : nextDrafts[provider.key]?.envText || "",
+          setDefault: Boolean(provider.defaultSelected),
+        };
+      }
+      return nextDrafts;
+    });
+  }, [runtimeProviders]);
 
   useEffect(() => {
     const nextDrafts = Object.fromEntries(
@@ -890,6 +1280,10 @@ const Operations = () => {
         runtimeStatusError={runtimeStatusError}
         runtimeTokenInput={runtimeTokenInput}
         isUpdatingRuntime={isUpdatingRuntime}
+        runtimeProviders={runtimeProviders}
+        runtimeProviderDrafts={runtimeProviderDrafts}
+        runtimeProviderBusyKey={runtimeProviderBusyKey}
+        defaultRuntimeProviderKey={defaultRuntimeProviderKey}
         embeddingBaseUrlInput={embeddingBaseUrlInput}
         embeddingApiKeyInput={embeddingApiKeyInput}
         embeddingModelInput={embeddingModelInput}
@@ -898,6 +1292,13 @@ const Operations = () => {
         onSave={handleRuntimeOverrideSave}
         onClear={handleRuntimeOverrideClear}
         onRefresh={refreshRuntimeIdentity}
+        onDefaultRuntimeProviderChange={setDefaultRuntimeProviderKey}
+        onSaveDefaultRuntimeProvider={handleSaveDefaultRuntimeProvider}
+        onProbeDefaultRuntimeProvider={handleProbeDefaultRuntimeProvider}
+        onUseRuntimeProviderNow={handleUseRuntimeProviderNow}
+        onRuntimeProviderDraftChange={handleRuntimeProviderDraftChange}
+        onSaveRuntimeProvider={handleRuntimeProviderSave}
+        onValidateRuntimeProvider={handleRuntimeProviderValidate}
         onEmbeddingBaseUrlInputChange={setEmbeddingBaseUrlInput}
         onEmbeddingApiKeyInputChange={setEmbeddingApiKeyInput}
         onEmbeddingModelInputChange={setEmbeddingModelInput}
@@ -1445,7 +1846,7 @@ const Operations = () => {
           </label>
 
           <label className="space-y-2">
-            <span className="form-kicker">Copilot CLI URL</span>
+            <span className="form-kicker">SDK session URL</span>
             <input
               value={prefsDraft.copilotCliUrl}
               onChange={e => setPrefsDraft(d => ({ ...d, copilotCliUrl: e.target.value }))}
@@ -1453,7 +1854,7 @@ const Operations = () => {
               className="field-input font-mono text-[0.8rem]"
             />
             <p className="text-xs text-secondary">
-              Replaces <code className="rounded bg-surface-container-low px-1">COPILOT_CLI_URL</code>.
+              Replaces <code className="rounded bg-surface-container-low px-1">COPILOT_CLI_URL</code> for the GitHub Copilot SDK lane.
             </p>
           </label>
 

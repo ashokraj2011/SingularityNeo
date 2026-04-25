@@ -13,6 +13,15 @@ contextBridge.exposeInMainWorld('singularityDesktop', {
   setActorContext: actor => ipcRenderer.invoke('desktop:runtime:actor-context', { actor }),
   setRuntimeToken: token => ipcRenderer.invoke('desktop:runtime:set-token', { token }),
   clearRuntimeToken: () => ipcRenderer.invoke('desktop:runtime:clear-token'),
+  listRuntimeProviders: () => ipcRenderer.invoke('desktop:runtime:providers:list'),
+  saveRuntimeProviderConfig: payload =>
+    ipcRenderer.invoke('desktop:runtime:providers:config:set', payload || {}),
+  validateRuntimeProvider: payload =>
+    ipcRenderer.invoke('desktop:runtime:providers:validate', payload || {}),
+  probeRuntimeProvider: payload =>
+    ipcRenderer.invoke('desktop:runtime:providers:probe', payload || {}),
+  getRuntimeProviderModels: providerKey =>
+    ipcRenderer.invoke('desktop:runtime:providers:models', { providerKey }),
   setEmbeddingConfig: payload =>
     ipcRenderer.invoke('desktop:runtime:set-embedding-config', payload || {}),
   clearEmbeddingConfig: () => ipcRenderer.invoke('desktop:runtime:clear-embedding-config'),

@@ -731,6 +731,21 @@ ipcMain.handle('desktop:runtime:set-token', async (_event, payload) =>
 ipcMain.handle('desktop:runtime:clear-token', async () =>
   requestWorker('runtime:clear-token'),
 );
+ipcMain.handle('desktop:runtime:providers:list', async () =>
+  requestWorker('runtime:providers:list'),
+);
+ipcMain.handle('desktop:runtime:providers:config:set', async (_event, payload) =>
+  requestWorker('runtime:providers:config:set', payload || {}),
+);
+ipcMain.handle('desktop:runtime:providers:validate', async (_event, payload) =>
+  requestWorker('runtime:providers:validate', payload || {}),
+);
+ipcMain.handle('desktop:runtime:providers:probe', async (_event, payload) =>
+  requestWorker('runtime:providers:probe', payload || {}),
+);
+ipcMain.handle('desktop:runtime:providers:models', async (_event, payload) =>
+  requestWorker('runtime:providers:models', payload || {}),
+);
 ipcMain.handle('desktop:runtime:set-embedding-config', async (_event, payload) =>
   requestWorker('runtime:set-embedding-config', payload || {}),
 );

@@ -162,6 +162,66 @@ export const listLocalOpenAIModels = async () => {
   }
 };
 
+export const validateLocalOpenAIChatProvider = async ({
+  baseUrl,
+  apiKey,
+  model,
+  timeoutMs = 15_000,
+}: {
+  baseUrl: string;
+  apiKey?: string;
+  model?: string;
+  timeoutMs?: number;
+}) => {
+  const normalizedBaseUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
+  if (!normalizedBaseUrl) {
+    throw new Error("A local OpenAI-compatible base URL is required.");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${normalizedBaseUrl}/models`, {
+      headers: {
+        Authorization: `Bearer ${String(apiKey || "local").trim() || "local"}`,
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(await getLocalProviderError(response));
+    }
+
+    const payload = (await response.json()) as {
+      data?: Array<{ id?: string }>;
+    };
+    const models = (payload.data || [])
+      .map(item => String(item.id || "").trim())
+      .filter(Boolean)
+      .map(modelId => ({
+        id: modelId,
+        label: modelId,
+        profile: "Local OpenAI-compatible model",
+        apiModelId: modelId,
+      }));
+
+    return {
+      baseUrl: normalizedBaseUrl,
+      model:
+        String(model || models[0]?.apiModelId || getLocalOpenAIDefaultModel()).trim() ||
+        getLocalOpenAIDefaultModel(),
+      models,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("The local OpenAI-compatible provider timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 // Minimal tool-call types for OpenAI-compatible API requests.
 export interface ProviderTool {
   type: 'function';

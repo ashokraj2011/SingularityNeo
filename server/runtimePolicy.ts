@@ -1,7 +1,8 @@
 export type RuntimeAccessMode =
-  | 'headless-cli'
-  | 'copilot-session'
-  | 'http-fallback'
+  | 'desktop-cli'
+  | 'sdk-session'
+  | 'http-api'
+  | 'local-openai'
   | 'unconfigured';
 
 export const getConfiguredCopilotCliUrl = () => process.env.COPILOT_CLI_URL?.trim() || '';
@@ -22,28 +23,39 @@ export const isHttpFallbackAllowed = () => {
 };
 
 export const resolveRuntimeAccessMode = ({
+  providerKey,
   tokenSource,
   token,
   modelCatalogFromRuntime,
 }: {
+  providerKey?: string | null;
   tokenSource?: string | null;
   token?: string;
   modelCatalogFromRuntime: boolean;
 }): RuntimeAccessMode => {
-  if (tokenSource === 'headless-cli' || isHeadlessCliConfigured()) {
-    return 'headless-cli';
+  const normalizedProvider = String(providerKey || '').trim().toLowerCase();
+  if (normalizedProvider === 'local-openai') {
+    return 'local-openai';
+  }
+
+  if (
+    normalizedProvider === 'codex-cli' ||
+    normalizedProvider === 'claude-code-cli' ||
+    normalizedProvider === 'aider-cli'
+  ) {
+    return 'desktop-cli';
+  }
+
+  if (tokenSource === 'headless-cli' || isHeadlessCliConfigured() || modelCatalogFromRuntime) {
+    return 'sdk-session';
   }
 
   if (token) {
-    return 'http-fallback';
-  }
-
-  if (modelCatalogFromRuntime) {
-    return 'copilot-session';
+    return 'http-api';
   }
 
   return 'unconfigured';
 };
 
 export const getMissingRuntimeConfigurationMessage = () =>
-  'Copilot runtime is not configured. Start the desktop runtime for the preferred local-owner model, or set COPILOT_CLI_URL / GITHUB_MODELS_TOKEN for a shared runtime, then restart the app.';
+  'No agent runtime is configured. Start the desktop runtime for the preferred local provider, or configure COPILOT_CLI_URL / GITHUB_MODELS_TOKEN / a desktop CLI provider, then restart the app.';

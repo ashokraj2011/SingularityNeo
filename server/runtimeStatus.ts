@@ -8,9 +8,7 @@ import {
   getConfiguredGitHubIdentity,
   getConfiguredToken,
   getConfiguredTokenSource,
-  getRuntimeDefaultModel,
   githubModelsApiUrl,
-  listAvailableRuntimeModels,
   normalizeModel,
 } from './githubModels';
 import { isDesktopExecutionRuntime } from './executionOwnership';
@@ -24,10 +22,13 @@ import {
   DEFAULT_EMBEDDING_PROVIDER_KEY,
   DEFAULT_PROVIDER_KEY,
   LOCAL_OPENAI_PROVIDER_KEY,
-  resolveProviderDisplayName,
 } from './providerRegistry';
 import { buildRuntimePreflight } from './runtimePreflight';
 import { resolveRuntimeAccessMode } from './runtimePolicy';
+import {
+  listRuntimeProviderStatuses,
+  resolveSelectedRuntimeProvider,
+} from './runtimeProviders';
 
 export const buildRuntimeStatus = async () => {
   const databaseRuntime = getDatabaseRuntimeInfo();
@@ -44,41 +45,42 @@ export const buildRuntimeStatus = async () => {
     databaseProfileSnapshot.profiles.find(profile => profile.id === activeDatabaseProfileId) || null;
   const token = getConfiguredToken();
   const tokenSource = getConfiguredTokenSource();
-  const headlessCli = tokenSource === 'headless-cli';
   const localProviderConfigured = isLocalOpenAIConfigured();
-  const providerKey =
-    !headlessCli && !token && localProviderConfigured
-      ? LOCAL_OPENAI_PROVIDER_KEY
-      : DEFAULT_PROVIDER_KEY;
-  const configured = headlessCli || Boolean(token) || localProviderConfigured;
+  const availableProviders = await listRuntimeProviderStatuses();
+  const selectedProvider = await resolveSelectedRuntimeProvider();
+  const providerKey = selectedProvider?.key || DEFAULT_PROVIDER_KEY;
+  const configured = Boolean(selectedProvider?.configured);
   const platformFeatures = getPlatformFeatureState();
-  const { models, fromRuntime } = await listAvailableRuntimeModels();
+  const models = selectedProvider?.availableModels || [];
+  const fromRuntime =
+    selectedProvider?.transportMode === 'sdk-session' ||
+    selectedProvider?.transportMode === 'http-api' ||
+    selectedProvider?.transportMode === 'local-openai';
   const runtimeDefaultModel =
-    providerKey === LOCAL_OPENAI_PROVIDER_KEY
+    selectedProvider?.model ||
+    (providerKey === LOCAL_OPENAI_PROVIDER_KEY
       ? normalizeModel(getLocalOpenAIDefaultModel())
-      : configured
-      ? await getRuntimeDefaultModel()
-      : normalizeModel(defaultModel);
+      : normalizeModel(defaultModel));
   const identityResult =
     configured && providerKey === DEFAULT_PROVIDER_KEY
     ? await getConfiguredGitHubIdentity()
     : { identity: null, error: null };
-  const provider = resolveProviderDisplayName(providerKey);
   const runtimeAccessMode = resolveRuntimeAccessMode({
+    providerKey,
     tokenSource,
     token,
     modelCatalogFromRuntime: fromRuntime,
   });
   const preflight = await buildRuntimePreflight({
     runtimeConfigured: configured,
-    runtimeProvider: provider,
+    runtimeProvider: selectedProvider?.label || 'Runtime provider',
     runtimeAccessMode,
     tokenSource,
   });
 
   return {
     configured,
-    provider,
+    provider: selectedProvider?.label || 'Runtime provider',
     providerKey,
     readinessState: preflight.readinessState,
     checks: preflight.checks,
@@ -94,26 +96,10 @@ export const buildRuntimeStatus = async () => {
     embeddingApiKeyConfigured: Boolean(
       String(process.env.LOCAL_OPENAI_API_KEY || process.env.OPENAI_COMPAT_API_KEY || '').trim(),
     ),
-    availableProviders: [
-      {
-        key: DEFAULT_PROVIDER_KEY,
-        label: resolveProviderDisplayName(DEFAULT_PROVIDER_KEY),
-        configured: headlessCli || Boolean(token),
-      },
-      {
-        key: LOCAL_OPENAI_PROVIDER_KEY,
-        label: resolveProviderDisplayName(LOCAL_OPENAI_PROVIDER_KEY),
-        configured: localProviderConfigured,
-      },
-    ],
+    availableProviders,
     runtimeOwner: 'SERVER',
     executionRuntimeOwner: isDesktopExecutionRuntime() ? 'DESKTOP' : 'SERVER',
-    endpoint:
-      providerKey === LOCAL_OPENAI_PROVIDER_KEY
-        ? getLocalOpenAIBaseUrl() || 'Unknown'
-        : headlessCli
-        ? process.env.COPILOT_CLI_URL || githubModelsApiUrl
-        : githubModelsApiUrl,
+    endpoint: selectedProvider?.endpoint || githubModelsApiUrl,
     tokenSource,
     defaultModel: runtimeDefaultModel,
     modelCatalogSource: fromRuntime ? 'runtime' : 'fallback',

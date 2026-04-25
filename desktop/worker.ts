@@ -25,6 +25,8 @@ import type {
   WorkflowRunDetail,
   WorkItem,
   WorkItemExplainDetail,
+  ProviderKey,
+  RuntimeProviderConfig,
 } from '../src/types';
 import type { RuntimeStatus } from '../src/lib/api';
 import {
@@ -32,11 +34,9 @@ import {
   getConfiguredGitHubIdentity,
   getConfiguredToken,
   getConfiguredTokenSource,
-  getRuntimeDefaultModel,
   githubModelsApiUrl,
   invokeCapabilityChat,
   invokeCapabilityChatStream,
-  listAvailableRuntimeModels,
   normalizeModel,
 } from '../server/githubModels';
 import {
@@ -55,6 +55,15 @@ import {
   getMissingRuntimeConfigurationMessage,
   resolveRuntimeAccessMode,
 } from '../server/runtimePolicy';
+import {
+  listRuntimeProviderStatuses,
+  getRuntimeProviderModels,
+  resolveSelectedRuntimeProvider,
+  saveConfiguredRuntimeProvider,
+  selectDefaultRuntimeProvider,
+  validateRuntimeProviderStatus,
+} from '../server/runtimeProviders';
+import { probeRuntimeProvider } from '../server/runtimeProbe';
 import { getLifecyclePhaseLabel } from '../src/lib/capabilityLifecycle';
 import {
   buildFocusedWorkItemDeveloperPrompt,
@@ -295,15 +304,16 @@ const controlPlaneRequest = async <T>(
 const buildRuntimeSummary = async () => {
   const token = getConfiguredToken();
   const tokenSource = getConfiguredTokenSource();
-  const headlessCli = tokenSource === 'headless-cli';
+  const selectedProvider = await resolveSelectedRuntimeProvider();
   return {
-    provider: 'GitHub Copilot SDK (Desktop Worker)',
-    endpoint: headlessCli ? process.env.COPILOT_CLI_URL || githubModelsApiUrl : githubModelsApiUrl,
-    defaultModel: token ? await getRuntimeDefaultModel() : normalizeModel(defaultModel),
+    provider: selectedProvider?.label || 'Desktop runtime',
+    endpoint: selectedProvider?.endpoint || githubModelsApiUrl,
+    defaultModel: selectedProvider?.model || normalizeModel(defaultModel),
     runtimeAccessMode: resolveRuntimeAccessMode({
+      providerKey: selectedProvider?.key,
       tokenSource,
       token,
-      modelCatalogFromRuntime: false,
+      modelCatalogFromRuntime: selectedProvider?.transportMode === 'sdk-session',
     }),
   };
 };
@@ -1023,8 +1033,12 @@ const resolveDesktopRuntimeContext = async (
 const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
   const token = getConfiguredToken();
   const tokenSource = getConfiguredTokenSource();
-  const headlessCli = tokenSource === 'headless-cli';
-  const configured = headlessCli || Boolean(token);
+  const providerStatuses = await listRuntimeProviderStatuses();
+  const selectedProvider =
+    providerStatuses.find(provider => provider.defaultSelected && provider.configured) ||
+    providerStatuses.find(provider => provider.configured) ||
+    providerStatuses[0];
+  const configured = Boolean(selectedProvider?.configured);
   const embeddingConfigured = isLocalOpenAIConfigured();
   let controlPlaneReachable = true;
   const controlPlaneRuntimeStatus = await controlPlaneRequest<
@@ -1054,12 +1068,16 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
       retrievalMode: undefined,
     };
   });
-  const { models, fromRuntime } = await listAvailableRuntimeModels();
-  const runtimeDefaultModel = configured
-    ? await getRuntimeDefaultModel()
-    : normalizeModel(defaultModel);
+  const models = selectedProvider?.availableModels || [];
+  const fromRuntime =
+    selectedProvider?.transportMode === 'sdk-session' ||
+    selectedProvider?.transportMode === 'http-api' ||
+    selectedProvider?.transportMode === 'local-openai';
+  const runtimeDefaultModel = selectedProvider?.model || normalizeModel(defaultModel);
   const identityResult = configured
-    ? await getConfiguredGitHubIdentity()
+    ? selectedProvider?.key === 'github-copilot'
+      ? await getConfiguredGitHubIdentity()
+      : { identity: null, error: null }
     : { identity: null, error: null };
   const checks: RuntimeReadinessCheck[] = [
     {
@@ -1078,11 +1096,11 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
       label: 'Desktop model runtime',
       status: configured ? 'healthy' : 'degraded',
       message: configured
-        ? `Desktop runtime credentials are resolved from ${tokenSource}.`
+        ? `${selectedProvider?.label || 'Desktop runtime'} is configured${selectedProvider?.transportMode ? ` (${selectedProvider.transportMode})` : ''}.`
         : 'Desktop model runtime is not configured.',
       remediation: configured
         ? undefined
-        : 'Start headless Copilot locally or configure GITHUB_MODELS_TOKEN for this desktop.',
+        : 'Configure at least one desktop runtime provider or token before claiming execution.',
     },
     {
       id: 'desktop-executor',
@@ -1123,7 +1141,8 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
 
   return {
     configured,
-    provider: 'GitHub Copilot SDK (Desktop Worker)',
+    provider: selectedProvider?.label || 'Desktop runtime',
+    providerKey: selectedProvider?.key,
     readinessState: deriveReadinessState(checks),
     checks,
     controlPlaneUrl,
@@ -1140,11 +1159,12 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
     actorUserId: activeActorContext?.userId,
     actorDisplayName: activeActorContext?.displayName,
     ownedCapabilityIds: executorOwnedCapabilityIds,
-    endpoint: headlessCli ? process.env.COPILOT_CLI_URL || githubModelsApiUrl : githubModelsApiUrl,
+    endpoint: selectedProvider?.endpoint || githubModelsApiUrl,
     tokenSource,
     defaultModel: runtimeDefaultModel,
     modelCatalogSource: fromRuntime ? 'runtime' : 'fallback',
     runtimeAccessMode: resolveRuntimeAccessMode({
+      providerKey: selectedProvider?.key,
       tokenSource,
       token,
       modelCatalogFromRuntime: fromRuntime,
@@ -1176,6 +1196,7 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
       memoryEmbeddingDimensions: 64,
     },
     availableModels: models,
+    availableProviders: providerStatuses,
   };
 };
 
@@ -1271,6 +1292,77 @@ reader.on('line', async line => {
       respond({
         requestId,
         payload: await buildDesktopRuntimeStatus(),
+      });
+      return;
+    }
+
+    if (message.type === 'runtime:providers:list') {
+      respond({
+        requestId,
+        payload: await listRuntimeProviderStatuses(),
+      });
+      return;
+    }
+
+    if (message.type === 'runtime:providers:config:set') {
+      const providerKey = String(message.payload?.providerKey || '').trim() as ProviderKey;
+      const config = (message.payload?.config || {}) as RuntimeProviderConfig;
+      const setDefault = Boolean(message.payload?.setDefault);
+      const clearDefault = Boolean(message.payload?.clearDefault);
+
+      const provider = await saveConfiguredRuntimeProvider({
+        providerKey,
+        config,
+        setDefault,
+      });
+
+      if (clearDefault) {
+        await selectDefaultRuntimeProvider({
+          providerKey: undefined,
+        }).catch(() => undefined);
+      }
+
+      respond({
+        requestId,
+        payload: {
+          provider,
+          providers: await listRuntimeProviderStatuses(),
+        },
+      });
+      return;
+    }
+
+    if (message.type === 'runtime:providers:validate') {
+      const providerKey = String(message.payload?.providerKey || '').trim() as ProviderKey;
+      respond({
+        requestId,
+        payload: await validateRuntimeProviderStatus({
+          providerKey,
+          config: (message.payload?.config || undefined) as RuntimeProviderConfig | undefined,
+        }),
+      });
+      return;
+    }
+
+    if (message.type === 'runtime:providers:probe') {
+      const providerKey = String(message.payload?.providerKey || '').trim() as ProviderKey;
+      respond({
+        requestId,
+        payload: await probeRuntimeProvider({
+          providerKey,
+          endpointHint: String(message.payload?.endpointHint || '').trim() || undefined,
+          commandHint: String(message.payload?.commandHint || '').trim() || undefined,
+          modelHint: String(message.payload?.modelHint || '').trim() || undefined,
+        }),
+      });
+      return;
+    }
+
+    if (message.type === 'runtime:providers:models') {
+      const providerKey = String(message.payload?.providerKey || '').trim() as ProviderKey;
+      respond({
+        requestId,
+        payload: await getRuntimeProviderModels(providerKey),
       });
       return;
     }

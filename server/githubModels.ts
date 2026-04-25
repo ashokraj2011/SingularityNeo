@@ -47,10 +47,18 @@ import {
 import {
   DEFAULT_PROVIDER_KEY,
   LOCAL_OPENAI_PROVIDER_KEY,
+  isCliRuntimeProviderKey,
   normalizeProviderKey,
   resolveAgentProviderKey,
   resolveProviderDisplayName,
 } from './providerRegistry';
+import {
+  getStoredCliProviderConfigSync,
+} from './runtimeProviders';
+import {
+  invokeCliRuntime,
+  type RuntimeCliMessage,
+} from './runtimeCli';
 import {
   buildBudgetedSectionPrompt,
   buildDeterministicChatRollup,
@@ -83,6 +91,9 @@ type SessionExchangeResult = {
   usage: ReturnType<typeof toUsage>;
   responseId: string | null;
   createdAt: string;
+  usageEstimated?: boolean;
+  runtimeTransportMode?: import("../src/types").RuntimeTransportMode;
+  runtimeProviderKey?: string;
   raw: {
     assistantMessage: AssistantMessageEvent | null;
     usageEvent: CopilotUsageEvent | null;
@@ -901,6 +912,61 @@ const toCatalogRuntimeModelOption = (model: {
         : String(model.summary || 'Available').trim() || 'Available',
     apiModelId: normalizeModel(id),
   };
+};
+
+export const validateCopilotCliEndpoint = async ({
+  cliUrl,
+  timeoutMs = COPILOT_CLIENT_START_TIMEOUT_MS,
+}: {
+  cliUrl: string;
+  timeoutMs?: number;
+}) => {
+  const normalizedCliUrl = String(cliUrl || "").trim().replace(/\/+$/, "");
+  if (!normalizedCliUrl) {
+    throw new Error("A Copilot SDK session URL is required.");
+  }
+
+  const client = new CopilotClient({
+    cliUrl: normalizedCliUrl,
+    autoStart: true,
+    logLevel: process.env.NODE_ENV === "development" ? "warning" : "error",
+    telemetry: process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+      ? {
+          otlpEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+        }
+      : undefined,
+  });
+
+  try {
+    await withStartTimeout(client.start(), timeoutMs, `cliUrl=${normalizedCliUrl}`);
+    const discoveredModels = await withStartTimeout(
+      client.listModels(),
+      timeoutMs,
+      "listModels",
+    );
+    const models = discoveredModels
+      .map(toRuntimeModelOption)
+      .filter(isRuntimeModelOption)
+      .filter(
+        (model, index, allModels) =>
+          allModels.findIndex(candidate => candidate.id === model.id) === index,
+      );
+
+    return {
+      cliUrl: normalizedCliUrl,
+      models,
+      message:
+        models.length > 0
+          ? `Connected to the GitHub Copilot SDK session at ${normalizedCliUrl}.`
+          : `Connected to the GitHub Copilot SDK session at ${normalizedCliUrl}, but no models were reported.`,
+    };
+  } finally {
+    try {
+      await client.stop();
+    } catch {
+      // Ignore client shutdown failures during probe cleanup.
+    }
+  }
 };
 
 const isRuntimeModelOption = (
@@ -2187,7 +2253,7 @@ const getManagedScopedSession = async ({
     };
   }
 
-  if (providerKey === LOCAL_OPENAI_PROVIDER_KEY) {
+  if (providerKey === LOCAL_OPENAI_PROVIDER_KEY || isCliRuntimeProviderKey(providerKey)) {
     const initialMessages: ProviderMessage[] =
       !resetSession && cached?.localMessages?.length
         ? cached.localMessages
@@ -2204,7 +2270,11 @@ const getManagedScopedSession = async ({
       agentName: agent.name,
       scope,
       scopeId,
-      model: agent.model || undefined,
+      model:
+        agent.model ||
+        (isCliRuntimeProviderKey(providerKey)
+          ? getStoredCliProviderConfigSync(providerKey)?.model
+          : undefined),
       createdAt: new Date().toISOString(),
       lastUsedAt: new Date().toISOString(),
       localHistoryRollup: cached?.localHistoryRollup || '',
@@ -2498,6 +2568,67 @@ export const invokeScopedCapabilitySession = async ({
               });
               return {
                 ...completion,
+                usageEstimated: false,
+                runtimeTransportMode: "local-openai",
+                runtimeProviderKey: managedSession!.providerKey,
+                raw: {
+                  assistantMessage: null,
+                  usageEvent: null,
+                },
+              };
+            })
+          : isCliRuntimeProviderKey(managedSession.providerKey)
+          ? await withSessionLock(managedSession.cacheKey, async () => {
+              const cliMessages: RuntimeCliMessage[] = [
+                { role: 'system', content: systemPrompt },
+                ...(managedSession!.localHistoryRollup?.trim()
+                  ? [
+                      {
+                        role: 'system' as const,
+                        content: managedSession!.localHistoryRollup!.trim(),
+                      },
+                    ]
+                  : []),
+                ...managedSession!.localMessages,
+              ];
+              const nextPrompt =
+                managedSession!.isNewSession && initialPrompt ? initialPrompt : prompt;
+              cliMessages.push({
+                role: 'user',
+                content: nextPrompt,
+              });
+
+              const completion = await invokeCliRuntime({
+                providerKey: managedSession!.providerKey as ProviderKey,
+                config: getStoredCliProviderConfigSync(
+                  managedSession!.providerKey as ProviderKey,
+                ),
+                messages: cliMessages,
+                workingDirectory: resolveRuntimeWorkingDirectory(capability),
+                model: managedSession!.model || effectiveModel,
+                timeoutMs,
+                onDelta,
+              });
+
+              const condensedState = await condenseLocalConversationState({
+                capability,
+                agent,
+                priorSummary: managedSession!.localHistoryRollup,
+                messages: [
+                  ...managedSession!.localMessages,
+                  { role: 'user', content: nextPrompt },
+                  { role: 'assistant', content: completion.content },
+                ],
+              });
+              updateManagedSessionRecord(managedSession!.sessionId, {
+                localHistoryRollup: condensedState.summary,
+                localMessages: condensedState.messages,
+              });
+              return {
+                ...completion,
+                usageEstimated: completion.estimatedUsage,
+                runtimeTransportMode: "desktop-cli",
+                runtimeProviderKey: managedSession!.providerKey,
                 raw: {
                   assistantMessage: null,
                   usageEvent: null,
@@ -2549,6 +2680,18 @@ export const invokeScopedCapabilitySession = async ({
         sessionId: managedSession.sessionId,
         sessionScope: scope,
         sessionScopeId: scopeId,
+        usageEstimated:
+          typeof result.usageEstimated === "boolean"
+            ? result.usageEstimated
+            : false,
+        runtimeTransportMode:
+          result.runtimeTransportMode ||
+          (managedSession.providerKey === LOCAL_OPENAI_PROVIDER_KEY
+            ? "local-openai"
+            : isCliRuntimeProviderKey(managedSession.providerKey)
+              ? "desktop-cli"
+              : "sdk-session"),
+        runtimeProviderKey: result.runtimeProviderKey || managedSession.providerKey,
         promptReceipt:
           managedSession.isNewSession && initialPromptReceipt
             ? initialPromptReceipt
@@ -2631,6 +2774,12 @@ export const invokeScopedCapabilitySession = async ({
     sessionId: undefined,
     sessionScope: scope,
     sessionScopeId: scopeId,
+    usageEstimated: false,
+    runtimeTransportMode:
+      resolveAgentProviderKey(agent) === LOCAL_OPENAI_PROVIDER_KEY
+        ? "local-openai"
+        : "http-api",
+    runtimeProviderKey: resolveAgentProviderKey(agent),
     promptReceipt: initialPromptReceipt || promptReceipt,
   };
 };
@@ -2678,6 +2827,7 @@ export const invokeBudgetModelSummary = async ({
 
   const providerKey = resolveAgentProviderKey(agent);
   const isLocalAgent = providerKey === LOCAL_OPENAI_PROVIDER_KEY;
+  const isCliAgent = isCliRuntimeProviderKey(providerKey);
 
   // Pick the cheapest model accessible to the agent's provider.
   //
@@ -2697,6 +2847,10 @@ export const invokeBudgetModelSummary = async ({
     );
     const cheapest = pickLowestCostRuntimeModel(localModels);
     chosenModel = cheapest?.apiModelId || normalizeModel('gpt-4o-mini');
+  } else if (isCliAgent) {
+    chosenModel =
+      getStoredCliProviderConfigSync(providerKey)?.model ||
+      normalizeModel(agent.model || defaultModel);
   } else {
     const { models } = await listAvailableRuntimeModels().catch(() => ({
       models: getStaticRuntimeModels(),
@@ -2860,10 +3014,22 @@ export const requestGitHubModel = async ({
   temperature?: number;
   timeoutMs?: number;
 }) => {
-  if (normalizeProviderKey(providerKey) === LOCAL_OPENAI_PROVIDER_KEY) {
+  const normalizedProviderKey = normalizeProviderKey(providerKey);
+  if (normalizedProviderKey === LOCAL_OPENAI_PROVIDER_KEY) {
     return requestLocalOpenAIModel({
       model,
       messages,
+      timeoutMs,
+    });
+  }
+
+  if (isCliRuntimeProviderKey(normalizedProviderKey)) {
+    return invokeCliRuntime({
+      providerKey: normalizedProviderKey,
+      config: getStoredCliProviderConfigSync(normalizedProviderKey),
+      messages,
+      workingDirectory: workingDirectory || resolveRuntimeWorkingDirectory(),
+      model,
       timeoutMs,
     });
   }
@@ -2937,10 +3103,23 @@ export const requestGitHubModelStream = async ({
   timeoutMs?: number;
   onDelta: (delta: string) => void;
 }) => {
-  if (normalizeProviderKey(providerKey) === LOCAL_OPENAI_PROVIDER_KEY) {
+  const normalizedProviderKey = normalizeProviderKey(providerKey);
+  if (normalizedProviderKey === LOCAL_OPENAI_PROVIDER_KEY) {
     return requestLocalOpenAIModelStream({
       model,
       messages,
+      timeoutMs,
+      onDelta,
+    });
+  }
+
+  if (isCliRuntimeProviderKey(normalizedProviderKey)) {
+    return invokeCliRuntime({
+      providerKey: normalizedProviderKey,
+      config: getStoredCliProviderConfigSync(normalizedProviderKey),
+      messages,
+      workingDirectory: workingDirectory || resolveRuntimeWorkingDirectory(),
+      model,
       timeoutMs,
       onDelta,
     });

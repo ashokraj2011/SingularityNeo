@@ -91,6 +91,7 @@ import {
   normalizeWorkflowGraph,
   validateWorkflowGraph,
 } from '../lib/workflowGraph';
+import { hasGitHubCapabilityRepository } from '../lib/githubRepositories';
 import { cn } from '../lib/utils';
 import type {
   AgentArtifactExpectation,
@@ -100,6 +101,7 @@ import type {
   Artifact,
   HumanTaskConfig,
   AgentTaskConfig,
+  ProviderKey,
   StepTemplate,
   SubWorkflowConfig,
   WorkflowVersion,
@@ -159,6 +161,68 @@ const TOOL_OPTIONS: ToolAdapterId[] = [
   'run_docs',
   'run_deploy',
 ];
+
+const EXECUTION_RUNTIME_OPTIONS: Array<{
+  key: ProviderKey | '';
+  label: string;
+  description: string;
+  desktopCli?: boolean;
+}> = [
+  {
+    key: '',
+    label: 'Inherit desktop default',
+    description: 'Use whichever runtime is currently selected in Operations.',
+  },
+  {
+    key: 'github-copilot',
+    label: 'GitHub Copilot runtime',
+    description: 'SDK / HTTP-backed runtime owned by SingularityNeo.',
+  },
+  {
+    key: 'local-openai',
+    label: 'Local OpenAI-compatible runtime',
+    description: 'Local Ollama / LM Studio / OpenAI-compatible endpoint.',
+  },
+  {
+    key: 'codex-cli',
+    label: 'Codex CLI',
+    description: 'Desktop CLI runtime for code-oriented phases.',
+    desktopCli: true,
+  },
+  {
+    key: 'claude-code-cli',
+    label: 'Claude Code CLI',
+    description: 'Desktop CLI runtime for code-oriented phases.',
+    desktopCli: true,
+  },
+  {
+    key: 'aider-cli',
+    label: 'Aider CLI',
+    description: 'Desktop CLI runtime for code-oriented phases.',
+    desktopCli: true,
+  },
+];
+
+const CODE_RUNTIME_PHASES = new Set([
+  'DEVELOPMENT',
+  'IMPLEMENTATION',
+  'FIX',
+  'REFACTOR',
+  'CONSTRUCTION',
+]);
+
+const supportsExternalRuntimeForNode = ({
+  nodeType,
+  phase,
+  hasGitHubCodeRepo,
+}: {
+  nodeType?: WorkflowNodeType;
+  phase?: WorkItemPhase;
+  hasGitHubCodeRepo: boolean;
+}) =>
+  hasGitHubCodeRepo &&
+  (nodeType === 'DELIVERY' || nodeType === 'AGENT_TASK') &&
+  CODE_RUNTIME_PHASES.has(String(phase || '').toUpperCase());
 
 // ──────────────────────────────────────────────────────────────────────────
 // Artifact-reference nudge: if a step names an inputArtifactId/outputArtifactId
@@ -886,6 +950,10 @@ export default function WorkflowStudio({
   const lifecyclePhaseIds = useMemo(
     () => getCapabilityGraphPhaseIds(capabilityLifecycle),
     [capabilityLifecycle],
+  );
+  const hasGitHubCodeRepo = useMemo(
+    () => hasGitHubCapabilityRepository(activeCapability.repositories),
+    [activeCapability.repositories],
   );
   const phaseLabel = useCallback(
     (phase?: string | null) => getLifecyclePhaseLabel(activeCapability, phase),
@@ -8236,6 +8304,119 @@ export default function WorkflowStudio({
 
                 {!businessView && nodeDetailTab === 'execution' && ['DELIVERY', 'AGENT_TASK', 'RELEASE'].includes(nodeDraft.type) && (
                   <div className="grid gap-4">
+                    <div className="rounded-2xl border border-outline-variant/35 bg-surface-container-low px-4 py-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                            Execution runtime
+                          </p>
+                          <p className="mt-2 text-sm leading-relaxed text-secondary">
+                            Runtime selection stays hybrid: Singularity still owns tools, AST refresh, evidence, approvals, and workflow state. This selector only chooses which runtime thinks through the step.
+                          </p>
+                        </div>
+                        <StatusBadge
+                          tone={
+                            supportsExternalRuntimeForNode({
+                              nodeType: nodeDraft.type,
+                              phase: nodeDraft.phase,
+                              hasGitHubCodeRepo,
+                            })
+                              ? 'success'
+                              : 'warning'
+                          }
+                        >
+                          {supportsExternalRuntimeForNode({
+                            nodeType: nodeDraft.type,
+                            phase: nodeDraft.phase,
+                            hasGitHubCodeRepo,
+                          })
+                            ? 'Desktop CLI eligible'
+                            : 'Internal runtime only'}
+                        </StatusBadge>
+                      </div>
+
+                      <div className="mt-4 grid gap-4 md:grid-cols-2">
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Runtime provider</span>
+                          <select
+                            value={nodeDraft.runtimeProviderKey || ''}
+                            onChange={e =>
+                              setNodeDraft(c =>
+                                c
+                                  ? {
+                                      ...c,
+                                      runtimeProviderKey:
+                                        (e.target.value as ProviderKey) || undefined,
+                                    }
+                                  : c,
+                              )
+                            }
+                            className="enterprise-input"
+                          >
+                            {EXECUTION_RUNTIME_OPTIONS.map(option => {
+                              const canUseExternal = supportsExternalRuntimeForNode({
+                                nodeType: nodeDraft.type,
+                                phase: nodeDraft.phase,
+                                hasGitHubCodeRepo,
+                              });
+                              const disabled =
+                                option.desktopCli &&
+                                !canUseExternal &&
+                                nodeDraft.runtimeProviderKey !== option.key;
+                              return (
+                                <option key={option.key || 'inherit'} value={option.key} disabled={disabled}>
+                                  {option.label}
+                                </option>
+                              );
+                            })}
+                          </select>
+                          <p className="text-[0.72rem] font-medium normal-case tracking-normal text-secondary">
+                            {EXECUTION_RUNTIME_OPTIONS.find(
+                              option => option.key === (nodeDraft.runtimeProviderKey || ''),
+                            )?.description ||
+                              'Use the desktop default runtime configured in Operations.'}
+                          </p>
+                        </label>
+                        <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
+                          <span>Runtime model override</span>
+                          <input
+                            value={nodeDraft.runtimeModel || ''}
+                            onChange={e =>
+                              setNodeDraft(c =>
+                                c
+                                  ? {
+                                      ...c,
+                                      runtimeModel: e.target.value || undefined,
+                                    }
+                                  : c,
+                              )
+                            }
+                            className="enterprise-input"
+                            placeholder="Optional model for this step"
+                          />
+                          <p className="text-[0.72rem] font-medium normal-case tracking-normal text-secondary">
+                            Leave blank to use the provider default from Operations or the agent fallback.
+                          </p>
+                        </label>
+                      </div>
+
+                      {!hasGitHubCodeRepo ? (
+                        <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                          Link at least one GitHub repository to this capability before using Codex CLI, Claude Code CLI, or Aider for code-work execution. Internal runtimes still work without a linked GitHub repo.
+                        </p>
+                      ) : null}
+                      {hasGitHubCodeRepo &&
+                      !supportsExternalRuntimeForNode({
+                        nodeType: nodeDraft.type,
+                        phase: nodeDraft.phase,
+                        hasGitHubCodeRepo,
+                      }) ? (
+                        <p className="mt-3 rounded-2xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+                          Desktop CLI runtimes only activate for code-oriented phases like Development, Implementation, Fix, Refactor, or Construction. This step will fall back to the internal Singularity runtime if you pick a desktop CLI provider here.
+                        </p>
+                      ) : null}
+                    </div>
+
                     <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
                       <span>Allowed Tools</span>
                       <select multiple value={nodeDraft.allowedToolIds || []} onChange={e => setNodeDraft(c => c ? { ...c, allowedToolIds: Array.from(e.target.selectedOptions).map(o => o.value as ToolAdapterId) } : c)} className="enterprise-input min-h-[9rem]">

@@ -14,8 +14,19 @@ export type Status =
 
 export type SkillKind = "GENERAL" | "ROLE" | "CUSTOM" | "LEARNING";
 export type SkillOrigin = "FOUNDATION" | "CAPABILITY";
-export type ProviderKey = "github-copilot" | "local-openai";
+export type ProviderKey =
+  | "github-copilot"
+  | "local-openai"
+  | "claude-code-cli"
+  | "codex-cli"
+  | "aider-cli";
 export type EmbeddingProviderKey = "local-openai" | "deterministic-hash";
+export type RuntimeTransportMode =
+  | "desktop-cli"
+  | "sdk-session"
+  | "http-api"
+  | "local-openai"
+  | "unconfigured";
 
 export type MemoryRetrievalMode = "pgvector" | "json-cosine" | "deterministic-hash";
 export type AgentRoleStarterKey =
@@ -1529,11 +1540,7 @@ export interface CopilotSessionMonitorSnapshot {
   runtime: {
     configured: boolean;
     provider: string;
-    runtimeAccessMode?:
-      | "copilot-session"
-      | "headless-cli"
-      | "http-fallback"
-      | "unconfigured";
+    runtimeAccessMode?: RuntimeTransportMode;
     httpFallbackEnabled?: boolean;
     tokenSource: string | null;
     defaultModel: string;
@@ -2497,6 +2504,8 @@ export interface WorkflowNode {
   subWorkflowConfig?: SubWorkflowConfig;
   // Pre-flight assignment
   assigneeEmail?: string;
+  runtimeProviderKey?: ProviderKey;
+  runtimeModel?: string;
 }
 
 export interface WorkflowEdge {
@@ -2550,6 +2559,8 @@ export interface WorkflowStep {
   requiredInputs?: RequiredInputField[];
   completionGates?: string[];
   executionBoundary?: Partial<ExecutionBoundary>;
+  runtimeProviderKey?: ProviderKey;
+  runtimeModel?: string;
 }
 
 export interface Workflow {
@@ -2852,6 +2863,69 @@ export interface DesktopPreferences {
   extra?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface RuntimeModelOption {
+  id: string;
+  label: string;
+  profile: string;
+  apiModelId: string;
+}
+
+export interface RuntimeProviderConfig {
+  command?: string;
+  cliUrl?: string;
+  model?: string;
+  profile?: string;
+  workingMode?: "plan" | "read-only" | "workspace-write" | "danger-full-access";
+  enabled?: boolean;
+  env?: Record<string, string>;
+  updatedAt?: string;
+}
+
+export interface RuntimeProviderValidationResult {
+  providerKey: ProviderKey;
+  ok: boolean;
+  status: "configured" | "missing" | "invalid" | "unavailable";
+  message: string;
+  transportMode: RuntimeTransportMode;
+  detectedCommand?: string;
+  installed?: boolean;
+  authenticated?: boolean | null;
+  workingDirectoryAllowed?: boolean | null;
+  usageEstimated?: boolean;
+  models?: RuntimeModelOption[];
+  details?: string[];
+  checkedAt?: string;
+}
+
+export interface RuntimeProviderStatus {
+  key: ProviderKey;
+  label: string;
+  transportMode: RuntimeTransportMode;
+  configured: boolean;
+  defaultSelected?: boolean;
+  endpoint?: string | null;
+  command?: string | null;
+  model?: string | null;
+  supportsSessions: boolean;
+  supportsTools: boolean;
+  supportsWorkspaceAutonomy: boolean;
+  availableModels?: RuntimeModelOption[];
+  validation?: RuntimeProviderValidationResult | null;
+  config?: RuntimeProviderConfig | null;
+}
+
+export interface RuntimeProviderProbeResult {
+  providerKey: ProviderKey;
+  ok: boolean;
+  message: string;
+  detectedEndpoint?: string | null;
+  detectedCommand?: string | null;
+  attempted?: string[];
+  validation?: RuntimeProviderValidationResult | null;
+  config?: RuntimeProviderConfig | null;
+  preferencePatch?: Partial<DesktopPreferences>;
 }
 
 export interface CapabilityExecutionOwnership {

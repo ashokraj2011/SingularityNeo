@@ -335,6 +335,8 @@ export const deriveWorkflowStepsFromGraph = (
         artifactContract: node.artifactContract,
         approvalPolicy: node.approvalPolicy,
         ownershipRule: node.ownershipRule,
+        runtimeProviderKey: node.runtimeProviderKey,
+        runtimeModel: node.runtimeModel,
       } satisfies WorkflowStep;
     });
 };
@@ -383,6 +385,8 @@ const createLinearGraph = (
       artifactContract: step.artifactContract,
       approvalPolicy: step.approvalPolicy,
       ownershipRule: step.ownershipRule,
+      runtimeProviderKey: step.runtimeProviderKey,
+      runtimeModel: step.runtimeModel,
     })),
     {
       id: endNodeId,

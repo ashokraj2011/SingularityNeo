@@ -13,9 +13,28 @@ import {
   getDesktopPreferences,
   patchDesktopPreferences,
 } from '../desktopPreferences';
+import type { ProviderKey, RuntimeProviderConfig } from '../../src/types';
+import {
+  getConfiguredRuntimeProviderStatus,
+  getRuntimeProviderModels,
+  listRuntimeProviderStatuses,
+  saveConfiguredRuntimeProvider,
+  selectDefaultRuntimeProvider,
+  validateRuntimeProviderStatus,
+} from '../runtimeProviders';
+import { probeRuntimeProvider } from '../runtimeProbe';
 
 type RuntimeCredentialBody = {
   token?: string;
+};
+
+type RuntimeProviderConfigBody = {
+  config?: RuntimeProviderConfig;
+  setDefault?: boolean;
+  clearDefault?: boolean;
+  endpointHint?: string;
+  commandHint?: string;
+  modelHint?: string;
 };
 
 export const registerRuntimeRoutes = (app: express.Express) => {
@@ -69,6 +88,91 @@ export const registerRuntimeRoutes = (app: express.Express) => {
         envFilePath: envLocalPath,
       });
       response.json(await buildRuntimeStatus());
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.get('/api/runtime/providers', async (_request, response) => {
+    try {
+      response.json({
+        providers: await listRuntimeProviderStatuses(),
+      });
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.get('/api/runtime/providers/:providerKey/status', async (request, response) => {
+    try {
+      const providerKey = String(request.params.providerKey || '').trim() as ProviderKey;
+      response.json(await getConfiguredRuntimeProviderStatus(providerKey));
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.put('/api/runtime/providers/:providerKey/config', async (request, response) => {
+    try {
+      const providerKey = String(request.params.providerKey || '').trim() as ProviderKey;
+      const body = (request.body || {}) as RuntimeProviderConfigBody;
+      const savedStatus = await saveConfiguredRuntimeProvider({
+        providerKey,
+        config: body.config || {},
+        setDefault: body.setDefault,
+      });
+
+      if (body.clearDefault) {
+        await selectDefaultRuntimeProvider({ providerKey: undefined });
+      }
+
+      response.json({
+        provider: savedStatus,
+        providers: await listRuntimeProviderStatuses(),
+      });
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.post('/api/runtime/providers/:providerKey/validate', async (request, response) => {
+    try {
+      const providerKey = String(request.params.providerKey || '').trim() as ProviderKey;
+      const body = (request.body || {}) as RuntimeProviderConfigBody;
+      response.json(
+        await validateRuntimeProviderStatus({
+          providerKey,
+          config: body.config || undefined,
+        }),
+      );
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.post('/api/runtime/providers/:providerKey/probe', async (request, response) => {
+    try {
+      const providerKey = String(request.params.providerKey || '').trim() as ProviderKey;
+      const body = (request.body || {}) as RuntimeProviderConfigBody;
+      response.json(
+        await probeRuntimeProvider({
+          providerKey,
+          endpointHint: body.endpointHint,
+          commandHint: body.commandHint,
+          modelHint: body.modelHint,
+        }),
+      );
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.get('/api/runtime/providers/:providerKey/models', async (request, response) => {
+    try {
+      const providerKey = String(request.params.providerKey || '').trim() as ProviderKey;
+      response.json({
+        models: await getRuntimeProviderModels(providerKey),
+      });
     } catch (error) {
       sendApiError(response, error);
     }

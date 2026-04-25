@@ -23,7 +23,7 @@ describe('runtime policy', () => {
         token: '',
         modelCatalogFromRuntime: true,
       }),
-    ).toBe('headless-cli');
+    ).toBe('sdk-session');
     expect(isHttpFallbackAllowed()).toBe(false);
   });
 
@@ -43,7 +43,7 @@ describe('runtime policy', () => {
         token: 'token',
         modelCatalogFromRuntime: false,
       }),
-    ).toBe('http-fallback');
+    ).toBe('http-api');
   });
 
   it('keeps the missing-runtime message stable for API and stream errors', () => {

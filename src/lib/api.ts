@@ -145,13 +145,20 @@ import {
   ChatParticipantDirectory,
   SwarmSessionDetail,
   SwarmSessionSummary,
+  ProviderKey,
+  RuntimeModelOption,
+  RuntimeProviderConfig,
+  RuntimeProviderProbeResult,
+  RuntimeProviderStatus,
+  RuntimeProviderValidationResult,
+  RuntimeTransportMode,
 } from "../types";
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from "./desktop";
 
 export interface RuntimeStatus {
   configured: boolean;
   provider: string;
-  providerKey?: "github-copilot" | "local-openai";
+  providerKey?: ProviderKey;
   readinessState?: RuntimeReadinessState;
   checks?: RuntimeReadinessCheck[];
   controlPlaneUrl?: string;
@@ -168,22 +175,14 @@ export interface RuntimeStatus {
   embeddingEndpoint?: string | null;
   embeddingModel?: string | null;
   embeddingApiKeyConfigured?: boolean;
-  availableProviders?: Array<{
-    key: "github-copilot" | "local-openai";
-    label: string;
-    configured: boolean;
-  }>;
+  availableProviders?: RuntimeProviderStatus[];
   endpoint: string;
   runtimeOwner?: "DESKTOP" | "SERVER";
   executionRuntimeOwner?: "DESKTOP" | "SERVER";
   tokenSource: string | null;
   defaultModel: string;
   modelCatalogSource?: "runtime" | "fallback";
-  runtimeAccessMode?:
-    | "copilot-session"
-    | "headless-cli"
-    | "http-fallback"
-    | "unconfigured";
+  runtimeAccessMode?: RuntimeTransportMode;
   httpFallbackEnabled?: boolean;
   databaseRuntime?: WorkspaceDatabaseRuntimeInfo;
   activeDatabaseProfileId?: string | null;
@@ -211,12 +210,7 @@ export interface RuntimeStatus {
     pgvectorAvailable: boolean;
     memoryEmbeddingDimensions: number;
   };
-  availableModels: Array<{
-    id: string;
-    label: string;
-    profile: string;
-    apiModelId: string;
-  }>;
+  availableModels: RuntimeModelOption[];
 }
 
 export interface RuntimeUsage {
@@ -461,6 +455,135 @@ export const clearRuntimeCredentials = async (): Promise<RuntimeStatus> => {
   return requestJson<RuntimeStatus>("/api/runtime/credentials", {
     method: "DELETE",
   });
+};
+
+export const fetchRuntimeProviders = async (): Promise<RuntimeProviderStatus[]> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop && typeof desktop.listRuntimeProviders === 'function') {
+    return desktop.listRuntimeProviders() as Promise<RuntimeProviderStatus[]>;
+  }
+
+  const payload = await requestJson<{ providers: RuntimeProviderStatus[] }>(
+    '/api/runtime/providers',
+  );
+  return payload.providers || [];
+};
+
+export const saveRuntimeProviderConfig = async ({
+  providerKey,
+  config,
+  setDefault,
+  clearDefault,
+}: {
+  providerKey: ProviderKey;
+  config: RuntimeProviderConfig;
+  setDefault?: boolean;
+  clearDefault?: boolean;
+}): Promise<{
+  provider: RuntimeProviderStatus;
+  providers: RuntimeProviderStatus[];
+}> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop && typeof desktop.saveRuntimeProviderConfig === 'function') {
+    return desktop.saveRuntimeProviderConfig({
+      providerKey,
+      config,
+      setDefault,
+      clearDefault,
+    }) as Promise<{
+      provider: RuntimeProviderStatus;
+      providers: RuntimeProviderStatus[];
+    }>;
+  }
+
+  return requestJson<{
+    provider: RuntimeProviderStatus;
+    providers: RuntimeProviderStatus[];
+  }>(`/api/runtime/providers/${encodeURIComponent(providerKey)}/config`, {
+    method: 'PUT',
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      config,
+      setDefault,
+      clearDefault,
+    }),
+  });
+};
+
+export const validateRuntimeProvider = async ({
+  providerKey,
+  config,
+}: {
+  providerKey: ProviderKey;
+  config?: RuntimeProviderConfig;
+}): Promise<RuntimeProviderValidationResult> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop && typeof desktop.validateRuntimeProvider === 'function') {
+    return desktop.validateRuntimeProvider({
+      providerKey,
+      config,
+    }) as Promise<RuntimeProviderValidationResult>;
+  }
+
+  return requestJson<RuntimeProviderValidationResult>(
+    `/api/runtime/providers/${encodeURIComponent(providerKey)}/validate`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        config,
+      }),
+    },
+  );
+};
+
+export const probeRuntimeProvider = async ({
+  providerKey,
+  endpointHint,
+  commandHint,
+  modelHint,
+}: {
+  providerKey: ProviderKey;
+  endpointHint?: string;
+  commandHint?: string;
+  modelHint?: string;
+}): Promise<RuntimeProviderProbeResult> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop && typeof desktop.probeRuntimeProvider === 'function') {
+    return desktop.probeRuntimeProvider({
+      providerKey,
+      endpointHint,
+      commandHint,
+      modelHint,
+    }) as Promise<RuntimeProviderProbeResult>;
+  }
+
+  return requestJson<RuntimeProviderProbeResult>(
+    `/api/runtime/providers/${encodeURIComponent(providerKey)}/probe`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        endpointHint,
+        commandHint,
+        modelHint,
+      }),
+    },
+  );
+};
+
+export const fetchRuntimeProviderModels = async (
+  providerKey: ProviderKey,
+): Promise<RuntimeModelOption[]> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop && typeof desktop.getRuntimeProviderModels === 'function') {
+    return desktop.getRuntimeProviderModels(providerKey) as Promise<RuntimeModelOption[]>;
+  }
+
+  const payload = await requestJson<{ models: RuntimeModelOption[] }>(
+    `/api/runtime/providers/${encodeURIComponent(providerKey)}/models`,
+  );
+  return payload.models || [];
 };
 
 export const updateLocalEmbeddingSettings = async ({

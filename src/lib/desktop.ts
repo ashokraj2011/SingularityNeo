@@ -3,6 +3,9 @@ import type {
   DesktopLocalConnectorProvider,
   DesktopLocalConnectorSavePayload,
   DesktopLocalConnectorValidationResult,
+  ProviderKey,
+  RuntimeProviderProbeResult,
+  RuntimeProviderConfig,
 } from '../types';
 
 export interface DesktopWorkerPing {
@@ -37,6 +40,24 @@ export interface SingularityDesktopBridge {
   setActorContext: (actor: unknown) => Promise<unknown>;
   setRuntimeToken: (token: string) => Promise<unknown>;
   clearRuntimeToken: () => Promise<unknown>;
+  listRuntimeProviders: () => Promise<unknown>;
+  saveRuntimeProviderConfig: (payload: {
+    providerKey: ProviderKey;
+    config: RuntimeProviderConfig;
+    setDefault?: boolean;
+    clearDefault?: boolean;
+  }) => Promise<unknown>;
+  validateRuntimeProvider: (payload: {
+    providerKey: ProviderKey;
+    config?: RuntimeProviderConfig;
+  }) => Promise<unknown>;
+  probeRuntimeProvider: (payload: {
+    providerKey: ProviderKey;
+    endpointHint?: string;
+    commandHint?: string;
+    modelHint?: string;
+  }) => Promise<RuntimeProviderProbeResult>;
+  getRuntimeProviderModels: (providerKey: ProviderKey) => Promise<unknown>;
   setEmbeddingConfig: (payload: {
     baseUrl: string;
     apiKey?: string;

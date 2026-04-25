@@ -49,6 +49,7 @@ import {
   buildCapabilityBriefing,
   buildCapabilityBriefingPrompt,
 } from "../../src/lib/capabilityBriefing";
+import { hasGitHubCapabilityRepository } from "../../src/lib/githubRepositories";
 import {
   buildAgentKnowledgeLens,
   buildAgentKnowledgePrompt,
@@ -86,9 +87,13 @@ import {
 } from "../../src/lib/workItemStakeholders";
 import { invokeScopedCapabilitySession } from "../githubModels";
 import { publishRunEvent } from "../eventBus";
-import { resolveAgentProviderKey } from "../providerRegistry";
+import { DEFAULT_PROVIDER_KEY, resolveAgentProviderKey } from "../providerRegistry";
 import { rollupToolHistory, type RollupCacheEntry } from "./historyRollup";
 import { resolveModelForTurn } from "./modelRouter";
+import {
+  buildExecutionRuntimeAgent,
+  resolveExecutionRuntimeForStep,
+} from "./runtimeSelection";
 import {
   buildBudgetedPrompt,
   resolvePhaseBudget,
@@ -1356,9 +1361,21 @@ const executeDelegatedTask = async ({
       `Delegated prompt:\n${prompt}`,
     ].join("\n");
 
+    const delegatedRuntime = resolveExecutionRuntimeForStep({
+      step,
+      agent: delegatedAgent,
+      hasGitHubCodeRepository: hasGitHubCapabilityRepository(
+        projection.capability.repositories,
+      ),
+    });
+    const delegatedRuntimeAgent = buildExecutionRuntimeAgent({
+      agent: delegatedAgent,
+      selection: delegatedRuntime,
+    });
+
     const response = await invokeScopedCapabilitySession({
       capability: projection.capability,
-      agent: delegatedAgent,
+      agent: delegatedRuntimeAgent,
       scope: "TASK",
       scopeId: childTask.id,
       prompt,
@@ -1366,6 +1383,7 @@ const executeDelegatedTask = async ({
       memoryPrompt: memoryContext.prompt,
       timeoutMs: 90_000,
       resetSession: true,
+      modelOverride: delegatedRuntime.model || undefined,
     });
 
     const artifact: Artifact = {
@@ -1909,9 +1927,20 @@ const repairMalformedExecutionDecision = async ({
   repairReason?: string;
 }) => {
   const startedAt = Date.now();
+  const runtimeSelection = resolveExecutionRuntimeForStep({
+    step,
+    agent,
+    hasGitHubCodeRepository: hasGitHubCapabilityRepository(
+      capability.repositories,
+    ),
+  });
+  const runtimeAgent = buildExecutionRuntimeAgent({
+    agent,
+    selection: runtimeSelection,
+  });
   const repaired = await invokeScopedCapabilitySession({
     capability,
-    agent,
+    agent: runtimeAgent,
     scope: workItem.id ? "WORK_ITEM" : "TASK",
     scopeId: workItem.id || runStep.id,
     workItemPhase: step.phase,
@@ -1938,6 +1967,7 @@ const repairMalformedExecutionDecision = async ({
     ].join("\n\n"),
     timeoutMs: 45_000,
     resetSession: true,
+    modelOverride: runtimeSelection.model || undefined,
   });
 
   const repairedObject = extractJsonObject(repaired.content) as Record<
@@ -2273,6 +2303,17 @@ const requestStepDecision = async ({
       workItemId: workItem.id,
     }),
   );
+  const executionRuntime = resolveExecutionRuntimeForStep({
+    step,
+    agent,
+    hasGitHubCodeRepository: hasGitHubCapabilityRepository(
+      capability.repositories,
+    ),
+  });
+  const executionRuntimeAgent = buildExecutionRuntimeAgent({
+    agent,
+    selection: executionRuntime,
+  });
 
   // Context Budgeter (Phase 2 / Lever 5): assemble the prompt as
   // typed fragments with priorities + token estimates so we can evict
@@ -2280,11 +2321,15 @@ const requestStepDecision = async ({
   // Happy path (call fits under the budget) is identical to the old
   // flat .join('\n\n'): fragments emit in input order, nothing evicted.
   const providerForEstimate = normalizeProviderForEstimate(
-    resolveAgentProviderKey(agent),
-    agent.model,
+    executionRuntime.providerKey,
+    executionRuntime.model || executionRuntimeAgent.model,
   );
   const tok = (text: string, kind: "prose" | "code" | "json" = "prose") =>
-    estimateTokens(text, { provider: providerForEstimate, model: agent.model, kind });
+    estimateTokens(text, {
+      provider: providerForEstimate,
+      model: executionRuntime.model || executionRuntimeAgent.model,
+      kind,
+    });
 
   const historyText = effectiveToolHistory.length
     ? `Prior tool loop transcript:\n${effectiveToolHistory
@@ -2425,14 +2470,21 @@ const requestStepDecision = async ({
   // turns so the expensive primary model is reserved for decision turns and
   // write operations. Falls back to agent.model when routing is disabled.
   const routedModel = resolveModelForTurn(
-    agent,
+    executionRuntimeAgent,
     lastToolName ?? null,
-    capability.executionConfig?.agentModelRouting ?? null,
+    executionRuntime.providerKey === DEFAULT_PROVIDER_KEY
+      ? capability.executionConfig?.agentModelRouting ?? null
+      : null,
   );
+  const effectiveRuntimeModel =
+    executionRuntime.providerKey === DEFAULT_PROVIDER_KEY &&
+    !normalizeString(step.runtimeModel)
+      ? routedModel
+      : executionRuntime.model || executionRuntimeAgent.model;
 
   const response = await invokeScopedCapabilitySession({
     capability,
-    agent,
+    agent: executionRuntimeAgent,
     scope: workItem.id ? "WORK_ITEM" : "TASK",
     scopeId: workItem.id || runStep.id,
     workItemPhase: step.phase || workItem.phase,
@@ -2443,8 +2495,10 @@ const requestStepDecision = async ({
     // Real-time LLM token streaming (Fix 4): forward deltas to SSE so
     // operators see the agent reasoning as it happens.
     onDelta: onLlmDelta,
-    // Dynamic model routing (Fix 2): override model for this turn.
-    modelOverride: routedModel !== agent.model ? routedModel : undefined,
+    // Dynamic model routing (Fix 2): override model for this turn only on
+    // the internal Copilot lane. CLI/local providers stay on their selected
+    // execution model so provider-specific defaults are preserved.
+    modelOverride: effectiveRuntimeModel || undefined,
   });
 
   // Emit a Prompt Receipt (Phase 2 / Lever 7): per-call record of which
@@ -2473,8 +2527,16 @@ const requestStepDecision = async ({
           maxInputTokens: budgeted.receipt.maxInputTokens,
           reservedOutputTokens: budgeted.receipt.reservedOutputTokens,
           phase: step.phase || workItem.phase,
+          runtimeProviderKey: executionRuntime.providerKey,
+          runtimeTransportMode: executionRuntime.transportMode,
+          executionRuntimeSource: executionRuntime.source,
+          toolingMode: "singularity-owned",
           model: response.model || null,
           actualUsage: response.usage || null,
+          usageEstimated:
+            typeof response.usageEstimated === "boolean"
+              ? response.usageEstimated
+              : executionRuntime.usageEstimated,
         },
       });
     } catch (error) {
@@ -2497,15 +2559,23 @@ const requestStepDecision = async ({
     scope: workItem.id ? "WORK_ITEM" : "TASK",
     scopeId: workItem.id || runStep.id,
     phase: step.phase || workItem.phase || null,
-    model: response.model || routedModel || agent.model || null,
-    providerKey: resolveAgentProviderKey(agent) || null,
+    model: response.model || effectiveRuntimeModel || executionRuntimeAgent.model || null,
+    providerKey: executionRuntime.providerKey || null,
     userPrompt: budgeted.assembled,
     memoryPrompt: memoryContext.prompt || null,
     developerPrompt:
       "You are an execution engine inside a capability workflow. Return JSON only with no markdown.",
     responseContent: response.content,
     responseUsage: response.usage
-      ? (response.usage as unknown as Record<string, unknown>)
+      ? ({
+          ...(response.usage as unknown as Record<string, unknown>),
+          runtimeTransportMode: executionRuntime.transportMode,
+          usageEstimated:
+            typeof response.usageEstimated === "boolean"
+              ? response.usageEstimated
+              : executionRuntime.usageEstimated,
+          toolingMode: "singularity-owned",
+        } as Record<string, unknown>)
       : null,
     fragments: budgeted.receipt.included.map(entry => ({
       source: String(entry.source),

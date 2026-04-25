@@ -52,6 +52,37 @@ vi.mock('../runtimePolicy', () => ({
   resolveRuntimeAccessMode: vi.fn(() => 'unconfigured'),
 }));
 
+vi.mock('../runtimeProviders', () => ({
+  listRuntimeProviderStatuses: vi.fn(async () => [
+    {
+      key: 'github-copilot',
+      label: 'GitHub Copilot',
+      configured: false,
+      transportMode: 'unconfigured',
+      supportsSessions: true,
+      supportsTools: true,
+      supportsWorkspaceAutonomy: false,
+      availableModels: [],
+      validation: null,
+      config: null,
+      defaultSelected: true,
+    },
+  ]),
+  resolveSelectedRuntimeProvider: vi.fn(async () => ({
+    key: 'github-copilot',
+    label: 'GitHub Copilot',
+    configured: false,
+    transportMode: 'unconfigured',
+    supportsSessions: true,
+    supportsTools: true,
+    supportsWorkspaceAutonomy: false,
+    availableModels: [],
+    validation: null,
+    config: null,
+    defaultSelected: true,
+  })),
+}));
+
 vi.mock('../runtimePreflight', () => ({
   buildRuntimePreflight: vi.fn(async () => ({
     generatedAt: new Date('2026-04-23T00:00:00.000Z').toISOString(),
