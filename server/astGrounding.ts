@@ -136,7 +136,12 @@ export const buildAstGroundingSummary = async ({
     }
   }
 
+  // Track the first valid candidate for fallback (even if no symbols match).
+  let firstValidCandidate: { checkoutPath: string; repositoryId: string } | null = null;
+
   for (const candidate of localCloneCandidates) {
+    if (!firstValidCandidate) firstValidCandidate = candidate;
+
     const localResults = [];
     for (const query of queries) {
       const result = await searchLocalCheckoutSymbols({
@@ -177,6 +182,25 @@ export const buildAstGroundingSummary = async ({
     }
   }
 
+  // No symbol matches from any local clone, but we know where the repo lives.
+  // Provide a minimal grounding so the agent uses tools rather than hallucinating.
+  if (firstValidCandidate) {
+    const resolvedRoot = firstValidCandidate.checkoutPath.replace(/\/+$/, "");
+    return {
+      prompt: [
+        `Code grounding: repository root on disk is ${resolvedRoot}`,
+        `No indexed symbols matched your query — use the browse_code tool to list`,
+        `actual classes/functions, or workspace_search to find symbols by name.`,
+        `Do NOT construct file paths manually or use shell commands (bash, cd, find).`,
+        `All file paths must come from browse_code or workspace_search output.`,
+      ].join("\n"),
+      astGroundingMode: "ast-grounded-local-clone",
+      checkoutPath: firstValidCandidate.checkoutPath,
+      branchName,
+      codeIndexSource: "local-checkout",
+    };
+  }
+
   const remoteResults = [];
   for (const query of queries) {
     const result = await searchCodeSymbols(capability.id, query, {
@@ -189,7 +213,14 @@ export const buildAstGroundingSummary = async ({
   }
 
   if (remoteResults.length === 0) {
+    // Even with no symbol hits, tell the agent to use structured tools.
     return {
+      prompt: [
+        `Code grounding: no symbols matched your query in the capability code index.`,
+        `Use the browse_code tool to list actual classes/functions in the indexed repositories,`,
+        `or workspace_search to find symbols by name.`,
+        `Do NOT construct file paths manually or use bash/shell commands for file discovery.`,
+      ].join("\n"),
       astGroundingMode: "no-ast-grounding",
       checkoutPath,
       branchName,

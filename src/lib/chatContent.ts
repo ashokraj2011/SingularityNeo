@@ -16,6 +16,10 @@
  *   - <parameter name="K">V</parameter>
  *   - <tool_name>X</tool_name> / <function_name>X</function_name> fallbacks
  *   - Orphan closing tags and malformed pairs (streams can truncate mid-tag)
+ *   - <(antml:)?thinking>…</> blocks — stripped entirely (internal reasoning)
+ *   - <system_notification>…</> — content kept, tags stripped
+ *   - <tool_result>…</> / <function_results>…</> — content kept, wrapper stripped
+ *   - <tool_use_id>, <tool_name>, <stdout>, <stderr>, <result> wrappers — stripped
  *
  * Output shape:
  *   A fenced code block with the `tool-call` language hint — the
@@ -25,7 +29,8 @@
 
 type Param = { name: string; value: string };
 
-const TAG_PROBE_RE = /<\/?(?:antml:)?(?:function_calls|invoke|parameter|tool_name|function_name)\b/i;
+const TAG_PROBE_RE =
+  /<\/?(?:antml:)?(?:function_calls|invoke|parameter|tool_name|function_name|thinking|system_notification|tool_result|function_results|tool_use_id|stdout|stderr|result|scratchpad)\b/i;
 
 const stripNamespace = (input: string): string =>
   input.replace(/<(\/?)antml:/gi, '<$1');
@@ -112,15 +117,59 @@ const stripOrphanTags = (input: string): string => {
   );
 };
 
+// ---------------------------------------------------------------------------
+// Extended scaffold-tag cleanup — handles model output that leaks tags which
+// are not part of the function_calls/invoke grammar but still shouldn't be
+// visible to the operator.
+// ---------------------------------------------------------------------------
+
+/** Strip internal-reasoning blocks entirely — the operator never needs them. */
+const stripThinkingBlocks = (input: string): string =>
+  input.replace(/<(?:antml:)?thinking[^>]*>[\s\S]*?<\/(?:antml:)?thinking>/gi, '');
+
+/** Strip <system_notification> wrapper tags; keep content visible as plain text. */
+const unwrapSystemNotifications = (input: string): string =>
+  input
+    .replace(/<system_notification[^>]*>/gi, '')
+    .replace(/<\/system_notification>/gi, '');
+
+/**
+ * Unwrap <tool_result> / <function_results> blocks.
+ * Strips the outer wrapper plus inner metadata tags (<tool_use_id>, <tool_name>
+ * within the result, <stdout>, <stderr>, <result>) while preserving the
+ * human-readable content so the model's reference to the output stays legible.
+ */
+const unwrapToolResultBlocks = (input: string): string =>
+  input
+    // Outer wrappers — strip tags, keep content
+    .replace(/<\/?tool_result[^>]*>/gi, '')
+    .replace(/<\/?function_results[^>]*>/gi, '')
+    // Inner metadata wrappers — strip entire element (tags + value)
+    .replace(/<tool_use_id[^>]*>[\s\S]*?<\/tool_use_id>/gi, '')
+    // Inner content wrappers — strip tags, keep content
+    .replace(/<\/?stdout[^>]*>/gi, '')
+    .replace(/<\/?stderr[^>]*>/gi, '')
+    .replace(/<\/?result[^>]*>/gi, '')
+    .replace(/<\/?scratchpad[^>]*>/gi, '');
+
 /**
  * Reformat Anthropic-style pseudo tool-call XML into readable fenced
  * code blocks. Idempotent and safe to run on every render — the probe
  * regex short-circuits when there's no tag to rewrite.
+ *
+ * Order matters:
+ *   1. Strip reasoning blocks entirely (they're never user-visible)
+ *   2. Unwrap tool-result and system-notification scaffold wrappers
+ *   3. Rewrite function_calls / invoke XML → fenced code blocks
+ *   4. Strip any orphaned tags that remain
  */
 export const reformatPseudoToolCalls = (raw: string): string => {
   if (!raw || !TAG_PROBE_RE.test(raw)) return raw;
 
   let working = stripNamespace(raw);
+  working = stripThinkingBlocks(working);
+  working = unwrapToolResultBlocks(working);
+  working = unwrapSystemNotifications(working);
   working = rewriteFunctionCallsBlocks(working);
   working = rewriteBareInvokeBlocks(working);
   working = stripOrphanTags(working);
