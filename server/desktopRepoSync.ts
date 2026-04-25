@@ -22,6 +22,7 @@ import {
 } from './workItemCheckouts';
 import { getDesktopExecutorRegistration } from './executionOwnership';
 import { getCapabilityRepositoriesRecord, getCapabilityBundle } from './repository';
+import { resolveDesktopWorkspace } from './desktopWorkspaces';
 import { refreshCapabilityCodeIndex } from './codeIndex/ingest';
 import {
   queueLocalCheckoutAstRefresh,
@@ -175,25 +176,49 @@ export interface CapabilityRepoSyncReport {
 export const syncCapabilityRepositoriesForDesktop = async ({
   capabilityId,
   executorId,
+  actorUserId,
   fetch = false,
 }: {
   capabilityId: string;
   executorId: string;
+  /**
+   * The operator's user ID.  When provided and the executor has no global
+   * `SINGULARITY_WORKING_DIRECTORY` set, the function falls back to the
+   * per-capability workspace mapping that the operator saved in the UI
+   * (stored in `desktop_user_workspace_mappings`).
+   */
+  actorUserId?: string;
   /**
    * When true, run `git fetch` on already-cloned repos to pull the latest
    * remote changes.  Defaults to false so the initial claim is fast.
    */
   fetch?: boolean;
 }): Promise<CapabilityRepoSyncReport> => {
-  // 1. Resolve working directory from executor registration.
+  // 1. Resolve working directory.
+  //    Priority order:
+  //    a. executor.workingDirectory  (set via SINGULARITY_WORKING_DIRECTORY env var)
+  //    b. per-capability workspace mapping saved through the UI
+  //       (desktop_user_workspace_mappings.working_directory_path)
   const registration = await getDesktopExecutorRegistration(executorId);
-  const workingDirectory = registration?.workingDirectory
+  let workingDirectory = registration?.workingDirectory
     ? normalizeDirectoryPath(registration.workingDirectory)
     : '';
 
+  if (!workingDirectory && actorUserId) {
+    const resolution = await resolveDesktopWorkspace({
+      executorId,
+      userId: actorUserId,
+      capabilityId,
+    }).catch(() => null);
+    if (resolution?.workingDirectoryPath) {
+      workingDirectory = normalizeDirectoryPath(resolution.workingDirectoryPath);
+    }
+  }
+
   if (!workingDirectory) {
     console.warn(
-      `[desktopRepoSync] executor ${executorId} has no workingDirectory — cannot sync repositories for ${capabilityId}`,
+      `[desktopRepoSync] executor ${executorId} has no workingDirectory for ${capabilityId} — ` +
+      `set SINGULARITY_WORKING_DIRECTORY or save a Desktop Workspace mapping in the Operations page`,
     );
     return {
       capabilityId,

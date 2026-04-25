@@ -747,6 +747,7 @@ export const registerExecutionRuntimeRoutes = (app: express.Express) => {
         syncCapabilityRepositoriesForDesktop({
           capabilityId,
           executorId,
+          actorUserId: actor.userId || undefined,
         }).catch(err => {
           console.error(
             `[executionRuntime] repo-sync failed for ${capabilityId}:`,
@@ -802,6 +803,7 @@ export const registerExecutionRuntimeRoutes = (app: express.Express) => {
         const report = await syncCapabilityRepositoriesForDesktop({
           capabilityId,
           executorId,
+          actorUserId: actor.userId || undefined,
           fetch,
         });
 
