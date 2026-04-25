@@ -14,6 +14,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { CapabilityRepository } from '../src/types';
 import {
   buildCapabilityBaseRepositoryPath,
@@ -70,18 +72,18 @@ export const getPrimaryBaseClone = (
 // Git helpers (thin wrappers — the real impl lives in workItems.ts / index.ts)
 // ---------------------------------------------------------------------------
 
+const execFileAsync = promisify(execFile);
+
 /** Runs a git command and returns trimmed stdout.  Throws on non-zero exit. */
-const runGit = (cwd: string, args: string[]): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const { execFile } = require('node:child_process') as typeof import('node:child_process');
-    execFile('git', args, { cwd }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(stderr?.trim() || error.message));
-      } else {
-        resolve(stdout?.trim() ?? '');
-      }
-    });
-  });
+const runGit = async (cwd: string, args: string[]): Promise<string> => {
+  try {
+    const { stdout } = await execFileAsync('git', args, { cwd });
+    return stdout?.trim() ?? '';
+  } catch (err: any) {
+    const msg = (err?.stderr as string | undefined)?.trim() || err?.message || String(err);
+    throw new Error(msg);
+  }
+};
 
 /**
  * Returns true when the given directory is the root of a git working tree.
