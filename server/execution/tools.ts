@@ -52,7 +52,10 @@ import {
   listLocalCheckoutAllSymbols,
   searchLocalCheckoutSymbols,
 } from "../localCodeIndex";
-import { getCapabilityBaseClones } from "../desktopRepoSync";
+import {
+  getCapabilityBaseClones,
+  getPrimaryBaseClone,
+} from "../desktopRepoSync";
 import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
 
 const execFileAsync = promisify(execFile);
@@ -370,6 +373,12 @@ const resolveWorkspacePath = async (
     const workItemRepository = (capability.repositories || []).find(
       (repository) => repository.id === workItemRepositoryId,
     );
+    const baseClonePath =
+      !workItem?.id && capability.id
+        ? normalizeDirectoryPath(
+            getPrimaryBaseClone(capability.id)?.checkoutPath || "",
+          )
+        : "";
     const derivedWorkItemCheckoutPath =
       workItem?.id && workItemRepository
         ? buildWorkItemCheckoutPath({
@@ -382,6 +391,7 @@ const resolveWorkspacePath = async (
         : "";
     const defaultPath =
       derivedWorkItemCheckoutPath ||
+      baseClonePath ||
       resolution.workingDirectoryPath ||
       resolution.localRootPath;
     const requestedPath = normalizeDirectoryPath(preferredPath || "");
