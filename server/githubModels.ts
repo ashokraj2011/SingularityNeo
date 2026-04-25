@@ -829,6 +829,11 @@ const shouldFallbackToHttp = (error: unknown) => {
     /not authorized to use this Copilot feature/i.test(message) ||
     /enterprise or organization policy/i.test(message) ||
     /requires an enterprise/i.test(message) ||
+    // Connection refused — Copilot CLI process is not running. Allow HTTP
+    // fallback so a missing copilot process degrades gracefully instead of
+    // blocking every chat message with a hard error.
+    /ECONNREFUSED/i.test(message) ||
+    /Failed to connect to CLI server/i.test(message) ||
     isGitHubProviderRateLimitError(error)
   );
 };

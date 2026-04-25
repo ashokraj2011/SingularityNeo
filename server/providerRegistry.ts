@@ -137,8 +137,13 @@ export const normalizeEmbeddingProviderKey = (
 export const resolveAgentProviderKey = (
   agent?: Partial<CapabilityAgent> | null,
 ): ProviderKey => {
-  if (trim(agent?.providerKey)) {
-    return normalizeProviderKey(agent?.providerKey);
+  const explicitKey = trim(agent?.providerKey);
+  // Treat the DEFAULT_PROVIDER_KEY ('github-copilot') stored in providerKey as
+  // a legacy sentinel — the same as an empty value — so that changing the
+  // configured runtime default (e.g. to 'local-openai') automatically re-routes
+  // agents that were created before the switch without requiring a DB migration.
+  if (explicitKey && !isLegacyDefaultProviderLabel(explicitKey)) {
+    return normalizeProviderKey(explicitKey);
   }
 
   if (isLegacyDefaultProviderLabel(agent?.provider)) {
