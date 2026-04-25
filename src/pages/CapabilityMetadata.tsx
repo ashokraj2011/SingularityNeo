@@ -8,7 +8,6 @@ import {
   Database,
   FolderCode,
   GitBranch,
-  KeyRound,
   Layers,
   Link2,
   Plus,
@@ -31,17 +30,13 @@ import { useToast } from '../context/ToastContext';
 import { cn } from '../lib/utils';
 import {
   fetchCapabilityAlmExport,
-  clearRuntimeCredentials,
   createStoryProposalBatch,
   detectCapabilityWorkspaceProfile,
   fetchCapabilityCodeIndex,
   fetchCapabilityCopilotGuidance,
-  fetchRuntimeStatus,
   publishCapabilityContract,
   refreshCapabilityCodeIndex,
   refreshCapabilityCopilotGuidance,
-  updateRuntimeCredentials,
-  type RuntimeStatus,
 } from '../lib/api';
 import {
   createLifecyclePhase,
@@ -425,7 +420,6 @@ export default function CapabilityMetadata() {
     });
   }, [location.hash]);
   const [isSaving, setIsSaving] = useState(false);
-  const [isUpdatingRuntime, setIsUpdatingRuntime] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [lastSavedAt, setLastSavedAt] = useState('');
   const workspace = getCapabilityWorkspace(activeCapability.id);
@@ -519,9 +513,6 @@ export default function CapabilityMetadata() {
   );
   const [isPublishingContract, setIsPublishingContract] = useState(false);
   const [almExportPreview, setAlmExportPreview] = useState('');
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
-  const [runtimeStatusError, setRuntimeStatusError] = useState('');
-  const [runtimeTokenInput, setRuntimeTokenInput] = useState('');
   const [workspaceDetection, setWorkspaceDetection] =
     useState<WorkspaceDetectionResult | null>(null);
   const [workspaceDetectionDismissed, setWorkspaceDetectionDismissed] =
@@ -633,35 +624,6 @@ export default function CapabilityMetadata() {
         : workspace.workflows[0]?.id || '',
     );
   }, [workspace.workflows]);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    fetchRuntimeStatus()
-      .then(status => {
-        if (!isMounted) {
-          return;
-        }
-
-        setRuntimeStatus(status);
-        setRuntimeStatusError('');
-      })
-      .catch(error => {
-        if (!isMounted) {
-          return;
-        }
-
-        setRuntimeStatusError(
-          error instanceof Error
-            ? error.message
-            : 'Unable to load GitHub runtime identity.',
-        );
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
 
   // Copilot guidance pack — surfaced so operators can see exactly what
   // CLAUDE.md / AGENTS.md / .cursor/rules content each agent reads on
@@ -846,25 +808,6 @@ export default function CapabilityMetadata() {
   );
   const capabilityLifecycleLabel =
     activeCapability.status === 'ARCHIVED' ? 'Inactive' : 'Active';
-  const runtimeAccessLabel =
-    runtimeStatus?.runtimeAccessMode === 'copilot-session'
-      ? 'Copilot session'
-      : runtimeStatus?.runtimeAccessMode === 'headless-cli'
-      ? 'Headless CLI'
-      : runtimeStatus?.runtimeAccessMode === 'http-fallback'
-      ? 'HTTP fallback'
-      : 'Unconfigured';
-  const runtimeTokenSourceLabel =
-    runtimeStatus?.tokenSource === 'headless-cli'
-      ? 'COPILOT_CLI_URL'
-      : runtimeStatus?.tokenSource === 'runtime-override'
-      ? 'UI override'
-      : runtimeStatus?.tokenSource === 'GITHUB_MODELS_TOKEN'
-      ? 'GITHUB_MODELS_TOKEN'
-      : runtimeStatus?.tokenSource === 'GITHUB_TOKEN'
-      ? 'GITHUB_TOKEN'
-      : 'No credential';
-
   const metadataSummary = useMemo(
     () => [
       { label: 'Teams', value: textToList(form.teamNames).length },
@@ -1609,75 +1552,6 @@ export default function CapabilityMetadata() {
       showError('Capability lifecycle update failed', message);
     }
     })();
-  };
-
-  const refreshRuntimeIdentity = async () => {
-    try {
-      const status = await fetchRuntimeStatus();
-      setRuntimeStatus(status);
-      setRuntimeStatusError('');
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'Unable to refresh runtime identity.';
-      setRuntimeStatusError(message);
-      showError('Runtime refresh failed', message);
-    }
-  };
-
-  const handleRuntimeOverrideSave = async () => {
-    const nextToken = runtimeTokenInput.trim();
-    if (!nextToken) {
-      showError('GitHub token required', 'Paste a GitHub token before saving the runtime override.');
-      return;
-    }
-
-    setIsUpdatingRuntime(true);
-    try {
-      const status = await updateRuntimeCredentials(nextToken);
-      setRuntimeStatus(status);
-      setRuntimeStatusError('');
-      setRuntimeTokenInput('');
-      success(
-        'Runtime key updated',
-        status.githubIdentity?.login
-          ? `The backend is now using @${status.githubIdentity.login}.`
-          : 'The backend is now using the runtime override key.',
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'Unable to update the runtime key.';
-      setRuntimeStatusError(message);
-      showError('Runtime key update failed', message);
-    } finally {
-      setIsUpdatingRuntime(false);
-    }
-  };
-
-  const handleRuntimeOverrideClear = async () => {
-    setIsUpdatingRuntime(true);
-    try {
-      const status = await clearRuntimeCredentials();
-      setRuntimeStatus(status);
-      setRuntimeStatusError('');
-      setRuntimeTokenInput('');
-      success(
-        'Runtime override cleared',
-        'The backend reverted to the server environment token configuration.',
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'Unable to clear the runtime override.';
-      setRuntimeStatusError(message);
-      showError('Runtime override clear failed', message);
-    } finally {
-      setIsUpdatingRuntime(false);
-    }
   };
 
   const handleGenerateStoryBatch = async () => {
@@ -3534,152 +3408,6 @@ export default function CapabilityMetadata() {
         </motion.form>
 
         <aside className="space-y-4 xl:sticky xl:top-28 xl:self-start">
-          <SectionCard
-            title="Execution runtime"
-            description="See which provider lane the control plane is using, which identity is visible, and whether the backend is using CLI, desktop session, or token-based access."
-            tone="brand"
-          >
-            <div className="space-y-4">
-              <div className="flex flex-wrap gap-2">
-                <StatusBadge tone={runtimeStatus?.configured ? 'success' : 'warning'}>
-                  {runtimeStatus?.configured ? 'Configured' : 'Not configured'}
-                </StatusBadge>
-                <StatusBadge tone={runtimeStatus?.runtimeAccessMode !== 'unconfigured' ? 'success' : 'warning'}>
-                  {runtimeAccessLabel}
-                </StatusBadge>
-                <StatusBadge tone="info">{runtimeTokenSourceLabel}</StatusBadge>
-                <StatusBadge tone="brand">{runtimeStatus?.provider || 'Unknown provider'}</StatusBadge>
-              </div>
-
-              <div className="rounded-2xl bg-surface-container-low p-4">
-                <div className="flex items-start gap-3">
-                  <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-primary shadow-sm">
-                    <KeyRound size={18} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                      {runtimeStatus?.providerKey === 'github-copilot'
-                        ? 'Active GitHub identity'
-                        : 'Resolved provider identity'}
-                    </p>
-                    <p className="mt-2 text-sm font-bold text-on-surface">
-                      {runtimeStatus?.githubIdentity?.login
-                        ? `@${runtimeStatus.githubIdentity.login}`
-                        : 'Identity unavailable'}
-                    </p>
-                    <p className="mt-1 text-sm text-secondary">
-                      {runtimeStatus?.githubIdentity?.name ||
-                        runtimeStatus?.githubIdentityError ||
-                        runtimeStatusError ||
-                        'The runtime has not resolved a GitHub identity yet.'}
-                    </p>
-                    {runtimeStatus?.githubIdentity?.profileUrl ? (
-                      <a
-                        href={runtimeStatus.githubIdentity.profileUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="mt-2 inline-flex text-xs font-bold uppercase tracking-[0.18em] text-primary transition-colors hover:text-primary/80"
-                      >
-                        Open GitHub profile
-                      </a>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl bg-surface-container-low p-4">
-                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                    Primary provider
-                  </p>
-                  <p className="mt-2 text-sm font-bold text-on-surface">
-                    {runtimeStatus?.provider || 'Not resolved'}
-                  </p>
-                </div>
-                <div className="rounded-2xl bg-surface-container-low p-4">
-                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                    Default model
-                  </p>
-                  <p className="mt-2 text-sm font-bold text-on-surface">
-                    {runtimeStatus?.defaultModel || 'Not resolved'}
-                  </p>
-                </div>
-                <div className="rounded-2xl bg-surface-container-low p-4 sm:col-span-2">
-                  <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
-                    Model catalog
-                  </p>
-                  <p className="mt-2 text-sm font-bold text-on-surface">
-                    {runtimeStatus?.modelCatalogSource === 'runtime'
-                      ? 'Live runtime catalog'
-                      : 'Fallback catalog'}
-                  </p>
-                  <p className="mt-2 text-xs leading-relaxed text-secondary">
-                    {(runtimeStatus?.availableProviders || []).length > 0
-                      ? `${runtimeStatus.availableProviders
-                          .map(provider =>
-                            provider.configured
-                              ? `${provider.label} ready`
-                              : `${provider.label} available`,
-                          )
-                          .join(' • ')}`
-                      : 'Provider abstraction is enabled through the runtime lane, even when only one provider is configured in this environment.'}
-                  </p>
-                </div>
-              </div>
-
-              {(runtimeStatusError || runtimeStatus?.githubIdentityError) ? (
-                <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
-                  <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-                  <p>{runtimeStatusError || runtimeStatus?.githubIdentityError}</p>
-                </div>
-              ) : null}
-
-              <label className="space-y-2 block">
-                <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">
-                  Runtime override key
-                </span>
-                <input
-                  type="password"
-                  value={runtimeTokenInput}
-                  onChange={event => setRuntimeTokenInput(event.target.value)}
-                  placeholder="Paste a provider token for the backend runtime"
-                  className="field-input"
-                />
-                <p className="text-xs text-secondary">
-                  This override applies immediately to the running backend and masks the server env token until you clear it or restart the server.
-                </p>
-              </label>
-
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => void handleRuntimeOverrideSave()}
-                  disabled={isUpdatingRuntime || !runtimeTokenInput.trim()}
-                  className="enterprise-button enterprise-button-brand-muted disabled:opacity-50"
-                >
-                  {isUpdatingRuntime ? 'Saving key' : 'Use this key'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleRuntimeOverrideClear()}
-                  disabled={isUpdatingRuntime}
-                  className="enterprise-button enterprise-button-secondary disabled:opacity-50"
-                >
-                  Revert to server env
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void refreshRuntimeIdentity()}
-                  disabled={isUpdatingRuntime}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-outline-variant/15 px-4 py-2.5 text-xs font-bold uppercase tracking-[0.18em] text-secondary transition-all hover:bg-surface-container-low disabled:opacity-50"
-                >
-                  <RefreshCw size={14} />
-                  Refresh status
-                </button>
-              </div>
-            </div>
-          </SectionCard>
-
           <SectionCard
             title="Capability status"
             description="Use this to keep a capability active for day-to-day delivery or move it to an inactive state without deleting its history."

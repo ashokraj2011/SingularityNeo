@@ -34,12 +34,12 @@ export const resolveRuntimeAccessMode = ({
     return 'headless-cli';
   }
 
-  if (modelCatalogFromRuntime) {
-    return 'copilot-session';
-  }
-
   if (token) {
     return 'http-fallback';
+  }
+
+  if (modelCatalogFromRuntime) {
+    return 'copilot-session';
   }
 
   return 'unconfigured';

@@ -38,6 +38,68 @@ export const getLocalOpenAIDefaultModel = () =>
 export const getLocalOpenAIEmbeddingModel = () =>
   String(process.env.LOCAL_OPENAI_EMBEDDING_MODEL || process.env.OPENAI_COMPAT_EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 
+export const validateLocalOpenAIEmbeddingProvider = async ({
+  baseUrl,
+  apiKey,
+  model,
+  timeoutMs = 45_000,
+}: {
+  baseUrl: string;
+  apiKey?: string;
+  model?: string;
+  timeoutMs?: number;
+}) => {
+  const normalizedBaseUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (!normalizedBaseUrl) {
+    throw new Error('A local embedding base URL is required.');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${normalizedBaseUrl}/embeddings`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${String(apiKey || 'local').trim() || 'local'}`,
+        'Content-Type': 'application/json',
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: String(model || getLocalOpenAIEmbeddingModel()).trim() || getLocalOpenAIEmbeddingModel(),
+        input: ['singularity-embedding-healthcheck'],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(await getLocalProviderError(response));
+    }
+
+    const payload = (await response.json()) as {
+      model?: string;
+      data?: Array<{ embedding?: number[] }>;
+    };
+
+    if (!Array.isArray(payload.data) || payload.data.length === 0) {
+      throw new Error('The local embedding provider returned no vectors.');
+    }
+
+    return {
+      baseUrl: normalizedBaseUrl,
+      model:
+        String(payload.model || model || getLocalOpenAIEmbeddingModel()).trim() ||
+        getLocalOpenAIEmbeddingModel(),
+    };
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('The local embedding provider timed out.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 const estimateUsage = (prompt: string, completion: string): ProviderUsage => {
   const promptTokens = Math.max(1, Math.ceil(prompt.split(/\s+/).filter(Boolean).length * 1.25));
   const completionTokens = Math.max(

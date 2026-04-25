@@ -54,6 +54,15 @@ type ChatContext = {
   chatScope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
   chatScopeId?: string;
   memoryQueryText: string;
+  astGroundingPrompt?: string;
+  astGroundingMode?:
+    | 'ast-grounded-local-clone'
+    | 'ast-grounded-remote-index'
+    | 'no-ast-grounding';
+  checkoutPath?: string;
+  branchName?: string;
+  codeIndexSource?: 'local-checkout' | 'capability-index';
+  codeIndexFreshness?: string;
   developerPrompt?: string;
 };
 
@@ -251,6 +260,7 @@ export const registerRuntimeChatRoutes = (
       const memoryContext = anchorMemoryContext;
       const mergedMemoryPrompt = [
         anchorMemoryContext.prompt,
+        chatContext.astGroundingPrompt,
         homeMemoryContext?.prompt
           ? `Home-capability memory (${taggedParticipant!.capabilityId}):\n${homeMemoryContext.prompt}`
           : null,
@@ -309,6 +319,11 @@ export const registerRuntimeChatRoutes = (
         traceId,
         sessionMode: body.sessionMode || 'resume',
         memoryReferences: memoryContext.results.map(result => result.reference),
+        astGroundingMode: chatContext.astGroundingMode,
+        checkoutPath: chatContext.checkoutPath,
+        branchName: chatContext.branchName,
+        codeIndexSource: chatContext.codeIndexSource,
+        codeIndexFreshness: chatContext.codeIndexFreshness,
       });
 
       // Fire-and-forget audit record so desktop chat turns are always
@@ -482,6 +497,7 @@ export const registerRuntimeChatRoutes = (
       const memoryContext = anchorMemoryContext;
       const streamMergedMemoryPrompt = [
         anchorMemoryContext.prompt,
+        chatContext.astGroundingPrompt,
         streamHomeMemoryContext?.prompt
           ? `Home-capability memory (${foreignParticipant!.capabilityId}):\n${streamHomeMemoryContext.prompt}`
           : null,
@@ -492,6 +508,11 @@ export const registerRuntimeChatRoutes = (
         type: 'memory',
         traceId,
         memoryReferences: memoryContext.results.map(result => result.reference),
+        astGroundingMode: chatContext.astGroundingMode,
+        checkoutPath: chatContext.checkoutPath,
+        branchName: chatContext.branchName,
+        codeIndexSource: chatContext.codeIndexSource,
+        codeIndexFreshness: chatContext.codeIndexFreshness,
       });
       const span = await startTelemetrySpan({
         capabilityId: liveCapability.id,

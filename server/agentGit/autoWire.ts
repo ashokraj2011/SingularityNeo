@@ -56,6 +56,7 @@ import {
   resolveDesktopWorkspace,
 } from "../desktopWorkspaces";
 import { getCapabilityExecutionOwnership } from "../executionOwnership";
+import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
 
 const LOG_PREFIX = "[agentGit/autoWire]";
 const execFileAsync = promisify(execFile);
@@ -96,11 +97,17 @@ const ensureLocalGitRepository = async (workspaceRoot: string) => {
 
 const resolveLocalWorkspaceRoot = async ({
   capabilityId,
+  capabilityName,
+  workItemId,
   repository,
+  repositoryCount = 1,
   workspaceRoots = [],
 }: {
   capabilityId: string;
+  capabilityName?: string;
+  workItemId: string;
   repository: CapabilityRepository;
+  repositoryCount?: number;
   workspaceRoots?: string[];
 }) => {
   void workspaceRoots;
@@ -120,7 +127,16 @@ const resolveLocalWorkspaceRoot = async ({
         repositoryId: repository.id,
       }),
     );
-    return resolution.workingDirectoryPath;
+    return buildWorkItemCheckoutPath({
+      workingDirectoryPath: resolution.workingDirectoryPath,
+      capability: {
+        id: capabilityId,
+        name: capabilityName || capabilityId,
+      },
+      workItemId,
+      repository,
+      repositoryCount,
+    });
   } catch {
     return "";
   }
@@ -156,12 +172,14 @@ const ensureLocalBranchCheckedOut = async ({
 
 const ensureLocalBranchSessionForWorkItem = async ({
   capabilityId,
+  capabilityName,
   workItem,
   repositories,
   workspaceRoots,
   context,
 }: {
   capabilityId: string;
+  capabilityName?: string;
   workItem: Pick<WorkItem, "id" | "title">;
   repositories: CapabilityRepository[];
   workspaceRoots?: string[];
@@ -175,7 +193,10 @@ const ensureLocalBranchSessionForWorkItem = async ({
 
   const workspaceRoot = await resolveLocalWorkspaceRoot({
     capabilityId,
+    capabilityName,
+    workItemId: workItem.id,
     repository,
+    repositoryCount: repositories.length,
     workspaceRoots,
   });
   if (!workspaceRoot) {
@@ -251,20 +272,29 @@ const ensureLocalBranchSessionForWorkItem = async ({
 
 const resolveLocalCommitSelection = async ({
   capabilityId,
+  capabilityName,
+  workItemId,
   artifact,
   repository,
+  repositoryCount = 1,
   workspaceRoots = [],
   context,
 }: {
   capabilityId: string;
+  capabilityName?: string;
+  workItemId: string;
   artifact: Artifact;
   repository: CapabilityRepository;
+  repositoryCount?: number;
   workspaceRoots?: string[];
   context: string;
 }) => {
   const repoRoot = await resolveLocalWorkspaceRoot({
     capabilityId,
+    capabilityName,
+    workItemId,
     repository,
+    repositoryCount,
     workspaceRoots,
   });
   if (!repoRoot) {
@@ -321,6 +351,7 @@ const resolveLocalCommitSelection = async ({
 
 const commitArtifactToLocalBranchSession = async ({
   capabilityId,
+  capabilityName,
   sessionId,
   artifact,
   repositories,
@@ -328,6 +359,7 @@ const commitArtifactToLocalBranchSession = async ({
   context,
 }: {
   capabilityId: string;
+  capabilityName?: string;
   sessionId: string;
   artifact: Artifact;
   repositories: CapabilityRepository[];
@@ -353,8 +385,11 @@ const commitArtifactToLocalBranchSession = async ({
 
   const selection = await resolveLocalCommitSelection({
     capabilityId,
+    capabilityName,
+    workItemId: session.workItemId,
     artifact,
     repository,
+    repositoryCount: repositories.length,
     workspaceRoots,
     context,
   });
@@ -457,6 +492,7 @@ const commitArtifactToLocalBranchSession = async ({
 
 export interface AutoStartInput {
   capabilityId: string;
+  capabilityName?: string;
   workItem: Pick<WorkItem, "id" | "title">;
   repositories: CapabilityRepository[];
   workspaceRoots?: string[];
@@ -486,6 +522,7 @@ export const autoStartSessionForWorkItem = async (
     if (auth.ok === false) {
       await ensureLocalBranchSessionForWorkItem({
         capabilityId: input.capabilityId,
+        capabilityName: input.capabilityName,
         workItem: input.workItem,
         repositories: input.repositories,
         workspaceRoots: input.workspaceRoots,
@@ -504,6 +541,7 @@ export const autoStartSessionForWorkItem = async (
       if (result.status === "AUTH_MISSING") {
         await ensureLocalBranchSessionForWorkItem({
           capabilityId: input.capabilityId,
+          capabilityName: input.capabilityName,
           workItem: input.workItem,
           repositories: input.repositories,
           workspaceRoots: input.workspaceRoots,
@@ -544,6 +582,7 @@ export const autoStartSessionForWorkItem = async (
 
 export interface AutoCommitInput {
   capabilityId: string;
+  capabilityName?: string;
   artifact: Artifact;
   /** The work item the artifact belongs to — needed when lazy-creating a session. */
   workItem: Pick<WorkItem, "id" | "title">;
@@ -567,12 +606,14 @@ const COMMITTABLE_KINDS = new Set<string>(["CODE_PATCH", "CODE_DIFF"]);
  */
 const resolveOrOpenSessionId = async ({
   capabilityId,
+  capabilityName,
   workItem,
   repositories,
   workspaceRoots,
   context,
 }: {
   capabilityId: string;
+  capabilityName?: string;
   workItem: Pick<WorkItem, "id" | "title">;
   repositories: CapabilityRepository[];
   workspaceRoots?: string[];
@@ -600,6 +641,7 @@ const resolveOrOpenSessionId = async ({
     if (started.status === "AUTH_MISSING") {
       return ensureLocalBranchSessionForWorkItem({
         capabilityId,
+        capabilityName,
         workItem,
         repositories,
         workspaceRoots,
@@ -714,6 +756,7 @@ export const autoCommitArtifact = async (
 
     const sessionId = await resolveOrOpenSessionId({
       capabilityId: input.capabilityId,
+      capabilityName: input.capabilityName,
       workItem: input.workItem,
       repositories: input.repositories,
       workspaceRoots: input.workspaceRoots,
@@ -725,6 +768,7 @@ export const autoCommitArtifact = async (
     if (auth.ok === false) {
       await commitArtifactToLocalBranchSession({
         capabilityId: input.capabilityId,
+        capabilityName: input.capabilityName,
         sessionId,
         artifact: input.artifact,
         repositories: input.repositories,
@@ -770,6 +814,7 @@ export const autoCommitArtifact = async (
         if (result.status === "AUTH_MISSING") {
           await commitArtifactToLocalBranchSession({
             capabilityId: input.capabilityId,
+            capabilityName: input.capabilityName,
             sessionId,
             artifact: input.artifact,
             repositories: input.repositories,

@@ -17,6 +17,7 @@ import { isDesktopExecutionRuntime } from './executionOwnership';
 import {
   getLocalOpenAIBaseUrl,
   getLocalOpenAIDefaultModel,
+  getLocalOpenAIEmbeddingModel,
   isLocalOpenAIConfigured,
 } from './localOpenAIProvider';
 import {
@@ -88,6 +89,11 @@ export const buildRuntimeStatus = async () => {
     embeddingConfigured: localProviderConfigured,
     retrievalMode: databaseRuntime.retrievalMode,
     fallbackReason: databaseRuntime.fallbackReason || null,
+    embeddingEndpoint: getLocalOpenAIBaseUrl() || null,
+    embeddingModel: localProviderConfigured ? getLocalOpenAIEmbeddingModel() : null,
+    embeddingApiKeyConfigured: Boolean(
+      String(process.env.LOCAL_OPENAI_API_KEY || process.env.OPENAI_COMPAT_API_KEY || '').trim(),
+    ),
     availableProviders: [
       {
         key: DEFAULT_PROVIDER_KEY,

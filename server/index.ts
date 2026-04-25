@@ -70,6 +70,7 @@ import {
   type ChatHistoryMessage,
 } from './githubModels';
 import { buildMemoryContext } from './memory';
+import { buildAstGroundingSummary, type AstGroundingSummary } from './astGrounding';
 import {
   ensureAgentLearningBackfill,
   queueCapabilityAgentLearningRefresh,
@@ -711,12 +712,31 @@ const resolveChatRuntimeContext = async ({
             .filter(Boolean)
             .join('\n')
         : body.message?.trim() || '';
+  const astGrounding: AstGroundingSummary = await buildAstGroundingSummary({
+    capability: bundle.capability,
+    workItem: hasReferencedWorkItem ? referencedWorkItem : undefined,
+    message: body.message || '',
+    branchName: hasReferencedWorkItem ? referencedWorkItem?.id : undefined,
+  }).catch(() => ({
+    astGroundingMode: 'no-ast-grounding' as const,
+    prompt: undefined,
+    checkoutPath: undefined,
+    branchName: hasReferencedWorkItem ? referencedWorkItem?.id : undefined,
+    codeIndexSource: undefined,
+    codeIndexFreshness: undefined,
+  }));
 
   return {
     liveBriefing,
     chatScope,
     chatScopeId,
     memoryQueryText,
+    astGroundingPrompt: astGrounding.prompt,
+    astGroundingMode: astGrounding.astGroundingMode,
+    checkoutPath: astGrounding.checkoutPath,
+    branchName: astGrounding.branchName,
+    codeIndexSource: astGrounding.codeIndexSource,
+    codeIndexFreshness: astGrounding.codeIndexFreshness,
     developerPrompt: isStageControlRequest
       ? buildStageControlDeveloperPrompt({
           agentName: liveAgent.name || liveAgent.role || 'the current stage agent',

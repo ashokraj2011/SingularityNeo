@@ -440,18 +440,6 @@ const loadExecutorWorkingDirectory = async (
   }
 };
 
-/**
- * Slug-safe subdirectory name for a repository checkout. We prefer the
- * repository id over the url because the id is already opaque/stable and
- * cannot accidentally leak credentials from a URL that happens to embed
- * a token.
- */
-const subdirectoryForRepository = (repositoryId: string | undefined): string => {
-  const trimmed = (repositoryId || "").trim();
-  if (!trimmed) return "workspace";
-  return trimmed.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
-};
-
 export const resolveDesktopWorkspace = async ({
   executorId,
   userId,
@@ -493,14 +481,10 @@ export const resolveDesktopWorkspace = async ({
       await loadExecutorWorkingDirectory(executorId);
     if (executorWorkingDirectory) {
       const normalizedRoot = normalizeDirectoryPath(executorWorkingDirectory);
-      // Each repository gets its own subdirectory inside the operator's
-      // working directory so multiple repos in the same capability don't
-      // collide on `git clone`. Capabilities with no repo still resolve
-      // cleanly: the subdir slug falls back to "workspace" and the
-      // checkout path is only consulted when a clone actually happens.
-      const synthesizedWorkingDirectoryPath = normalizedRoot
-        ? path.join(normalizedRoot, subdirectoryForRepository(repositoryId))
-        : normalizedRoot;
+      // The configured working directory is a parent workspace area. Runtime
+      // callers derive the per-capability / per-work-item checkout path from
+      // this root so multiple work items never collide on the same checkout.
+      const synthesizedWorkingDirectoryPath = normalizedRoot;
       const synthesizedValidation = validateWorkspacePaths({
         localRootPath: normalizedRoot,
         workingDirectoryPath: synthesizedWorkingDirectoryPath,

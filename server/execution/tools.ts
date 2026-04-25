@@ -44,7 +44,14 @@ import {
   findFileDependents,
   findFileDependencies,
   listTopExportsInFile,
+  searchCodeSymbols,
 } from "../codeIndex/query";
+import {
+  findLocalCheckoutSymbolRange,
+  getLocalCheckoutAstFreshness,
+  searchLocalCheckoutSymbols,
+} from "../localCodeIndex";
+import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
 
 const execFileAsync = promisify(execFile);
 
@@ -330,6 +337,10 @@ const requireRemoteWorkspaceResolution = (
   };
 };
 
+const looksLikeSymbolPattern = (value: string) =>
+  /^[A-Za-z_][A-Za-z0-9_.$-]{1,120}$/.test(String(value || "").trim()) &&
+  !/\s/.test(String(value || ""));
+
 const resolveWorkspacePath = async (
   capability: Capability,
   workItem?: WorkItem,
@@ -354,8 +365,23 @@ const resolveWorkspacePath = async (
       resolution.approvedWorkspaceRoots.length > 0
         ? resolution.approvedWorkspaceRoots
         : [resolution.localRootPath];
+    const workItemRepository = (capability.repositories || []).find(
+      (repository) => repository.id === workItemRepositoryId,
+    );
+    const derivedWorkItemCheckoutPath =
+      workItem?.id && workItemRepository
+        ? buildWorkItemCheckoutPath({
+            workingDirectoryPath: resolution.workingDirectoryPath,
+            capability,
+            workItemId: workItem.id,
+            repository: workItemRepository,
+            repositoryCount: (capability.repositories || []).length,
+          })
+        : "";
     const defaultPath =
-      resolution.workingDirectoryPath || resolution.localRootPath;
+      derivedWorkItemCheckoutPath ||
+      resolution.workingDirectoryPath ||
+      resolution.localRootPath;
     const requestedPath = normalizeDirectoryPath(preferredPath || "");
     const candidate = requestedPath || defaultPath;
 
@@ -747,7 +773,12 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         Math.min(Number(args.includeCallees ?? 0), 3),
       );
       const content = await fs.readFile(targetPath, "utf8");
-      const relativePath = path.relative(workspacePath, targetPath);
+      const relativePath = path
+        .relative(workspacePath, targetPath)
+        .replace(/\\/g, "/");
+      const workItemRepositoryId =
+        workItem?.executionContext?.primaryRepositoryId ||
+        workItem?.executionContext?.branch?.repositoryId;
 
       // Retrieval Bundle (Phase 2 / Lever 6): when the agent asks for
       // a symbol with callers/callees, surface neighbor-file paths + up
@@ -763,14 +794,14 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
           includeCallers > 0
             ? findFileDependents(
                 capability.id,
-                requestedPath,
+                relativePath,
                 includeCallers,
               ).catch(() => [])
             : Promise.resolve([]),
           includeCallees > 0
             ? findFileDependencies(
                 capability.id,
-                requestedPath,
+                relativePath,
                 includeCallees,
               ).catch(() => [])
             : Promise.resolve([]),
@@ -804,11 +835,23 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       // Semantic-hunk path: caller asked for a specific symbol. Look up
       // start/end lines from the code index, slice just that region.
       if (requestedSymbol && capability.id) {
-        const range = await findSymbolRangeInFile(
-          capability.id,
-          requestedPath,
-          requestedSymbol,
-        ).catch(() => null);
+        const localRange =
+          isRemoteExecutionClient() && workItem?.id && workItemRepositoryId
+            ? await findLocalCheckoutSymbolRange({
+                checkoutPath: workspacePath,
+                capabilityId: capability.id,
+                repositoryId: workItemRepositoryId,
+                relativePath,
+                symbolQuery: requestedSymbol,
+              }).catch(() => null)
+            : null;
+        const range =
+          localRange ||
+          (await findSymbolRangeInFile(
+            capability.id,
+            relativePath,
+            requestedSymbol,
+          ).catch(() => null));
         if (range) {
           const allLines = content.split("\n");
           const semanticStartLine = Math.max(1, range.sliceStartLine || range.startLine);
@@ -840,6 +883,14 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               containerSymbolId: range.containerSymbolId,
               qualifiedSymbolName: range.qualifiedSymbolName,
               kind: range.kind,
+              codeIndexSource:
+                localRange?.source === "local-checkout"
+                  ? "local-checkout"
+                  : "capability-index",
+              codeIndexFreshness:
+                localRange?.source === "local-checkout"
+                  ? localRange.builtAt
+                  : undefined,
               startLine: range.startLine,
               endLine: range.endLine,
               semanticStartLine,
@@ -872,6 +923,10 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             symbol: requestedSymbol,
             mode: "whole-file-fallback",
             compression,
+            codeIndexSource:
+              isRemoteExecutionClient() && workItem?.id && workItemRepositoryId
+                ? "local-checkout"
+                : "capability-index",
             symbolLookupMissed: true,
             hasNeighbors: neighborNote.length > 0,
             truncated: output.length > maxBytes,
@@ -922,6 +977,106 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       const limit = clampLimit(args.limit, 100, 500);
       const cursor =
         typeof args.cursor === "string" ? args.cursor.trim() : undefined;
+      const workItemRepositoryId =
+        workItem?.executionContext?.primaryRepositoryId ||
+        workItem?.executionContext?.branch?.repositoryId;
+      const relativeScopePath = path
+        .relative(workspacePath, scopePath)
+        .replace(/\\/g, "/");
+
+      if (capability.id && looksLikeSymbolPattern(pattern)) {
+        const localSymbolResults =
+          isRemoteExecutionClient() && workItem?.id && workItemRepositoryId
+            ? await searchLocalCheckoutSymbols({
+                checkoutPath: workspacePath,
+                capabilityId: capability.id,
+                repositoryId: workItemRepositoryId,
+                query: pattern,
+                limit: Math.min(limit, 25),
+              }).catch(() => null)
+            : null;
+        const filteredLocalSymbols =
+          localSymbolResults?.symbols.filter((symbol) =>
+            !relativeScopePath || relativeScopePath === "."
+              ? true
+              : symbol.filePath.startsWith(
+                  `${relativeScopePath.replace(/\/+$/, "")}/`,
+                ) || symbol.filePath === relativeScopePath,
+          ) || [];
+        if (filteredLocalSymbols.length > 0) {
+          const output = filteredLocalSymbols
+            .map(
+              (symbol) =>
+                `${symbol.qualifiedSymbolName} (${symbol.kind}) ${symbol.filePath}:${symbol.sliceStartLine || symbol.startLine}-${symbol.sliceEndLine || symbol.endLine}`,
+            )
+            .join("\n");
+          return {
+            summary: `Found ${filteredLocalSymbols.length} indexed symbol match${filteredLocalSymbols.length === 1 ? "" : "es"} for ${pattern}.`,
+            workingDirectory: workspacePath,
+            exitCode: 0,
+            stdoutPreview: previewText(output),
+            details: {
+              pattern,
+              scopePath,
+              matches: filteredLocalSymbols.map((symbol) => ({
+                symbolId: symbol.symbolId,
+                qualifiedSymbolName: symbol.qualifiedSymbolName,
+                symbolName: symbol.symbolName,
+                kind: symbol.kind,
+                filePath: symbol.filePath,
+                sliceStartLine: symbol.sliceStartLine,
+                sliceEndLine: symbol.sliceEndLine,
+              })),
+              totalScanned: filteredLocalSymbols.length,
+              mode: "symbol-search",
+              codeIndexSource: "local-checkout",
+              codeIndexFreshness: localSymbolResults?.builtAt,
+            },
+          };
+        }
+
+        const indexedMatches = (await searchCodeSymbols(capability.id, pattern, {
+          limit: Math.min(limit, 25),
+        }).catch(() => []))
+          .filter((symbol) =>
+            !relativeScopePath || relativeScopePath === "."
+              ? true
+              : symbol.filePath.startsWith(
+                  `${relativeScopePath.replace(/\/+$/, "")}/`,
+                ) || symbol.filePath === relativeScopePath,
+          );
+        if (indexedMatches.length > 0) {
+          const output = indexedMatches
+            .map(
+              (symbol) =>
+                `${symbol.qualifiedSymbolName} (${symbol.kind}) ${symbol.filePath}:${symbol.sliceStartLine || symbol.startLine}-${symbol.sliceEndLine || symbol.endLine}`,
+            )
+            .join("\n");
+          return {
+            summary: `Found ${indexedMatches.length} indexed symbol match${indexedMatches.length === 1 ? "" : "es"} for ${pattern}.`,
+            workingDirectory: workspacePath,
+            exitCode: 0,
+            stdoutPreview: previewText(output),
+            details: {
+              pattern,
+              scopePath,
+              matches: indexedMatches.map((symbol) => ({
+                symbolId: symbol.symbolId,
+                qualifiedSymbolName: symbol.qualifiedSymbolName,
+                symbolName: symbol.symbolName,
+                kind: symbol.kind,
+                filePath: symbol.filePath,
+                sliceStartLine: symbol.sliceStartLine,
+                sliceEndLine: symbol.sliceEndLine,
+              })),
+              totalScanned: indexedMatches.length,
+              mode: "symbol-search",
+              codeIndexSource: "capability-index",
+            },
+          };
+        }
+      }
+
       const result = await runProcess(
         "rg",
         ["-n", pattern, scopePath],
@@ -982,6 +1137,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
           nextCursor: paged.nextCursor,
           totalScanned: paged.totalScanned,
           truncated: paged.truncated,
+          mode: "text-search",
           fallback: isCommandMissing(result) ? "node-filesystem" : undefined,
         },
       };

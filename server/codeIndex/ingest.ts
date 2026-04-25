@@ -596,9 +596,12 @@ const ingestRepository = async (
   repository: CapabilityRepository,
   headers: Record<string, string>,
   workspaceSettings?: WorkspaceSettings,
+  localRepositoryRootOverride?: string,
 ): Promise<RepoIngestResult> => {
   const label = repository.label || repository.url || repository.id;
-  const localRepositoryRoot = resolveLocalRepositoryRoot(repository);
+  const localRepositoryRoot =
+    normalizeDirectoryPath(localRepositoryRootOverride || "") ||
+    resolveLocalRepositoryRoot(repository);
   let localFallbackMessage = '';
   let tree:
     | { ok: true; entries: TreeEntry[]; truncated: boolean }
@@ -1072,6 +1075,9 @@ const aggregateStatus = (
 
 export const refreshCapabilityCodeIndex = async (
   capabilityId: string,
+  options?: {
+    localRepositoryRoots?: Record<string, string | undefined>;
+  },
 ): Promise<CapabilityCodeIndexSnapshot> => {
   const startedAt = new Date();
   const repositories = await getCapabilityRepositoriesRecord(capabilityId);
@@ -1100,6 +1106,7 @@ export const refreshCapabilityCodeIndex = async (
         repo,
         headers,
         workspaceSettings,
+        options?.localRepositoryRoots?.[repo.id],
       );
       repoResults.push(result);
     } catch (error) {

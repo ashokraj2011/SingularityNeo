@@ -68,6 +68,7 @@ import {
 } from "../telemetry";
 import { appendAccessAuditEvent } from "../workspaceOrganization";
 import { getWorkspaceWriteLock } from "../workspaceLock";
+import { syncCapabilityRepositoriesForDesktop } from "../desktopRepoSync";
 
 const parseHeaderStringList = (value: unknown) => {
   const raw = String(value || "").trim();
@@ -741,10 +742,70 @@ export const registerExecutionRuntimeRoutes = (app: express.Express) => {
           createdAt: new Date().toISOString(),
         }).catch(() => undefined);
 
+        // Fire-and-forget: ensure repos are cloned and AST index is built.
+        // Do NOT await — the claim response must not be delayed.
+        syncCapabilityRepositoriesForDesktop({
+          capabilityId,
+          executorId,
+        }).catch(err => {
+          console.error(
+            `[executionRuntime] repo-sync failed for ${capabilityId}:`,
+            err instanceof Error ? err.message : err,
+          );
+        });
+
         response.json({
           ownership,
           executor: await getDesktopExecutorRegistration(executorId),
         });
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  /**
+   * POST /api/capabilities/:capabilityId/execution/repo-sync
+   *
+   * Explicitly triggers (or re-triggers) the git clone + AST index build for
+   * all repositories configured on the capability.  Accepts an optional
+   * `fetch: true` body flag to also pull the latest remote changes into
+   * existing clones.
+   *
+   * Returns a JSON report of what was cloned / updated / skipped.
+   */
+  app.post(
+    "/api/capabilities/:capabilityId/execution/repo-sync",
+    async (request, response) => {
+      try {
+        const actor = parseActorContext(request, "Workspace Operator");
+        const capabilityId = String(request.params.capabilityId || "").trim();
+        await assertCapabilityPermission({
+          capabilityId,
+          actor,
+          action: "capability.execution.claim",
+        });
+
+        const executorId = String(request.body?.executorId || "").trim();
+        if (!executorId) {
+          response.status(400).json({ error: "executorId is required." });
+          return;
+        }
+
+        const registration = await getDesktopExecutorRegistration(executorId);
+        if (!registration) {
+          response.status(404).json({ error: "Desktop executor not found." });
+          return;
+        }
+
+        const fetch = Boolean(request.body?.fetch);
+        const report = await syncCapabilityRepositoriesForDesktop({
+          capabilityId,
+          executorId,
+          fetch,
+        });
+
+        response.json(report);
       } catch (error) {
         sendApiError(response, error);
       }

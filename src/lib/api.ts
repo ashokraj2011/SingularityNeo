@@ -160,6 +160,9 @@ export interface RuntimeStatus {
   embeddingConfigured?: boolean;
   retrievalMode?: MemoryRetrievalMode;
   fallbackReason?: string | null;
+  embeddingEndpoint?: string | null;
+  embeddingModel?: string | null;
+  embeddingApiKeyConfigured?: boolean;
   availableProviders?: Array<{
     key: "github-copilot" | "local-openai";
     label: string;
@@ -451,6 +454,36 @@ export const clearRuntimeCredentials = async (): Promise<RuntimeStatus> => {
   });
 };
 
+export const updateLocalEmbeddingSettings = async ({
+  baseUrl,
+  apiKey,
+  model,
+}: {
+  baseUrl: string;
+  apiKey?: string;
+  model?: string;
+}): Promise<RuntimeStatus> => {
+  const desktop = getDesktopBridge();
+  if (!desktop?.isDesktop) {
+    throw new Error('Local embedding settings can only be configured from the desktop runtime.');
+  }
+
+  return desktop.setEmbeddingConfig({
+    baseUrl,
+    apiKey,
+    model,
+  }) as Promise<RuntimeStatus>;
+};
+
+export const clearLocalEmbeddingSettings = async (): Promise<RuntimeStatus> => {
+  const desktop = getDesktopBridge();
+  if (!desktop?.isDesktop) {
+    throw new Error('Local embedding settings can only be configured from the desktop runtime.');
+  }
+
+  return desktop.clearEmbeddingConfig() as Promise<RuntimeStatus>;
+};
+
 export const claimCapabilityExecution = async ({
   capabilityId,
   forceTakeover,
@@ -492,6 +525,45 @@ export const releaseCapabilityExecution = async ({
     "A desktop runtime is required to release capability execution.",
   );
 };
+
+export interface RepoSyncResult {
+  repositoryId: string;
+  repositoryLabel: string;
+  checkoutPath: string;
+  status: 'cloned' | 'updated' | 'already-current' | 'skipped' | 'error';
+  error?: string;
+}
+
+export interface CapabilityRepoSyncReport {
+  capabilityId: string;
+  executorId: string;
+  workingDirectory: string;
+  repos: RepoSyncResult[];
+  syncedAt: string;
+}
+
+/**
+ * Explicitly triggers git clone + AST index build for all repositories
+ * configured on a capability.  Pass `fetch: true` to also pull the latest
+ * remote changes into existing clones.
+ */
+export const syncCapabilityRepositories = async ({
+  capabilityId,
+  executorId,
+  fetch = false,
+}: {
+  capabilityId: string;
+  executorId: string;
+  fetch?: boolean;
+}): Promise<CapabilityRepoSyncReport> =>
+  requestJson<CapabilityRepoSyncReport>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/execution/repo-sync`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ executorId, fetch }),
+    },
+  );
 
 export const fetchDesktopWorkspaceMappings = async ({
   executorId,

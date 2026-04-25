@@ -53,6 +53,7 @@ import {
   upsertWorkItemCheckoutSessionRecord,
   upsertWorkItemCodeClaimRecord,
 } from "../repository";
+import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
 import { isPathInsideWorkspaceRoot } from "../workspacePaths";
 
 type CodeWorkspaceStatus = {
@@ -156,17 +157,27 @@ export const registerWorkItemRoutes = (
   };
 
   const ensureRepositoryCheckoutReady = async ({
+    capability,
+    workItemId,
     desktopWorkspace,
     repository,
     baseBranch,
   }: {
+    capability: Capability;
+    workItemId: string;
     desktopWorkspace: Awaited<
       ReturnType<typeof resolveRequiredDesktopWorkspace>
     >;
     repository: Capability["repositories"][number];
     baseBranch: string;
   }) => {
-    const checkoutPath = desktopWorkspace.workingDirectoryPath;
+    const checkoutPath = buildWorkItemCheckoutPath({
+      workingDirectoryPath: desktopWorkspace.workingDirectoryPath,
+      capability,
+      workItemId,
+      repository,
+      repositoryCount: (capability.repositories || []).length,
+    });
     if (
       !isPathInsideWorkspaceRoot(checkoutPath, desktopWorkspace.localRootPath)
     ) {
@@ -268,6 +279,8 @@ export const registerWorkItemRoutes = (
       context.branch.baseBranch || repository.defaultBranch || "main";
     const { workspacePath, workspaceStatus } =
       await ensureRepositoryCheckoutReady({
+        capability: bundle.capability,
+        workItemId,
         desktopWorkspace,
         repository,
         baseBranch,
@@ -332,7 +345,7 @@ export const registerWorkItemRoutes = (
         userId: actorUserId,
         repositoryId: context.primaryRepositoryId,
         localPath: workspacePath,
-        workingDirectoryPath: desktopWorkspace.workingDirectoryPath,
+        workingDirectoryPath: workspacePath,
         branch: branchName,
         lastSeenHeadSha: headSha || undefined,
         lastSyncedAt: new Date().toISOString(),
@@ -893,12 +906,28 @@ export const registerWorkItemRoutes = (
           actorUserId: userId,
           repositoryId,
         });
+        const bundle = await getCapabilityBundle(request.params.capabilityId);
+        const repository = (bundle.capability.repositories || []).find(
+          (entry) => entry.id === repositoryId,
+        );
+        if (!repository) {
+          throw new Error(
+            `Repository ${repositoryId} was not found on capability ${request.params.capabilityId}.`,
+          );
+        }
+
+        const defaultCheckoutPath = buildWorkItemCheckoutPath({
+          workingDirectoryPath: desktopWorkspace.workingDirectoryPath,
+          capability: bundle.capability,
+          workItemId: request.params.workItemId,
+          repository,
+          repositoryCount: (bundle.capability.repositories || []).length,
+        });
         const localPath =
-          String(request.body?.localPath || "").trim() ||
-          desktopWorkspace.workingDirectoryPath;
+          String(request.body?.localPath || "").trim() || defaultCheckoutPath;
         const workingDirectoryPath =
           String(request.body?.workingDirectoryPath || "").trim() ||
-          desktopWorkspace.workingDirectoryPath;
+          defaultCheckoutPath;
 
         if (
           !isPathInsideWorkspaceRoot(localPath, desktopWorkspace.localRootPath)

@@ -13,6 +13,9 @@ contextBridge.exposeInMainWorld('singularityDesktop', {
   setActorContext: actor => ipcRenderer.invoke('desktop:runtime:actor-context', { actor }),
   setRuntimeToken: token => ipcRenderer.invoke('desktop:runtime:set-token', { token }),
   clearRuntimeToken: () => ipcRenderer.invoke('desktop:runtime:clear-token'),
+  setEmbeddingConfig: payload =>
+    ipcRenderer.invoke('desktop:runtime:set-embedding-config', payload || {}),
+  clearEmbeddingConfig: () => ipcRenderer.invoke('desktop:runtime:clear-embedding-config'),
   sendRuntimeChat: payload => ipcRenderer.invoke('desktop:runtime:chat', payload),
   claimCapabilityExecution: payload =>
     ipcRenderer.invoke('desktop:runtime:execution:claim', payload),

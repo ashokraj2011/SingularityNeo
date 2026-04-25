@@ -37,6 +37,12 @@ export interface SingularityDesktopBridge {
   setActorContext: (actor: unknown) => Promise<unknown>;
   setRuntimeToken: (token: string) => Promise<unknown>;
   clearRuntimeToken: () => Promise<unknown>;
+  setEmbeddingConfig: (payload: {
+    baseUrl: string;
+    apiKey?: string;
+    model?: string;
+  }) => Promise<unknown>;
+  clearEmbeddingConfig: () => Promise<unknown>;
   sendRuntimeChat: (payload: unknown) => Promise<unknown>;
   claimCapabilityExecution: (payload: unknown) => Promise<unknown>;
   releaseCapabilityExecution: (payload: unknown) => Promise<unknown>;

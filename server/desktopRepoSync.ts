@@ -1,0 +1,362 @@
+/**
+ * Desktop Repository Sync
+ *
+ * When a desktop executor claims a capability, this module ensures every
+ * configured repository is present as a local clone inside the executor's
+ * working directory.  It also builds (or queues a build of) the in-memory
+ * AST index for each clone so that chat and agent runs get `ast-grounded-local-clone`
+ * quality grounding without waiting for a work-item checkout.
+ *
+ * The module also maintains an in-memory registry of base clone paths that
+ * other services (astGrounding, chatWorkspace) can query without needing to
+ * know the executor or working-directory details.
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import type { CapabilityRepository } from '../src/types';
+import {
+  buildCapabilityBaseRepositoryPath,
+  buildCapabilityCheckoutSlug,
+  buildRepositoryCheckoutSlug,
+} from './workItemCheckouts';
+import { getDesktopExecutorRegistration } from './executionOwnership';
+import { getCapabilityRepositoriesRecord, getCapabilityBundle } from './repository';
+import { refreshCapabilityCodeIndex } from './codeIndex/ingest';
+import {
+  queueLocalCheckoutAstRefresh,
+  getLocalCheckoutAstFreshness,
+} from './localCodeIndex';
+import { normalizeDirectoryPath } from './workspacePaths';
+
+// ---------------------------------------------------------------------------
+// In-memory registry — maps capabilityId → list of base clone entries.
+// Written by syncCapabilityRepositoriesForDesktop(); read by astGrounding.ts.
+// ---------------------------------------------------------------------------
+
+export interface CapabilityBaseCloneEntry {
+  repositoryId: string;
+  repositoryLabel: string;
+  checkoutPath: string;
+  isPrimary: boolean;
+  syncedAt: string;
+  /** undefined = not yet checked */
+  isGitRepo?: boolean;
+}
+
+const baseCloneRegistry = new Map<string, CapabilityBaseCloneEntry[]>();
+
+/**
+ * Returns the registered base clone entries for a capability, or an empty
+ * array if the capability has not been synced yet.
+ */
+export const getCapabilityBaseClones = (
+  capabilityId: string,
+): CapabilityBaseCloneEntry[] => baseCloneRegistry.get(capabilityId) ?? [];
+
+/**
+ * Returns the primary (or first) base clone entry for a capability.
+ * Used by astGrounding.ts when no work-item checkout is available.
+ */
+export const getPrimaryBaseClone = (
+  capabilityId: string,
+): CapabilityBaseCloneEntry | undefined => {
+  const entries = getCapabilityBaseClones(capabilityId);
+  return entries.find(e => e.isPrimary && e.isGitRepo) ?? entries.find(e => e.isGitRepo);
+};
+
+// ---------------------------------------------------------------------------
+// Git helpers (thin wrappers — the real impl lives in workItems.ts / index.ts)
+// ---------------------------------------------------------------------------
+
+/** Runs a git command and returns trimmed stdout.  Throws on non-zero exit. */
+const runGit = (cwd: string, args: string[]): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const { execFile } = require('node:child_process') as typeof import('node:child_process');
+    execFile('git', args, { cwd }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr?.trim() || error.message));
+      } else {
+        resolve(stdout?.trim() ?? '');
+      }
+    });
+  });
+
+/**
+ * Returns true when the given directory is the root of a git working tree.
+ * Returns false (never throws) when the directory doesn't exist or is not a repo.
+ */
+const isGitRepository = async (dirPath: string): Promise<boolean> => {
+  if (!fs.existsSync(dirPath)) return false;
+  try {
+    const result = await runGit(dirPath, ['rev-parse', '--is-inside-work-tree']);
+    return result === 'true';
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Clones `repositoryUrl` into `checkoutPath` on `defaultBranch`.
+ * Falls back to a full clone if the branch-specific clone fails.
+ */
+const cloneRepository = async ({
+  repositoryUrl,
+  checkoutPath,
+  defaultBranch,
+}: {
+  repositoryUrl: string;
+  checkoutPath: string;
+  defaultBranch: string;
+}): Promise<void> => {
+  const parent = path.dirname(checkoutPath);
+  fs.mkdirSync(parent, { recursive: true });
+
+  try {
+    await runGit(parent, [
+      'clone',
+      '--branch', defaultBranch,
+      '--single-branch',
+      repositoryUrl,
+      checkoutPath,
+    ]);
+  } catch {
+    // Branch not found or other failure — attempt a full clone.
+    await runGit(parent, ['clone', repositoryUrl, checkoutPath]);
+  }
+};
+
+/**
+ * Fetches the latest changes on the current branch of an existing clone.
+ * Does nothing (no throw) if the network is unreachable.
+ */
+const fetchRepository = async (checkoutPath: string): Promise<void> => {
+  try {
+    await runGit(checkoutPath, ['fetch', '--quiet', '--prune']);
+  } catch {
+    // Network unreachable — leave the existing clone as-is.
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+export interface RepoSyncResult {
+  repositoryId: string;
+  repositoryLabel: string;
+  checkoutPath: string;
+  status: 'cloned' | 'updated' | 'already-current' | 'skipped' | 'error';
+  error?: string;
+}
+
+export interface CapabilityRepoSyncReport {
+  capabilityId: string;
+  executorId: string;
+  workingDirectory: string;
+  repos: RepoSyncResult[];
+  syncedAt: string;
+}
+
+/**
+ * Checks whether each repository configured on the capability has a local
+ * clone in the executor's working directory.  Missing repos are cloned;
+ * existing clones are kept as-is (or optionally fetched when `fetch: true`).
+ *
+ * After cloning, the in-memory AST index for each repo is queued for a
+ * refresh so that code grounding is available immediately.
+ *
+ * The capability code index is also refreshed with the local clone paths so
+ * that subsequent ingest jobs prefer reading from disk rather than the GitHub
+ * API.
+ *
+ * Designed to be called fire-and-forget from the claim endpoint.
+ */
+export const syncCapabilityRepositoriesForDesktop = async ({
+  capabilityId,
+  executorId,
+  fetch = false,
+}: {
+  capabilityId: string;
+  executorId: string;
+  /**
+   * When true, run `git fetch` on already-cloned repos to pull the latest
+   * remote changes.  Defaults to false so the initial claim is fast.
+   */
+  fetch?: boolean;
+}): Promise<CapabilityRepoSyncReport> => {
+  // 1. Resolve working directory from executor registration.
+  const registration = await getDesktopExecutorRegistration(executorId);
+  const workingDirectory = registration?.workingDirectory
+    ? normalizeDirectoryPath(registration.workingDirectory)
+    : '';
+
+  if (!workingDirectory) {
+    console.warn(
+      `[desktopRepoSync] executor ${executorId} has no workingDirectory — cannot sync repositories for ${capabilityId}`,
+    );
+    return {
+      capabilityId,
+      executorId,
+      workingDirectory: '',
+      repos: [],
+      syncedAt: new Date().toISOString(),
+    };
+  }
+
+  // 2. Load capability bundle (needed for the slug + repository list).
+  const bundle = await getCapabilityBundle(capabilityId).catch(() => null);
+  const repositories: CapabilityRepository[] = bundle?.capability.repositories ?? [];
+
+  if (!repositories.length) {
+    console.log(
+      `[desktopRepoSync] capability ${capabilityId} has no repositories — nothing to sync`,
+    );
+    return {
+      capabilityId,
+      executorId,
+      workingDirectory,
+      repos: [],
+      syncedAt: new Date().toISOString(),
+    };
+  }
+
+  const capability = bundle!.capability;
+  const results: RepoSyncResult[] = [];
+  const registryEntries: CapabilityBaseCloneEntry[] = [];
+  const localRepositoryRoots: Record<string, string> = {};
+
+  // 3. For each repository — ensure clone exists and queue AST refresh.
+  for (const repo of repositories) {
+    if (repo.status === 'ARCHIVED') {
+      results.push({
+        repositoryId: repo.id,
+        repositoryLabel: repo.label || repo.url,
+        checkoutPath: '',
+        status: 'skipped',
+      });
+      continue;
+    }
+
+    const checkoutPath = buildCapabilityBaseRepositoryPath({
+      workingDirectoryPath: workingDirectory,
+      capability,
+      repository: repo,
+    });
+
+    if (!checkoutPath) {
+      results.push({
+        repositoryId: repo.id,
+        repositoryLabel: repo.label || repo.url,
+        checkoutPath: '',
+        status: 'error',
+        error: 'Could not build checkout path — workingDirectory may be invalid',
+      });
+      continue;
+    }
+
+    let status: RepoSyncResult['status'] = 'already-current';
+    let error: string | undefined;
+
+    try {
+      const alreadyCloned = await isGitRepository(checkoutPath);
+
+      if (alreadyCloned) {
+        if (fetch) {
+          await fetchRepository(checkoutPath);
+          status = 'updated';
+        } else {
+          status = 'already-current';
+        }
+      } else {
+        if (!repo.url) {
+          throw new Error(`Repository ${repo.id} has no URL configured`);
+        }
+        await cloneRepository({
+          repositoryUrl: repo.url,
+          checkoutPath,
+          defaultBranch: repo.defaultBranch || 'main',
+        });
+        status = 'cloned';
+        console.log(
+          `[desktopRepoSync] cloned ${repo.url} → ${checkoutPath}`,
+        );
+      }
+
+      // 4. Queue AST refresh (non-blocking).
+      queueLocalCheckoutAstRefresh({
+        checkoutPath,
+        capabilityId,
+        repositoryId: repo.id,
+      });
+
+      // 5. Record in the local roots map for the capability code index.
+      localRepositoryRoots[repo.id] = checkoutPath;
+
+      registryEntries.push({
+        repositoryId: repo.id,
+        repositoryLabel: repo.label || repo.url,
+        checkoutPath,
+        isPrimary: Boolean(repo.isPrimary),
+        syncedAt: new Date().toISOString(),
+        isGitRepo: true,
+      });
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      status = 'error';
+      console.error(
+        `[desktopRepoSync] failed to sync repo ${repo.id} for capability ${capabilityId}: ${error}`,
+      );
+      registryEntries.push({
+        repositoryId: repo.id,
+        repositoryLabel: repo.label || repo.url,
+        checkoutPath,
+        isPrimary: Boolean(repo.isPrimary),
+        syncedAt: new Date().toISOString(),
+        isGitRepo: false,
+      });
+    }
+
+    results.push({
+      repositoryId: repo.id,
+      repositoryLabel: repo.label || repo.url,
+      checkoutPath,
+      status,
+      error,
+    });
+  }
+
+  // 6. Update in-memory registry so astGrounding can resolve base clone paths.
+  baseCloneRegistry.set(capabilityId, registryEntries);
+
+  // 7. Refresh the capability code index using local clones where available.
+  //    Run in the background — do not block the caller.
+  if (Object.keys(localRepositoryRoots).length > 0) {
+    refreshCapabilityCodeIndex(capabilityId, {
+      localRepositoryRoots,
+    }).catch(err => {
+      console.error(
+        `[desktopRepoSync] capability code index refresh failed for ${capabilityId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  }
+
+  const report: CapabilityRepoSyncReport = {
+    capabilityId,
+    executorId,
+    workingDirectory,
+    repos: results,
+    syncedAt: new Date().toISOString(),
+  };
+
+  const cloned = results.filter(r => r.status === 'cloned').length;
+  const updated = results.filter(r => r.status === 'updated').length;
+  const errors = results.filter(r => r.status === 'error').length;
+  console.log(
+    `[desktopRepoSync] ${capabilityId}: cloned=${cloned} updated=${updated} errors=${errors}`,
+  );
+
+  return report;
+};

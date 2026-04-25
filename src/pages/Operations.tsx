@@ -4,6 +4,7 @@ import {
   ArrowRight,
   Bot,
   ExternalLink,
+  GitBranch,
   Laptop2,
   LoaderCircle,
   Lock,
@@ -14,6 +15,7 @@ import {
   Unplug,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import DesktopRuntimeSettingsCard from "../components/operations/DesktopRuntimeSettingsCard";
 import {
   EmptyState,
   PageHeader,
@@ -25,6 +27,8 @@ import { useToast } from "../context/ToastContext";
 import { hasPermission } from "../lib/accessControl";
 import {
   claimCapabilityExecution,
+  clearLocalEmbeddingSettings,
+  clearRuntimeCredentials,
   createDesktopWorkspaceMapping,
   deleteDesktopWorkspaceMapping,
   fetchExecutorRegistry,
@@ -33,6 +37,9 @@ import {
   fetchWorkspaceWriteLock,
   releaseCapabilityExecution,
   removeDesktopExecutor,
+  syncCapabilityRepositories,
+  updateLocalEmbeddingSettings,
+  updateRuntimeCredentials,
   updateDesktopWorkspaceMapping,
   type RuntimeStatus,
 } from "../lib/api";
@@ -102,6 +109,13 @@ const Operations = () => {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(
     null,
   );
+  const [runtimeStatusError, setRuntimeStatusError] = useState("");
+  const [runtimeTokenInput, setRuntimeTokenInput] = useState("");
+  const [isUpdatingRuntime, setIsUpdatingRuntime] = useState(false);
+  const [embeddingBaseUrlInput, setEmbeddingBaseUrlInput] = useState("");
+  const [embeddingApiKeyInput, setEmbeddingApiKeyInput] = useState("");
+  const [embeddingModelInput, setEmbeddingModelInput] = useState("");
+  const [isUpdatingEmbeddings, setIsUpdatingEmbeddings] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState("");
   const [writeLock, setWriteLock] = useState<WorkspaceWriteLock | null>(null);
@@ -205,16 +219,156 @@ const Operations = () => {
     ],
     [currentActorContext, runtimeStatus],
   );
+  const runtimeRefreshFailureMessage =
+    "Unable to load desktop execution runtime status.";
+
+  const refreshRuntimeIdentity = async () => {
+    try {
+      const status = await fetchRuntimeStatus();
+      setRuntimeStatus(status);
+      setRuntimeStatusError("");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : runtimeRefreshFailureMessage;
+      setRuntimeStatusError(message);
+      showError("Runtime refresh failed", message);
+    }
+  };
+
+  const handleRuntimeOverrideSave = async () => {
+    const nextToken = runtimeTokenInput.trim();
+    if (!nextToken) {
+      showError("Runtime key required", "Paste a runtime key before saving it to this desktop.");
+      return;
+    }
+
+    setIsUpdatingRuntime(true);
+    try {
+      const status = await updateRuntimeCredentials(nextToken);
+      setRuntimeStatus(status);
+      setRuntimeStatusError("");
+      setRuntimeTokenInput("");
+      success(
+        "Desktop runtime key updated",
+        status.githubIdentity?.login
+          ? `Saved to this desktop's .env.local and validated against GitHub Models as @${status.githubIdentity.login}.`
+          : "Saved to this desktop's .env.local and validated against the live model runtime.",
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unable to update the desktop runtime key.";
+      setRuntimeStatusError(message);
+      showError("Desktop runtime update failed", message);
+    } finally {
+      setIsUpdatingRuntime(false);
+    }
+  };
+
+  const handleRuntimeOverrideClear = async () => {
+    setIsUpdatingRuntime(true);
+    try {
+      const status = await clearRuntimeCredentials();
+      setRuntimeStatus(status);
+      setRuntimeStatusError("");
+      setRuntimeTokenInput("");
+      success(
+        "Desktop runtime key cleared",
+        "Removed from this desktop's .env.local and reverted to the remaining runtime environment configuration.",
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unable to clear the desktop runtime key.";
+      setRuntimeStatusError(message);
+      showError("Desktop runtime clear failed", message);
+    } finally {
+      setIsUpdatingRuntime(false);
+    }
+  };
+
+  const handleEmbeddingSettingsSave = async () => {
+    const nextBaseUrl = embeddingBaseUrlInput.trim();
+    if (!nextBaseUrl) {
+      showError(
+        "Embedding endpoint required",
+        "Enter the local embedding base URL before saving desktop embedding settings.",
+      );
+      return;
+    }
+
+    setIsUpdatingEmbeddings(true);
+    try {
+      const status = await updateLocalEmbeddingSettings({
+        baseUrl: nextBaseUrl,
+        apiKey: embeddingApiKeyInput.trim() || undefined,
+        model: embeddingModelInput.trim() || undefined,
+      });
+      setRuntimeStatus(status);
+      setRuntimeStatusError("");
+      setEmbeddingApiKeyInput("");
+      success(
+        "Desktop embedding settings updated",
+        status.retrievalMode === "pgvector"
+          ? "Saved to this desktop's .env.local, validated live, and memory retrieval will use pgvector in the active database."
+          : status.retrievalMode === "json-cosine"
+            ? "Saved to this desktop's .env.local, validated live, and memory retrieval will use JSON cosine because pgvector is unavailable."
+            : "Saved to this desktop's .env.local. Without a validated embedding endpoint, memory retrieval falls back to the built-in deterministic-hash path.",
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unable to update desktop embedding settings.";
+      showError("Desktop embedding update failed", message);
+    } finally {
+      setIsUpdatingEmbeddings(false);
+    }
+  };
+
+  const handleEmbeddingSettingsClear = async () => {
+    setIsUpdatingEmbeddings(true);
+    try {
+      const status = await clearLocalEmbeddingSettings();
+      setRuntimeStatus(status);
+      setRuntimeStatusError("");
+      setEmbeddingBaseUrlInput("");
+      setEmbeddingApiKeyInput("");
+      setEmbeddingModelInput("");
+      success(
+        "Desktop embedding settings cleared",
+        "Removed from this desktop's .env.local. Without a local embedding endpoint, memory retrieval falls back to the built-in deterministic-hash path.",
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unable to clear desktop embedding settings.";
+      showError("Desktop embedding clear failed", message);
+    } finally {
+      setIsUpdatingEmbeddings(false);
+    }
+  };
 
   const refreshData = async () => {
     setLoading(true);
     try {
       const [nextRegistry, nextRuntimeStatus] = await Promise.all([
         fetchExecutorRegistry(),
-        fetchRuntimeStatus().catch(() => null),
+        fetchRuntimeStatus().catch((error) => {
+          setRuntimeStatusError(
+            error instanceof Error ? error.message : runtimeRefreshFailureMessage,
+          );
+          return null;
+        }),
       ]);
       setRegistry(nextRegistry);
       setRuntimeStatus(nextRuntimeStatus);
+      if (nextRuntimeStatus) {
+        setRuntimeStatusError("");
+      }
     } catch (error) {
       showError(
         "Operations unavailable",
@@ -263,6 +417,11 @@ const Operations = () => {
   useEffect(() => {
     void loadWorkspaceMappings(runtimeStatus?.executorId || null);
   }, [loadWorkspaceMappings, runtimeStatus?.executorId]);
+
+  useEffect(() => {
+    setEmbeddingBaseUrlInput(runtimeStatus?.embeddingEndpoint || "");
+    setEmbeddingModelInput(runtimeStatus?.embeddingModel || "");
+  }, [runtimeStatus?.embeddingEndpoint, runtimeStatus?.embeddingModel]);
 
   useEffect(() => {
     const nextDrafts = Object.fromEntries(
@@ -378,6 +537,48 @@ const Operations = () => {
         error instanceof Error
           ? error.message
           : "Unable to release execution ownership.",
+      );
+    } finally {
+      setBusyAction("");
+    }
+  };
+
+  const handleSyncRepos = async (fetch = false) => {
+    const executorId = runtimeStatus?.executorId;
+    if (!executorId) return;
+    setBusyAction(fetch ? "sync-repos-fetch" : "sync-repos");
+    try {
+      const report = await syncCapabilityRepositories({
+        capabilityId: activeCapability.id,
+        executorId,
+        fetch,
+      });
+      const cloned = report.repos.filter(r => r.status === "cloned").length;
+      const updated = report.repos.filter(r => r.status === "updated").length;
+      const errors = report.repos.filter(r => r.status === "error");
+      if (errors.length > 0) {
+        showError(
+          "Repo sync completed with errors",
+          errors.map(r => `${r.repositoryLabel}: ${r.error}`).join("\n"),
+        );
+      } else {
+        success(
+          fetch
+            ? "Repositories updated"
+            : cloned > 0
+              ? "Repositories cloned"
+              : "Repositories up to date",
+          cloned > 0
+            ? `Cloned ${cloned} repo${cloned !== 1 ? "s" : ""} and queued AST index build.`
+            : updated > 0
+              ? `Fetched latest changes for ${updated} repo${updated !== 1 ? "s" : ""}.`
+              : "All repositories already present.",
+        );
+      }
+    } catch (error) {
+      showError(
+        "Repo sync failed",
+        error instanceof Error ? error.message : "Unable to sync repositories.",
       );
     } finally {
       setBusyAction("");
@@ -621,6 +822,26 @@ const Operations = () => {
         ) : null}
       </SectionCard>
 
+      <DesktopRuntimeSettingsCard
+        runtimeStatus={runtimeStatus}
+        runtimeStatusError={runtimeStatusError}
+        runtimeTokenInput={runtimeTokenInput}
+        isUpdatingRuntime={isUpdatingRuntime}
+        embeddingBaseUrlInput={embeddingBaseUrlInput}
+        embeddingApiKeyInput={embeddingApiKeyInput}
+        embeddingModelInput={embeddingModelInput}
+        isUpdatingEmbeddings={isUpdatingEmbeddings}
+        onRuntimeTokenInputChange={setRuntimeTokenInput}
+        onSave={handleRuntimeOverrideSave}
+        onClear={handleRuntimeOverrideClear}
+        onRefresh={refreshRuntimeIdentity}
+        onEmbeddingBaseUrlInputChange={setEmbeddingBaseUrlInput}
+        onEmbeddingApiKeyInputChange={setEmbeddingApiKeyInput}
+        onEmbeddingModelInputChange={setEmbeddingModelInput}
+        onSaveEmbeddings={handleEmbeddingSettingsSave}
+        onClearEmbeddings={handleEmbeddingSettingsClear}
+      />
+
       <div className="grid gap-6 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
         <SectionCard
           title="Current capability execution"
@@ -695,19 +916,49 @@ const Operations = () => {
                   : "Claim current capability"}
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={() => void handleReleaseExecution()}
-                disabled={!canClaimExecution || busyAction.length > 0}
-                className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {busyAction === "release" ? (
-                  <LoaderCircle size={16} className="animate-spin" />
-                ) : (
-                  <Unplug size={16} />
-                )}
-                Release current capability
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => void handleReleaseExecution()}
+                  disabled={!canClaimExecution || busyAction.length > 0}
+                  className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busyAction === "release" ? (
+                    <LoaderCircle size={16} className="animate-spin" />
+                  ) : (
+                    <Unplug size={16} />
+                  )}
+                  Release current capability
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSyncRepos(false)}
+                  disabled={busyAction.length > 0}
+                  title="Clone any missing repositories and rebuild the local AST index"
+                  className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busyAction === "sync-repos" ? (
+                    <LoaderCircle size={16} className="animate-spin" />
+                  ) : (
+                    <GitBranch size={16} />
+                  )}
+                  Sync repos
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSyncRepos(true)}
+                  disabled={busyAction.length > 0}
+                  title="Fetch the latest remote changes and rebuild the local AST index"
+                  className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busyAction === "sync-repos-fetch" ? (
+                    <LoaderCircle size={16} className="animate-spin" />
+                  ) : (
+                    <RefreshCw size={16} />
+                  )}
+                  Pull latest
+                </button>
+              </>
             )}
             <button
               type="button"

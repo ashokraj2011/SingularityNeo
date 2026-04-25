@@ -4689,8 +4689,9 @@ export const replaceCapabilityWorkspaceContentRecord = async (
     if (newCommittableArtifacts.length > 0) {
       void (async () => {
         try {
-          const [{ autoCommitArtifact }, bundle] = await Promise.all([
+          const [{ autoCommitArtifact }, { queueWorkItemAstRefresh }, bundle] = await Promise.all([
             import('./agentGit/autoWire'),
+            import('./workItemAst'),
             getCapabilityBundle(capabilityId),
           ]);
           const workItemsById = new Map(
@@ -4703,10 +4704,15 @@ export const replaceCapabilityWorkspaceContentRecord = async (
               if (!workItem) return;
               await autoCommitArtifact({
                 capabilityId,
+                capabilityName: bundle.capability.name,
                 artifact,
                 workItem: { id: workItem.id, title: workItem.title },
                 repositories,
                 workspaceRoots: getCapabilityWorkspaceRoots(bundle.capability),
+              });
+              await queueWorkItemAstRefresh({
+                capability: bundle.capability,
+                workItem,
               });
             }),
           );

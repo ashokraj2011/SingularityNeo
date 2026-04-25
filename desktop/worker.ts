@@ -27,7 +27,6 @@ import type {
 } from '../src/types';
 import type { RuntimeStatus } from '../src/lib/api';
 import {
-  clearRuntimeTokenOverride,
   defaultModel,
   getConfiguredGitHubIdentity,
   getConfiguredToken,
@@ -38,8 +37,19 @@ import {
   invokeCapabilityChatStream,
   listAvailableRuntimeModels,
   normalizeModel,
-  setRuntimeTokenOverride,
 } from '../server/githubModels';
+import {
+  clearPersistedRuntimeToken,
+  clearPersistedLocalEmbeddingSettings,
+  persistLocalEmbeddingSettingsAndValidate,
+  persistRuntimeTokenAndValidate,
+  resolveRuntimeEnvLocalPath,
+} from '../server/runtimeCredentials';
+import {
+  getLocalOpenAIBaseUrl,
+  getLocalOpenAIEmbeddingModel,
+  isLocalOpenAIConfigured,
+} from '../server/localOpenAIProvider';
 import {
   getMissingRuntimeConfigurationMessage,
   resolveRuntimeAccessMode,
@@ -50,11 +60,17 @@ import {
   extractChatWorkspaceReferenceId,
   resolveMentionedWorkItem,
 } from '../server/chatWorkspace';
+import {
+  buildAstGroundingSummary,
+  type AstGroundingSummary,
+} from '../server/astGrounding';
 import { processWorkflowRun, reconcileWorkflowRunFailure } from '../server/execution/service';
 import { getWorkflowRunDetail } from '../server/execution/repository';
 import { runWithExecutionClientContext } from '../server/execution/runtimeClient';
+import { buildWorkItemCheckoutPath } from '../server/workItemCheckouts';
 
 const projectRoot = process.env.SINGULARITY_PROJECT_ROOT || process.cwd();
+const envLocalPath = resolveRuntimeEnvLocalPath(projectRoot);
 dotenv.config({ path: path.join(projectRoot, '.env.local') });
 dotenv.config({ path: path.join(projectRoot, '.env') });
 
@@ -679,6 +695,14 @@ const resolveDesktopRuntimeContext = async (
   developerPrompt?: string;
   memoryPrompt?: string;
   memoryReferences: MemoryReference[];
+  astGroundingMode?:
+    | 'ast-grounded-local-clone'
+    | 'ast-grounded-remote-index'
+    | 'no-ast-grounding';
+  checkoutPath?: string;
+  branchName?: string;
+  codeIndexSource?: 'local-checkout' | 'capability-index';
+  codeIndexFreshness?: string;
   scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
   scopeId?: string;
 }> => {
@@ -822,6 +846,40 @@ const resolveDesktopRuntimeContext = async (
               .filter(Boolean)
               .join('\n')
         : String(payload.message || '').trim();
+    const astRepository =
+      (bundle.capability.repositories || []).find(
+        repository =>
+          repository.id ===
+          (referencedWorkItem?.executionContext?.primaryRepositoryId ||
+            referencedWorkItem?.executionContext?.branch?.repositoryId),
+      ) ||
+      (bundle.capability.repositories || []).find(repository => repository.isPrimary) ||
+      bundle.capability.repositories?.[0];
+    const astCheckoutPath =
+      desktopWorkingDirectory && referencedWorkItem && astRepository
+        ? buildWorkItemCheckoutPath({
+            workingDirectoryPath: desktopWorkingDirectory,
+            capability: bundle.capability,
+            workItemId: referencedWorkItem.id,
+            repository: astRepository,
+            repositoryCount: (bundle.capability.repositories || []).length,
+          })
+        : undefined;
+    const astGrounding: AstGroundingSummary = await buildAstGroundingSummary({
+      capability: bundle.capability,
+      workItem: referencedWorkItem,
+      message: String(payload.message || ''),
+      checkoutPath: astCheckoutPath,
+      repositoryId: astRepository?.id,
+      branchName: referencedWorkItem?.id,
+    }).catch(() => ({
+      astGroundingMode: 'no-ast-grounding' as const,
+      prompt: undefined,
+      checkoutPath: astCheckoutPath,
+      branchName: referencedWorkItem?.id,
+      codeIndexSource: undefined,
+      codeIndexFreshness: undefined,
+    }));
 
     if (queryText) {
       const memoryResults = await controlPlaneRequest<MemorySearchResult[]>(
@@ -834,8 +892,12 @@ const resolveDesktopRuntimeContext = async (
       ).catch(() => []);
       memoryReferences = memoryResults.map(result => result.reference);
       const serializedMemory = buildMemoryPrompt(memoryResults);
-      if (serializedMemory) {
-        const combined = [liveBriefing, `Retrieved memory context:\n${serializedMemory}`]
+      if (serializedMemory || astGrounding.prompt) {
+        const combined = [
+          liveBriefing,
+          astGrounding.prompt,
+          serializedMemory ? `Retrieved memory context:\n${serializedMemory}` : null,
+        ]
           .filter(Boolean)
           .join('\n\n');
         return {
@@ -844,11 +906,50 @@ const resolveDesktopRuntimeContext = async (
           developerPrompt,
           memoryPrompt: combined,
           memoryReferences,
+          astGroundingMode: astGrounding.astGroundingMode,
+          checkoutPath: astGrounding.checkoutPath,
+          branchName: astGrounding.branchName,
+          codeIndexSource: astGrounding.codeIndexSource,
+          codeIndexFreshness: astGrounding.codeIndexFreshness,
           scope,
           scopeId,
         };
       }
+
+      return {
+        capability,
+        agent,
+        developerPrompt,
+        memoryPrompt:
+          [liveBriefing, astGrounding.prompt].filter(Boolean).join('\n\n') ||
+          undefined,
+        memoryReferences,
+        astGroundingMode: astGrounding.astGroundingMode,
+        checkoutPath: astGrounding.checkoutPath,
+        branchName: astGrounding.branchName,
+        codeIndexSource: astGrounding.codeIndexSource,
+        codeIndexFreshness: astGrounding.codeIndexFreshness,
+        scope,
+        scopeId,
+      };
     }
+
+    return {
+      capability,
+      agent,
+      developerPrompt,
+      memoryPrompt:
+        [liveBriefing, astGrounding.prompt].filter(Boolean).join('\n\n') ||
+        undefined,
+      memoryReferences,
+      astGroundingMode: astGrounding.astGroundingMode,
+      checkoutPath: astGrounding.checkoutPath,
+      branchName: astGrounding.branchName,
+      codeIndexSource: astGrounding.codeIndexSource,
+      codeIndexFreshness: astGrounding.codeIndexFreshness,
+      scope,
+      scopeId,
+    };
   }
 
   return {
@@ -867,6 +968,7 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
   const tokenSource = getConfiguredTokenSource();
   const headlessCli = tokenSource === 'headless-cli';
   const configured = headlessCli || Boolean(token);
+  const embeddingConfigured = isLocalOpenAIConfigured();
   let controlPlaneReachable = true;
   const controlPlaneRuntimeStatus = await controlPlaneRequest<
     Pick<
@@ -877,6 +979,9 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
       | 'readinessState'
       | 'checks'
       | 'controlPlaneUrl'
+      | 'fallbackReason'
+      | 'embeddingConfigured'
+      | 'retrievalMode'
     >
   >('/api/runtime/status').catch(() => {
     controlPlaneReachable = false;
@@ -887,6 +992,9 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
       readinessState: 'blocked' as const,
       checks: [],
       controlPlaneUrl,
+      fallbackReason: null,
+      embeddingConfigured: false,
+      retrievalMode: undefined,
     };
   });
   const { models, fromRuntime } = await listAvailableRuntimeModels();
@@ -985,6 +1093,20 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
     activeDatabaseProfileId: controlPlaneRuntimeStatus.activeDatabaseProfileId ?? null,
     activeDatabaseProfileLabel: controlPlaneRuntimeStatus.activeDatabaseProfileLabel ?? null,
     httpFallbackEnabled: process.env.ALLOW_GITHUB_MODELS_HTTP_FALLBACK === 'true',
+    embeddingProviderKey: embeddingConfigured ? 'local-openai' : 'deterministic-hash',
+    embeddingConfigured,
+    retrievalMode:
+      controlPlaneRuntimeStatus.retrievalMode ||
+      controlPlaneRuntimeStatus.databaseRuntime?.retrievalMode,
+    fallbackReason:
+      controlPlaneRuntimeStatus.fallbackReason ||
+      controlPlaneRuntimeStatus.databaseRuntime?.fallbackReason ||
+      null,
+    embeddingEndpoint: getLocalOpenAIBaseUrl() || null,
+    embeddingModel: embeddingConfigured ? getLocalOpenAIEmbeddingModel() : null,
+    embeddingApiKeyConfigured: Boolean(
+      String(process.env.LOCAL_OPENAI_API_KEY || process.env.OPENAI_COMPAT_API_KEY || '').trim(),
+    ),
     lastRuntimeError: identityResult.error,
     streaming: true,
     githubIdentity: identityResult.identity,
@@ -1068,7 +1190,10 @@ reader.on('line', async line => {
     }
 
     if (message.type === 'runtime:set-token') {
-      await setRuntimeTokenOverride(String(message.payload?.token || ''));
+      await persistRuntimeTokenAndValidate({
+        token: String(message.payload?.token || ''),
+        envFilePath: envLocalPath,
+      });
       respond({
         requestId,
         payload: await buildDesktopRuntimeStatus(),
@@ -1077,7 +1202,34 @@ reader.on('line', async line => {
     }
 
     if (message.type === 'runtime:clear-token') {
-      await clearRuntimeTokenOverride();
+      await clearPersistedRuntimeToken({
+        envFilePath: envLocalPath,
+      });
+      respond({
+        requestId,
+        payload: await buildDesktopRuntimeStatus(),
+      });
+      return;
+    }
+
+    if (message.type === 'runtime:set-embedding-config') {
+      await persistLocalEmbeddingSettingsAndValidate({
+        baseUrl: String(message.payload?.baseUrl || ''),
+        apiKey: String(message.payload?.apiKey || ''),
+        model: String(message.payload?.model || ''),
+        envFilePath: envLocalPath,
+      });
+      respond({
+        requestId,
+        payload: await buildDesktopRuntimeStatus(),
+      });
+      return;
+    }
+
+    if (message.type === 'runtime:clear-embedding-config') {
+      await clearPersistedLocalEmbeddingSettings({
+        envFilePath: envLocalPath,
+      });
       respond({
         requestId,
         payload: await buildDesktopRuntimeStatus(),
@@ -1113,7 +1265,14 @@ reader.on('line', async line => {
 
       respond({
         requestId,
-        payload: result,
+        payload: {
+          ...result,
+          astGroundingMode: context.astGroundingMode,
+          checkoutPath: context.checkoutPath,
+          branchName: context.branchName,
+          codeIndexSource: context.codeIndexSource,
+          codeIndexFreshness: context.codeIndexFreshness,
+        },
       });
       return;
     }

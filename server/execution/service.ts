@@ -103,6 +103,10 @@ import {
 } from "../agentLearning/service";
 import { wakeAgentLearningWorker } from "../agentLearning/worker";
 import { buildMemoryContext, refreshCapabilityMemory } from "../memory";
+import {
+  forceWorkItemAstRefresh,
+  queueWorkItemAstRefresh,
+} from "../workItemAst";
 import { evaluateToolPolicy } from "../policy";
 import { transaction, query as dbQuery } from "../db";
 import {
@@ -3627,6 +3631,12 @@ const syncCompletedProjection = async ({
       }),
     ],
   });
+  if (!nextStep) {
+    await forceWorkItemAstRefresh({
+      capability: projection.capability,
+      workItem: nextWorkItem,
+    }).catch(() => undefined);
+  }
   await queueExperienceDistillationRefresh({
     capabilityId: detail.run.capabilityId,
     agentId: completedStep.agentId,
@@ -4808,6 +4818,7 @@ export const createWorkItemRecord = async ({
           await import("../agentGit/autoWire");
         await autoStartSessionForWorkItem({
           capabilityId,
+          capabilityName: bundle.capability.name,
           workItem: { id: nextWorkItem.id, title: nextWorkItem.title },
           repositories: bundle.capability.repositories || [],
           workspaceRoots: getCapabilityWorkspaceRoots(bundle.capability),
@@ -7924,9 +7935,18 @@ const executeAutomatedStep = async (
               details: {
                 toolId: decision.toolCall.toolId,
                 path: changedPath,
-              },
+                },
             });
           });
+          await queueWorkItemAstRefresh({
+            capability: projection.capability,
+            workItem: projection.workItem,
+            checkoutPath:
+              typeof result.workingDirectory === "string" &&
+              result.workingDirectory.trim()
+                ? result.workingDirectory
+                : undefined,
+          }).catch(() => undefined);
         }
         // Fix 2 — update routing state so the next requestStepDecision call
         // can route trivial follow-up reads to the budget model.

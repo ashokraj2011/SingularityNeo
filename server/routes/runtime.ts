@@ -1,8 +1,9 @@
 import type express from 'express';
 import {
-  clearRuntimeTokenOverride,
-  setRuntimeTokenOverride,
-} from '../githubModels';
+  clearPersistedRuntimeToken,
+  persistRuntimeTokenAndValidate,
+  resolveRuntimeEnvLocalPath,
+} from '../runtimeCredentials';
 import { sendApiError } from '../api/errors';
 import { buildRuntimeStatus } from '../runtimeStatus';
 
@@ -11,6 +12,8 @@ type RuntimeCredentialBody = {
 };
 
 export const registerRuntimeRoutes = (app: express.Express) => {
+  const envLocalPath = resolveRuntimeEnvLocalPath();
+
   app.get('/api/runtime/status', async (_request, response) => {
     response.json(await buildRuntimeStatus());
   });
@@ -43,7 +46,10 @@ export const registerRuntimeRoutes = (app: express.Express) => {
         return;
       }
 
-      await setRuntimeTokenOverride(token);
+      await persistRuntimeTokenAndValidate({
+        token,
+        envFilePath: envLocalPath,
+      });
       response.json(await buildRuntimeStatus());
     } catch (error) {
       sendApiError(response, error);
@@ -52,7 +58,9 @@ export const registerRuntimeRoutes = (app: express.Express) => {
 
   app.delete('/api/runtime/credentials', async (_request, response) => {
     try {
-      await clearRuntimeTokenOverride();
+      await clearPersistedRuntimeToken({
+        envFilePath: envLocalPath,
+      });
       response.json(await buildRuntimeStatus());
     } catch (error) {
       sendApiError(response, error);

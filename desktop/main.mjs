@@ -731,6 +731,12 @@ ipcMain.handle('desktop:runtime:set-token', async (_event, payload) =>
 ipcMain.handle('desktop:runtime:clear-token', async () =>
   requestWorker('runtime:clear-token'),
 );
+ipcMain.handle('desktop:runtime:set-embedding-config', async (_event, payload) =>
+  requestWorker('runtime:set-embedding-config', payload || {}),
+);
+ipcMain.handle('desktop:runtime:clear-embedding-config', async () =>
+  requestWorker('runtime:clear-embedding-config'),
+);
 ipcMain.handle('desktop:runtime:chat', async (_event, payload) =>
   requestWorker('runtime:chat', payload || {}),
 );

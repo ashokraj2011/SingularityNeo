@@ -140,12 +140,16 @@ export const githubModelsApiUrl =
   process.env.GITHUB_MODELS_API_URL ||
   'copilot-sdk://embedded-cli';
 
+const GITHUB_MODELS_API_VERSION = '2026-03-10';
+
 const githubModelsHttpApiUrl = (
   process.env.GITHUB_MODELS_HTTP_API_URL ||
   (githubModelsApiUrl.startsWith('http')
     ? githubModelsApiUrl
     : 'https://models.github.ai/inference')
 ).replace(/\/$/, '');
+
+const githubModelsCatalogApiUrl = new URL('/catalog/models', githubModelsHttpApiUrl).toString();
 
 export const defaultModel = 'gpt-4.1-mini';
 
@@ -557,41 +561,8 @@ export const getConfiguredToken = () => getConfiguredTokenState().token;
 
 export const getConfiguredTokenSource = () => getConfiguredTokenState().source;
 
-export const getConfiguredGitHubIdentity = async ({
-  refresh = false,
-}: {
-  refresh?: boolean;
-} = {}): Promise<{
-  identity: RuntimeGitHubIdentity | null;
-  error: string | null;
-}> => {
-  const { token } = getConfiguredTokenState();
-  if (!token) {
-    if (getConfiguredCopilotCliUrl()) {
-      return {
-        identity: null,
-        error: 'Identity is managed by the configured headless Copilot CLI server.',
-      };
-    }
-
-    return {
-      identity: null,
-      error: null,
-    };
-  }
-
+const fetchGitHubIdentityForToken = async (token: string) => {
   const tokenHash = hashText(token);
-  if (
-    !refresh &&
-    runtimeIdentityCache &&
-    runtimeIdentityCache.tokenHash === tokenHash &&
-    Date.now() - runtimeIdentityCache.fetchedAt < 60_000
-  ) {
-    return {
-      identity: runtimeIdentityCache.identity,
-      error: runtimeIdentityCache.error,
-    };
-  }
 
   try {
     const response = await fetch('https://api.github.com/user', {
@@ -665,6 +636,47 @@ export const getConfiguredGitHubIdentity = async ({
       error: message,
     };
   }
+};
+
+export const getConfiguredGitHubIdentity = async ({
+  refresh = false,
+  tokenOverride,
+}: {
+  refresh?: boolean;
+  tokenOverride?: string | null;
+} = {}): Promise<{
+  identity: RuntimeGitHubIdentity | null;
+  error: string | null;
+}> => {
+  const token = String(tokenOverride || '').trim() || getConfiguredTokenState().token;
+  if (!token) {
+    if (getConfiguredCopilotCliUrl()) {
+      return {
+        identity: null,
+        error: 'Identity is managed by the configured headless Copilot CLI server.',
+      };
+    }
+
+    return {
+      identity: null,
+      error: null,
+    };
+  }
+
+  const tokenHash = hashText(token);
+  if (
+    !refresh &&
+    runtimeIdentityCache &&
+    runtimeIdentityCache.tokenHash === tokenHash &&
+    Date.now() - runtimeIdentityCache.fetchedAt < 60_000
+  ) {
+    return {
+      identity: runtimeIdentityCache.identity,
+      error: runtimeIdentityCache.error,
+    };
+  }
+
+  return fetchGitHubIdentityForToken(token);
 };
 
 export const normalizeModel = (model?: string) => {
@@ -826,6 +838,39 @@ const toRuntimeModelOption = (model: ModelInfo): RuntimeModelOption => ({
   apiModelId: normalizeModel(model.id),
 });
 
+const toCatalogRuntimeModelOption = (model: {
+  id?: string;
+  name?: string;
+  summary?: string;
+  limits?: {
+    max_input_tokens?: number;
+    max_context_window_tokens?: number;
+  };
+}): RuntimeModelOption | null => {
+  const id = String(model.id || '').trim();
+  if (!id) {
+    return null;
+  }
+
+  const maxContextTokens =
+    Number(model.limits?.max_context_window_tokens || 0) ||
+    Number(model.limits?.max_input_tokens || 0);
+
+  return {
+    id,
+    label: String(model.name || id).trim() || id,
+    profile:
+      maxContextTokens > 0
+        ? `${maxContextTokens.toLocaleString()} ctx`
+        : String(model.summary || 'Available').trim() || 'Available',
+    apiModelId: normalizeModel(id),
+  };
+};
+
+const isRuntimeModelOption = (
+  model: RuntimeModelOption | null | undefined,
+): model is RuntimeModelOption => Boolean(model?.id);
+
 const getStaticRuntimeModels = (): RuntimeModelOption[] =>
   staticModels.map(model => ({
     ...model,
@@ -896,6 +941,63 @@ export const listAvailableRuntimeModels = async ({
     };
   }
 
+  if (!getConfiguredCopilotCliUrl() && token) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15_000);
+      try {
+        const response = await fetch(githubModelsCatalogApiUrl, {
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${token}`,
+            'X-GitHub-Api-Version': GITHUB_MODELS_API_VERSION,
+          },
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(
+            text || `GitHub Models catalog request failed with status ${response.status}.`,
+          );
+        }
+
+        const payload = (await response.json()) as Array<{
+          id?: string;
+          name?: string;
+          summary?: string;
+          limits?: {
+            max_input_tokens?: number;
+            max_context_window_tokens?: number;
+          };
+        }>;
+        const models = (payload || [])
+          .map(toCatalogRuntimeModelOption)
+          .filter(isRuntimeModelOption)
+          .filter(
+            (model, index, allModels) =>
+              allModels.findIndex(candidate => candidate.id === model.id) === index,
+          );
+
+        if (models.length > 0) {
+          runtimeModelCache = {
+            fetchedAt: Date.now(),
+            models,
+            fromRuntime: true,
+          };
+          return {
+            models,
+            fromRuntime: true,
+          };
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch {
+      // Fall through to the static fallback when the HTTP catalog cannot be loaded.
+    }
+  }
+
   try {
     const client = await getCopilotClient();
     // listModels() can also hang if the CLI lost its connection to GitHub after
@@ -942,6 +1044,96 @@ export const listAvailableRuntimeModels = async ({
     models: fallback,
     fromRuntime: false,
   };
+};
+
+export const validateGitHubRuntimeToken = async (token: string) => {
+  const trimmedToken = String(token || '').trim();
+  if (!trimmedToken) {
+    return {
+      models: [] as RuntimeModelOption[],
+      fromRuntime: false,
+      identity: null as RuntimeGitHubIdentity | null,
+      identityError: 'A GitHub token is required.',
+      error: 'A GitHub token is required.',
+    };
+  }
+
+  const identityResult = await getConfiguredGitHubIdentity({
+    refresh: true,
+    tokenOverride: trimmedToken,
+  });
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    const response = await fetch(githubModelsCatalogApiUrl, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${trimmedToken}`,
+        'X-GitHub-Api-Version': GITHUB_MODELS_API_VERSION,
+      },
+      signal: controller.signal,
+    }).finally(() => {
+      clearTimeout(timeout);
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return {
+        models: [] as RuntimeModelOption[],
+        fromRuntime: false,
+        identity: identityResult.identity,
+        identityError: identityResult.error,
+        error: text || `GitHub Models catalog request failed with status ${response.status}.`,
+      };
+    }
+
+    const payload = (await response.json()) as Array<{
+      id?: string;
+      name?: string;
+      summary?: string;
+      limits?: {
+        max_input_tokens?: number;
+        max_context_window_tokens?: number;
+      };
+    }>;
+    const models = (payload || [])
+      .map(toCatalogRuntimeModelOption)
+      .filter(isRuntimeModelOption)
+      .filter(
+        (model, index, allModels) =>
+          allModels.findIndex(candidate => candidate.id === model.id) === index,
+      );
+
+    if (models.length === 0) {
+      return {
+        models,
+        fromRuntime: false,
+        identity: identityResult.identity,
+        identityError: identityResult.error,
+        error:
+          'GitHub Models did not return a live model catalog for this token in the current environment.',
+      };
+    }
+
+    return {
+      models,
+      fromRuntime: true,
+      identity: identityResult.identity,
+      identityError: identityResult.error,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      models: [] as RuntimeModelOption[],
+      fromRuntime: false,
+      identity: identityResult.identity,
+      identityError: identityResult.error,
+      error:
+        error instanceof Error
+          ? error.message
+          : 'GitHub Models validation failed unexpectedly.',
+    };
+  }
 };
 
 export const getRuntimeDefaultModel = async () => {
