@@ -71,11 +71,17 @@ const formatSymbolRows = (
     sliceEndLine?: number;
     signature?: string;
   }>,
+  checkoutRoot?: string,
 ) =>
   symbols.map((symbol) => {
     const range = `${symbol.sliceStartLine || 1}-${symbol.sliceEndLine || symbol.sliceStartLine || 1}`;
     const signature = symbol.signature ? ` — ${symbol.signature}` : "";
-    return `- ${symbol.qualifiedSymbolName} (${symbol.kind}) at ${symbol.filePath}:${range}${signature}`;
+    // Emit absolute path so the agent can pass it directly to workspace_read
+    // without constructing or guessing any directory structure.
+    const absolutePath = checkoutRoot
+      ? `${checkoutRoot.replace(/\/+$/, "")}/${symbol.filePath.replace(/^\/+/, "")}`
+      : symbol.filePath;
+    return `- ${symbol.qualifiedSymbolName} (${symbol.kind}) at ${absolutePath}:${range}${signature}`;
   });
 
 const looksLikeCodeQuestion = (message: string) =>
@@ -152,10 +158,15 @@ export const buildAstGroundingSummary = async ({
       ).slice(0, 6);
       const freshness = getLocalCheckoutAstFreshness(candidate.checkoutPath);
       const isBaseClone = !checkoutPath;
+      const resolvedRoot = candidate.checkoutPath.replace(/\/+$/, "");
       return {
         prompt: [
           `AST grounding from local ${isBaseClone ? "base clone" : "checkout"}${workItem ? ` for ${workItem.id}` : ""}${branchName ? ` on branch ${branchName}` : ""}:`,
-          ...formatSymbolRows(deduped),
+          `Repository root on disk: ${resolvedRoot}`,
+          `IMPORTANT: The file paths below are absolute. Use the workspace_read or browse_code tool`,
+          `with these exact paths. Do NOT use shell commands (cd, ls, find) or construct directory`,
+          `paths manually — only the paths shown here are guaranteed to exist.`,
+          ...formatSymbolRows(deduped, resolvedRoot),
         ].join("\n"),
         astGroundingMode: "ast-grounded-local-clone",
         checkoutPath: candidate.checkoutPath,
@@ -191,6 +202,8 @@ export const buildAstGroundingSummary = async ({
   return {
     prompt: [
       `AST grounding from the capability code index${workItem ? ` for ${workItem.id}` : ""}:`,
+      `IMPORTANT: Use workspace_search or browse_code to discover actual file locations.`,
+      `Do NOT guess or construct file paths — use only paths returned by tools.`,
       ...formatSymbolRows(deduped),
     ].join("\n"),
     astGroundingMode: "ast-grounded-remote-index",

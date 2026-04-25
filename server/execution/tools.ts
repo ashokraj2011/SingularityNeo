@@ -1005,6 +1005,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         }
 
         let localSymbolResults: Awaited<ReturnType<typeof searchLocalCheckoutSymbols>> | null = null;
+        let localSymbolCheckoutRoot = "";
         for (const candidate of localCheckoutCandidates) {
           const result = await searchLocalCheckoutSymbols({
             checkoutPath: candidate.checkoutPath,
@@ -1015,6 +1016,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
           }).catch(() => null);
           if (result && result.symbols.length > 0) {
             localSymbolResults = result;
+            localSymbolCheckoutRoot = candidate.checkoutPath.replace(/\/+$/, "");
             break;
           }
         }
@@ -1028,12 +1030,18 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
                 ) || symbol.filePath === relativeScopePath,
           ) || [];
         if (filteredLocalSymbols.length > 0) {
-          const output = filteredLocalSymbols
-            .map(
+          // Emit absolute paths so the agent never needs to guess directory layout.
+          const toAbsPath = (relPath: string) =>
+            localSymbolCheckoutRoot
+              ? `${localSymbolCheckoutRoot}/${relPath.replace(/^\/+/, "")}`
+              : relPath;
+          const output = [
+            ...(localSymbolCheckoutRoot ? [`Repository root: ${localSymbolCheckoutRoot}`, "Paths below are absolute — pass them directly to workspace_read."] : []),
+            ...filteredLocalSymbols.map(
               (symbol) =>
-                `${symbol.qualifiedSymbolName} (${symbol.kind}) ${symbol.filePath}:${symbol.sliceStartLine || symbol.startLine}-${symbol.sliceEndLine || symbol.endLine}`,
-            )
-            .join("\n");
+                `${symbol.qualifiedSymbolName} (${symbol.kind}) ${toAbsPath(symbol.filePath)}:${symbol.sliceStartLine || symbol.startLine}-${symbol.sliceEndLine || symbol.endLine}`,
+            ),
+          ].join("\n");
           return {
             summary: `Found ${filteredLocalSymbols.length} indexed symbol match${filteredLocalSymbols.length === 1 ? "" : "es"} for ${pattern}.`,
             workingDirectory: workspacePath,
@@ -1047,9 +1055,10 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
                 qualifiedSymbolName: symbol.qualifiedSymbolName,
                 symbolName: symbol.symbolName,
                 kind: symbol.kind,
-                filePath: symbol.filePath,
+                filePath: toAbsPath(symbol.filePath),
                 sliceStartLine: symbol.sliceStartLine,
                 sliceEndLine: symbol.sliceEndLine,
+                checkoutRoot: localSymbolCheckoutRoot || undefined,
               })),
               totalScanned: filteredLocalSymbols.length,
               mode: "symbol-search",
@@ -1213,9 +1222,11 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         };
       }
 
-      const allSymbols: any[] = [];
+      // Track symbols with their checkout root so we can emit absolute paths.
+      const allSymbols: Array<any & { _checkoutRoot: string }> = [];
       const repoSummaries: string[] = [];
       for (const clone of [...baseClones.filter(e => e.isPrimary), ...baseClones.filter(e => !e.isPrimary)]) {
+        const cloneRoot = clone.checkoutPath.replace(/\/+$/, "");
         const { symbols, builtAt } = await listLocalCheckoutAllSymbols({
           checkoutPath: clone.checkoutPath,
           capabilityId: capability.id,
@@ -1224,15 +1235,26 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
           filePathPrefix,
           limit,
         }).catch(() => ({ symbols: [] as any[], builtAt: undefined }));
-        allSymbols.push(...symbols);
-        repoSummaries.push(`${clone.repositoryLabel}: ${symbols.length} symbol(s) (indexed ${builtAt ? new Date(builtAt).toLocaleString() : "pending"})`);
+        symbols.forEach(s => allSymbols.push({ ...s, _checkoutRoot: cloneRoot }));
+        repoSummaries.push(
+          `${clone.repositoryLabel} (root: ${cloneRoot}): ${symbols.length} symbol(s)` +
+          ` (indexed ${builtAt ? new Date(builtAt).toLocaleString() : "pending"})`,
+        );
         if (allSymbols.length >= limit) break;
       }
 
       const sliced = allSymbols.slice(0, limit);
-      const output = sliced
-        .map(s => `${s.qualifiedSymbolName || s.symbolName} (${s.kind}) ${s.filePath}:${s.sliceStartLine ?? s.startLine}-${s.sliceEndLine ?? s.endLine}`)
-        .join("\n");
+      // Always emit absolute paths — the agent must NOT construct paths manually.
+      const toAbsolute = (s: any) =>
+        `${s._checkoutRoot}/${String(s.filePath).replace(/^\/+/, "")}`;
+      const output = [
+        "NOTE: Paths below are absolute. Pass them directly to workspace_read.",
+        "Do NOT cd to or construct directory paths — only these paths exist on disk.",
+        "",
+        ...sliced.map(s =>
+          `${s.qualifiedSymbolName || s.symbolName} (${s.kind}) ${toAbsolute(s)}:${s.sliceStartLine ?? s.startLine}-${s.sliceEndLine ?? s.endLine}`,
+        ),
+      ].join("\n");
 
       return {
         summary: `Found ${sliced.length} ${kind ? kind + " " : ""}symbol(s) across ${baseClones.length} repo(s).`,
@@ -1242,12 +1264,13 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             symbolName: s.symbolName,
             qualifiedSymbolName: s.qualifiedSymbolName,
             kind: s.kind,
-            filePath: s.filePath,
+            filePath: toAbsolute(s),
             startLine: s.sliceStartLine ?? s.startLine,
             endLine: s.sliceEndLine ?? s.endLine,
             signature: s.signature,
             isExported: s.isExported,
             repositoryId: s.repositoryId,
+            checkoutRoot: s._checkoutRoot,
           })),
           source: "local-clone",
           repositories: repoSummaries,
