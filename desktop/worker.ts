@@ -1,5 +1,6 @@
 import readline from 'node:readline';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
@@ -106,37 +107,90 @@ const controlPlaneUrl = String(
 
 const EXECUTOR_LEASE_MS = 30_000;
 const EXECUTOR_POLL_MS = 2_500;
+
+// ── Desktop identity ──────────────────────────────────────────────────────
+// Derive a stable, hash-based desktop ID from the machine hostname.
+// This matches the algorithm in server/desktopPreferences.ts so both sides
+// agree on the key without needing to share a module at this import level.
+const desktopHostname = os.hostname();
+const desktopId = (() => {
+  const host = desktopHostname.toLowerCase().trim();
+  const hash = createHash('sha256').update(host).digest('hex').slice(0, 16).toUpperCase();
+  return `DID-${hash}`;
+})();
+
 const resolveExecutorId = () => {
   const configured = String(process.env.SINGULARITY_DESKTOP_EXECUTOR_ID || '').trim();
-  if (configured) {
-    return configured;
-  }
-  return `desktop-executor-${randomUUID().slice(0, 12)}`;
+  if (configured) return configured;
+  // Derive from desktop ID so the executor ID is also stable across restarts.
+  return `desktop-executor-${desktopId.replace('DID-', '').slice(0, 12).toLowerCase()}`;
 };
-const executorId = resolveExecutorId();
+let executorId = resolveExecutorId();
 
 // User-level working directory — the single source of truth for this
-// machine's workspace root. Capability-level workspace paths are only
-// a fallback for shared / headless runners. Every desktop user puts
-// their own value in `.env.local`:
-//
-//   SINGULARITY_WORKING_DIRECTORY=/Users/alice/code
-//
-// If unset, `projectRoot` acts as a sensible default so a first-run
-// developer isn't blocked — they can still execute against the repo
-// they launched Singularity from.
-const desktopWorkingDirectory = (() => {
+// machine's workspace root. Initially resolved from .env.local / project root;
+// overwritten by DB-sourced preferences once the server connection is ready.
+const resolveWorkingDirectory = () => {
   const raw = String(process.env.SINGULARITY_WORKING_DIRECTORY || '').trim();
   if (raw) return raw;
   const root = String(projectRoot || '').trim();
   return root || undefined;
-})();
-const desktopWorkingDirectorySource: RuntimeStatus['workingDirectorySource'] =
+};
+let desktopWorkingDirectory = resolveWorkingDirectory();
+let desktopWorkingDirectorySource: RuntimeStatus['workingDirectorySource'] =
   process.env.SINGULARITY_WORKING_DIRECTORY?.trim()
   ? 'env'
   : desktopWorkingDirectory
   ? 'project-root'
   : 'missing';
+
+/**
+ * Fetches stored preferences from the control plane and applies them to this
+ * worker's own process.env and local variables.  Called once after the first
+ * successful server connection.
+ *
+ * Failures are silent — the worker continues with .env.local values.
+ */
+const loadPreferencesFromServer = async () => {
+  try {
+    const raw = await fetch(`${controlPlaneUrl}/api/runtime/desktop-preferences`, {
+      headers: { 'x-desktop-hostname': desktopHostname },
+    });
+    if (!raw.ok) return;
+    const prefs = await raw.json() as {
+      workingDirectory?: string;
+      copilotCliUrl?: string;
+      allowHttpFallback?: boolean;
+      embeddingBaseUrl?: string;
+      embeddingModel?: string;
+      executorId?: string;
+    };
+
+    if (prefs.workingDirectory) {
+      process.env.SINGULARITY_WORKING_DIRECTORY = prefs.workingDirectory;
+      desktopWorkingDirectory = prefs.workingDirectory;
+      desktopWorkingDirectorySource = 'env';
+    }
+    if (prefs.copilotCliUrl) {
+      process.env.COPILOT_CLI_URL = prefs.copilotCliUrl;
+    }
+    if (prefs.allowHttpFallback !== undefined) {
+      process.env.ALLOW_GITHUB_MODELS_HTTP_FALLBACK = prefs.allowHttpFallback ? 'true' : 'false';
+    }
+    if (prefs.embeddingBaseUrl) {
+      process.env.LOCAL_OPENAI_BASE_URL = prefs.embeddingBaseUrl;
+    }
+    if (prefs.embeddingModel) {
+      process.env.LOCAL_OPENAI_EMBEDDING_MODEL = prefs.embeddingModel;
+    }
+    if (prefs.executorId) {
+      executorId = prefs.executorId;
+      process.env.SINGULARITY_DESKTOP_EXECUTOR_ID = prefs.executorId;
+    }
+  } catch {
+    // Server not yet reachable — proceed with .env.local values.
+  }
+};
 
 const deriveReadinessState = (checks: RuntimeReadinessCheck[]) => {
   if (checks.some(check => check.status === 'blocked')) {
@@ -1071,6 +1125,9 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
     checks,
     controlPlaneUrl,
     desktopExecutorId: executorId,
+    desktopId,
+    desktopHostname,
+    workingDirectory: desktopWorkingDirectory,
     workingDirectorySource: desktopWorkingDirectorySource,
     runtimeOwner: 'DESKTOP',
     executionRuntimeOwner: 'DESKTOP',
@@ -1175,6 +1232,9 @@ reader.on('line', async line => {
         (message.payload?.actor as ActorContext | null | undefined) || null;
 
       if (activeActorContext?.userId) {
+        // Load DB-stored preferences once on first sign-in so working directory,
+        // CLI URL, etc. come from the database rather than .env.local alone.
+        await loadPreferencesFromServer().catch(() => undefined);
         await syncExecutorRegistration().catch(() => undefined);
         ensureDesktopExecutorLoop();
       } else {
@@ -1234,6 +1294,63 @@ reader.on('line', async line => {
         requestId,
         payload: await buildDesktopRuntimeStatus(),
       });
+      return;
+    }
+
+    if (message.type === 'runtime:preferences:get') {
+      // Return the stored preferences from the control plane.
+      try {
+        const raw = await fetch(`${controlPlaneUrl}/api/runtime/desktop-preferences`, {
+          headers: { 'x-desktop-hostname': desktopHostname },
+        });
+        const prefs = raw.ok ? await raw.json() : null;
+        respond({ requestId, payload: prefs });
+      } catch (error) {
+        respond({ requestId, payload: null });
+      }
+      return;
+    }
+
+    if (message.type === 'runtime:preferences:set') {
+      // Save preferences to the control plane DB and apply to this worker.
+      try {
+        const body = {
+          hostname: desktopHostname,
+          ...(message.payload || {}),
+        };
+        const raw = await fetch(`${controlPlaneUrl}/api/runtime/desktop-preferences`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!raw.ok) {
+          const err = await raw.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error((err as any).error || 'Failed to save preferences');
+        }
+        const saved = await raw.json();
+        // Apply to this worker process.
+        if (saved.workingDirectory) {
+          process.env.SINGULARITY_WORKING_DIRECTORY = saved.workingDirectory;
+          desktopWorkingDirectory = saved.workingDirectory;
+          desktopWorkingDirectorySource = 'env';
+        }
+        if (saved.copilotCliUrl) process.env.COPILOT_CLI_URL = saved.copilotCliUrl;
+        if (saved.allowHttpFallback !== undefined) {
+          process.env.ALLOW_GITHUB_MODELS_HTTP_FALLBACK = saved.allowHttpFallback ? 'true' : 'false';
+        }
+        if (saved.embeddingBaseUrl) process.env.LOCAL_OPENAI_BASE_URL = saved.embeddingBaseUrl;
+        if (saved.embeddingModel) process.env.LOCAL_OPENAI_EMBEDDING_MODEL = saved.embeddingModel;
+        if (saved.executorId) {
+          executorId = saved.executorId;
+          process.env.SINGULARITY_DESKTOP_EXECUTOR_ID = saved.executorId;
+        }
+        respond({ requestId, payload: { saved, status: await buildDesktopRuntimeStatus() } });
+      } catch (error) {
+        respond({
+          requestId,
+          error: error instanceof Error ? error.message : 'Failed to save preferences',
+        });
+      }
       return;
     }
 

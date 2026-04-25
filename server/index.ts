@@ -71,6 +71,7 @@ import {
 } from './githubModels';
 import { buildMemoryContext } from './memory';
 import { buildAstGroundingSummary, type AstGroundingSummary } from './astGrounding';
+import { loadAndApplyDesktopPreferences } from './desktopPreferences';
 import {
   ensureAgentLearningBackfill,
   queueCapabilityAgentLearningRefresh,
@@ -165,6 +166,9 @@ const ensureWorkersStarted = () => {
 const bootstrapWorkspaceDatabaseAndStandards =
   async (): Promise<WorkspaceDatabaseBootstrapResult> => {
     await initializeDatabase();
+    // Load stored desktop preferences into process.env so runtime settings
+    // configured through the UI take effect even without .env.local entries.
+    await loadAndApplyDesktopPreferences();
     await initializeSeedData();
     const catalogSnapshot = await initializeWorkspaceFoundations();
     ensureWorkersStarted();

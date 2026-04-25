@@ -43,6 +43,8 @@ export interface SingularityDesktopBridge {
     model?: string;
   }) => Promise<unknown>;
   clearEmbeddingConfig: () => Promise<unknown>;
+  getDesktopPreferences: () => Promise<unknown>;
+  setDesktopPreferences: (prefs: unknown) => Promise<unknown>;
   sendRuntimeChat: (payload: unknown) => Promise<unknown>;
   claimCapabilityExecution: (payload: unknown) => Promise<unknown>;
   releaseCapabilityExecution: (payload: unknown) => Promise<unknown>;

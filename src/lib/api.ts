@@ -155,6 +155,10 @@ export interface RuntimeStatus {
   checks?: RuntimeReadinessCheck[];
   controlPlaneUrl?: string;
   desktopExecutorId?: string;
+  /** Stable hash-based machine identity e.g. "DID-3A7F2B9C1D4E5F60" */
+  desktopId?: string;
+  /** OS hostname of the desktop machine */
+  desktopHostname?: string;
   workingDirectorySource?: "mapping" | "env" | "project-root" | "missing";
   embeddingProviderKey?: "local-openai" | "deterministic-hash";
   embeddingConfigured?: boolean;
@@ -482,6 +486,43 @@ export const clearLocalEmbeddingSettings = async (): Promise<RuntimeStatus> => {
   }
 
   return desktop.clearEmbeddingConfig() as Promise<RuntimeStatus>;
+};
+
+/**
+ * Fetches stored non-secret desktop preferences from the control plane.
+ * Passes the current machine hostname via a header so the server returns
+ * the correct row without requiring auth.
+ */
+export const fetchDesktopPreferences = async (): Promise<import('../types').DesktopPreferences | null> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop) {
+    return desktop.getDesktopPreferences() as Promise<import('../types').DesktopPreferences | null>;
+  }
+  return requestJson<import('../types').DesktopPreferences | null>(
+    '/api/runtime/desktop-preferences',
+  );
+};
+
+/**
+ * Saves non-secret desktop preferences to the DB and applies them immediately.
+ * Security tokens are not accepted here — use the credentials endpoints instead.
+ */
+export const saveDesktopPreferences = async (
+  prefs: Partial<import('../types').DesktopPreferences>,
+): Promise<import('../types').DesktopPreferences> => {
+  const desktop = getDesktopBridge();
+  if (desktop?.isDesktop) {
+    return (desktop.setDesktopPreferences(prefs) as Promise<{ saved: import('../types').DesktopPreferences }>)
+      .then(r => r.saved);
+  }
+  return requestJson<import('../types').DesktopPreferences>(
+    '/api/runtime/desktop-preferences',
+    {
+      method: 'PUT',
+      headers: jsonHeaders,
+      body: JSON.stringify(prefs),
+    },
+  );
 };
 
 export const claimCapabilityExecution = async ({

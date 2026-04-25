@@ -737,6 +737,12 @@ ipcMain.handle('desktop:runtime:set-embedding-config', async (_event, payload) =
 ipcMain.handle('desktop:runtime:clear-embedding-config', async () =>
   requestWorker('runtime:clear-embedding-config'),
 );
+ipcMain.handle('desktop:runtime:preferences:get', async () =>
+  requestWorker('runtime:preferences:get'),
+);
+ipcMain.handle('desktop:runtime:preferences:set', async (_event, payload) =>
+  requestWorker('runtime:preferences:set', payload || {}),
+);
 ipcMain.handle('desktop:runtime:chat', async (_event, payload) =>
   requestWorker('runtime:chat', payload || {}),
 );

@@ -1,3 +1,4 @@
+import os from 'node:os';
 import type express from 'express';
 import {
   clearPersistedRuntimeToken,
@@ -6,6 +7,12 @@ import {
 } from '../runtimeCredentials';
 import { sendApiError } from '../api/errors';
 import { buildRuntimeStatus } from '../runtimeStatus';
+import {
+  applyPreferencesToEnv,
+  deriveDesktopId,
+  getDesktopPreferences,
+  patchDesktopPreferences,
+} from '../desktopPreferences';
 
 type RuntimeCredentialBody = {
   token?: string;
@@ -62,6 +69,78 @@ export const registerRuntimeRoutes = (app: express.Express) => {
         envFilePath: envLocalPath,
       });
       response.json(await buildRuntimeStatus());
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  // ── Desktop preferences ──────────────────────────────────────────────────
+
+  /**
+   * GET /api/runtime/desktop-preferences
+   *
+   * Returns the stored preferences for the desktop identified by the
+   * `x-desktop-hostname` header (or falls back to the server's own hostname).
+   * Creates a minimal row on first access.
+   */
+  app.get('/api/runtime/desktop-preferences', async (request, response) => {
+    try {
+      const hostname = String(request.headers['x-desktop-hostname'] || '').trim();
+      const desktopId = deriveDesktopId(hostname || undefined);
+      const prefs = await getDesktopPreferences(desktopId);
+      response.json(prefs ?? { id: desktopId, hostname: hostname || os.hostname(), createdAt: null, updatedAt: null });
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  /**
+   * PUT /api/runtime/desktop-preferences
+   *
+   * Saves non-secret preferences for this desktop and immediately applies
+   * them to the server process environment.
+   *
+   * Body: { hostname, workingDirectory?, copilotCliUrl?, allowHttpFallback?,
+   *         embeddingBaseUrl?, embeddingModel?, runtimePort?, executorId? }
+   *
+   * Security tokens are never accepted here — they continue to be saved via
+   * POST /api/runtime/credentials.
+   */
+  app.put('/api/runtime/desktop-preferences', async (request, response) => {
+    try {
+      const hostname = String(request.body?.hostname || '').trim();
+      const desktopId = deriveDesktopId(hostname || undefined);
+
+      const patch = {
+        workingDirectory: request.body?.workingDirectory !== undefined
+          ? String(request.body.workingDirectory || '').trim() || undefined
+          : undefined,
+        copilotCliUrl: request.body?.copilotCliUrl !== undefined
+          ? String(request.body.copilotCliUrl || '').trim() || undefined
+          : undefined,
+        allowHttpFallback: request.body?.allowHttpFallback !== undefined
+          ? Boolean(request.body.allowHttpFallback)
+          : undefined,
+        embeddingBaseUrl: request.body?.embeddingBaseUrl !== undefined
+          ? String(request.body.embeddingBaseUrl || '').trim() || undefined
+          : undefined,
+        embeddingModel: request.body?.embeddingModel !== undefined
+          ? String(request.body.embeddingModel || '').trim() || undefined
+          : undefined,
+        runtimePort: request.body?.runtimePort !== undefined
+          ? (Number(request.body.runtimePort) > 0 ? Math.floor(Number(request.body.runtimePort)) : undefined)
+          : undefined,
+        executorId: request.body?.executorId !== undefined
+          ? String(request.body.executorId || '').trim() || undefined
+          : undefined,
+      };
+
+      const saved = await patchDesktopPreferences(desktopId, hostname, patch);
+
+      // Apply immediately so the running server process picks them up.
+      applyPreferencesToEnv(saved);
+
+      response.json(saved);
     } catch (error) {
       sendApiError(response, error);
     }

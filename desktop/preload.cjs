@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('singularityDesktop', {
   setEmbeddingConfig: payload =>
     ipcRenderer.invoke('desktop:runtime:set-embedding-config', payload || {}),
   clearEmbeddingConfig: () => ipcRenderer.invoke('desktop:runtime:clear-embedding-config'),
+  getDesktopPreferences: () => ipcRenderer.invoke('desktop:runtime:preferences:get'),
+  setDesktopPreferences: prefs => ipcRenderer.invoke('desktop:runtime:preferences:set', prefs || {}),
   sendRuntimeChat: payload => ipcRenderer.invoke('desktop:runtime:chat', payload),
   claimCapabilityExecution: payload =>
     ipcRenderer.invoke('desktop:runtime:execution:claim', payload),

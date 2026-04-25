@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   Lock,
   LockOpen,
+  MonitorCog,
   RefreshCw,
   ShieldCheck,
   Trash2,
@@ -31,12 +32,14 @@ import {
   clearRuntimeCredentials,
   createDesktopWorkspaceMapping,
   deleteDesktopWorkspaceMapping,
+  fetchDesktopPreferences,
   fetchExecutorRegistry,
   fetchDesktopWorkspaceMappings,
   fetchRuntimeStatus,
   fetchWorkspaceWriteLock,
   releaseCapabilityExecution,
   removeDesktopExecutor,
+  saveDesktopPreferences,
   syncCapabilityRepositories,
   updateLocalEmbeddingSettings,
   updateRuntimeCredentials,
@@ -44,6 +47,7 @@ import {
   type RuntimeStatus,
 } from "../lib/api";
 import type {
+  DesktopPreferences,
   DesktopWorkspaceMapping,
   ExecutorRegistrySummary,
   WorkspaceWriteLock,
@@ -129,6 +133,23 @@ const Operations = () => {
     Record<string, { localRootPath: string; workingDirectoryPath: string }>
   >({});
   const lockPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Desktop preferences
+  const [desktopPrefs, setDesktopPrefs] = useState<DesktopPreferences | null>(null);
+  const [prefsDraft, setPrefsDraft] = useState<{
+    workingDirectory: string;
+    copilotCliUrl: string;
+    allowHttpFallback: boolean;
+    embeddingBaseUrl: string;
+    embeddingModel: string;
+  }>({
+    workingDirectory: "",
+    copilotCliUrl: "",
+    allowHttpFallback: false,
+    embeddingBaseUrl: "",
+    embeddingModel: "",
+  });
+  const [prefsBusy, setPrefsBusy] = useState(false);
 
   const canClaimExecution = hasPermission(
     activeCapability.effectivePermissions,
@@ -414,6 +435,23 @@ const Operations = () => {
     void refreshData();
   }, [activeCapability.id]);
 
+  // Load desktop preferences once on mount (desktop-only).
+  useEffect(() => {
+    fetchDesktopPreferences()
+      .then(prefs => {
+        if (!prefs) return;
+        setDesktopPrefs(prefs);
+        setPrefsDraft({
+          workingDirectory: prefs.workingDirectory ?? "",
+          copilotCliUrl: prefs.copilotCliUrl ?? "",
+          allowHttpFallback: prefs.allowHttpFallback ?? false,
+          embeddingBaseUrl: prefs.embeddingBaseUrl ?? "",
+          embeddingModel: prefs.embeddingModel ?? "",
+        });
+      })
+      .catch(() => undefined);
+  }, []);
+
   useEffect(() => {
     void loadWorkspaceMappings(runtimeStatus?.executorId || null);
   }, [loadWorkspaceMappings, runtimeStatus?.executorId]);
@@ -582,6 +620,31 @@ const Operations = () => {
       );
     } finally {
       setBusyAction("");
+    }
+  };
+
+  const handleSavePreferences = async () => {
+    setPrefsBusy(true);
+    try {
+      const saved = await saveDesktopPreferences({
+        workingDirectory: prefsDraft.workingDirectory.trim() || undefined,
+        copilotCliUrl: prefsDraft.copilotCliUrl.trim() || undefined,
+        allowHttpFallback: prefsDraft.allowHttpFallback,
+        embeddingBaseUrl: prefsDraft.embeddingBaseUrl.trim() || undefined,
+        embeddingModel: prefsDraft.embeddingModel.trim() || undefined,
+      });
+      setDesktopPrefs(saved);
+      success(
+        "Preferences saved",
+        "Desktop settings are now stored in the database and will load automatically on next start.",
+      );
+    } catch (error) {
+      showError(
+        "Save failed",
+        error instanceof Error ? error.message : "Unable to save desktop preferences.",
+      );
+    } finally {
+      setPrefsBusy(false);
     }
   };
 
@@ -1342,6 +1405,108 @@ const Operations = () => {
               })}
             </div>
           )}
+        </div>
+      </SectionCard>
+
+      {/* ── Desktop Identity & Preferences ─────────────────────────────── */}
+      <SectionCard
+        title="Desktop identity & preferences"
+        description="Non-secret settings stored in the database and loaded automatically on startup. Security tokens (GitHub token, embedding API key) are excluded — configure those in the Runtime settings card above."
+        icon={MonitorCog}
+        action={
+          desktopPrefs?.id ? (
+            <StatusBadge tone="info">{desktopPrefs.id}</StatusBadge>
+          ) : runtimeStatus?.desktopId ? (
+            <StatusBadge tone="neutral">{runtimeStatus.desktopId}</StatusBadge>
+          ) : null
+        }
+      >
+        {desktopPrefs?.hostname || runtimeStatus?.desktopHostname ? (
+          <p className="mb-4 text-xs text-secondary">
+            Machine:{" "}
+            <span className="font-mono font-semibold">
+              {desktopPrefs?.hostname || runtimeStatus?.desktopHostname}
+            </span>
+          </p>
+        ) : null}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="col-span-2 space-y-2">
+            <span className="form-kicker">Working directory</span>
+            <input
+              value={prefsDraft.workingDirectory}
+              onChange={e => setPrefsDraft(d => ({ ...d, workingDirectory: e.target.value }))}
+              placeholder="/Users/you/projects"
+              className="field-input font-mono text-[0.8rem]"
+            />
+            <p className="text-xs text-secondary">
+              Replaces <code className="rounded bg-surface-container-low px-1">SINGULARITY_WORKING_DIRECTORY</code>.
+              Stored in DB — no need to set it in .env.local.
+            </p>
+          </label>
+
+          <label className="space-y-2">
+            <span className="form-kicker">Copilot CLI URL</span>
+            <input
+              value={prefsDraft.copilotCliUrl}
+              onChange={e => setPrefsDraft(d => ({ ...d, copilotCliUrl: e.target.value }))}
+              placeholder="http://127.0.0.1:4321"
+              className="field-input font-mono text-[0.8rem]"
+            />
+            <p className="text-xs text-secondary">
+              Replaces <code className="rounded bg-surface-container-low px-1">COPILOT_CLI_URL</code>.
+            </p>
+          </label>
+
+          <label className="space-y-2">
+            <span className="form-kicker">Embedding base URL</span>
+            <input
+              value={prefsDraft.embeddingBaseUrl}
+              onChange={e => setPrefsDraft(d => ({ ...d, embeddingBaseUrl: e.target.value }))}
+              placeholder="http://127.0.0.1:11434/v1"
+              className="field-input font-mono text-[0.8rem]"
+            />
+            <p className="text-xs text-secondary">
+              Replaces <code className="rounded bg-surface-container-low px-1">LOCAL_OPENAI_BASE_URL</code>. API key stays in .env.local.
+            </p>
+          </label>
+
+          <label className="space-y-2">
+            <span className="form-kicker">Embedding model</span>
+            <input
+              value={prefsDraft.embeddingModel}
+              onChange={e => setPrefsDraft(d => ({ ...d, embeddingModel: e.target.value }))}
+              placeholder="nomic-embed-text"
+              className="field-input"
+            />
+          </label>
+
+          <label className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              checked={prefsDraft.allowHttpFallback}
+              onChange={e => setPrefsDraft(d => ({ ...d, allowHttpFallback: e.target.checked }))}
+              className="h-4 w-4 rounded border-outline-variant accent-primary"
+            />
+            <div>
+              <p className="text-sm font-semibold text-on-surface">Allow HTTP fallback</p>
+              <p className="text-xs text-secondary">
+                Replaces <code className="rounded bg-surface-container-low px-1">ALLOW_GITHUB_MODELS_HTTP_FALLBACK</code>.
+                Falls back to GitHub Models HTTP API when the CLI rejects a model.
+              </p>
+            </div>
+          </label>
+        </div>
+
+        <div className="mt-4 flex gap-2">
+          <button
+            type="button"
+            onClick={() => void handleSavePreferences()}
+            disabled={prefsBusy}
+            className="enterprise-button enterprise-button-brand-muted disabled:opacity-50"
+          >
+            {prefsBusy ? <LoaderCircle size={14} className="animate-spin" /> : null}
+            Save to database
+          </button>
         </div>
       </SectionCard>
 

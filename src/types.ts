@@ -2811,6 +2811,30 @@ export interface ExecutorRegistrySummary {
   disconnectedCount: number;
 }
 
+/**
+ * Non-secret, per-machine settings stored in the `desktop_preferences` table
+ * and keyed by a stable hash of the machine hostname.
+ *
+ * Security tokens (`GITHUB_MODELS_TOKEN`, `LOCAL_OPENAI_API_KEY`, passwords)
+ * are intentionally absent — they stay in `.env.local` only.
+ */
+export interface DesktopPreferences {
+  /** Hash-based stable machine identity, e.g. "DID-3A7F…" */
+  id: string;
+  hostname: string;
+  workingDirectory?: string;
+  copilotCliUrl?: string;
+  allowHttpFallback?: boolean;
+  embeddingBaseUrl?: string;
+  embeddingModel?: string;
+  runtimePort?: number;
+  /** Stable executor ID so the machine keeps the same ID across restarts */
+  executorId?: string;
+  extra?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CapabilityExecutionOwnership {
   capabilityId: string;
   executorId: string;

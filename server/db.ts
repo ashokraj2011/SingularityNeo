@@ -3261,6 +3261,30 @@ export const migrationStatements = [
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `,
+  // ── Desktop preferences ────────────────────────────────────────────────────
+  // Non-secret, per-machine settings keyed by a hash of the machine hostname.
+  // Security tokens (GITHUB_MODELS_TOKEN, LOCAL_OPENAI_API_KEY, etc.) are
+  // intentionally excluded — they remain in .env.local only.
+  `
+    CREATE TABLE IF NOT EXISTS desktop_preferences (
+      id TEXT PRIMARY KEY,
+      hostname TEXT NOT NULL,
+      working_directory TEXT,
+      copilot_cli_url TEXT,
+      allow_http_fallback BOOLEAN,
+      embedding_base_url TEXT,
+      embedding_model TEXT,
+      runtime_port INTEGER,
+      executor_id TEXT,
+      extra JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS desktop_preferences_hostname_idx
+      ON desktop_preferences (hostname)
+  `,
 ];
 
 const detectOptionalPlatformExtensions = async (client: PoolClient) => {
