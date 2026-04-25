@@ -39,6 +39,8 @@ import {
   AgentLearningStatus,
   AgentRoleStarterKey,
   CapabilityAgent,
+  ProviderKey,
+  RuntimeProviderStatus,
   Skill,
   ToolAdapterId,
 } from '../types';
@@ -149,9 +151,45 @@ type AgentFormState = {
   expectedOutputArtifacts: string;
   skillIds: string[];
   preferredToolIds: ToolAdapterId[];
+  providerKey: ProviderKey;
   model: string;
   tokenLimit: string;
 };
+
+const RUNTIME_PROVIDER_FALLBACKS: Array<{ key: ProviderKey; label: string }> = [
+  { key: 'github-copilot', label: 'GitHub Copilot SDK' },
+  { key: 'local-openai', label: 'Local OpenAI-Compatible (Ollama / OpenAI-compatible)' },
+  { key: 'claude-code-cli', label: 'Claude Code CLI' },
+  { key: 'codex-cli', label: 'Codex CLI' },
+  { key: 'aider-cli', label: 'Aider CLI' },
+];
+
+const normalizeAgentProviderKey = (value?: string | null): ProviderKey => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (
+    normalized === 'local-openai' ||
+    normalized.includes('local openai') ||
+    normalized.includes('openai-compatible') ||
+    normalized.includes('ollama')
+  ) {
+    return 'local-openai';
+  }
+  if (normalized === 'claude-code-cli' || normalized === 'claude' || normalized.includes('claude code')) {
+    return 'claude-code-cli';
+  }
+  if (normalized === 'codex-cli' || normalized === 'codex' || normalized.includes('codex cli')) {
+    return 'codex-cli';
+  }
+  if (normalized === 'aider-cli' || normalized === 'aider' || normalized.includes('aider cli')) {
+    return 'aider-cli';
+  }
+  return 'github-copilot';
+};
+
+const getRuntimeProviderLabel = (providerKey: ProviderKey, providers: RuntimeProviderStatus[] = []) =>
+  providers.find(provider => provider.key === providerKey)?.label ||
+  RUNTIME_PROVIDER_FALLBACKS.find(provider => provider.key === providerKey)?.label ||
+  'GitHub Copilot SDK';
 
 const CUSTOM_AGENT_DEFAULT_STARTER: AgentRoleStarterKey = 'SOFTWARE-DEVELOPER';
 
@@ -183,6 +221,7 @@ const createAgentForm = (
   capabilityName: string,
   availableSkills: Skill[],
   defaultModel: string,
+  defaultProviderKey: ProviderKey = 'github-copilot',
   roleStarterKey: AgentRoleStarterKey = CUSTOM_AGENT_DEFAULT_STARTER,
 ): AgentFormState => {
   const template = getRoleStarterTemplate(roleStarterKey);
@@ -213,6 +252,7 @@ const createAgentForm = (
     expectedOutputArtifacts: formatArtifactExpectations(contract.expectedOutputArtifacts),
     skillIds: defaultSkillIds,
     preferredToolIds: template?.preferredToolIds || [],
+    providerKey: defaultProviderKey,
     model: defaultModel,
     tokenLimit: '12000',
   };
@@ -247,6 +287,7 @@ const agentToForm = (agent: CapabilityAgent): AgentFormState => {
     expectedOutputArtifacts: formatArtifactExpectations(contract.expectedOutputArtifacts),
     skillIds: agent.skillIds,
     preferredToolIds: agent.preferredToolIds || [],
+    providerKey: normalizeAgentProviderKey(agent.providerKey || agent.provider),
     model: agent.model,
     tokenLimit: agent.tokenLimit.toString(),
   };
@@ -289,6 +330,7 @@ const applyRoleStarterToForm = (
     capabilityName,
     availableSkills,
     form.model,
+    form.providerKey,
     roleStarterKey,
   );
 
@@ -342,6 +384,7 @@ const normalizeFormSnapshot = (form: AgentFormState) =>
     ),
     skillIds: [...new Set(form.skillIds)].sort(),
     preferredToolIds: [...new Set(form.preferredToolIds)].sort(),
+    providerKey: form.providerKey,
     model: form.model.trim(),
     tokenLimit: Math.max(1000, Number.parseInt(form.tokenLimit, 10) || 12000),
   });
@@ -379,7 +422,8 @@ const buildAgentPayload = (
     outputArtifacts: legacyArtifacts.outputArtifacts,
     skillIds: [...new Set(form.skillIds)],
     preferredToolIds: [...new Set(form.preferredToolIds)],
-    provider: 'GitHub Copilot SDK' as const,
+    provider: getRuntimeProviderLabel(form.providerKey),
+    providerKey: form.providerKey,
     model: form.model,
     tokenLimit: Math.max(1000, Number.parseInt(form.tokenLimit, 10) || 12000),
   };
@@ -390,9 +434,12 @@ const getComparableSelectedAgent = (
   capabilityName: string,
   fallbackSkills: Skill[],
   fallbackModel: string,
+  fallbackProviderKey: ProviderKey,
 ) =>
   normalizeFormSnapshot(
-    agent ? agentToForm(agent) : createAgentForm(capabilityName, fallbackSkills, fallbackModel),
+    agent
+      ? agentToForm(agent)
+      : createAgentForm(capabilityName, fallbackSkills, fallbackModel, fallbackProviderKey),
   );
 
 export default function Agents() {
@@ -432,6 +479,7 @@ export default function Agents() {
       activeCapability.name,
       availableSkills,
       fallbackModelOptions[0]?.apiModelId || 'gpt-4.1-mini',
+      'github-copilot',
     ),
   );
   const [createModalOpen, setCreateModalOpen] = useState(false);
@@ -441,6 +489,7 @@ export default function Agents() {
       activeCapability.name,
       availableSkills,
       fallbackModelOptions[0]?.apiModelId || 'gpt-4.1-mini',
+      'github-copilot',
     ),
   );
   const [bulkModelValue, setBulkModelValue] = useState<string>(
@@ -467,6 +516,13 @@ export default function Agents() {
     availableModelOptions[0]?.apiModelId ||
     availableModelOptions[0]?.id ||
     'gpt-4.1-mini';
+  const runtimeDefaultProviderKey = runtimeStatus?.providerKey || 'github-copilot';
+  const runtimeProviderOptions = runtimeStatus?.availableProviders?.length
+    ? runtimeStatus.availableProviders.map(provider => ({
+        key: provider.key,
+        label: provider.label,
+      }))
+    : RUNTIME_PROVIDER_FALLBACKS;
   const selectedAgent =
     workspace.agents.find(agent => agent.id === selectedAgentId) || ownerAgent || null;
   const selectedAgentKnowledgeLens = useMemo(
@@ -536,8 +592,16 @@ export default function Agents() {
         activeCapability.name,
         availableSkills,
         runtimeDefaultModel,
+        runtimeDefaultProviderKey,
       ),
-    [activeCapability.name, availableSkills, detailForm, runtimeDefaultModel, selectedAgent],
+    [
+      activeCapability.name,
+      availableSkills,
+      detailForm,
+      runtimeDefaultModel,
+      runtimeDefaultProviderKey,
+      selectedAgent,
+    ],
   );
 
   const detailCanSave = Boolean(
@@ -551,13 +615,30 @@ export default function Agents() {
     createForm.name.trim() && createForm.role.trim() && createForm.objective.trim(),
   );
 
-  const getModelOptionsForValue = (value: string) => {
-    const isUnavailable = !availableModelOptions.some(
+  const getProviderModelOptions = (providerKey: ProviderKey) => {
+    const providerModels = runtimeStatus?.availableProviders?.find(
+      provider => provider.key === providerKey,
+    )?.availableModels;
+    return providerModels && providerModels.length > 0 ? providerModels : availableModelOptions;
+  };
+
+  const getPreferredModelForProvider = (providerKey: ProviderKey) => {
+    const providerOptions = getProviderModelOptions(providerKey);
+    return (
+      providerOptions[0]?.apiModelId ||
+      providerOptions[0]?.id ||
+      runtimeDefaultModel
+    );
+  };
+
+  const getModelOptionsForValue = (providerKey: ProviderKey, value: string) => {
+    const providerOptions = getProviderModelOptions(providerKey);
+    const isUnavailable = !providerOptions.some(
       model => model.id === value || model.apiModelId === value,
     );
 
     if (!isUnavailable || !value) {
-      return availableModelOptions;
+      return providerOptions;
     }
 
     return [
@@ -565,21 +646,21 @@ export default function Agents() {
         id: value,
         apiModelId: value,
         label: `${value} (current)`,
-        profile: 'Unavailable in current Copilot runtime',
+        profile: 'Unavailable in current runtime provider',
       },
-      ...availableModelOptions,
+      ...providerOptions,
     ];
   };
 
-  const detailModelOptions = getModelOptionsForValue(detailForm.model);
-  const createModelOptions = getModelOptionsForValue(createForm.model);
-  const detailModelUnavailable = !availableModelOptions.some(
+  const detailModelOptions = getModelOptionsForValue(detailForm.providerKey, detailForm.model);
+  const createModelOptions = getModelOptionsForValue(createForm.providerKey, createForm.model);
+  const detailModelUnavailable = !getProviderModelOptions(detailForm.providerKey).some(
     model => model.id === detailForm.model || model.apiModelId === detailForm.model,
   );
-  const createModelUnavailable = !availableModelOptions.some(
+  const createModelUnavailable = !getProviderModelOptions(createForm.providerKey).some(
     model => model.id === createForm.model || model.apiModelId === createForm.model,
   );
-  const bulkModelOptions = getModelOptionsForValue(bulkModelValue);
+  const bulkModelOptions = getModelOptionsForValue(runtimeDefaultProviderKey, bulkModelValue);
   const bulkModelUnavailable = !availableModelOptions.some(
     model => model.id === bulkModelValue || model.apiModelId === bulkModelValue,
   );
@@ -618,7 +699,7 @@ export default function Agents() {
         setRuntimeStatusError(
           nextError instanceof Error
             ? nextError.message
-            : 'Unable to load the live Copilot model catalog.',
+            : 'Unable to load the live runtime model catalog.',
         );
       });
 
@@ -700,7 +781,14 @@ export default function Agents() {
   };
 
   const openCreateModal = () => {
-    setCreateForm(createAgentForm(activeCapability.name, availableSkills, runtimeDefaultModel));
+    setCreateForm(
+      createAgentForm(
+        activeCapability.name,
+        availableSkills,
+        getPreferredModelForProvider(runtimeDefaultProviderKey),
+        runtimeDefaultProviderKey,
+      ),
+    );
     setCreateAdvancedOpen(false);
     setCreateModalOpen(true);
   };
@@ -873,7 +961,7 @@ export default function Agents() {
           }
         >
           {runtimeStatus?.configured && runtimeStatus?.modelCatalogSource === 'runtime'
-            ? 'Live Copilot models'
+            ? 'Live runtime models'
             : 'Fallback model catalog'}
         </StatusBadge>
         {isUnavailable ? (
@@ -883,7 +971,7 @@ export default function Agents() {
       <p className="text-sm leading-relaxed text-secondary">
         {runtimeStatus?.configured && runtimeStatus?.modelCatalogSource === 'runtime'
           ? `Using ${availableModelOptions.length} models reported by the backend runtime.`
-          : 'The backend is currently serving the fallback model catalog, so validate the selected model in this environment before relying on it.'}
+          : 'The backend is currently serving the fallback model catalog, so validate the selected runtime model in this environment before relying on it.'}
       </p>
       {runtimeStatusError ? (
         <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
@@ -1059,7 +1147,15 @@ export default function Agents() {
             >
               <div className="grid gap-3 md:grid-cols-4">
                 {[
-                  { label: 'Provider', value: selectedAgent.provider },
+                  {
+                    label: 'Provider',
+                    value: getRuntimeProviderLabel(
+                      normalizeAgentProviderKey(
+                        selectedAgent.providerKey || selectedAgent.provider,
+                      ),
+                      runtimeStatus?.availableProviders,
+                    ),
+                  },
                   { label: 'Model', value: selectedAgent.model },
                   {
                     label: 'Token cap',
@@ -1489,7 +1585,38 @@ export default function Agents() {
               </p>
             </label>
             <label className="space-y-2">
-              <span className="field-label">Copilot model</span>
+              <span className="field-label">Runtime provider</span>
+              <select
+                value={detailForm.providerKey}
+                onChange={event =>
+                  setDetailForm(prev => {
+                    const nextProviderKey = event.target.value as ProviderKey;
+                    const nextModel = getProviderModelOptions(nextProviderKey).some(
+                      model => model.id === prev.model || model.apiModelId === prev.model,
+                    )
+                      ? prev.model
+                      : getPreferredModelForProvider(nextProviderKey);
+                    return {
+                      ...prev,
+                      providerKey: nextProviderKey,
+                      model: nextModel,
+                    };
+                  })
+                }
+                className="field-select"
+              >
+                {runtimeProviderOptions.map(provider => (
+                  <option key={provider.key} value={provider.key}>
+                    {provider.label}
+                  </option>
+                ))}
+              </select>
+              <p className="field-help">
+                Choose the runtime lane this agent should use. If you leave other agents unpinned, they follow the desktop default provider from Operations.
+              </p>
+            </label>
+            <label className="space-y-2">
+              <span className="field-label">Runtime model</span>
               <select
                 value={detailForm.model}
                 onChange={event =>
@@ -1504,7 +1631,7 @@ export default function Agents() {
                 ))}
               </select>
               <p className="field-help">
-                This list comes from the backend runtime when available, so the agent only uses models exposed by the connected Copilot environment.
+                This list comes from the selected runtime provider when available, so the agent only uses models exposed by that environment.
               </p>
             </label>
             <label className="space-y-2">
@@ -2427,7 +2554,7 @@ export default function Agents() {
 
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="space-y-2 md:col-span-2">
-                  <span className="field-label">Target Copilot model</span>
+                  <span className="field-label">Target runtime model</span>
                   <select
                     value={bulkModelValue}
                     onChange={event => setBulkModelValue(event.target.value)}
@@ -2552,6 +2679,37 @@ export default function Agents() {
                   </p>
                 </label>
                 <label className="space-y-2">
+                  <span className="field-label">Runtime provider</span>
+                  <select
+                    value={createForm.providerKey}
+                    onChange={event =>
+                      setCreateForm(prev => {
+                        const nextProviderKey = event.target.value as ProviderKey;
+                        const nextModel = getProviderModelOptions(nextProviderKey).some(
+                          model => model.id === prev.model || model.apiModelId === prev.model,
+                        )
+                          ? prev.model
+                          : getPreferredModelForProvider(nextProviderKey);
+                        return {
+                          ...prev,
+                          providerKey: nextProviderKey,
+                          model: nextModel,
+                        };
+                      })
+                    }
+                    className="field-select"
+                  >
+                    {runtimeProviderOptions.map(provider => (
+                      <option key={provider.key} value={provider.key}>
+                        {provider.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="field-help">
+                    Pin this agent to a specific runtime lane, or match the desktop default provider before saving.
+                  </p>
+                </label>
+                <label className="space-y-2">
                   <span className="field-label">Role</span>
                   <input
                     value={createForm.role}
@@ -2563,7 +2721,7 @@ export default function Agents() {
                   />
                 </label>
                 <label className="space-y-2">
-                  <span className="field-label">Copilot model</span>
+                  <span className="field-label">Runtime model</span>
                   <select
                     value={createForm.model}
                     onChange={event =>

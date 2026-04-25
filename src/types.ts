@@ -4391,6 +4391,10 @@ export interface ChatStreamEvent {
   content?: string;
   createdAt?: string;
   model?: string;
+  runtimeProviderKey?: ProviderKey;
+  runtimeTransportMode?: RuntimeTransportMode;
+  runtimeEndpoint?: string | null;
+  runtimeCommand?: string | null;
   usage?: {
     promptTokens: number;
     completionTokens: number;

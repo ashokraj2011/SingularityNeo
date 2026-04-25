@@ -22,3 +22,9 @@ test-results/
 .singularity/
 .secrets/
 REPO-CAP-*/
+
+# Desktop base clones — created at runtime by desktopRepoSync, never committed
+_repos/
+
+# Local provider config — machine-specific, contains no secrets but is not shared
+.runtime-providers.local.json

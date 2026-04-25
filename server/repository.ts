@@ -892,7 +892,7 @@ const agentFromRow = (row: Record<string, any>): CapabilityAgent => ({
   skillIds: asStringArray(row.skill_ids),
   preferredToolIds: asStringArray(row.preferred_tool_ids) as CapabilityAgent['preferredToolIds'],
   provider: resolveProviderDisplayName(row.provider_key || row.provider),
-  providerKey: normalizeProviderKey(row.provider_key || row.provider),
+  providerKey: row.provider_key ? normalizeProviderKey(row.provider_key) : undefined,
   embeddingProviderKey: normalizeEmbeddingProviderKey(
     row.embedding_provider_key || row.provider_key || row.provider,
   ),

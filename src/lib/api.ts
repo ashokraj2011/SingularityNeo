@@ -227,6 +227,10 @@ export interface CapabilityChatResponse {
   responseId: string | null;
   createdAt: string;
   traceId?: string;
+  runtimeProviderKey?: ProviderKey;
+  runtimeTransportMode?: RuntimeTransportMode;
+  runtimeEndpoint?: string | null;
+  runtimeCommand?: string | null;
   sessionId?: string;
   sessionScope?: "GENERAL_CHAT" | "WORK_ITEM" | "TASK";
   sessionScopeId?: string;

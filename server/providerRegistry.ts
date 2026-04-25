@@ -19,6 +19,7 @@ export const DEFAULT_EMBEDDING_PROVIDER_KEY: EmbeddingProviderKey = 'local-opena
 export const HASH_EMBEDDING_PROVIDER_KEY: EmbeddingProviderKey = 'deterministic-hash';
 
 const trim = (value?: string | null) => String(value || '').trim();
+const DEFAULT_PROVIDER_LABEL_NORMALIZED = DEFAULT_PROVIDER_LABEL.toLowerCase();
 
 export const isCliRuntimeProviderKey = (providerKey?: string | null): providerKey is ProviderKey => {
   const normalized = trim(providerKey).toLowerCase();
@@ -76,6 +77,19 @@ export const normalizeProviderKey = (value?: string | null): ProviderKey => {
   return DEFAULT_PROVIDER_KEY;
 };
 
+const isLegacyDefaultProviderLabel = (value?: string | null) => {
+  const normalized = trim(value).toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+
+  return (
+    normalized === DEFAULT_PROVIDER_KEY ||
+    normalized === DEFAULT_PROVIDER_LABEL_NORMALIZED ||
+    normalized.includes('github copilot')
+  );
+};
+
 export const resolveProviderDisplayName = (providerKey?: ProviderKey | string | null) => {
   switch (normalizeProviderKey(providerKey)) {
     case LOCAL_OPENAI_PROVIDER_KEY:
@@ -89,6 +103,16 @@ export const resolveProviderDisplayName = (providerKey?: ProviderKey | string | 
     default:
       return DEFAULT_PROVIDER_LABEL;
   }
+};
+
+export const hasExplicitAgentProvider = (
+  agent?: Partial<CapabilityAgent> | null,
+) => {
+  if (trim(agent?.providerKey)) {
+    return true;
+  }
+
+  return !isLegacyDefaultProviderLabel(agent?.provider);
 };
 
 export const normalizeEmbeddingProviderKey = (
@@ -112,7 +136,17 @@ export const normalizeEmbeddingProviderKey = (
 
 export const resolveAgentProviderKey = (
   agent?: Partial<CapabilityAgent> | null,
-): ProviderKey => normalizeProviderKey(agent?.providerKey || agent?.provider);
+): ProviderKey => {
+  if (trim(agent?.providerKey)) {
+    return normalizeProviderKey(agent?.providerKey);
+  }
+
+  if (isLegacyDefaultProviderLabel(agent?.provider)) {
+    return getConfiguredDefaultRuntimeProviderKey();
+  }
+
+  return normalizeProviderKey(agent?.provider);
+};
 
 export const resolveAgentEmbeddingProviderKey = (
   agent?: Partial<CapabilityAgent> | null,

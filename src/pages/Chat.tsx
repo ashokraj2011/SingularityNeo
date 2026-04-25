@@ -48,6 +48,8 @@ import type {
   AgentSessionSummary,
   CapabilityChatMessage,
   MemoryReference,
+  ProviderKey,
+  RuntimeTransportMode,
   WorkItem,
 } from '../types';
 import { buildAgentKnowledgeLens } from '../lib/agentKnowledge';
@@ -75,6 +77,10 @@ type ChatMessageAnnotation = {
   deliveryState: MessageDeliveryState;
   traceId?: string;
   model?: string;
+  runtimeProviderKey?: ProviderKey;
+  runtimeTransportMode?: RuntimeTransportMode;
+  runtimeEndpoint?: string | null;
+  runtimeCommand?: string | null;
   usage?: RuntimeUsage;
   memoryReferences?: MemoryReference[];
   error?: string;
@@ -251,6 +257,61 @@ const getRuntimeDisplayLabel = () =>
 const getRuntimeOwnerLabel = () =>
   isDesktopRuntime() ? 'desktop runtime' : 'control-plane runtime';
 
+const getProviderLabel = (providerKey?: ProviderKey | string | null) => {
+  const normalized = String(providerKey || '').trim().toLowerCase();
+  if (!normalized || normalized === 'github-copilot') return 'GitHub Copilot SDK';
+  if (normalized === 'local-openai') return 'Local OpenAI-Compatible';
+  if (normalized === 'claude-code-cli') return 'Claude Code CLI';
+  if (normalized === 'codex-cli') return 'Codex CLI';
+  if (normalized === 'aider-cli') return 'Aider CLI';
+  return normalized;
+};
+
+const normalizeProviderKey = (providerKey?: ProviderKey | string | null): ProviderKey => {
+  const normalized = String(providerKey || '').trim().toLowerCase();
+  if (
+    normalized === 'local-openai' ||
+    normalized.includes('local openai') ||
+    normalized.includes('openai-compatible') ||
+    normalized.includes('ollama')
+  ) {
+    return 'local-openai';
+  }
+  if (normalized === 'claude-code-cli' || normalized === 'claude' || normalized.includes('claude code')) {
+    return 'claude-code-cli';
+  }
+  if (normalized === 'codex-cli' || normalized === 'codex' || normalized.includes('codex cli')) {
+    return 'codex-cli';
+  }
+  if (normalized === 'aider-cli' || normalized === 'aider' || normalized.includes('aider cli')) {
+    return 'aider-cli';
+  }
+  return 'github-copilot';
+};
+
+const formatRuntimeModeLabel = (runtimeTransportMode?: RuntimeTransportMode) => {
+  switch (runtimeTransportMode) {
+    case 'desktop-cli':
+      return 'Desktop CLI';
+    case 'sdk-session':
+      return 'SDK session';
+    case 'http-api':
+      return 'HTTP API';
+    case 'local-openai':
+      return 'Local OpenAI';
+    default:
+      return 'Unknown transport';
+  }
+};
+
+const formatRuntimeTarget = ({
+  endpoint,
+  command,
+}: {
+  endpoint?: string | null;
+  command?: string | null;
+}) => endpoint || command || 'Not reported';
+
 const WORK_ITEM_BRANCH_STATUS_PRIORITY: Record<WorkItem['status'], number> = {
   ACTIVE: 0,
   BLOCKED: 0,
@@ -315,6 +376,11 @@ const Chat = () => {
     isNewSession?: boolean;
     sessionMode: SessionMode;
     createdAt?: string;
+    model?: string;
+    runtimeProviderKey?: ProviderKey;
+    runtimeTransportMode?: RuntimeTransportMode;
+    runtimeEndpoint?: string | null;
+    runtimeCommand?: string | null;
   } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -770,7 +836,7 @@ const Chat = () => {
 
     if (!runtimeStatus?.configured) {
       setError(
-        `The ${getRuntimeDisplayLabel()} is not configured yet. Set COPILOT_CLI_URL for a headless Copilot CLI server or add GITHUB_MODELS_TOKEN to .env.local, then restart the ${isDesktopRuntime() ? 'desktop app' : 'dev server'}.`,
+        `The ${getRuntimeDisplayLabel()} is not configured yet. Configure a runtime provider in Operations, then restart the ${isDesktopRuntime() ? 'desktop app' : 'dev server'} if prompted.`,
       );
       return;
     }
@@ -900,6 +966,10 @@ const Chat = () => {
         deliveryState,
         traceId: streamResult.completeEvent?.traceId,
         model: streamResult.completeEvent?.model || activeAgent.model,
+        runtimeProviderKey: streamResult.completeEvent?.runtimeProviderKey,
+        runtimeTransportMode: streamResult.completeEvent?.runtimeTransportMode,
+        runtimeEndpoint: streamResult.completeEvent?.runtimeEndpoint,
+        runtimeCommand: streamResult.completeEvent?.runtimeCommand,
         usage: streamResult.completeEvent?.usage,
         memoryReferences: streamResult.memoryReferences,
         error: streamResult.error,
@@ -918,6 +988,11 @@ const Chat = () => {
         isNewSession: streamResult.completeEvent?.isNewSession,
         sessionMode: requestedSessionMode,
         createdAt,
+        model: streamResult.completeEvent?.model || activeAgent.model,
+        runtimeProviderKey: streamResult.completeEvent?.runtimeProviderKey,
+        runtimeTransportMode: streamResult.completeEvent?.runtimeTransportMode,
+        runtimeEndpoint: streamResult.completeEvent?.runtimeEndpoint,
+        runtimeCommand: streamResult.completeEvent?.runtimeCommand,
       });
 
       setStreamedDraft('');
@@ -952,7 +1027,7 @@ const Chat = () => {
       if (requestedSessionMode === 'fresh') {
         info(
           'Fresh session started',
-          `${activeAgent.name} started a new Copilot session for this turn.`,
+          `${activeAgent.name} started a new runtime session for this turn.`,
         );
       }
     } catch (nextError) {
@@ -1026,7 +1101,7 @@ const Chat = () => {
     }
 
     const shouldClear = window.confirm(
-      'Clear the capability copilot transcript? This also resets the saved general chat session so the next turn starts fresh.',
+      'Clear the capability chat transcript? This also resets the saved general chat session so the next turn starts fresh.',
     );
     if (!shouldClear) {
       return;
@@ -1072,12 +1147,12 @@ const Chat = () => {
     : {
         icon: AlertTriangle,
         tone: 'warning' as const,
-        label: 'Needs Copilot setup',
+        label: 'Needs runtime setup',
         helper: 'Open context',
       };
 
   const commandStripSummary = pendingSessionMode === 'fresh'
-    ? 'Next turn starts a fresh Copilot session'
+    ? 'Next turn starts a fresh runtime session'
     : generalChatSession
       ? `Resuming ${formatSessionScope(generalChatSession.scope).toLowerCase()} context`
       : 'First chat session for this agent';
@@ -1086,6 +1161,31 @@ const Chat = () => {
       ? `${activeExecutionItem.id} is collaborating on ${activeExecutionBranch.sharedBranch}.`
       : `${activeExecutionItem.id} has an execution context but the shared branch has not been created yet.`
     : 'No work item has claimed shared branch context yet.';
+  const activeAgentProviderKey = activeAgent?.providerKey
+    ? normalizeProviderKey(activeAgent.providerKey)
+    : normalizeProviderKey(runtimeStatus?.providerKey || activeAgent?.provider);
+  const activeRuntimeProviderKey =
+    lastSessionSnapshot?.runtimeProviderKey || activeAgentProviderKey;
+  const activeRuntimeProviderStatus = runtimeStatus?.availableProviders?.find(
+    provider => provider.key === activeRuntimeProviderKey,
+  );
+  const activeRuntimeLabel = getProviderLabel(activeRuntimeProviderKey);
+  const activeRuntimeModeLabel = formatRuntimeModeLabel(
+    lastSessionSnapshot?.runtimeTransportMode ||
+      activeRuntimeProviderStatus?.transportMode ||
+      runtimeStatus?.runtimeAccessMode,
+  );
+  const activeRuntimeTarget = formatRuntimeTarget({
+    endpoint:
+      lastSessionSnapshot?.runtimeEndpoint ||
+      activeRuntimeProviderStatus?.endpoint ||
+      (runtimeStatus?.providerKey === activeRuntimeProviderKey ? runtimeStatus?.endpoint : null),
+    command: lastSessionSnapshot?.runtimeCommand || activeRuntimeProviderStatus?.command,
+  });
+  const runtimeResolutionLabel =
+    activeAgent?.providerKey
+      ? 'Pinned on this agent'
+      : 'Using desktop default';
 
   const suggestedPrompts = useMemo(() => {
     const isExecutionAgent =
@@ -1205,9 +1305,30 @@ const Chat = () => {
                 tone={isUser ? 'user' : 'agent'}
               />
 
-              {!isUser && (annotation?.model || annotation?.usage || annotation?.traceId) ? (
+              {!isUser &&
+              (annotation?.model ||
+                annotation?.usage ||
+                annotation?.traceId ||
+                annotation?.runtimeProviderKey ||
+                annotation?.runtimeTransportMode ||
+                annotation?.runtimeEndpoint ||
+                annotation?.runtimeCommand) ? (
                 <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-black/5 pt-3 text-[0.6875rem] text-slate-500">
                   {annotation.model ? <span>{annotation.model}</span> : null}
+                  {annotation.runtimeProviderKey ? (
+                    <span>{getProviderLabel(annotation.runtimeProviderKey)}</span>
+                  ) : null}
+                  {annotation.runtimeTransportMode ? (
+                    <span>{formatRuntimeModeLabel(annotation.runtimeTransportMode)}</span>
+                  ) : null}
+                  {annotation.runtimeEndpoint || annotation.runtimeCommand ? (
+                    <span>
+                      {formatRuntimeTarget({
+                        endpoint: annotation.runtimeEndpoint,
+                        command: annotation.runtimeCommand,
+                      })}
+                    </span>
+                  ) : null}
                   {annotation.usage ? <span>{formatUsageLabel(annotation.usage)}</span> : null}
                   {annotation.memoryReferences?.length ? (
                     <span>{annotation.memoryReferences.length} memory sources</span>
@@ -1302,6 +1423,7 @@ const Chat = () => {
             { label: 'Runtime mode', value: runtimeStatus?.runtimeAccessMode || 'Unknown' },
             { label: 'Token source', value: runtimeStatus?.tokenSource || 'Unknown' },
             { label: 'Provider', value: runtimeStatus?.provider || 'Unknown' },
+            { label: 'Resolved chat provider', value: activeRuntimeLabel },
             {
               label: 'Execution owner',
               value:
@@ -1321,6 +1443,8 @@ const Chat = () => {
           <p className="workspace-section-title">Runtime details</p>
           <div className="mt-3 space-y-2 text-sm text-secondary">
             <p>Endpoint: {runtimeStatus?.endpoint || 'Unknown'}</p>
+            <p>Resolved target: {activeRuntimeTarget}</p>
+            <p>{runtimeResolutionLabel}</p>
             <p>Streaming: {runtimeStatus?.streaming ? 'Enabled' : 'Unavailable'}</p>
             {configError ? <p>Config warning: {configError}</p> : null}
             {runtimeStatus?.githubIdentityError ? (
@@ -1661,7 +1785,7 @@ const Chat = () => {
           <div className="workspace-surface">
             <p className="workspace-section-title">Session mode</p>
             <p className="mt-2 text-sm leading-7 text-secondary">
-              Resume keeps the durable Copilot context. New Chat starts the next turn fresh while preserving the capability boundary.
+              Resume keeps the durable runtime context. New chat starts the next turn fresh while preserving the capability boundary.
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
               <button
@@ -1917,6 +2041,8 @@ const Chat = () => {
                 {lastSessionSnapshot?.sessionId ? (
                   <StatusBadge tone="success">Resuming saved session</StatusBadge>
                 ) : null}
+                <StatusBadge tone="neutral">{activeRuntimeLabel}</StatusBadge>
+                <StatusBadge tone="info">{activeRuntimeModeLabel}</StatusBadge>
                 {activeExecutionItem ? (
                   <StatusBadge tone={activeExecutionBranch ? 'brand' : 'warning'}>
                     <GitBranch size={12} className="mr-1 inline-flex" />
@@ -1926,6 +2052,7 @@ const Chat = () => {
               </div>
               <div className="flex flex-wrap items-center gap-3 text-xs text-secondary">
                 <span>{commandStripSummary}</span>
+                <span>{activeRuntimeTarget}</span>
                 <span>{branchContextSummary}</span>
                 <span>
                   {searchQuery

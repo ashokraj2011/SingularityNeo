@@ -18,6 +18,7 @@ import {
   DEFAULT_PROVIDER_KEY,
   LOCAL_OPENAI_PROVIDER_KEY,
   getConfiguredDefaultRuntimeProviderKey,
+  hasExplicitAgentProvider,
   isCliRuntimeProviderKey,
   normalizeProviderKey,
   resolveAgentProviderKey,
@@ -52,9 +53,6 @@ const CODE_WORK_PHASES = new Set([
 
 const trim = (value?: string | null) => String(value || "").trim();
 
-const hasExplicitProvider = (agent?: Partial<CapabilityAgent> | null) =>
-  trim(agent?.providerKey || agent?.provider).length > 0;
-
 const isCodeExecutionStepType = (stepType?: string | null) =>
   stepType === "DELIVERY" || stepType === "BUILD" || stepType === "AGENT_TASK";
 
@@ -82,7 +80,7 @@ const resolveInternalExecutionProvider = ({
   defaultProviderKey: ProviderKey;
   localOpenAIAvailable: boolean;
 }): ProviderKey => {
-  const explicitAgentProvider = hasExplicitProvider(agent)
+  const explicitAgentProvider = hasExplicitAgentProvider(agent)
     ? normalizeProviderKey(agent?.providerKey || agent?.provider)
     : null;
   if (explicitAgentProvider && !isCliRuntimeProviderKey(explicitAgentProvider)) {
@@ -169,7 +167,7 @@ export const resolveExecutionRuntimeForStep = ({
   const requestedProviderKey = explicitStepProvider
     ? normalizeProviderKey(explicitStepProvider)
     : undefined;
-  const explicitAgentProvider = hasExplicitProvider(agent)
+  const explicitAgentProvider = hasExplicitAgentProvider(agent)
     ? normalizeProviderKey(agent?.providerKey || agent?.provider)
     : undefined;
   const normalizedDefaultProvider = normalizeProviderKey(defaultProviderKey);

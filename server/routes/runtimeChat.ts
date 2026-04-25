@@ -7,6 +7,8 @@ import { parseActorContext } from '../requestActor';
 import { resolveAuthorizedSwarmParticipants } from '../swarmParticipants';
 import { wakeExecutionWorker } from '../execution/worker';
 import { sendApiError } from '../api/errors';
+import { normalizeProviderKey } from '../providerRegistry';
+import { getConfiguredRuntimeProviderStatus } from '../runtimeProviders';
 import {
   buildStructuredChatEvidencePrompt,
   sanitizeGroundedChatResponse,
@@ -37,6 +39,16 @@ type ChatRequestBody = {
    *   - length >3             → 400.
    */
   participants?: Array<{ capabilityId: string; agentId: string }>;
+};
+
+const resolveRuntimeTarget = async (providerKey?: string | null) => {
+  const status = await getConfiguredRuntimeProviderStatus(
+    normalizeProviderKey(providerKey),
+  );
+  return {
+    runtimeEndpoint: status.endpoint || null,
+    runtimeCommand: status.command || null,
+  };
 };
 
 const normalizeParticipants = (
@@ -379,6 +391,9 @@ export const registerRuntimeChatRoutes = (
         pathValidationState: sanitizedChat.pathValidationState,
         unverifiedPathClaimsRemoved: sanitizedChat.unverifiedPathClaimsRemoved,
       });
+      const runtimeTarget = await resolveRuntimeTarget(
+        publicChatResponse.runtimeProviderKey || liveAgent.providerKey || liveAgent.provider,
+      );
       await finishTelemetrySpan({
         capabilityId: liveCapability.id,
         spanId: span.id,
@@ -411,6 +426,7 @@ export const registerRuntimeChatRoutes = (
 
       response.json({
         ...publicChatResponse,
+        ...runtimeTarget,
         content: sanitizedChat.content,
         traceId,
         sessionMode: body.sessionMode || 'resume',
@@ -692,6 +708,9 @@ export const registerRuntimeChatRoutes = (
         pathValidationState: sanitizedStream.pathValidationState,
         unverifiedPathClaimsRemoved: sanitizedStream.unverifiedPathClaimsRemoved,
       });
+      const runtimeTarget = await resolveRuntimeTarget(
+        publicStreamed.runtimeProviderKey || liveAgent.providerKey || liveAgent.provider,
+      );
 
       await finishTelemetrySpan({
         capabilityId: liveCapability.id,
@@ -739,6 +758,9 @@ export const registerRuntimeChatRoutes = (
         createdAt: publicStreamed.createdAt,
         model: publicStreamed.model,
         usage: publicStreamed.usage,
+        runtimeProviderKey: publicStreamed.runtimeProviderKey,
+        runtimeTransportMode: publicStreamed.runtimeTransportMode,
+        ...runtimeTarget,
         sessionId: publicStreamed.sessionId,
         sessionScope: publicStreamed.sessionScope,
         sessionScopeId: publicStreamed.sessionScopeId,

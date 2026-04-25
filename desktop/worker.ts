@@ -1200,6 +1200,15 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
   };
 };
 
+const resolveRuntimeProviderTarget = async (providerKey?: string | null) => {
+  const providerStatuses = await listRuntimeProviderStatuses();
+  const matchedProvider = providerStatuses.find(status => status.key === providerKey);
+  return {
+    runtimeEndpoint: matchedProvider?.endpoint || null,
+    runtimeCommand: matchedProvider?.command || null,
+  };
+};
+
 reader.on('line', async line => {
   if (!line.trim()) {
     return;
@@ -1474,11 +1483,13 @@ reader.on('line', async line => {
         scopeId: context.scopeId,
         resetSession: payload.sessionMode === 'fresh',
       });
+      const runtimeTarget = await resolveRuntimeProviderTarget(result.runtimeProviderKey);
 
       respond({
         requestId,
         payload: {
           ...result,
+          ...runtimeTarget,
           astGroundingMode: context.astGroundingMode,
           checkoutPath: context.checkoutPath,
           branchName: context.branchName,
@@ -1603,6 +1614,7 @@ reader.on('line', async line => {
           });
         },
       });
+      const runtimeTarget = await resolveRuntimeProviderTarget(streamed.runtimeProviderKey);
 
       const completeEvent: ChatStreamEvent = {
         type: 'complete',
@@ -1610,6 +1622,9 @@ reader.on('line', async line => {
         createdAt: streamed.createdAt,
         model: streamed.model,
         usage: streamed.usage,
+        runtimeProviderKey: streamed.runtimeProviderKey,
+        runtimeTransportMode: streamed.runtimeTransportMode,
+        ...runtimeTarget,
         sessionId: streamed.sessionId,
         sessionScope: streamed.sessionScope,
         sessionScopeId: streamed.sessionScopeId,
