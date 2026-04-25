@@ -267,6 +267,24 @@ export interface CapabilityCodeIndexSnapshot {
   totalFiles: number;
 }
 
+export interface LocalAstRepositorySummary {
+  repositoryId: string;
+  repositoryLabel: string;
+  checkoutPath: string;
+  isPrimary: boolean;
+  symbolCount: number;
+  builtAt?: string;
+}
+
+export interface LocalAstSnapshot {
+  capabilityId: string;
+  baseCloneCount: number;
+  repositories: LocalAstRepositorySummary[];
+  symbols: CapabilityCodeSymbol[];
+  builtAt: string | null;
+  message?: string;
+}
+
 export interface WorkItemPhaseStakeholder {
   role: string;
   name: string;
@@ -2148,6 +2166,7 @@ export type ToolAdapterId =
   | "workspace_list"
   | "workspace_read"
   | "workspace_search"
+  | "browse_code"
   | "git_status"
   | "workspace_write"
   | "workspace_replace_block"

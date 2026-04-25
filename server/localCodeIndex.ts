@@ -475,3 +475,48 @@ export const getLocalCheckoutAstFreshness = (checkoutPath: string) => {
   const snapshot = localCodeIndexCache.get(normalizeDirectoryPath(checkoutPath));
   return snapshot?.builtAt;
 };
+
+/**
+ * Returns ALL symbols from the local checkout index for a given checkout path.
+ * Builds the index on first call (cached thereafter).
+ * Optionally filters by `kind` and/or `filePath` prefix.
+ */
+export const listLocalCheckoutAllSymbols = async ({
+  checkoutPath,
+  capabilityId,
+  repositoryId,
+  kind,
+  filePathPrefix,
+  limit = 2000,
+}: {
+  checkoutPath: string;
+  capabilityId: string;
+  repositoryId: string;
+  kind?: CapabilityCodeSymbolKind;
+  filePathPrefix?: string;
+  limit?: number;
+}): Promise<{ symbols: LocalSymbolEntry[]; builtAt: string | undefined }> => {
+  const snapshot = await getOrBuildLocalCheckoutIndex({
+    checkoutPath,
+    capabilityId,
+    repositoryId,
+  });
+
+  let symbols = snapshot.symbols;
+
+  if (kind) {
+    symbols = symbols.filter((s) => s.kind === kind);
+  }
+
+  if (filePathPrefix) {
+    const prefix = filePathPrefix.replace(/\\/g, "/").replace(/\/+$/, "") + "/";
+    symbols = symbols.filter(
+      (s) => s.filePath.startsWith(prefix) || s.filePath === filePathPrefix.replace(/\\/g, "/"),
+    );
+  }
+
+  return {
+    symbols: symbols.slice(0, Math.max(1, Math.min(limit, 5000))),
+    builtAt: snapshot.builtAt,
+  };
+};

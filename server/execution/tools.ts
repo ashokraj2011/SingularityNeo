@@ -49,8 +49,10 @@ import {
 import {
   findLocalCheckoutSymbolRange,
   getLocalCheckoutAstFreshness,
+  listLocalCheckoutAllSymbols,
   searchLocalCheckoutSymbols,
 } from "../localCodeIndex";
+import { getCapabilityBaseClones } from "../desktopRepoSync";
 import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
 
 const execFileAsync = promisify(execFile);
@@ -985,16 +987,38 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         .replace(/\\/g, "/");
 
       if (capability.id && looksLikeSymbolPattern(pattern)) {
-        const localSymbolResults =
-          isRemoteExecutionClient() && workItem?.id && workItemRepositoryId
-            ? await searchLocalCheckoutSymbols({
-                checkoutPath: workspacePath,
-                capabilityId: capability.id,
-                repositoryId: workItemRepositoryId,
-                query: pattern,
-                limit: Math.min(limit, 25),
-              }).catch(() => null)
-            : null;
+        // Determine which checkout paths to search.
+        // Priority 1: explicit work-item checkout (remote executor mode).
+        // Priority 2: base clones registered at desktop claim time (chat / no workItem).
+        const localCheckoutCandidates: Array<{ checkoutPath: string; repositoryId: string }> = [];
+
+        if (isRemoteExecutionClient() && workItem?.id && workItemRepositoryId) {
+          localCheckoutCandidates.push({ checkoutPath: workspacePath, repositoryId: workItemRepositoryId });
+        }
+
+        if (isRemoteExecutionClient() && capability.id && localCheckoutCandidates.length === 0) {
+          const baseClones = getCapabilityBaseClones(capability.id).filter(e => e.isGitRepo);
+          // Primary clone first.
+          [...baseClones.filter(e => e.isPrimary), ...baseClones.filter(e => !e.isPrimary)].forEach(c =>
+            localCheckoutCandidates.push({ checkoutPath: c.checkoutPath, repositoryId: c.repositoryId }),
+          );
+        }
+
+        let localSymbolResults: Awaited<ReturnType<typeof searchLocalCheckoutSymbols>> | null = null;
+        for (const candidate of localCheckoutCandidates) {
+          const result = await searchLocalCheckoutSymbols({
+            checkoutPath: candidate.checkoutPath,
+            capabilityId: capability.id,
+            repositoryId: candidate.repositoryId,
+            query: pattern,
+            limit: Math.min(limit, 25),
+          }).catch(() => null);
+          if (result && result.symbols.length > 0) {
+            localSymbolResults = result;
+            break;
+          }
+        }
+
         const filteredLocalSymbols =
           localSymbolResults?.symbols.filter((symbol) =>
             !relativeScopePath || relativeScopePath === "."
@@ -1139,6 +1163,94 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
           truncated: paged.truncated,
           mode: "text-search",
           fallback: isCommandMissing(result) ? "node-filesystem" : undefined,
+        },
+      };
+    },
+  },
+  browse_code: {
+    id: "browse_code",
+    description:
+      "Browse the AST symbol index for this capability's repositories. " +
+      "Use kind='class'|'function'|'interface'|'method'|'type'|'enum'|'variable' to filter. " +
+      "Returns symbol names, file paths, and line ranges from the local base clone. " +
+      "Does NOT require cloning — uses the pre-synced _repos/ directory. " +
+      "Use this to discover API endpoints, service contracts, interfaces, and top-level exports.",
+    usageExample: '{"kind":"interface","limit":30}',
+    retryable: true,
+    execute: async ({ capability }, args) => {
+      if (!capability.id) {
+        throw new Error("browse_code requires a capability context.");
+      }
+
+      const kindRaw = String(args.kind || "").trim().toLowerCase();
+      const validKinds = new Set(["class", "function", "interface", "method", "type", "enum", "variable", "property"]);
+      const kind = validKinds.has(kindRaw) ? (kindRaw as any) : undefined;
+      const filePathPrefix = String(args.filePathPrefix || args.path || "").trim() || undefined;
+      const limitRaw = Number(args.limit);
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.floor(limitRaw), 100)) : 30;
+
+      // Try local base clones first.
+      const baseClones = isRemoteExecutionClient()
+        ? getCapabilityBaseClones(capability.id).filter(e => e.isGitRepo)
+        : [];
+
+      if (baseClones.length === 0) {
+        // Fall back to DB index.
+        const dbResults = await searchCodeSymbols(capability.id, kindRaw || "*", { limit: limit as any }).catch(() => []);
+        if (dbResults.length === 0) {
+          return {
+            summary: "No local base clones available and no DB code index found. Run repo-sync first.",
+            details: { symbols: [], source: "none" },
+          };
+        }
+        const output = dbResults
+          .map(s => `${s.qualifiedSymbolName || s.symbolName} (${s.kind}) ${s.filePath}:${s.sliceStartLine}-${s.sliceEndLine}`)
+          .join("\n");
+        return {
+          summary: `Found ${dbResults.length} symbol(s) from DB code index.`,
+          stdoutPreview: previewText(output),
+          details: { symbols: dbResults, source: "capability-index" },
+        };
+      }
+
+      const allSymbols: any[] = [];
+      const repoSummaries: string[] = [];
+      for (const clone of [...baseClones.filter(e => e.isPrimary), ...baseClones.filter(e => !e.isPrimary)]) {
+        const { symbols, builtAt } = await listLocalCheckoutAllSymbols({
+          checkoutPath: clone.checkoutPath,
+          capabilityId: capability.id,
+          repositoryId: clone.repositoryId,
+          kind,
+          filePathPrefix,
+          limit,
+        }).catch(() => ({ symbols: [] as any[], builtAt: undefined }));
+        allSymbols.push(...symbols);
+        repoSummaries.push(`${clone.repositoryLabel}: ${symbols.length} symbol(s) (indexed ${builtAt ? new Date(builtAt).toLocaleString() : "pending"})`);
+        if (allSymbols.length >= limit) break;
+      }
+
+      const sliced = allSymbols.slice(0, limit);
+      const output = sliced
+        .map(s => `${s.qualifiedSymbolName || s.symbolName} (${s.kind}) ${s.filePath}:${s.sliceStartLine ?? s.startLine}-${s.sliceEndLine ?? s.endLine}`)
+        .join("\n");
+
+      return {
+        summary: `Found ${sliced.length} ${kind ? kind + " " : ""}symbol(s) across ${baseClones.length} repo(s).`,
+        stdoutPreview: previewText(`Repositories:\n${repoSummaries.join("\n")}\n\nSymbols:\n${output}`),
+        details: {
+          symbols: sliced.map(s => ({
+            symbolName: s.symbolName,
+            qualifiedSymbolName: s.qualifiedSymbolName,
+            kind: s.kind,
+            filePath: s.filePath,
+            startLine: s.sliceStartLine ?? s.startLine,
+            endLine: s.sliceEndLine ?? s.endLine,
+            signature: s.signature,
+            isExported: s.isExported,
+            repositoryId: s.repositoryId,
+          })),
+          source: "local-clone",
+          repositories: repoSummaries,
         },
       };
     },

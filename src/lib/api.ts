@@ -16,6 +16,7 @@ import {
   CapabilityCodeIndexSnapshot,
   CapabilityCodeSymbol,
   CapabilityCodeSymbolKind,
+  LocalAstSnapshot,
   CapabilityCopilotGuidancePack,
   CodePatchPayload,
   AgentBranchSession,
@@ -1176,6 +1177,41 @@ export const searchCapabilityCodeSymbols = async (
     `/api/capabilities/${encodeURIComponent(capabilityId)}/code-index/symbols?${params.toString()}`,
   );
 };
+
+/**
+ * Fetch all symbols from the in-memory local AST built from base-clone repos.
+ * These are indexed at desktop claim time — no GitHub traffic.
+ *
+ * Optional filters: `kind` (class|function|interface|…), `filePathPrefix`,
+ * `limit` (default 2000). Pass `force=true` to force a synchronous re-index.
+ */
+export const fetchLocalAstSnapshot = async (
+  capabilityId: string,
+  options: {
+    kind?: CapabilityCodeSymbolKind;
+    filePathPrefix?: string;
+    limit?: number;
+    force?: boolean;
+  } = {},
+): Promise<LocalAstSnapshot> => {
+  const params = new URLSearchParams();
+  if (options.kind) params.set("kind", options.kind);
+  if (options.filePathPrefix) params.set("filePathPrefix", options.filePathPrefix);
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.force) params.set("force", "true");
+  return requestJson<LocalAstSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/code-index/local-ast?${params.toString()}`,
+  );
+};
+
+/**
+ * Force a synchronous re-index of all base-clone repos for a capability.
+ */
+export const refreshLocalAst = async (capabilityId: string): Promise<{ refreshed: Array<{ repositoryId: string; symbolCount: number; builtAt: string | undefined }> }> =>
+  requestJson(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/code-index/local-ast/refresh`,
+    { method: "POST", headers: jsonHeaders, body: JSON.stringify({}) },
+  );
 
 /**
  * Validate a unified-diff body and return the structured

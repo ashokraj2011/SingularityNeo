@@ -35,6 +35,7 @@ const TOOL_TONE: Record<ToolAdapterId, 'info' | 'warning' | 'danger'> = {
   workspace_list: 'info',
   workspace_read: 'info',
   workspace_search: 'info',
+  browse_code: 'info',
   git_status: 'info',
   workspace_write: 'danger',
   workspace_replace_block: 'danger',

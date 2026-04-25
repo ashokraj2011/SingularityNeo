@@ -57,6 +57,12 @@ import {
   readCodeIndexSnapshot,
   searchCodeSymbols,
 } from '../codeIndex/query';
+import {
+  forceLocalCheckoutAstRefresh,
+  listLocalCheckoutAllSymbols,
+  queueLocalCheckoutAstRefresh,
+} from '../localCodeIndex';
+import { getCapabilityBaseClones } from '../desktopRepoSync';
 import { buildCodePatchPayload } from '../patch/validate';
 import { estimateTokens } from '../execution/tokenEstimate';
 
@@ -401,6 +407,152 @@ export const registerCapabilityManagementRoutes = (
           maxNodes,
         }),
       );
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  /**
+   * GET /api/capabilities/:capabilityId/code-index/local-ast
+   *
+   * Returns ALL symbols from the in-memory local AST for this capability,
+   * derived from the desktop base-clone repos synced at claim time.
+   * Supports optional ?kind= and ?filePathPrefix= filters.
+   *
+   * Falls back to an empty array when no base clones are registered
+   * (i.e. the desktop sync hasn't run yet).
+   */
+  app.get('/api/capabilities/:capabilityId/code-index/local-ast', async (request, response) => {
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.read',
+      });
+
+      const { capabilityId } = request.params;
+      const kindRaw = String(request.query?.kind || '').trim();
+      const kind = kindRaw ? (kindRaw as any) : undefined;
+      const filePathPrefix = String(request.query?.filePathPrefix || '').trim() || undefined;
+      const limitRaw = Number.parseInt(String(request.query?.limit || ''), 10);
+      const limit = Number.isFinite(limitRaw) ? Math.min(limitRaw, 5000) : 2000;
+      const forceRaw = String(request.query?.force || '').trim().toLowerCase();
+      const force = forceRaw === 'true' || forceRaw === '1';
+
+      const baseClones = getCapabilityBaseClones(capabilityId).filter(e => e.isGitRepo);
+
+      if (baseClones.length === 0) {
+        response.json({
+          capabilityId,
+          baseCloneCount: 0,
+          repositories: [],
+          symbols: [],
+          builtAt: null,
+          message: 'No local base clones registered. Trigger a desktop claim or repo-sync first.',
+        });
+        return;
+      }
+
+      const results: Array<{
+        repositoryId: string;
+        repositoryLabel: string;
+        checkoutPath: string;
+        isPrimary: boolean;
+        symbolCount: number;
+        builtAt: string | undefined;
+        symbols: Awaited<ReturnType<typeof listLocalCheckoutAllSymbols>>['symbols'];
+      }> = [];
+
+      for (const clone of baseClones) {
+        if (force) {
+          await forceLocalCheckoutAstRefresh({
+            checkoutPath: clone.checkoutPath,
+            capabilityId,
+            repositoryId: clone.repositoryId,
+          });
+        } else {
+          queueLocalCheckoutAstRefresh({
+            checkoutPath: clone.checkoutPath,
+            capabilityId,
+            repositoryId: clone.repositoryId,
+          });
+        }
+
+        const { symbols, builtAt } = await listLocalCheckoutAllSymbols({
+          checkoutPath: clone.checkoutPath,
+          capabilityId,
+          repositoryId: clone.repositoryId,
+          kind,
+          filePathPrefix,
+          limit,
+        });
+
+        results.push({
+          repositoryId: clone.repositoryId,
+          repositoryLabel: clone.repositoryLabel,
+          checkoutPath: clone.checkoutPath,
+          isPrimary: clone.isPrimary,
+          symbolCount: symbols.length,
+          builtAt,
+          symbols,
+        });
+      }
+
+      const allSymbols = results.flatMap(r => r.symbols).slice(0, limit);
+
+      response.json({
+        capabilityId,
+        baseCloneCount: baseClones.length,
+        repositories: results.map(r => ({
+          repositoryId: r.repositoryId,
+          repositoryLabel: r.repositoryLabel,
+          checkoutPath: r.checkoutPath,
+          isPrimary: r.isPrimary,
+          symbolCount: r.symbolCount,
+          builtAt: r.builtAt,
+        })),
+        symbols: allSymbols,
+        builtAt: results[0]?.builtAt ?? null,
+      });
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  /**
+   * POST /api/capabilities/:capabilityId/code-index/local-ast/refresh
+   *
+   * Forces a synchronous re-index of all base-clone repos for this capability.
+   */
+  app.post('/api/capabilities/:capabilityId/code-index/local-ast/refresh', async (request, response) => {
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.edit',
+      });
+
+      const { capabilityId } = request.params;
+      const baseClones = getCapabilityBaseClones(capabilityId).filter(e => e.isGitRepo);
+
+      if (baseClones.length === 0) {
+        response.status(404).json({
+          error: 'No local base clones registered for this capability.',
+        });
+        return;
+      }
+
+      const results: Array<{ repositoryId: string; symbolCount: number; builtAt: string | undefined }> = [];
+      for (const clone of baseClones) {
+        const snapshot = await forceLocalCheckoutAstRefresh({
+          checkoutPath: clone.checkoutPath,
+          capabilityId,
+          repositoryId: clone.repositoryId,
+        });
+        results.push({ repositoryId: clone.repositoryId, symbolCount: snapshot.symbols.length, builtAt: snapshot.builtAt });
+      }
+
+      response.json({ capabilityId, refreshed: results });
     } catch (error) {
       sendApiError(response, error);
     }

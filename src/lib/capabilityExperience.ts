@@ -117,7 +117,8 @@ export type AdvancedToolId =
   | 'governance-posture'
   | 'work-item-report'
   | 'sentinel'
-  | 'blast-radius';
+  | 'blast-radius'
+  | 'ast-explorer';
 
 export type AdvancedToolAudience =
   | 'ALL'
@@ -423,6 +424,17 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     exposureMode: 'ALWAYS',
     contextTriggers: [],
   },
+  {
+    id: 'ast-explorer',
+    label: 'AST Explorer',
+    shortName: 'AST',
+    path: '/ast-explorer',
+    description:
+      'Browse the local code index: API endpoints, interfaces, contracts, classes, and methods extracted from the capability repositories. Powered by the desktop base-clone AST.',
+    audience: 'BUILDERS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_REPOSITORIES'],
+  },
 ];
 
 const hasText = (value?: string) => Boolean(value?.trim());
@@ -540,6 +552,9 @@ const matchesAdvancedToolTrigger = (
       return workspace.agents.length > 0;
     case 'HAS_TASK_ACTIVITY':
       return workspace.tasks.length > 0;
+    case 'HAS_REPOSITORIES':
+      return (capability.repositories?.length ?? 0) > 0 ||
+        (capability.gitRepositories?.length ?? 0) > 0;
     default:
       return false;
   }
