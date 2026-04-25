@@ -68,7 +68,10 @@ import {
 } from "../telemetry";
 import { appendAccessAuditEvent } from "../workspaceOrganization";
 import { getWorkspaceWriteLock } from "../workspaceLock";
-import { syncCapabilityRepositoriesForDesktop } from "../desktopRepoSync";
+import {
+  cancelPeriodicAstRefresh,
+  syncCapabilityRepositoriesForDesktop,
+} from "../desktopRepoSync";
 
 const parseHeaderStringList = (value: unknown) => {
   const raw = String(value || "").trim();
@@ -584,9 +587,14 @@ export const registerExecutionRuntimeRoutes = (app: express.Express) => {
       try {
         const actor = parseActorContext(request, "Workspace Operator");
         await assertWorkspacePermission({ actor, action: "workspace.manage" });
-        await unregisterDesktopExecutor(
-          String(request.params.executorId || "").trim(),
-        );
+        const executorId = String(request.params.executorId || "").trim();
+        // Cancel the periodic AST refresh for all capabilities owned by this
+        // executor before releasing ownership so no stale timers remain.
+        const ownedCapabilityIds = await listOwnedCapabilityIdsForExecutor(executorId);
+        for (const capabilityId of ownedCapabilityIds) {
+          cancelPeriodicAstRefresh(capabilityId);
+        }
+        await unregisterDesktopExecutor(executorId);
         response.status(204).end();
       } catch (error) {
         sendApiError(response, error);

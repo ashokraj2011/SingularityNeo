@@ -385,5 +385,101 @@ export const syncCapabilityRepositoriesForDesktop = async ({
     `[desktopRepoSync] ${capabilityId}: cloned=${cloned} updated=${updated} errors=${errors}`,
   );
 
+  // Start (or re-arm) the periodic AST refresh loop for this capability now
+  // that the registry is populated.
+  schedulePeriodicAstRefresh(capabilityId);
+
   return report;
+};
+
+// ---------------------------------------------------------------------------
+// Periodic AST refresh
+//
+// After the initial clone/claim, code on disk can change (git pull, editor
+// saves, branch switches).  To keep the in-memory AST index current without
+// requiring a full re-claim, we run a self-rescheduling loop per capability
+// that:
+//   1. git-fetches each registered base clone (background, ignores network
+//      errors so an offline laptop never breaks the loop)
+//   2. Queues a non-blocking AST re-index for every clone whose index is
+//      older than AST_REFRESH_INTERVAL_MS
+//
+// The loop uses setTimeout (not setInterval) so that if the work takes
+// longer than the interval it simply delays the next tick rather than
+// piling up concurrent refreshes.
+// ---------------------------------------------------------------------------
+
+/** How often each base clone's AST is refreshed (default 5 minutes). */
+const AST_REFRESH_INTERVAL_MS =
+  Number(process.env.AST_REFRESH_INTERVAL_MS) || 5 * 60 * 1000;
+
+// One active timer handle per capability — prevents duplicate loops when
+// syncCapabilityRepositoriesForDesktop is called multiple times (e.g. re-claim).
+const periodicRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+const runPeriodicAstRefresh = async (capabilityId: string): Promise<void> => {
+  const entries = getCapabilityBaseClones(capabilityId).filter(e => e.isGitRepo);
+  if (entries.length === 0) return;
+
+  for (const entry of entries) {
+    // 1. git fetch — pull latest refs from remote so the tree is up-to-date.
+    //    fetchRepository already swallows network errors silently.
+    await fetchRepository(entry.checkoutPath);
+
+    // 2. Re-index the checkout.  Check freshness first to skip a re-index that
+    //    was already kicked off by a work-item checkout or admin action.
+    const freshness = getLocalCheckoutAstFreshness(entry.checkoutPath);
+    const ageMs = freshness ? Date.now() - new Date(freshness).getTime() : Infinity;
+    if (ageMs >= AST_REFRESH_INTERVAL_MS) {
+      queueLocalCheckoutAstRefresh({
+        checkoutPath: entry.checkoutPath,
+        capabilityId,
+        repositoryId: entry.repositoryId,
+      });
+      console.log(
+        `[desktopRepoSync] periodic AST refresh queued for ${entry.repositoryLabel} (${capabilityId})`,
+      );
+    }
+  }
+};
+
+/**
+ * Starts (or re-arms) the periodic AST refresh loop for a capability.
+ * Safe to call multiple times — only one timer runs per capability.
+ */
+export const schedulePeriodicAstRefresh = (capabilityId: string): void => {
+  // Clear any existing timer so re-claiming doesn't create a second loop.
+  const existing = periodicRefreshTimers.get(capabilityId);
+  if (existing !== undefined) clearTimeout(existing);
+
+  const tick = () => {
+    runPeriodicAstRefresh(capabilityId)
+      .catch(err =>
+        console.warn(
+          `[desktopRepoSync] periodic AST refresh error for ${capabilityId}:`,
+          err instanceof Error ? err.message : err,
+        ),
+      )
+      .finally(() => {
+        // Re-schedule unless the capability was removed from the registry.
+        if (getCapabilityBaseClones(capabilityId).length > 0) {
+          periodicRefreshTimers.set(capabilityId, setTimeout(tick, AST_REFRESH_INTERVAL_MS));
+        } else {
+          periodicRefreshTimers.delete(capabilityId);
+        }
+      });
+  };
+
+  periodicRefreshTimers.set(capabilityId, setTimeout(tick, AST_REFRESH_INTERVAL_MS));
+};
+
+/**
+ * Cancels the periodic refresh loop for a capability (e.g. executor unclaim).
+ */
+export const cancelPeriodicAstRefresh = (capabilityId: string): void => {
+  const timer = periodicRefreshTimers.get(capabilityId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    periodicRefreshTimers.delete(capabilityId);
+  }
 };
