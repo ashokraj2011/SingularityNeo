@@ -224,6 +224,42 @@ const evictManagedSessionRecord = async (sessionId?: string | null) => {
   await disconnectSessionQuietly(existing?.session);
 };
 
+export const evictManagedCapabilitySessions = async ({
+  capabilityId,
+  agentId,
+  scope,
+  scopeId,
+}: {
+  capabilityId: string;
+  agentId?: string;
+  scope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  scopeId?: string;
+}) => {
+  const matchingSessionIds = [...managedChatSessions.values()]
+    .filter(record => {
+      if (record.capabilityId !== capabilityId) {
+        return false;
+      }
+      if (agentId && record.agentId !== agentId) {
+        return false;
+      }
+      if (scope && record.scope !== scope) {
+        return false;
+      }
+      if (scopeId && record.scopeId !== scopeId) {
+        return false;
+      }
+      return true;
+    })
+    .map(record => record.sessionId);
+
+  await Promise.all(
+    matchingSessionIds.map(sessionId =>
+      evictManagedSessionRecord(sessionId).catch(() => undefined),
+    ),
+  );
+};
+
 export const listManagedCopilotSessions = () =>
   [...managedChatSessions.values()].map(record => ({
     sessionId: record.sessionId,
@@ -1275,6 +1311,9 @@ export const buildCapabilitySystemPrompt = ({
     ...toSkillInstructionSections(capability, operatingAgent),
     toPromptSection('Preferred tool profile', operatingAgent?.preferredToolIds),
     'Keep the response inside this capability context. If capability context is missing for a claim, say so clearly instead of inventing it.',
+    'Repository paths, symbol locations, package names, and exact code counts are high-risk factual claims. State them only when they come from verified AST, tool, or repository evidence in this turn.',
+    'Prior assistant replies, chat-session memory, and learned notes are advisory only. They are never sufficient proof for an exact repo path or symbol location.',
+    'If exact repository evidence is incomplete, say so clearly and omit the path or location claim instead of guessing.',
     'Prefer practical, execution-ready answers that help the team move work forward.',
   ]
     .filter(Boolean)
@@ -1801,7 +1840,7 @@ const formatHistorySummaryFragment = (summary?: string | null) =>
     : '';
 
 const formatMemoryFragment = (memoryPrompt?: string | null) =>
-  memoryPrompt?.trim() ? `Retrieved memory context:\n${memoryPrompt.trim()}` : '';
+  memoryPrompt?.trim() ? memoryPrompt.trim() : '';
 
 const buildChatPromptPlan = ({
   capability,

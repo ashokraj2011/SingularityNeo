@@ -22,10 +22,13 @@ export type AstGroundingSummary = {
     | "ast-grounded-local-clone"
     | "ast-grounded-remote-index"
     | "no-ast-grounding";
+  isCodeQuestion: boolean;
   checkoutPath?: string;
   branchName?: string;
   codeIndexSource?: "local-checkout" | "capability-index";
   codeIndexFreshness?: string;
+  verifiedPaths?: string[];
+  groundingEvidenceSource?: "local-checkout" | "capability-index" | "none";
 };
 
 const normalizeIdentifierCandidate = (value: string) =>
@@ -197,6 +200,11 @@ const buildLocalPathFallback = async ({
   };
 };
 
+const toVerifiedPath = (symbolFilePath: string, checkoutRoot?: string) =>
+  checkoutRoot
+    ? `${checkoutRoot.replace(/\/+$/, "")}/${symbolFilePath.replace(/^\/+/, "")}`
+    : symbolFilePath;
+
 const formatSymbolRows = (
   symbols: Array<{
     qualifiedSymbolName?: string;
@@ -218,13 +226,11 @@ const formatSymbolRows = (
       symbol.filePath;
     // Emit absolute path so the agent can pass it directly to workspace_read
     // without constructing or guessing any directory structure.
-    const absolutePath = checkoutRoot
-      ? `${checkoutRoot.replace(/\/+$/, "")}/${symbol.filePath.replace(/^\/+/, "")}`
-      : symbol.filePath;
+    const absolutePath = toVerifiedPath(symbol.filePath, checkoutRoot);
     return `- ${displayName} (${symbol.kind}) at ${absolutePath}:${range}${signature}`;
   });
 
-const looksLikeCodeQuestion = (message: string) =>
+export const looksLikeCodeQuestion = (message: string) =>
   CODE_PROMPT_PATTERNS.some((pattern) => pattern.test(String(message || "")));
 
 export const buildAstGroundingSummary = async ({
@@ -242,9 +248,13 @@ export const buildAstGroundingSummary = async ({
   repositoryId?: string;
   branchName?: string;
 }): Promise<AstGroundingSummary> => {
-  if (!looksLikeCodeQuestion(message)) {
+  const isCodeQuestion = looksLikeCodeQuestion(message);
+  if (!isCodeQuestion) {
     return {
       astGroundingMode: "no-ast-grounding",
+      isCodeQuestion: false,
+      verifiedPaths: [],
+      groundingEvidenceSource: "none",
     };
   }
 
@@ -252,6 +262,9 @@ export const buildAstGroundingSummary = async ({
   if (queries.length === 0) {
     return {
       astGroundingMode: "no-ast-grounding",
+      isCodeQuestion,
+      verifiedPaths: [],
+      groundingEvidenceSource: "none",
     };
   }
   const searchTerms = toSearchTerms(queries);
@@ -315,10 +328,15 @@ export const buildAstGroundingSummary = async ({
           ...formatSymbolRows(deduped, resolvedRoot),
         ].join("\n"),
         astGroundingMode: "ast-grounded-local-clone",
+        isCodeQuestion,
         checkoutPath: candidate.checkoutPath,
         branchName,
         codeIndexSource: "local-checkout",
         codeIndexFreshness: freshness,
+        verifiedPaths: deduped.map(symbol =>
+          toVerifiedPath(symbol.filePath, resolvedRoot),
+        ),
+        groundingEvidenceSource: "local-checkout",
       };
     }
 
@@ -340,10 +358,15 @@ export const buildAstGroundingSummary = async ({
           ...formatSymbolRows(localPathFallback.symbols, resolvedRoot),
         ].join("\n"),
         astGroundingMode: "ast-grounded-local-clone",
+        isCodeQuestion,
         checkoutPath: candidate.checkoutPath,
         branchName,
         codeIndexSource: "local-checkout",
         codeIndexFreshness: localPathFallback.builtAt,
+        verifiedPaths: localPathFallback.symbols.map(symbol =>
+          toVerifiedPath(symbol.filePath, resolvedRoot),
+        ),
+        groundingEvidenceSource: "local-checkout",
       };
     }
   }
@@ -361,9 +384,12 @@ export const buildAstGroundingSummary = async ({
         `All file paths must come from browse_code or workspace_search output.`,
       ].join("\n"),
       astGroundingMode: "ast-grounded-local-clone",
+      isCodeQuestion,
       checkoutPath: firstValidCandidate.checkoutPath,
       branchName,
       codeIndexSource: "local-checkout",
+      verifiedPaths: [],
+      groundingEvidenceSource: "local-checkout",
     };
   }
 
@@ -388,8 +414,11 @@ export const buildAstGroundingSummary = async ({
         `Do NOT construct file paths manually or use bash/shell commands for file discovery.`,
       ].join("\n"),
       astGroundingMode: "no-ast-grounding",
+      isCodeQuestion,
       checkoutPath,
       branchName,
+      verifiedPaths: [],
+      groundingEvidenceSource: "none",
     };
   }
 
@@ -404,8 +433,11 @@ export const buildAstGroundingSummary = async ({
       ...formatSymbolRows(deduped),
     ].join("\n"),
     astGroundingMode: "ast-grounded-remote-index",
+    isCodeQuestion,
     checkoutPath,
     branchName,
     codeIndexSource: "capability-index",
+    verifiedPaths: deduped.map(symbol => symbol.filePath),
+    groundingEvidenceSource: "capability-index",
   };
 };

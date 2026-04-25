@@ -68,7 +68,7 @@ const buildSearchRow = ({
   title: string;
   content: string;
   embedding: number[];
-  sourceType?: 'REPOSITORY_FILE' | 'ARTIFACT';
+  sourceType?: 'REPOSITORY_FILE' | 'ARTIFACT' | 'CHAT_SESSION';
 }) => {
   const timestamp = '2026-04-17T00:00:00.000Z';
   return {
@@ -401,5 +401,43 @@ describe('memory retrieval hardening', () => {
     expect(context.results[0]?.reference.rerankScore).toBeGreaterThan(0);
     expect(context.prompt).toContain('[Memory 1] Gamma Guide');
     expect(context.prompt).toContain('gamma instructions');
+  });
+
+  it('excludes chat-session memory from code-grounded retrieval when requested', async () => {
+    requestLocalOpenAIEmbeddingsMock.mockResolvedValue({
+      providerKey: 'local-openai',
+      model: 'text-embedding-3-small',
+      vectors: [[1, 0, 0, 0]],
+    });
+    queryMock.mockResolvedValue({
+      rows: [
+        buildSearchRow({
+          documentId: 'DOC-CHAT',
+          title: 'Recent Chat Session',
+          content: 'USER: How many operators are there?\n\nAGENT: Defined in /src/main/java/com/pzn/ruleengine/operators/',
+          embedding: [1, 0, 0, 0],
+          sourceType: 'CHAT_SESSION',
+        }),
+        buildSearchRow({
+          documentId: 'DOC-ART',
+          title: 'Operator Design Note',
+          content: 'operators live in the actual indexed repository files',
+          embedding: [0.9, 0.1, 0, 0],
+          sourceType: 'ARTIFACT',
+        }),
+      ],
+    } as any);
+
+    const context = await buildMemoryContext({
+      capabilityId: 'CAP-MEM',
+      queryText: 'how many operators',
+      excludeSourceTypes: ['CHAT_SESSION'],
+    });
+
+    expect(context.results).toHaveLength(1);
+    expect(context.results[0]?.document.sourceType).toBe('ARTIFACT');
+    expect(context.prompt).toContain('Operator Design Note');
+    expect(context.prompt).not.toContain('Recent Chat Session');
+    expect(context.prompt).not.toContain('/src/main/java/com/pzn/ruleengine/operators/');
   });
 });

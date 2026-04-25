@@ -237,6 +237,10 @@ export interface CapabilityChatResponse {
   sessionScope?: "GENERAL_CHAT" | "WORK_ITEM" | "TASK";
   sessionScopeId?: string;
   isNewSession?: boolean;
+  groundingEvidenceSource?: "local-checkout" | "capability-index" | "none";
+  memoryTrustMode?: "standard" | "repo-evidence-only";
+  pathValidationState?: "verified" | "repaired" | "stripped" | "none";
+  unverifiedPathClaimsRemoved?: string[];
 }
 
 export interface CapabilityChatStreamResult {

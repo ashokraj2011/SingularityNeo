@@ -691,6 +691,9 @@ const buildSources = (
 
   const recentMessages = workspace.messages.slice(-12);
   if (recentMessages.length > 0) {
+    const recentUserMessages = recentMessages
+      .filter(message => String(message.role || '').toLowerCase() === 'user')
+      .slice(-8);
     sources.push({
       id: createMemoryDocumentId(capability.id, 'CHAT_SESSION', `${capability.id}-session`),
       title: `${capability.name} Recent Chat Session`,
@@ -699,9 +702,18 @@ const buildSources = (
       sourceId: `${capability.id}-session`,
       metadata: {
         messageCount: recentMessages.length,
+        userMessageCount: recentUserMessages.length,
       },
-      content: recentMessages
-        .map(message => `${message.role.toUpperCase()}: ${message.content}`)
+      content: [
+        `Recent user requests from the ${capability.name} chat session.`,
+        'This session memory is advisory only and must not be used as proof for repository paths, symbol locations, or exact code counts.',
+        recentUserMessages.length > 0
+          ? recentUserMessages
+              .map(message => `USER: ${message.content}`)
+              .join('\n\n')
+          : 'No recent user prompts were available for chat-session memory.',
+      ]
+        .filter(Boolean)
         .join('\n\n'),
     });
   }
@@ -1131,16 +1143,19 @@ export const searchCapabilityMemory = async ({
   agentId,
   queryText,
   limit = 8,
+  excludeSourceTypes = [],
 }: {
   capabilityId: string;
   agentId?: string;
   queryText: string;
   limit?: number;
+  excludeSourceTypes?: MemorySourceType[];
 }): Promise<MemorySearchResult[]> => {
   const normalizedQuery = normalizeText(queryText);
   if (!normalizedQuery) {
     return [];
   }
+  const excludedSourceTypes = new Set(excludeSourceTypes);
   const sourceFilter = await getAgentSourceFilter(capabilityId, agentId);
   if (sourceFilter && sourceFilter.size === 0) {
     return [];
@@ -1218,6 +1233,7 @@ export const searchCapabilityMemory = async ({
         vectorModel: String(record.vector_model || queryEmbeddingResult.model || ''),
       };
     })
+    .filter(item => !excludedSourceTypes.has(item.document.sourceType))
     .sort((left, right) => (right.reference.rerankScore || 0) - (left.reference.rerankScore || 0))
     .filter(item => {
       // Global documents bypass per-agent source filters — they are
@@ -1349,11 +1365,13 @@ export const buildMemoryContext = async ({
   agentId,
   queryText,
   limit = 5,
+  excludeSourceTypes = [],
 }: {
   capabilityId: string;
   agentId?: string;
   queryText: string;
   limit?: number;
+  excludeSourceTypes?: MemorySourceType[];
 }) => {
   if (isRemoteExecutionClient()) {
     return executionRuntimeRpc<{
@@ -1364,6 +1382,7 @@ export const buildMemoryContext = async ({
       agentId,
       queryText,
       limit,
+      excludeSourceTypes,
     });
   }
 
@@ -1374,7 +1393,13 @@ export const buildMemoryContext = async ({
     capabilityBundle?.workspace.agents.find(candidate => candidate.id === agentId)?.provider;
   const agentModel =
     capabilityBundle?.workspace.agents.find(candidate => candidate.id === agentId)?.model;
-  const results = await searchCapabilityMemory({ capabilityId, agentId, queryText, limit });
+  const results = await searchCapabilityMemory({
+    capabilityId,
+    agentId,
+    queryText,
+    limit,
+    excludeSourceTypes,
+  });
   return {
     results,
     prompt: buildBudgetedMemoryPrompt({

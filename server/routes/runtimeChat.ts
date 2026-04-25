@@ -7,6 +7,12 @@ import { parseActorContext } from '../requestActor';
 import { resolveAuthorizedSwarmParticipants } from '../swarmParticipants';
 import { wakeExecutionWorker } from '../execution/worker';
 import { sendApiError } from '../api/errors';
+import {
+  buildStructuredChatEvidencePrompt,
+  sanitizeGroundedChatResponse,
+  type MemoryTrustMode,
+  type PathValidationState,
+} from '../chatEvidence';
 
 type ChatRequestBody = {
   capability?: Capability;
@@ -63,6 +69,9 @@ type ChatContext = {
   branchName?: string;
   codeIndexSource?: 'local-checkout' | 'capability-index';
   codeIndexFreshness?: string;
+  verifiedPaths?: string[];
+  isCodeQuestion?: boolean;
+  groundingEvidenceSource?: 'local-checkout' | 'capability-index' | 'none';
   developerPrompt?: string;
 };
 
@@ -75,6 +84,7 @@ type RuntimeChatRouteDeps = {
   };
   buildChatMemoryPrompt: (args: { liveBriefing: string; memoryPrompt?: string }) => string;
   createTraceId: () => string;
+  evictManagedCapabilitySessions: typeof import('../githubModels').evictManagedCapabilitySessions;
   finishTelemetrySpan: typeof import('../telemetry').finishTelemetrySpan;
   getMissingRuntimeConfigurationMessage: () => string;
   invokeCapabilityChat: typeof import('../githubModels').invokeCapabilityChat;
@@ -82,6 +92,7 @@ type RuntimeChatRouteDeps = {
   isRuntimeConfigured: () => boolean;
   maybeHandleCapabilityChatAction: typeof import('../chatWorkspace').maybeHandleCapabilityChatAction;
   recordUsageMetrics: typeof import('../telemetry').recordUsageMetrics;
+  refreshCapabilityMemory: typeof import('../memory').refreshCapabilityMemory;
   resolveChatRuntimeContext: (args: {
     body: ChatRequestBody;
     bundle: {
@@ -103,6 +114,7 @@ export const registerRuntimeChatRoutes = (
     buildChatMemoryPrompt,
     buildMemoryContext,
     createTraceId,
+    evictManagedCapabilitySessions,
     finishTelemetrySpan,
     getMissingRuntimeConfigurationMessage,
     invokeCapabilityChat,
@@ -110,12 +122,76 @@ export const registerRuntimeChatRoutes = (
     isRuntimeConfigured,
     maybeHandleCapabilityChatAction,
     recordUsageMetrics,
+    refreshCapabilityMemory,
     resolveChatRuntimeContext,
     startTelemetrySpan,
     writeSseEvent,
     GitHubProviderRateLimitError,
   }: RuntimeChatRouteDeps,
 ) => {
+  const buildEvidenceDiagnostics = ({
+    chatContext,
+    memoryTrustMode,
+    pathValidationState,
+    unverifiedPathClaimsRemoved,
+  }: {
+    chatContext: ChatContext;
+    memoryTrustMode: MemoryTrustMode;
+    pathValidationState?: PathValidationState;
+    unverifiedPathClaimsRemoved?: string[];
+  }) => ({
+    groundingEvidenceSource:
+      chatContext.groundingEvidenceSource ||
+      chatContext.codeIndexSource ||
+      'none',
+    memoryTrustMode,
+    pathValidationState: pathValidationState || 'none',
+    unverifiedPathClaimsRemoved: unverifiedPathClaimsRemoved || [],
+  });
+
+  const buildCodeEvidencePrompt = ({
+    chatContext,
+    advisoryMemory,
+    homeMemoryPrompt,
+    memoryTrustMode,
+  }: {
+    chatContext: ChatContext;
+    advisoryMemory?: string;
+    homeMemoryPrompt?: string;
+    memoryTrustMode: MemoryTrustMode;
+  }) =>
+    buildStructuredChatEvidencePrompt({
+      verifiedCodeGrounding: chatContext.astGroundingPrompt,
+      verifiedRepositoryEvidence: chatContext.checkoutPath
+        ? [
+            `Repository root on disk: ${chatContext.checkoutPath}`,
+            chatContext.branchName ? `Active branch: ${chatContext.branchName}` : null,
+            chatContext.codeIndexFreshness
+              ? `Code index freshness: ${chatContext.codeIndexFreshness}`
+              : null,
+          ]
+            .filter(Boolean)
+            .join('\n')
+        : null,
+      advisoryMemory: [
+        advisoryMemory?.trim() ? `Anchor capability memory:\n${advisoryMemory.trim()}` : null,
+        homeMemoryPrompt?.trim() ? homeMemoryPrompt.trim() : null,
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
+      memoryTrustMode,
+    });
+
+  const maybeRefreshCodeGroundingMemory = (capabilityId: string, shouldRefresh: boolean) => {
+    if (!shouldRefresh) {
+      return;
+    }
+    void refreshCapabilityMemory(capabilityId, {
+      requeueAgents: false,
+      requestReason: 'repo-grounding-chat-refresh',
+    }).catch(() => undefined);
+  };
+
   app.post('/api/runtime/chat', async (request, response) => {
     const body = request.body as ChatRequestBody;
     const message = body.message?.trim();
@@ -241,10 +317,15 @@ export const registerRuntimeChatRoutes = (
         bundle,
         liveAgent,
       });
+      const memoryTrustMode: MemoryTrustMode = chatContext.isCodeQuestion
+        ? 'repo-evidence-only'
+        : 'standard';
       const anchorMemoryContext = await buildMemoryContext({
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
         queryText: chatContext.memoryQueryText || message,
+        excludeSourceTypes:
+          memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
       });
       // Merged-memory slice (plan §3c) — when the speaking agent lives in a
       // different capability, pull its home memory too so it brings its own
@@ -255,18 +336,19 @@ export const registerRuntimeChatRoutes = (
               capabilityId: taggedParticipant.capabilityId,
               agentId: taggedParticipant.agentId,
               queryText: chatContext.memoryQueryText || message,
+              excludeSourceTypes:
+                memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
             }).catch(() => null)
           : null;
       const memoryContext = anchorMemoryContext;
-      const mergedMemoryPrompt = [
-        anchorMemoryContext.prompt,
-        chatContext.astGroundingPrompt,
-        homeMemoryContext?.prompt
+      const mergedMemoryPrompt = buildCodeEvidencePrompt({
+        chatContext,
+        advisoryMemory: anchorMemoryContext.prompt,
+        homeMemoryPrompt: homeMemoryContext?.prompt
           ? `Home-capability memory (${taggedParticipant!.capabilityId}):\n${homeMemoryContext.prompt}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join('\n\n');
+          : undefined,
+        memoryTrustMode,
+      });
       const chatResponse = await invokeCapabilityChat({
         capability: liveCapability,
         agent: liveAgent,
@@ -285,6 +367,18 @@ export const registerRuntimeChatRoutes = (
         promptReceipt?: Record<string, unknown>;
         tokenPolicy?: Record<string, unknown>;
       };
+      const sanitizedChat = await sanitizeGroundedChatResponse({
+        content: publicChatResponse.content || '',
+        checkoutPath: chatContext.checkoutPath,
+        verifiedPaths: chatContext.verifiedPaths,
+        enforceEvidenceOnly: Boolean(chatContext.isCodeQuestion),
+      });
+      const evidenceDiagnostics = buildEvidenceDiagnostics({
+        chatContext,
+        memoryTrustMode,
+        pathValidationState: sanitizedChat.pathValidationState,
+        unverifiedPathClaimsRemoved: sanitizedChat.unverifiedPathClaimsRemoved,
+      });
       await finishTelemetrySpan({
         capabilityId: liveCapability.id,
         spanId: span.id,
@@ -298,6 +392,7 @@ export const registerRuntimeChatRoutes = (
           stage: 'capability_chat',
           promptReceipt,
           tokenPolicy,
+          ...evidenceDiagnostics,
         },
       });
       await recordUsageMetrics({
@@ -316,6 +411,7 @@ export const registerRuntimeChatRoutes = (
 
       response.json({
         ...publicChatResponse,
+        content: sanitizedChat.content,
         traceId,
         sessionMode: body.sessionMode || 'resume',
         memoryReferences: memoryContext.results.map(result => result.reference),
@@ -324,6 +420,7 @@ export const registerRuntimeChatRoutes = (
         branchName: chatContext.branchName,
         codeIndexSource: chatContext.codeIndexSource,
         codeIndexFreshness: chatContext.codeIndexFreshness,
+        ...evidenceDiagnostics,
       });
 
       // Fire-and-forget audit record so desktop chat turns are always
@@ -334,7 +431,7 @@ export const registerRuntimeChatRoutes = (
         agentId: liveAgent.id,
         agentName: liveAgent.name,
         userMessage: message,
-        agentMessage: publicChatResponse.content || '',
+        agentMessage: sanitizedChat.content || '',
         model: publicChatResponse.model || null,
         traceId,
         sessionId: publicChatResponse.sessionId || null,
@@ -346,6 +443,21 @@ export const registerRuntimeChatRoutes = (
       }).catch(err => {
         console.warn('[chat-audit] failed to persist chat turn:', err instanceof Error ? err.message : err);
       });
+      if (
+        sanitizedChat.pathValidationState === 'repaired' ||
+        sanitizedChat.pathValidationState === 'stripped'
+      ) {
+        void evictManagedCapabilitySessions({
+          capabilityId: liveCapability.id,
+          agentId: liveAgent.id,
+          scope: chatContext.chatScope,
+          scopeId: chatContext.chatScopeId,
+        }).catch(() => undefined);
+      }
+      maybeRefreshCodeGroundingMemory(
+        liveCapability.id,
+        Boolean(chatContext.isCodeQuestion),
+      );
     } catch (error) {
       sendApiError(response, error);
     }
@@ -481,10 +593,15 @@ export const registerRuntimeChatRoutes = (
         bundle,
         liveAgent,
       });
+      const memoryTrustMode: MemoryTrustMode = chatContext.isCodeQuestion
+        ? 'repo-evidence-only'
+        : 'standard';
       const anchorMemoryContext = await buildMemoryContext({
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
         queryText: chatContext.memoryQueryText || message,
+        excludeSourceTypes:
+          memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
       });
       const streamHomeMemoryContext =
         usingForeignAgent && foreignParticipant
@@ -492,18 +609,23 @@ export const registerRuntimeChatRoutes = (
               capabilityId: foreignParticipant.capabilityId,
               agentId: foreignParticipant.agentId,
               queryText: chatContext.memoryQueryText || message,
+              excludeSourceTypes:
+                memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
             }).catch(() => null)
           : null;
       const memoryContext = anchorMemoryContext;
-      const streamMergedMemoryPrompt = [
-        anchorMemoryContext.prompt,
-        chatContext.astGroundingPrompt,
-        streamHomeMemoryContext?.prompt
+      const streamMergedMemoryPrompt = buildCodeEvidencePrompt({
+        chatContext,
+        advisoryMemory: anchorMemoryContext.prompt,
+        homeMemoryPrompt: streamHomeMemoryContext?.prompt
           ? `Home-capability memory (${foreignParticipant!.capabilityId}):\n${streamHomeMemoryContext.prompt}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join('\n\n');
+          : undefined,
+        memoryTrustMode,
+      });
+      const memoryDiagnostics = buildEvidenceDiagnostics({
+        chatContext,
+        memoryTrustMode,
+      });
       writeSseEvent(response, 'memory', {
         type: 'memory',
         traceId,
@@ -513,6 +635,7 @@ export const registerRuntimeChatRoutes = (
         branchName: chatContext.branchName,
         codeIndexSource: chatContext.codeIndexSource,
         codeIndexFreshness: chatContext.codeIndexFreshness,
+        ...memoryDiagnostics,
       });
       const span = await startTelemetrySpan({
         capabilityId: liveCapability.id,
@@ -528,6 +651,7 @@ export const registerRuntimeChatRoutes = (
           streamed: true,
         },
       });
+      const shouldBufferValidatedStream = Boolean(chatContext.isCodeQuestion);
       const streamed = await invokeCapabilityChatStream({
         capability: liveCapability,
         agent: liveAgent,
@@ -542,17 +666,32 @@ export const registerRuntimeChatRoutes = (
           memoryPrompt: streamMergedMemoryPrompt,
         }),
         onDelta: delta => {
-          writeSseEvent(response, 'delta', {
-            type: 'delta',
-            traceId,
-            content: delta,
-          });
+          if (!shouldBufferValidatedStream) {
+            writeSseEvent(response, 'delta', {
+              type: 'delta',
+              traceId,
+              content: delta,
+            });
+          }
         },
       });
       const { promptReceipt, tokenPolicy, ...publicStreamed } = streamed as typeof streamed & {
         promptReceipt?: Record<string, unknown>;
         tokenPolicy?: Record<string, unknown>;
       };
+
+      const sanitizedStream = await sanitizeGroundedChatResponse({
+        content: publicStreamed.content || '',
+        checkoutPath: chatContext.checkoutPath,
+        verifiedPaths: chatContext.verifiedPaths,
+        enforceEvidenceOnly: Boolean(chatContext.isCodeQuestion),
+      });
+      const streamDiagnostics = buildEvidenceDiagnostics({
+        chatContext,
+        memoryTrustMode,
+        pathValidationState: sanitizedStream.pathValidationState,
+        unverifiedPathClaimsRemoved: sanitizedStream.unverifiedPathClaimsRemoved,
+      });
 
       await finishTelemetrySpan({
         capabilityId: liveCapability.id,
@@ -568,6 +707,7 @@ export const registerRuntimeChatRoutes = (
           stage: 'capability_chat',
           promptReceipt,
           tokenPolicy,
+          ...streamDiagnostics,
         },
       });
       await recordUsageMetrics({
@@ -585,10 +725,17 @@ export const registerRuntimeChatRoutes = (
         },
       });
 
+      if (shouldBufferValidatedStream && sanitizedStream.content) {
+        writeSseEvent(response, 'delta', {
+          type: 'delta',
+          traceId,
+          content: sanitizedStream.content,
+        });
+      }
       writeSseEvent(response, 'complete', {
         type: 'complete',
         traceId,
-        content: publicStreamed.content,
+        content: sanitizedStream.content,
         createdAt: publicStreamed.createdAt,
         model: publicStreamed.model,
         usage: publicStreamed.usage,
@@ -598,6 +745,7 @@ export const registerRuntimeChatRoutes = (
         isNewSession: publicStreamed.isNewSession,
         sessionMode: body.sessionMode || 'resume',
         memoryReferences: memoryContext.results.map(result => result.reference),
+        ...streamDiagnostics,
       });
       response.end();
 
@@ -607,7 +755,7 @@ export const registerRuntimeChatRoutes = (
         agentId: liveAgent.id,
         agentName: liveAgent.name,
         userMessage: message,
-        agentMessage: publicStreamed.content || '',
+        agentMessage: sanitizedStream.content || '',
         model: publicStreamed.model || null,
         traceId,
         sessionId: publicStreamed.sessionId || null,
@@ -621,6 +769,21 @@ export const registerRuntimeChatRoutes = (
       }).catch(err => {
         console.warn('[chat-audit] failed to persist stream chat turn:', err instanceof Error ? err.message : err);
       });
+      if (
+        sanitizedStream.pathValidationState === 'repaired' ||
+        sanitizedStream.pathValidationState === 'stripped'
+      ) {
+        void evictManagedCapabilitySessions({
+          capabilityId: liveCapability.id,
+          agentId: liveAgent.id,
+          scope: chatContext.chatScope,
+          scopeId: chatContext.chatScopeId,
+        }).catch(() => undefined);
+      }
+      maybeRefreshCodeGroundingMemory(
+        liveCapability.id,
+        Boolean(chatContext.isCodeQuestion),
+      );
     } catch (error) {
       writeSseEvent(response, 'error', {
         type: 'error',

@@ -4325,6 +4325,10 @@ export interface ChatStreamEvent {
   };
   traceId?: string;
   memoryReferences?: MemoryReference[];
+  groundingEvidenceSource?: "local-checkout" | "capability-index" | "none";
+  memoryTrustMode?: "standard" | "repo-evidence-only";
+  pathValidationState?: "verified" | "repaired" | "stripped" | "none";
+  unverifiedPathClaimsRemoved?: string[];
   error?: string;
   retryAfterMs?: number;
 }

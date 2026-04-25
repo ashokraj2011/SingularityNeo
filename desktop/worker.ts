@@ -928,11 +928,14 @@ const resolveDesktopRuntimeContext = async (
       branchName: referencedWorkItem?.id,
     }).catch(() => ({
       astGroundingMode: 'no-ast-grounding' as const,
+      isCodeQuestion: false,
       prompt: undefined,
       checkoutPath: astCheckoutPath,
       branchName: referencedWorkItem?.id,
       codeIndexSource: undefined,
       codeIndexFreshness: undefined,
+      verifiedPaths: [],
+      groundingEvidenceSource: 'none' as const,
     }));
 
     if (queryText) {

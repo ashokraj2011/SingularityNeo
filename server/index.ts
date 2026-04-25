@@ -58,6 +58,7 @@ import { hasPermission } from '../src/lib/accessControl';
 import {
   GitHubProviderRateLimitError,
   defaultModel,
+  evictManagedCapabilitySessions,
   getConfiguredToken,
   getConfiguredTokenSource,
   getRuntimeDefaultModel,
@@ -69,7 +70,7 @@ import {
   resolveRuntimeModel,
   type ChatHistoryMessage,
 } from './githubModels';
-import { buildMemoryContext } from './memory';
+import { buildMemoryContext, refreshCapabilityMemory } from './memory';
 import { buildAstGroundingSummary, type AstGroundingSummary } from './astGrounding';
 import { loadAndApplyDesktopPreferences } from './desktopPreferences';
 import {
@@ -597,7 +598,7 @@ const buildChatMemoryPrompt = ({
   liveBriefing: string;
   memoryPrompt?: string;
 }) =>
-  [liveBriefing, memoryPrompt ? `Retrieved memory context:\n${memoryPrompt}` : null]
+  [liveBriefing, memoryPrompt || null]
     .filter(Boolean)
     .join('\n\n');
 
@@ -723,11 +724,14 @@ const resolveChatRuntimeContext = async ({
     branchName: hasReferencedWorkItem ? referencedWorkItem?.id : undefined,
   }).catch(() => ({
     astGroundingMode: 'no-ast-grounding' as const,
+    isCodeQuestion: false,
     prompt: undefined,
     checkoutPath: undefined,
     branchName: hasReferencedWorkItem ? referencedWorkItem?.id : undefined,
     codeIndexSource: undefined,
     codeIndexFreshness: undefined,
+    verifiedPaths: [],
+    groundingEvidenceSource: 'none' as const,
   }));
 
   return {
@@ -741,6 +745,9 @@ const resolveChatRuntimeContext = async ({
     branchName: astGrounding.branchName,
     codeIndexSource: astGrounding.codeIndexSource,
     codeIndexFreshness: astGrounding.codeIndexFreshness,
+    verifiedPaths: astGrounding.verifiedPaths,
+    isCodeQuestion: astGrounding.isCodeQuestion,
+    groundingEvidenceSource: astGrounding.groundingEvidenceSource,
     developerPrompt: isStageControlRequest
       ? buildStageControlDeveloperPrompt({
           agentName: liveAgent.name || liveAgent.role || 'the current stage agent',
@@ -958,6 +965,7 @@ registerRuntimeChatRoutes(app, {
   buildChatMemoryPrompt,
   buildMemoryContext,
   createTraceId,
+  evictManagedCapabilitySessions,
   finishTelemetrySpan,
   getMissingRuntimeConfigurationMessage,
   invokeCapabilityChat,
@@ -965,6 +973,7 @@ registerRuntimeChatRoutes(app, {
   isRuntimeConfigured,
   maybeHandleCapabilityChatAction,
   recordUsageMetrics,
+  refreshCapabilityMemory,
   resolveChatRuntimeContext,
   startTelemetrySpan,
   writeSseEvent,
