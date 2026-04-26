@@ -104,6 +104,7 @@ const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
   "blast-radius": ScanEye,
   "ast-explorer": TreePine,
   "code-graph": Network,
+  "world-model": Network,
 };
 
 // ─── Sidebar group definitions ───────────────────────────────────────────────
@@ -147,6 +148,7 @@ const PATH_TO_GROUP: Record<string, ToolGroup> = {
   "/blast-radius": "security",
   "/ast-explorer": "platform",
   "/code-graph": "platform",
+  "/world-model": "platform",
   "/operations": "operations",
   "/desktop/connectors": "operations",
   "/incidents": "operations",
@@ -193,6 +195,7 @@ const routeTitles: Record<string, string> = {
   "/blast-radius": "Blast Radius",
   "/ast-explorer": "AST Explorer",
   "/code-graph": "Code Graph",
+  "/world-model": "Code World Model",
 };
 
 const SIDEBAR_STORAGE_KEY = "singularity.sidebar.collapsed";

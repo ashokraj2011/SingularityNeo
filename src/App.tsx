@@ -53,6 +53,7 @@ const BlastRadius = lazy(() => import('./pages/BlastRadius'));
 const Sentinel = lazy(() => import('./pages/Sentinel'));
 const AstExplorer = lazy(() => import('./pages/AstExplorer'));
 const CodeGraph = lazy(() => import('./pages/CodeGraph'));
+const WorldModel = lazy(() => import('./pages/WorldModel'));
 
 const RouteLoader = () => (
   <div className="section-card ambient-shadow min-h-[calc(100vh-12rem)] p-8">
@@ -151,6 +152,7 @@ export default function App() {
                   <Route path="/sentinel" element={<Sentinel />} />
                   <Route path="/ast-explorer" element={<AstExplorer />} />
                   <Route path="/code-graph" element={<CodeGraph />} />
+                  <Route path="/world-model" element={<WorldModel />} />
                   <Route path="*" element={<Orchestrator />} />
                 </Routes>
               </Suspense>

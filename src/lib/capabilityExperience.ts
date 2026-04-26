@@ -119,7 +119,8 @@ export type AdvancedToolId =
   | 'sentinel'
   | 'blast-radius'
   | 'ast-explorer'
-  | 'code-graph';
+  | 'code-graph'
+  | 'world-model';
 
 export type AdvancedToolAudience =
   | 'ALL'
@@ -446,6 +447,17 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     audience: 'BUILDERS',
     exposureMode: 'WHEN_RELEVANT',
     contextTriggers: ['HAS_REPOSITORIES'],
+  },
+  {
+    id: 'world-model',
+    label: 'World Model',
+    shortName: 'World',
+    path: '/world-model',
+    description:
+      'Semantic force-directed interactive graph of the capability world model: connects APIs, Services, Repositories, Data objects and impacted downstream workflows.',
+    audience: 'BUILDERS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
   },
 ];
 

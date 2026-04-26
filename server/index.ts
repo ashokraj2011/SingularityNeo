@@ -111,6 +111,7 @@ import { registerWorkflowRunRoutes } from './routes/workflowRuns';
 import { registerStoryProposalRoutes } from './routes/storyProposals';
 import { registerPassportRoutes } from './routes/passport';
 import { registerBlastRadiusRoutes } from './routes/blastRadius';
+import { registerWorldModelRoutes } from './routes/worldModel';
 import { registerSentinelRoutes } from './routes/sentinel';
 import { registerWorkspaceAccessRoutes } from './routes/workspaceAccess';
 import { registerStepTemplateRoutes } from './routes/stepTemplates';
@@ -958,6 +959,7 @@ registerStepTemplateRoutes(app);
 registerIncidentRoutes(app, { parseActorContext });
 registerPassportRoutes(app);
 registerBlastRadiusRoutes(app);
+registerWorldModelRoutes(app);
 registerSentinelRoutes(app, { parseActor });
 registerRuntimeChatRoutes(app, {
   ZERO_RUNTIME_USAGE,
