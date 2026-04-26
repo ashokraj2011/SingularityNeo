@@ -9,6 +9,10 @@ export const DEFAULT_PROVIDER_KEY: ProviderKey = 'github-copilot';
 export const DEFAULT_PROVIDER_LABEL = 'GitHub Copilot SDK';
 export const LOCAL_OPENAI_PROVIDER_KEY: ProviderKey = 'local-openai';
 export const LOCAL_OPENAI_PROVIDER_LABEL = 'Local OpenAI-Compatible';
+export const GEMINI_PROVIDER_KEY: ProviderKey = 'gemini';
+export const GEMINI_PROVIDER_LABEL = 'Google Gemini';
+export const CUSTOM_ROUTER_PROVIDER_KEY: ProviderKey = 'custom-router';
+export const CUSTOM_ROUTER_PROVIDER_LABEL = 'Custom OpenAI Router';
 export const CLAUDE_CODE_CLI_PROVIDER_KEY: ProviderKey = 'claude-code-cli';
 export const CLAUDE_CODE_CLI_PROVIDER_LABEL = 'Claude Code CLI';
 export const CODEX_CLI_PROVIDER_KEY: ProviderKey = 'codex-cli';
@@ -48,6 +52,31 @@ export const normalizeProviderKey = (value?: string | null): ProviderKey => {
     normalized.includes('lm studio')
   ) {
     return LOCAL_OPENAI_PROVIDER_KEY;
+  }
+
+  if (
+    normalized === GEMINI_PROVIDER_KEY ||
+    normalized.includes('gemini') ||
+    normalized.includes('google gemini') ||
+    normalized.includes('google ai')
+  ) {
+    return GEMINI_PROVIDER_KEY;
+  }
+
+  if (
+    normalized === CUSTOM_ROUTER_PROVIDER_KEY ||
+    normalized.includes('custom router') ||
+    normalized.includes('custom-router') ||
+    normalized.includes('openrouter') ||
+    normalized.includes('open router') ||
+    normalized.includes('opencode') ||
+    normalized.includes('open code') ||
+    normalized.includes('litellm') ||
+    normalized.includes('together') ||
+    normalized.includes('groq') ||
+    normalized.includes('anyscale')
+  ) {
+    return CUSTOM_ROUTER_PROVIDER_KEY;
   }
 
   if (
@@ -92,16 +121,13 @@ const isLegacyDefaultProviderLabel = (value?: string | null) => {
 
 export const resolveProviderDisplayName = (providerKey?: ProviderKey | string | null) => {
   switch (normalizeProviderKey(providerKey)) {
-    case LOCAL_OPENAI_PROVIDER_KEY:
-      return LOCAL_OPENAI_PROVIDER_LABEL;
-    case CLAUDE_CODE_CLI_PROVIDER_KEY:
-      return CLAUDE_CODE_CLI_PROVIDER_LABEL;
-    case CODEX_CLI_PROVIDER_KEY:
-      return CODEX_CLI_PROVIDER_LABEL;
-    case AIDER_CLI_PROVIDER_KEY:
-      return AIDER_CLI_PROVIDER_LABEL;
-    default:
-      return DEFAULT_PROVIDER_LABEL;
+    case LOCAL_OPENAI_PROVIDER_KEY:   return LOCAL_OPENAI_PROVIDER_LABEL;
+    case GEMINI_PROVIDER_KEY:         return GEMINI_PROVIDER_LABEL;
+    case CUSTOM_ROUTER_PROVIDER_KEY:  return CUSTOM_ROUTER_PROVIDER_LABEL;
+    case CLAUDE_CODE_CLI_PROVIDER_KEY: return CLAUDE_CODE_CLI_PROVIDER_LABEL;
+    case CODEX_CLI_PROVIDER_KEY:      return CODEX_CLI_PROVIDER_LABEL;
+    case AIDER_CLI_PROVIDER_KEY:      return AIDER_CLI_PROVIDER_LABEL;
+    default:                          return DEFAULT_PROVIDER_LABEL;
   }
 };
 

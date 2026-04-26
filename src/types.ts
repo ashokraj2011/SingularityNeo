@@ -17,6 +17,8 @@ export type SkillOrigin = "FOUNDATION" | "CAPABILITY";
 export type ProviderKey =
   | "github-copilot"
   | "local-openai"
+  | "gemini"
+  | "custom-router"
   | "claude-code-cli"
   | "codex-cli"
   | "aider-cli";

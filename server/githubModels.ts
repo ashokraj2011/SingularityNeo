@@ -45,13 +45,17 @@ import {
   type ProviderMessage,
 } from './localOpenAIProvider';
 import {
+  CUSTOM_ROUTER_PROVIDER_KEY,
   DEFAULT_PROVIDER_KEY,
+  GEMINI_PROVIDER_KEY,
   LOCAL_OPENAI_PROVIDER_KEY,
   isCliRuntimeProviderKey,
   normalizeProviderKey,
   resolveAgentProviderKey,
   resolveProviderDisplayName,
 } from './providerRegistry';
+import { requestGeminiModel, requestGeminiModelStream } from './geminiProvider';
+import { requestCustomRouterModel, requestCustomRouterModelStream } from './customRouterProvider';
 import {
   getStoredCliProviderConfigSync,
 } from './runtimeProviders';
@@ -3021,11 +3025,15 @@ export const requestGitHubModel = async ({
 }) => {
   const normalizedProviderKey = normalizeProviderKey(providerKey);
   if (normalizedProviderKey === LOCAL_OPENAI_PROVIDER_KEY) {
-    return requestLocalOpenAIModel({
-      model,
-      messages,
-      timeoutMs,
-    });
+    return requestLocalOpenAIModel({ model, messages, timeoutMs });
+  }
+
+  if (normalizedProviderKey === GEMINI_PROVIDER_KEY) {
+    return requestGeminiModel({ model, messages, timeoutMs });
+  }
+
+  if (normalizedProviderKey === CUSTOM_ROUTER_PROVIDER_KEY) {
+    return requestCustomRouterModel({ model, messages, timeoutMs });
   }
 
   if (isCliRuntimeProviderKey(normalizedProviderKey)) {
@@ -3110,12 +3118,15 @@ export const requestGitHubModelStream = async ({
 }) => {
   const normalizedProviderKey = normalizeProviderKey(providerKey);
   if (normalizedProviderKey === LOCAL_OPENAI_PROVIDER_KEY) {
-    return requestLocalOpenAIModelStream({
-      model,
-      messages,
-      timeoutMs,
-      onDelta,
-    });
+    return requestLocalOpenAIModelStream({ model, messages, timeoutMs, onDelta });
+  }
+
+  if (normalizedProviderKey === GEMINI_PROVIDER_KEY) {
+    return requestGeminiModelStream({ model, messages, timeoutMs, onDelta });
+  }
+
+  if (normalizedProviderKey === CUSTOM_ROUTER_PROVIDER_KEY) {
+    return requestCustomRouterModelStream({ model, messages, timeoutMs, onDelta });
   }
 
   if (isCliRuntimeProviderKey(normalizedProviderKey)) {

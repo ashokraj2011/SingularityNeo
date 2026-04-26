@@ -51,6 +51,8 @@ const trim = (value?: string | null) => String(value || '').trim();
 const providerDefaultCommand: Record<ProviderKey, string> = {
   'github-copilot': '',
   'local-openai': '',
+  'gemini': '',
+  'custom-router': '',
   'claude-code-cli': 'claude',
   'codex-cli': 'codex',
   'aider-cli': 'aider',

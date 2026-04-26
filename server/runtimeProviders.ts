@@ -26,13 +26,29 @@ import {
   AIDER_CLI_PROVIDER_KEY,
   CLAUDE_CODE_CLI_PROVIDER_KEY,
   CODEX_CLI_PROVIDER_KEY,
+  CUSTOM_ROUTER_PROVIDER_KEY,
   DEFAULT_PROVIDER_KEY,
+  GEMINI_PROVIDER_KEY,
   LOCAL_OPENAI_PROVIDER_KEY,
   getConfiguredDefaultRuntimeProviderKey,
   isCliRuntimeProviderKey,
   normalizeProviderKey,
   resolveProviderDisplayName,
 } from './providerRegistry';
+import {
+  getGeminiApiKey,
+  getGeminiBaseUrl,
+  getGeminiDefaultModel,
+  isGeminiConfigured,
+  listGeminiModels,
+} from './geminiProvider';
+import {
+  getCustomRouterBaseUrl,
+  getCustomRouterDefaultModel,
+  getCustomRouterLabel,
+  isCustomRouterConfigured,
+  listCustomRouterModels,
+} from './customRouterProvider';
 import { resolveRuntimeAccessMode } from './runtimePolicy';
 import {
   getStoredRuntimeProviderConfig,
@@ -90,6 +106,22 @@ const runtimeProviderDefinitions: RuntimeProviderDefinition[] = [
     transportMode: 'desktop-cli',
     supportsSessions: false,
     supportsTools: false,
+    supportsWorkspaceAutonomy: false,
+  },
+  {
+    key: GEMINI_PROVIDER_KEY,
+    label: resolveProviderDisplayName(GEMINI_PROVIDER_KEY),
+    transportMode: 'local-openai',   // same HTTP transport as local-openai
+    supportsSessions: true,
+    supportsTools: true,
+    supportsWorkspaceAutonomy: false,
+  },
+  {
+    key: CUSTOM_ROUTER_PROVIDER_KEY,
+    label: resolveProviderDisplayName(CUSTOM_ROUTER_PROVIDER_KEY),
+    transportMode: 'local-openai',   // OpenAI-compatible HTTP
+    supportsSessions: true,
+    supportsTools: true,
     supportsWorkspaceAutonomy: false,
   },
 ];
@@ -247,6 +279,66 @@ const getLocalOpenAIProviderStatus = async (): Promise<RuntimeProviderStatus> =>
   });
 };
 
+const getGeminiProviderStatus = async (): Promise<RuntimeProviderStatus> => {
+  const configured = isGeminiConfigured();
+  const models = configured ? await listGeminiModels().catch(() => []) : [];
+  return buildConfiguredStatus({
+    providerKey: GEMINI_PROVIDER_KEY,
+    transportMode: 'local-openai',
+    configured,
+    endpoint: configured ? getGeminiBaseUrl() : null,
+    model: configured ? getGeminiDefaultModel() : null,
+    availableModels: models,
+    validation: {
+      providerKey: GEMINI_PROVIDER_KEY,
+      ok: configured,
+      status: configured ? 'configured' : 'missing',
+      message: configured
+        ? 'Google Gemini is configured via GEMINI_API_KEY.'
+        : 'Set GEMINI_API_KEY (from https://aistudio.google.com/app/apikey) to enable Gemini.',
+      transportMode: 'local-openai',
+      installed: configured,
+      authenticated: configured ? true : null,
+      workingDirectoryAllowed: null,
+      usageEstimated: false,
+      models,
+      checkedAt: new Date().toISOString(),
+    },
+  });
+};
+
+const getCustomRouterProviderStatus = async (): Promise<RuntimeProviderStatus> => {
+  const config = (await getStoredRuntimeProviderConfig({ providerKey: CUSTOM_ROUTER_PROVIDER_KEY })) || null;
+  const configured = isCustomRouterConfigured(config);
+  const models = configured ? await listCustomRouterModels(config).catch(() => []) : [];
+  const label = getCustomRouterLabel(config);
+  const baseUrl = getCustomRouterBaseUrl(config);
+  return buildConfiguredStatus({
+    providerKey: CUSTOM_ROUTER_PROVIDER_KEY,
+    transportMode: 'local-openai',
+    configured,
+    endpoint: baseUrl || null,
+    model: configured ? getCustomRouterDefaultModel(config) || null : null,
+    availableModels: models,
+    config,
+    validation: {
+      providerKey: CUSTOM_ROUTER_PROVIDER_KEY,
+      ok: configured,
+      status: configured ? 'configured' : 'missing',
+      message: configured
+        ? `${label} is configured (${baseUrl}).`
+        : 'Set CUSTOM_ROUTER_BASE_URL to enable a custom OpenAI-compatible router.',
+      transportMode: 'local-openai',
+      installed: configured,
+      authenticated: null,
+      workingDirectoryAllowed: null,
+      usageEstimated: false,
+      models,
+      checkedAt: new Date().toISOString(),
+    },
+  });
+};
+
 const getCliProviderStatus = async (providerKey: ProviderKey): Promise<RuntimeProviderStatus> => {
   const config = (await getStoredRuntimeProviderConfig({ providerKey })) || null;
   const validation = await validateCliRuntimeProvider({
@@ -277,6 +369,12 @@ export const getConfiguredRuntimeProviderStatus = async (
   }
   if (providerKey === LOCAL_OPENAI_PROVIDER_KEY) {
     return getLocalOpenAIProviderStatus();
+  }
+  if (providerKey === GEMINI_PROVIDER_KEY) {
+    return getGeminiProviderStatus();
+  }
+  if (providerKey === CUSTOM_ROUTER_PROVIDER_KEY) {
+    return getCustomRouterProviderStatus();
   }
   if (isCliRuntimeProviderKey(providerKey)) {
     return getCliProviderStatus(providerKey);

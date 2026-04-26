@@ -222,6 +222,11 @@ export const validateLocalOpenAIChatProvider = async ({
   }
 };
 
+// ─── Shared OpenAI-compatible HTTP core ──────────────────────────────────────
+//
+// All three HTTP providers (local-openai, gemini, custom-router) call this
+// with their own base URL and API key. Keeping it in one place avoids drift.
+
 // Minimal tool-call types for OpenAI-compatible API requests.
 export interface ProviderTool {
   type: 'function';
@@ -237,40 +242,43 @@ export type ProviderToolChoice =
   | 'none'
   | { type: 'function'; function: { name: string } };
 
-export const requestLocalOpenAIModel = async ({
+/**
+ * Low-level OpenAI-compatible chat completion.
+ * Accepts explicit baseUrl + apiKey so any provider (local-openai, gemini,
+ * custom-router) can call it without re-implementing the fetch logic.
+ */
+export const requestOpenAICompatModel = async ({
+  baseUrl,
+  apiKey,
   model,
   messages,
   timeoutMs = 45_000,
   tools,
   tool_choice,
+  providerLabel = 'OpenAI-compatible provider',
 }: {
-  model?: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
   messages: ProviderMessage[];
   timeoutMs?: number;
-  /** Optional tool definitions for tool-call mode. */
   tools?: ProviderTool[];
-  /** Force a specific tool call. */
   tool_choice?: ProviderToolChoice;
+  providerLabel?: string;
 }): Promise<ProviderCompletion> => {
-  if (!isLocalOpenAIConfigured()) {
-    throw new Error(
-      `${resolveProviderDisplayName(LOCAL_OPENAI_PROVIDER_KEY)} is not configured. Set LOCAL_OPENAI_BASE_URL and restart the app.`,
-    );
-  }
-
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${getLocalOpenAIBaseUrl()}/chat/completions`, {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${LOCAL_OPENAI_API_KEY()}`,
+        Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: model || getLocalOpenAIDefaultModel(),
+        model,
         messages,
         temperature: 0.2,
         stream: false,
@@ -304,42 +312,100 @@ export const requestLocalOpenAIModel = async ({
       }>;
     };
 
-    // Prefer tool-call content over text when tools were requested.
     const toolCall = payload.choices?.[0]?.message?.tool_calls?.[0];
-    const content = toolCall?.function?.arguments?.trim()
-      || payload.choices?.[0]?.message?.content?.trim()
-      || '';
+    const content =
+      toolCall?.function?.arguments?.trim() ||
+      payload.choices?.[0]?.message?.content?.trim() ||
+      '';
     if (!content) {
-      throw new Error('The local OpenAI-compatible provider returned an empty response.');
+      throw new Error(`${providerLabel} returned an empty response.`);
     }
 
-    const promptText = messages.map(message => `${message.role}: ${message.content}`).join('\n');
+    const promptText = messages.map(m => `${m.role}: ${m.content}`).join('\n');
     const usage = payload.usage
       ? {
-          promptTokens: Number(payload.usage.prompt_tokens || 0),
+          promptTokens:     Number(payload.usage.prompt_tokens    || 0),
           completionTokens: Number(payload.usage.completion_tokens || 0),
-          totalTokens: Number(payload.usage.total_tokens || 0),
+          totalTokens:      Number(payload.usage.total_tokens      || 0),
           estimatedCostUsd: Number((Number(payload.usage.total_tokens || 0) * 0.000002).toFixed(6)),
         }
       : estimateUsage(promptText, content);
 
     return {
       content,
-      model: String(payload.model || model || getLocalOpenAIDefaultModel()),
+      model:      String(payload.model || model),
       usage,
       responseId: payload.id || null,
-      createdAt: payload.created
+      createdAt:  payload.created
         ? new Date(payload.created * 1000).toISOString()
         : new Date().toISOString(),
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('The local OpenAI-compatible provider timed out.');
+      throw new Error(`${providerLabel} timed out.`);
     }
     throw error;
   } finally {
     clearTimeout(timeout);
   }
+};
+
+/**
+ * Fetch the model list from any OpenAI-compatible /models endpoint.
+ * Returns an empty array on any error (provider offline / no list endpoint).
+ */
+export const listOpenAICompatModels = async ({
+  baseUrl,
+  apiKey,
+  profile,
+}: {
+  baseUrl: string;
+  apiKey: string;
+  profile: string;
+}): Promise<Array<{ id: string; label: string; profile: string; apiModelId: string }>> => {
+  try {
+    const resp = await fetch(`${baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!resp.ok) return [];
+    const payload = (await resp.json()) as { data?: Array<{ id?: string }> };
+    return (payload.data || [])
+      .map(m => String(m.id || '').trim())
+      .filter(Boolean)
+      .map(id => ({ id, label: id, profile, apiModelId: id }));
+  } catch {
+    return [];
+  }
+};
+
+export const requestLocalOpenAIModel = async ({
+  model,
+  messages,
+  timeoutMs = 45_000,
+  tools,
+  tool_choice,
+}: {
+  model?: string;
+  messages: ProviderMessage[];
+  timeoutMs?: number;
+  tools?: ProviderTool[];
+  tool_choice?: ProviderToolChoice;
+}): Promise<ProviderCompletion> => {
+  if (!isLocalOpenAIConfigured()) {
+    throw new Error(
+      `${resolveProviderDisplayName(LOCAL_OPENAI_PROVIDER_KEY)} is not configured. Set LOCAL_OPENAI_BASE_URL and restart the app.`,
+    );
+  }
+  return requestOpenAICompatModel({
+    baseUrl:       getLocalOpenAIBaseUrl(),
+    apiKey:        LOCAL_OPENAI_API_KEY(),
+    model:         model || getLocalOpenAIDefaultModel(),
+    messages,
+    timeoutMs,
+    tools,
+    tool_choice,
+    providerLabel: 'Local OpenAI-compatible provider',
+  });
 };
 
 export const requestLocalOpenAIModelStream = async ({
