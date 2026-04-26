@@ -29,6 +29,7 @@ import {
   Radiation,
   ScanEye,
   TreePine,
+  Network,
   Siren,
   Sparkles,
   Star,
@@ -102,6 +103,7 @@ const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
   sentinel: Radiation,
   "blast-radius": ScanEye,
   "ast-explorer": TreePine,
+  "code-graph": Network,
 };
 
 // ─── Sidebar group definitions ───────────────────────────────────────────────
@@ -144,6 +146,7 @@ const PATH_TO_GROUP: Record<string, ToolGroup> = {
   "/sentinel": "security",
   "/blast-radius": "security",
   "/ast-explorer": "platform",
+  "/code-graph": "platform",
   "/operations": "operations",
   "/desktop/connectors": "operations",
   "/incidents": "operations",
@@ -189,6 +192,7 @@ const routeTitles: Record<string, string> = {
   "/sentinel": "Sentinel Mode",
   "/blast-radius": "Blast Radius",
   "/ast-explorer": "AST Explorer",
+  "/code-graph": "Code Graph",
 };
 
 const SIDEBAR_STORAGE_KEY = "singularity.sidebar.collapsed";

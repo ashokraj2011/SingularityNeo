@@ -118,7 +118,8 @@ export type AdvancedToolId =
   | 'work-item-report'
   | 'sentinel'
   | 'blast-radius'
-  | 'ast-explorer';
+  | 'ast-explorer'
+  | 'code-graph';
 
 export type AdvancedToolAudience =
   | 'ALL'
@@ -431,6 +432,17 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     path: '/ast-explorer',
     description:
       'Browse the local code index: API endpoints, interfaces, contracts, classes, and methods extracted from the capability repositories. Powered by the desktop base-clone AST.',
+    audience: 'BUILDERS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_REPOSITORIES'],
+  },
+  {
+    id: 'code-graph',
+    label: 'Code Graph',
+    shortName: 'Graph',
+    path: '/code-graph',
+    description:
+      'Force-directed interactive graph of the capability codebase: file import topology, symbol containment hierarchy, and API endpoint detection. Switch between file-level and symbol-level views.',
     audience: 'BUILDERS',
     exposureMode: 'WHEN_RELEVANT',
     contextTriggers: ['HAS_REPOSITORIES'],

@@ -18,6 +18,7 @@ import {
   ScanEye,
   Search,
   TreePine,
+  Network,
   ShieldCheck,
   ShieldOff,
   Sparkles,
@@ -98,6 +99,7 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   sentinel: Radiation,
   'blast-radius': ScanEye,
   'ast-explorer': TreePine,
+  'code-graph': Network,
 };
 
 const Dashboard = () => {
