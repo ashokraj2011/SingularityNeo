@@ -15,6 +15,7 @@ import { query } from '../db';
 import { getCapabilityRepositoriesRecord } from '../repository';
 import { detectSourceLanguage } from './parse';
 import type {
+  ArchLayer,
   BlastRadiusSymbolGraph,
   BlastRadiusSymbolGraphEdge,
   BlastRadiusSymbolGraphNode,
@@ -899,6 +900,45 @@ const isEndpointFile = (filePath: string) => ENDPOINT_FILE_RE.test(filePath);
 const isEndpointSymbol = (name: string, sig: string) =>
   ENDPOINT_SYMBOL_NAME_RE.test(name) || ENDPOINT_SIGNATURE_RE.test(sig);
 
+// Pick the candidate whose path has the most segments in common with target
+const pickBestPathMatch = (target: string, candidates: string[]): string => {
+  if (candidates.length === 1) return candidates[0];
+  const tParts = target.toLowerCase().split('/');
+  let best = candidates[0], bestScore = -1;
+  for (const c of candidates) {
+    const cParts = c.toLowerCase().split('/');
+    let score = 0;
+    for (const p of tParts) { if (cParts.includes(p)) score++; }
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+  return best;
+};
+
+const detectArchLayer = (fp: string): ArchLayer => {
+  const f = fp.toLowerCase();
+  if (/\/(routes?|routers?|endpoints?)\//i.test(f) || /[./](routes?|router|endpoint)\.[a-z]+$/.test(f)) return 'route';
+  if (/\/(controllers?|handlers?)\//i.test(f) || /[./](controller|handler)\.[a-z]+$/.test(f)) return 'controller';
+  if (/\/(services?|managers?|providers?|usecases?)\//i.test(f) || /[./](service|manager|provider|usecase)\.[a-z]+$/.test(f)) return 'service';
+  if (/\/(repositories?|repos?|daos?|stores?)\//i.test(f) || /[./](repository|repo|dao|store)\.[a-z]+$/.test(f)) return 'repository';
+  if (/\/(models?|entities?|schemas?|domain|dtos?)\//i.test(f) || /[./](model|entity|schema|dto)\.[a-z]+$/.test(f)) return 'model';
+  if (/\/(utils?|helpers?|lib|shared|common)\//i.test(f) || /[./](util|utils|helper|helpers)\.[a-z]+$/.test(f)) return 'util';
+  return 'other';
+};
+
+const extractHttpMethod = (name: string, sig: string): string | undefined => {
+  if (/@(Get|GetMapping)\b/.test(sig))    return 'GET';
+  if (/@(Post|PostMapping)\b/.test(sig))  return 'POST';
+  if (/@(Put|PutMapping)\b/.test(sig))    return 'PUT';
+  if (/@(Patch|PatchMapping)\b/.test(sig)) return 'PATCH';
+  if (/@(Delete|DeleteMapping)\b/.test(sig)) return 'DELETE';
+  if (/(?:app|router)\.get\s*\(/.test(sig))    return 'GET';
+  if (/(?:app|router)\.post\s*\(/.test(sig))   return 'POST';
+  if (/(?:app|router)\.put\s*\(/.test(sig))    return 'PUT';
+  if (/(?:app|router)\.patch\s*\(/.test(sig))  return 'PATCH';
+  if (/(?:app|router)\.delete\s*\(/.test(sig)) return 'DELETE';
+  return undefined;
+};
+
 /**
  * Build a lightweight code graph for visualization — file nodes, top-level
  * symbol nodes, and their import / containment edges.
@@ -909,33 +949,24 @@ export const getCapabilityCodeGraph = async (
   capabilityId: string,
   options: { maxFiles?: number; maxSymbols?: number } = {},
 ): Promise<CapabilityCodeGraph> => {
-  const maxFiles = Math.min(Math.max(options.maxFiles || 120, 10), 200);
-  const maxSymbols = Math.min(Math.max(options.maxSymbols || 280, 10), 500);
+  const maxFiles  = Math.min(Math.max(options.maxFiles  ?? 120, 10), 200);
+  const maxSymbols = Math.min(Math.max(options.maxSymbols ?? 280, 10), 500);
 
   const repositories = await getCapabilityRepositoriesRecord(capabilityId);
-  const labelByRepoId = new Map(
-    repositories.map(r => [r.id, r.label || r.url || r.id] as const),
-  );
+  const labelByRepoId = new Map(repositories.map(r => [r.id, r.label || r.url || r.id] as const));
 
   // 1. Top files by symbol count
-  const fileRows = await query(
-    `
-      SELECT file_path, repository_id, COUNT(*) AS symbol_count,
-             MAX(language) AS language
-      FROM capability_code_symbols
-      WHERE capability_id = $1
-      GROUP BY file_path, repository_id
-      ORDER BY symbol_count DESC
-      LIMIT $2
-    `,
-    [capabilityId, maxFiles],
-  );
+  const fileRows = await query(`
+    SELECT file_path, repository_id, COUNT(*) AS symbol_count, MAX(language) AS language
+    FROM capability_code_symbols
+    WHERE capability_id = $1
+    GROUP BY file_path, repository_id
+    ORDER BY symbol_count DESC
+    LIMIT $2
+  `, [capabilityId, maxFiles]);
 
   const fileList = (fileRows.rows as Array<{
-    file_path: string;
-    repository_id: string;
-    symbol_count: string;
-    language: string | null;
+    file_path: string; repository_id: string; symbol_count: string; language: string | null;
   }>).map(r => ({
     filePath: r.file_path,
     repositoryId: r.repository_id,
@@ -943,30 +974,36 @@ export const getCapabilityCodeGraph = async (
     language: String(r.language || '').trim() || detectSourceLanguage(r.file_path),
   }));
 
-  const filePaths = fileList.map(f => f.filePath);
+  const filePaths  = fileList.map(f => f.filePath);
+  const filePathSet = new Set(filePaths);
 
-  // 2. Top-level exported symbols for those files (skip methods/properties of
-  //    private members — too noisy for graph overview).
-  const symRows = await query(
-    `
-      SELECT repository_id, file_path, symbol_id, container_symbol_id,
-             symbol_name, qualified_symbol_name, kind, language,
-             parent_symbol, start_line, signature, is_exported
-      FROM capability_code_symbols
-      WHERE capability_id = $1
-        AND file_path = ANY($2::text[])
-        AND (
-          is_exported = TRUE
-          OR kind IN ('class', 'interface', 'type', 'enum', 'function')
-          OR container_symbol_id IS NULL
-        )
-      ORDER BY
-        CASE WHEN is_exported THEN 0 ELSE 1 END,
-        start_line ASC
-      LIMIT $3
-    `,
-    [capabilityId, filePaths, maxSymbols],
-  );
+  // Build basename → [filePaths] for O(1) resolution
+  const basenameToFiles = new Map<string, string[]>();
+  for (const fp of filePaths) {
+    const base = (fp.split('/').pop() ?? '').replace(/\.[^.]+$/, '').toLowerCase();
+    if (base.length >= 2) {
+      const arr = basenameToFiles.get(base) ?? [];
+      arr.push(fp);
+      basenameToFiles.set(base, arr);
+    }
+  }
+
+  // 2. Top-level symbols
+  const symRows = await query(`
+    SELECT repository_id, file_path, symbol_id, container_symbol_id,
+           symbol_name, qualified_symbol_name, kind, language,
+           parent_symbol, start_line, signature, is_exported
+    FROM capability_code_symbols
+    WHERE capability_id = $1
+      AND file_path = ANY($2::text[])
+      AND (
+        is_exported = TRUE
+        OR kind IN ('class', 'interface', 'type', 'enum', 'function')
+        OR container_symbol_id IS NULL
+      )
+    ORDER BY CASE WHEN is_exported THEN 0 ELSE 1 END, start_line ASC
+    LIMIT $3
+  `, [capabilityId, filePaths, maxSymbols]);
 
   interface SymRow {
     repository_id: string; file_path: string; symbol_id: string | null;
@@ -979,14 +1016,14 @@ export const getCapabilityCodeGraph = async (
   const symbolIds: string[] = [];
   const symbolNodes: CodeGraphSymbolNode[] = [];
 
-  for (const r of (symRows.rows as SymRow[]) || []) {
+  for (const r of (symRows.rows as SymRow[]) ?? []) {
     const qualified = String(r.qualified_symbol_name || r.symbol_name || '').trim();
-    const sig = String(r.signature || '').trim();
+    const sig  = String(r.signature || '').trim();
     const name = String(r.symbol_name || '').trim();
-    const sid = String(r.symbol_id || '').trim() || `${r.file_path}#${name}`;
+    const sid  = String(r.symbol_id || '').trim() || `${r.file_path}#${name}`;
     symbolIds.push(sid);
     const rawKind = r.kind as CapabilityCodeSymbolKind;
-    const isEp = isEndpointSymbol(name, sig) || isEndpointFile(r.file_path);
+    const isEp    = isEndpointSymbol(name, sig) || isEndpointFile(r.file_path);
     symbolNodes.push({
       id: sid,
       kind: isEp ? 'endpoint' : rawKind,
@@ -1000,67 +1037,66 @@ export const getCapabilityCodeGraph = async (
       language: String(r.language || '').trim() || detectSourceLanguage(r.file_path),
       containerSymbolId: r.container_symbol_id || undefined,
       isEndpoint: isEp,
+      httpMethod: isEp ? extractHttpMethod(name, sig) : undefined,
     });
   }
 
-  // 3. File import edges — resolve specifiers to actual indexed file paths.
-  const refRows = await query(
-    `
-      SELECT from_file, to_module
-      FROM capability_code_references
-      WHERE capability_id = $1
-        AND from_file = ANY($2::text[])
-      ORDER BY from_file
-      LIMIT 1000
-    `,
-    [capabilityId, filePaths],
-  );
+  // 3. Robust file import edges
+  // Do NOT filter by from_file in SQL — paths may differ between tables.
+  // Resolve both from_file and to_module via basename matching in JS.
+  const refRows = await query(`
+    SELECT DISTINCT from_file, to_module
+    FROM capability_code_references
+    WHERE capability_id = $1
+    LIMIT 5000
+  `, [capabilityId]);
 
-  const fileEdges: CodeGraphEdge[] = [];
+  const fileEdges: CodeGraphEdge[]   = [];
   const seenFileEdges = new Set<string>();
-  const filePathSet = new Set(filePaths);
 
-  for (const ref of (refRows.rows as Array<{ from_file: string; to_module: string }>) || []) {
-    const spec = String(ref.to_module || '').trim();
-    if (!spec) continue;
-    const seg = spec.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || '';
-    if (!seg || seg.length < 2) continue;
-    const segLower = seg.toLowerCase();
-    const match = filePaths.find(
-      fp =>
-        fp.toLowerCase().endsWith(`/${segLower}.ts`) ||
-        fp.toLowerCase().endsWith(`/${segLower}.tsx`) ||
-        fp.toLowerCase().endsWith(`/${segLower}.js`) ||
-        fp.toLowerCase().endsWith(`/${segLower}.jsx`) ||
-        fp.toLowerCase().endsWith(`/${segLower}.java`) ||
-        fp.toLowerCase().endsWith(`/${segLower}.py`) ||
-        fp.toLowerCase().endsWith(`/${segLower}/index.ts`) ||
-        fp.toLowerCase().endsWith(`/${segLower}/index.tsx`),
-    );
-    if (!match || match === ref.from_file || !filePathSet.has(ref.from_file)) continue;
-    const edgeId = `${ref.from_file}→${match}`;
+  for (const ref of (refRows.rows as Array<{ from_file: string; to_module: string }>) ?? []) {
+    const rawFrom = String(ref.from_file ?? '').trim();
+    const spec    = String(ref.to_module  ?? '').trim();
+    if (!rawFrom || !spec) continue;
+
+    // Resolve from_file → nodeId (exact first, then basename fallback)
+    let fromId = rawFrom;
+    if (!filePathSet.has(fromId)) {
+      const fromBase = (rawFrom.split('/').pop() ?? '').replace(/\.[^.]+$/, '').toLowerCase();
+      const cands = basenameToFiles.get(fromBase) ?? [];
+      if (cands.length === 0) continue;
+      fromId = pickBestPathMatch(rawFrom, cands);
+      if (!filePathSet.has(fromId)) continue;
+    }
+
+    // Resolve to_module → nodeId
+    const toSeg = (spec.split(/[/\\]/).pop() ?? '').replace(/\.[^.]+$/, '').toLowerCase();
+    if (toSeg.length < 2) continue;
+    const toMatches = basenameToFiles.get(toSeg) ?? [];
+    if (toMatches.length === 0) continue;
+    const toId = toMatches.length === 1 ? toMatches[0] : pickBestPathMatch(spec, toMatches);
+    if (toId === fromId) continue;
+
+    const edgeId = `${fromId}→${toId}`;
     if (seenFileEdges.has(edgeId)) continue;
     seenFileEdges.add(edgeId);
-    fileEdges.push({ id: edgeId, from: ref.from_file, to: match, kind: 'imports' });
+    fileEdges.push({ id: edgeId, from: fromId, to: toId, kind: 'imports' });
   }
 
-  // 4. Symbol containment edges (parent ↔ child) for the symbols we selected.
+  // 4. Symbol containment edges
   const symbolEdges: CodeGraphEdge[] = [];
   if (symbolIds.length > 0) {
-    const edgeRows = await query(
-      `
-        SELECT from_symbol_id, to_symbol_id, edge_kind
-        FROM capability_code_symbol_edges
-        WHERE capability_id = $1
-          AND from_symbol_id = ANY($2::text[])
-          AND to_symbol_id = ANY($2::text[])
-        LIMIT 500
-      `,
-      [capabilityId, symbolIds],
-    );
+    const edgeRows = await query(`
+      SELECT from_symbol_id, to_symbol_id, edge_kind
+      FROM capability_code_symbol_edges
+      WHERE capability_id = $1
+        AND from_symbol_id = ANY($2::text[])
+        AND to_symbol_id   = ANY($2::text[])
+      LIMIT 500
+    `, [capabilityId, symbolIds]);
     for (const r of (edgeRows.rows as Array<{
       from_symbol_id: string; to_symbol_id: string; edge_kind: string;
-    }>) || []) {
+    }>) ?? []) {
       symbolEdges.push({
         id: `${r.from_symbol_id}→${r.to_symbol_id}`,
         from: r.from_symbol_id,
@@ -1070,6 +1106,7 @@ export const getCapabilityCodeGraph = async (
     }
   }
 
+  // 5. Build file nodes with layer
   const fileNodes: CodeGraphFileNode[] = fileList.map(f => ({
     id: f.filePath,
     kind: 'file' as const,
@@ -1080,14 +1117,8 @@ export const getCapabilityCodeGraph = async (
     language: f.language,
     symbolCount: f.symbolCount,
     isEndpoint: isEndpointFile(f.filePath),
+    layer: detectArchLayer(f.filePath),
   }));
 
-  return {
-    capabilityId,
-    generatedAt: new Date().toISOString(),
-    fileNodes,
-    symbolNodes,
-    fileEdges,
-    symbolEdges,
-  };
+  return { capabilityId, generatedAt: new Date().toISOString(), fileNodes, symbolNodes, fileEdges, symbolEdges };
 };

@@ -298,6 +298,8 @@ export interface LocalAstSnapshot {
 
 // ─── Code Graph ──────────────────────────────────────────────────────────────
 
+export type ArchLayer = 'route' | 'controller' | 'service' | 'repository' | 'model' | 'util' | 'other';
+
 export type CodeGraphNodeKind =
   | 'file'
   | CapabilityCodeSymbolKind
@@ -313,6 +315,7 @@ export interface CodeGraphFileNode {
   language: string;
   symbolCount: number;
   isEndpoint: boolean;
+  layer?: ArchLayer;
 }
 
 export interface CodeGraphSymbolNode {
@@ -328,6 +331,7 @@ export interface CodeGraphSymbolNode {
   language: string;
   containerSymbolId?: string;
   isEndpoint: boolean;
+  httpMethod?: string;
 }
 
 export type CodeGraphNode = CodeGraphFileNode | CodeGraphSymbolNode;

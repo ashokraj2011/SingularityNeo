@@ -1,9 +1,10 @@
 /**
  * CodeGraph — interactive force-directed graph of the capability's code structure.
  *
- * Two graph modes:
- *   File Graph   – files as nodes, import relationships as edges
- *   Symbol Graph – classes / functions / interfaces as nodes, containment edges
+ * Three graph modes:
+ *   File Graph   – files as nodes, import relationships as edges (force sim)
+ *   Symbol Graph – classes / functions / interfaces as nodes, containment edges (force sim)
+ *   Flow         – hierarchical/topological layout showing architectural data flow
  *
  * Route: /code-graph
  */
@@ -14,29 +15,22 @@ import React, {
   useState,
 } from 'react';
 import {
-  Box,
-  Circle,
   Code2,
   FileCode,
-  FunctionSquare,
-  Hexagon,
-  Layers,
+  GitBranch,
   Loader2,
   Maximize2,
   Minimize2,
   RefreshCw,
   Search,
-  Server,
-  Zap,
-  ZoomIn,
-  ZoomOut,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { EmptyState, PageHeader, StatTile, StatusBadge } from '../components/EnterpriseUI';
+import { EmptyState, PageHeader, StatTile } from '../components/EnterpriseUI';
 import { fetchCodeGraph } from '../lib/api';
 import { useCapability } from '../context/CapabilityContext';
 import { useToast } from '../context/ToastContext';
 import type {
+  ArchLayer,
   CapabilityCodeGraph,
   CodeGraphEdge,
   CodeGraphFileNode,
@@ -65,6 +59,8 @@ type SimNode = {
   language?: string;
   qualifiedName?: string;
   radius: number;
+  layer?: ArchLayer;
+  httpMethod?: string;
 };
 
 type SimEdge = CodeGraphEdge & { srcNode?: SimNode; tgtNode?: SimNode };
@@ -85,8 +81,16 @@ const NODE_COLORS: Record<string, { stroke: string; fill: string; text: string }
 };
 
 const EDGE_COLORS: Record<string, string> = {
-  imports:  '#475569',
-  contains: '#1e40af',
+  imports:  '#38bdf8',
+  contains: '#818cf8',
+};
+
+const HTTP_METHOD_COLORS: Record<string, string> = {
+  GET:    '#4ade80',
+  POST:   '#60a5fa',
+  PUT:    '#fbbf24',
+  PATCH:  '#34d399',
+  DELETE: '#f87171',
 };
 
 const nodeRadius = (kind: CodeGraphNodeKind): number => {
@@ -105,6 +109,67 @@ const nodeRadius = (kind: CodeGraphNodeKind): number => {
 
 const nodeCollisionRadius = (kind: CodeGraphNodeKind): number =>
   kind === 'file' ? 58 : nodeRadius(kind) + 14;
+
+// ─── Flow layout constants ────────────────────────────────────────────────────
+
+const FLOW_Y_SPACING = 220;
+const FLOW_X_SPACING = 180;
+
+function computeFlowPositions(nodes: SimNode[], edges: SimEdge[]): void {
+  if (nodes.length === 0) return;
+
+  // Build dependency graph (A imports B → A depends on B)
+  const outEdges = new Map<string, string[]>();
+  const inDegree  = new Map<string, number>();
+  for (const n of nodes) { outEdges.set(n.id, []); inDegree.set(n.id, 0); }
+  for (const e of edges) {
+    outEdges.get(e.from)?.push(e.to);
+    inDegree.set(e.to, (inDegree.get(e.to) ?? 0) + 1);
+  }
+
+  // BFS topological sort (Kahn's algorithm)
+  const levels = new Map<string, number>();
+  const queue  = nodes.filter(n => (inDegree.get(n.id) ?? 0) === 0).map(n => n.id);
+  for (const id of queue) levels.set(id, 0);
+
+  let qi = 0;
+  while (qi < queue.length) {
+    const id  = queue[qi++];
+    const lv  = levels.get(id) ?? 0;
+    for (const dep of (outEdges.get(id) ?? [])) {
+      const next = lv + 1;
+      if ((levels.get(dep) ?? -1) < next) {
+        levels.set(dep, next);
+        queue.push(dep);
+      }
+    }
+  }
+  // Assign orphans a level based on inDegree
+  for (const n of nodes) {
+    if (!levels.has(n.id)) levels.set(n.id, Math.min(5, inDegree.get(n.id) ?? 0));
+  }
+
+  // Group by level
+  const byLevel = new Map<number, SimNode[]>();
+  for (const n of nodes) {
+    const l = levels.get(n.id) ?? 0;
+    const arr = byLevel.get(l) ?? []; arr.push(n); byLevel.set(l, arr);
+  }
+
+  // Position
+  const levelKeys = Array.from(byLevel.keys());
+  const maxLevel = levelKeys.length > 0 ? Math.max(...levelKeys) : 0;
+  const midY = (maxLevel * FLOW_Y_SPACING) / 2;
+  for (const [level, levelNodes] of byLevel.entries()) {
+    const y = level * FLOW_Y_SPACING - midY;
+    const totalW = (levelNodes.length - 1) * FLOW_X_SPACING;
+    levelNodes.forEach((n, i) => {
+      n.x = i * FLOW_X_SPACING - totalW / 2;
+      n.y = y;
+      n.vx = 0; n.vy = 0;
+    });
+  }
+}
 
 // ─── Node shape renderer ──────────────────────────────────────────────────────
 
@@ -141,8 +206,8 @@ const NodeShape: React.FC<NodeShapeProps> = React.memo(
             x={-52} y={-14}
             width={104} height={28}
             rx={5} ry={5}
-            fill={colors.fill}
-            stroke={strokeColor}
+            fill={node.isEndpoint ? '#431407' : colors.fill}
+            stroke={node.isEndpoint ? '#fb923c' : strokeColor}
             strokeWidth={strokeWidth}
             filter={glowFilter}
           />
@@ -199,7 +264,7 @@ const NodeShape: React.FC<NodeShapeProps> = React.memo(
         {shape}
         {/* Label */}
         <text
-          y={node.kind === 'file' ? labelY : labelY}
+          y={labelY}
           textAnchor="middle"
           fontSize={fontSize}
           fill={colors.text}
@@ -208,8 +273,22 @@ const NodeShape: React.FC<NodeShapeProps> = React.memo(
         >
           {label}
         </text>
+        {/* HTTP method badge for endpoints */}
+        {node.httpMethod && (
+          <text
+            x={node.kind === 'file' ? 54 : r + 2}
+            y={-10}
+            fontSize={7}
+            fontWeight="bold"
+            fill={HTTP_METHOD_COLORS[node.httpMethod] ?? '#fb923c'}
+            fontFamily="ui-monospace, monospace"
+            style={{ pointerEvents: 'none' }}
+          >
+            {node.httpMethod}
+          </text>
+        )}
         {/* Endpoint lightning icon indicator */}
-        {node.isEndpoint && node.kind !== 'endpoint' && (
+        {node.isEndpoint && node.kind !== 'endpoint' && !node.httpMethod && (
           <text
             x={r + 4} y={-r + 4}
             fontSize={9}
@@ -251,7 +330,6 @@ function stepForces(
       const dy = b.y - a.y || 0.01;
       const d2 = dx * dx + dy * dy;
       const d = Math.sqrt(d2) || 0.01;
-      // Also enforce minimum spacing via collision
       const minDist = nodeCollisionRadius(a.kind) + nodeCollisionRadius(b.kind);
       const force = d < minDist
         ? (REPULSION * 2) / (d2 + 1)
@@ -293,7 +371,7 @@ function stepForces(
 
 interface InfoPanelProps {
   node: SimNode | null;
-  graphMode: 'file' | 'symbol';
+  graphMode: GraphMode;
 }
 
 const InfoPanel: React.FC<InfoPanelProps> = ({ node, graphMode }) => {
@@ -313,18 +391,29 @@ const InfoPanel: React.FC<InfoPanelProps> = ({ node, graphMode }) => {
   const shortPath = pathParts.slice(-3).join('/');
   return (
     <div className="flex flex-col gap-3 p-4 text-xs">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <span
           className="inline-flex items-center rounded-full px-2 py-0.5 font-medium text-[10px]"
           style={{ background: colors.fill, color: colors.text, border: `1px solid ${colors.stroke}` }}
         >
           {kindLabel}
         </span>
+        {node.httpMethod && (
+          <span
+            className="rounded px-1.5 py-0.5 font-mono text-[10px] font-bold"
+            style={{ color: HTTP_METHOD_COLORS[node.httpMethod] ?? '#fb923c', background: '#1e293b' }}
+          >
+            {node.httpMethod}
+          </span>
+        )}
         {node.isEndpoint && (
           <span className="text-[10px] text-amber-400">⚡ endpoint</span>
         )}
         {node.isExported && (
           <span className="text-[10px] text-slate-400">exported</span>
+        )}
+        {node.layer && node.layer !== 'other' && (
+          <span className="text-[10px] text-slate-500 capitalize">{node.layer}</span>
         )}
       </div>
 
@@ -376,6 +465,15 @@ const InfoPanel: React.FC<InfoPanelProps> = ({ node, graphMode }) => {
           </span>
         </div>
       )}
+
+      {graphMode === 'flow' && node.layer && (
+        <div className="rounded bg-surface-container-low p-2">
+          <p className="mb-1 text-[9px] uppercase tracking-wider text-on-surface-variant/60">
+            Architectural Layer
+          </p>
+          <p className="text-[10px] capitalize text-on-surface-variant">{node.layer}</p>
+        </div>
+      )}
     </div>
   );
 };
@@ -411,9 +509,19 @@ const LegendBar: React.FC<{ entries: LegendEntry[] }> = ({ entries }) => (
   </div>
 );
 
+// ─── Flow layer bands ─────────────────────────────────────────────────────────
+
+const FLOW_LAYER_LABELS: Array<{ label: string; y: number; color: string }> = [
+  { label: 'Entry Points', y: 0, color: '#fb923c33' },
+  { label: 'Controllers',  y: 1, color: '#3b82f633' },
+  { label: 'Services',     y: 2, color: '#a78bfa33' },
+  { label: 'Data Layer',   y: 3, color: '#22d3ee33' },
+  { label: 'Foundational', y: 4, color: '#4ade8033' },
+];
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
-type GraphMode = 'file' | 'symbol';
+type GraphMode = 'file' | 'symbol' | 'flow';
 
 export default function CodeGraph() {
   const { activeCapability } = useCapability();
@@ -485,7 +593,7 @@ export default function CodeGraph() {
 
     const rawNodes: SimNode[] = [];
 
-    if (graphMode === 'file') {
+    if (graphMode === 'file' || graphMode === 'flow') {
       for (const fn of graphData.fileNodes) {
         if (hiddenKinds.has('file')) continue;
         const existing = nodeMapRef.current.get(fn.id);
@@ -505,6 +613,7 @@ export default function CodeGraph() {
           language: fn.language,
           qualifiedName: fn.filePath,
           radius: nodeCollisionRadius('file'),
+          layer: fn.layer,
         });
       }
     } else {
@@ -527,24 +636,24 @@ export default function CodeGraph() {
           language: sn.language,
           qualifiedName: sn.qualifiedName,
           radius: nodeCollisionRadius(sn.kind),
+          httpMethod: sn.httpMethod,
         });
       }
     }
 
     const newNodeMap = new Map(rawNodes.map(n => [n.id, n]));
-    const rawEdges: SimEdge[] =
-      (graphMode === 'file' ? graphData.fileEdges : graphData.symbolEdges)
-        .filter(e => newNodeMap.has(e.from) && newNodeMap.has(e.to))
-        .map(e => ({
-          ...e,
-          srcNode: newNodeMap.get(e.from),
-          tgtNode: newNodeMap.get(e.to),
-        }));
+    const edgeSource = graphMode === 'symbol' ? graphData.symbolEdges : graphData.fileEdges;
+    const rawEdges: SimEdge[] = edgeSource
+      .filter(e => newNodeMap.has(e.from) && newNodeMap.has(e.to))
+      .map(e => ({
+        ...e,
+        srcNode: newNodeMap.get(e.from),
+        tgtNode: newNodeMap.get(e.to),
+      }));
 
     nodesRef.current = rawNodes;
     nodeMapRef.current = newNodeMap;
     edgesRef.current = rawEdges;
-    alphaRef.current = 1.0;
 
     // Reset pan/zoom to center
     setPanX(0);
@@ -552,11 +661,22 @@ export default function CodeGraph() {
     setZoom(0.9);
     setSelectedId(null);
 
+    if (graphMode === 'flow') {
+      // Compute fixed topological layout — no simulation needed
+      computeFlowPositions(rawNodes, rawEdges);
+      // Mark all nodes fixed so they don't move
+      for (const n of rawNodes) n.fixed = true;
+      alphaRef.current = 0;
+      setRenderTick(t => t + 1);
+      return;
+    }
+
+    alphaRef.current = 1.0;
+
     // Start simulation loop
     const animate = () => {
       const alpha = alphaRef.current;
       if (alpha > ALPHA_MIN) {
-        // 2 steps per frame for faster convergence
         stepForces(nodesRef.current, edgesRef.current, alpha, nodeMapRef.current);
         stepForces(nodesRef.current, edgesRef.current, alpha * ALPHA_DECAY, nodeMapRef.current);
         alphaRef.current = alpha * ALPHA_DECAY * ALPHA_DECAY;
@@ -575,17 +695,6 @@ export default function CodeGraph() {
   // ── SVG coordinate helpers ───────────────────────────────────────────────────
 
   const getSvgRect = () => svgRef.current?.getBoundingClientRect();
-
-  const clientToGraph = (clientX: number, clientY: number) => {
-    const rect = getSvgRect();
-    if (!rect) return { x: 0, y: 0 };
-    const svgX = clientX - rect.left;
-    const svgY = clientY - rect.top;
-    return {
-      x: (svgX - panX) / zoom,
-      y: (svgY - panY) / zoom,
-    };
-  };
 
   // ── Mouse interactions ────────────────────────────────────────────────────────
 
@@ -622,7 +731,6 @@ export default function CodeGraph() {
       nodeStartX: node.x,
       nodeStartY: node.y,
     };
-    // Freeze node during drag
     node.fixed = true;
     cancelAnimationFrame(rafRef.current);
   };
@@ -650,28 +758,26 @@ export default function CodeGraph() {
   const handleMouseUp = (e: React.MouseEvent) => {
     if (dragNodeId) {
       const node = nodeMapRef.current.get(dragNodeId);
-      if (node) node.fixed = false; // release pin after drop
+      if (node && graphMode !== 'flow') node.fixed = false;
       setDragNodeId(null);
-      // Resume simulation
-      alphaRef.current = Math.max(alphaRef.current, 0.3);
-      const animate = () => {
-        if (alphaRef.current > ALPHA_MIN) {
-          stepForces(nodesRef.current, edgesRef.current, alphaRef.current, nodeMapRef.current);
-          alphaRef.current *= ALPHA_DECAY;
-          setRenderTick(t => t + 1);
-          rafRef.current = requestAnimationFrame(animate);
-        }
-      };
-      rafRef.current = requestAnimationFrame(animate);
+      if (graphMode !== 'flow') {
+        alphaRef.current = Math.max(alphaRef.current, 0.3);
+        const animate = () => {
+          if (alphaRef.current > ALPHA_MIN) {
+            stepForces(nodesRef.current, edgesRef.current, alphaRef.current, nodeMapRef.current);
+            alphaRef.current *= ALPHA_DECAY;
+            setRenderTick(t => t + 1);
+            rafRef.current = requestAnimationFrame(animate);
+          }
+        };
+        rafRef.current = requestAnimationFrame(animate);
+      }
     }
     setIsDraggingBg(false);
     dragStart.current = null;
   };
 
   const handleNodeClick = (nodeId: string) => {
-    if (dragStart.current && (
-      Math.abs(dragStart.current.x - (dragStart.current.x)) < 4
-    )) return;
     setSelectedId(prev => (prev === nodeId ? null : nodeId));
     setInfoPanelOpen(true);
   };
@@ -682,7 +788,7 @@ export default function CodeGraph() {
   const edges = edgesRef.current;
   const selectedNode = selectedId ? (nodeMapRef.current.get(selectedId) ?? null) : null;
 
-  const allKinds: CodeGraphNodeKind[] = graphMode === 'file'
+  const allKinds: CodeGraphNodeKind[] = (graphMode === 'file' || graphMode === 'flow')
     ? ['file', 'endpoint']
     : ['class', 'interface', 'function', 'method', 'enum', 'type', 'endpoint', 'variable', 'property'];
 
@@ -708,7 +814,8 @@ export default function CodeGraph() {
       ]
     : [];
 
-  const simActive = alphaRef.current > ALPHA_MIN;
+  const simActive = alphaRef.current > ALPHA_MIN && graphMode !== 'flow';
+  const hasNoFileEdges = graphData !== null && graphData.fileEdges.length === 0 && graphMode === 'file';
 
   // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -726,7 +833,7 @@ export default function CodeGraph() {
       <PageHeader
         eyebrow="Code Intelligence"
         title="Code Graph"
-        description="Interactive force-directed map of your codebase — files, symbols, imports and containment."
+        description="Interactive map of your codebase — files, symbols, imports, and data flow."
         actions={
           <div className="flex items-center gap-2">
             {/* Mode toggle */}
@@ -752,6 +859,17 @@ export default function CodeGraph() {
                 )}
               >
                 <span className="flex items-center gap-1"><Code2 size={12} /> Symbols</span>
+              </button>
+              <button
+                onClick={() => setGraphMode('flow')}
+                className={cn(
+                  'px-3 py-1.5 transition-colors',
+                  graphMode === 'flow'
+                    ? 'bg-primary text-on-primary'
+                    : 'text-on-surface-variant hover:bg-surface-container',
+                )}
+              >
+                <span className="flex items-center gap-1"><GitBranch size={12} /> Flow</span>
               </button>
             </div>
 
@@ -783,6 +901,13 @@ export default function CodeGraph() {
           {stats.map(s => (
             <StatTile key={s.label} label={s.label} value={String(s.value)} />
           ))}
+        </div>
+      )}
+
+      {/* No-edges diagnostic banner */}
+      {hasNoFileEdges && (
+        <div className="mx-6 mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-400">
+          No import data in index — run a code index refresh or switch to Symbol / Flow view.
         </div>
       )}
 
@@ -853,7 +978,7 @@ export default function CodeGraph() {
                   refX="5" refY="3"
                   orient="auto" markerUnits="strokeWidth"
                 >
-                  <path d="M 0 1 L 5 3 L 0 5 Z" fill="#475569" opacity="0.8" />
+                  <path d="M 0 1 L 5 3 L 0 5 Z" fill="#38bdf8" opacity="0.9" />
                 </marker>
                 <marker
                   id="arrow-contains"
@@ -861,7 +986,7 @@ export default function CodeGraph() {
                   refX="5" refY="3"
                   orient="auto" markerUnits="strokeWidth"
                 >
-                  <path d="M 0 1 L 5 3 L 0 5 Z" fill="#1e40af" opacity="0.8" />
+                  <path d="M 0 1 L 5 3 L 0 5 Z" fill="#818cf8" opacity="0.9" />
                 </marker>
               </defs>
 
@@ -872,12 +997,61 @@ export default function CodeGraph() {
               <g
                 transform={`translate(${panX + (svgRef.current?.clientWidth ?? 800) / 2},${panY + (svgRef.current?.clientHeight ?? 600) / 2}) scale(${zoom})`}
               >
+                {/* Flow mode: layer band backgrounds */}
+                {graphMode === 'flow' && (() => {
+                  const canvasW = (svgRef.current?.clientWidth ?? 800) / zoom + 400;
+                  return FLOW_LAYER_LABELS.map(layer => {
+                    const yCenter = layer.y * FLOW_Y_SPACING - (4 * FLOW_Y_SPACING) / 2;
+                    return (
+                      <g key={layer.label}>
+                        <rect
+                          x={-canvasW / 2}
+                          y={yCenter - FLOW_Y_SPACING / 2}
+                          width={canvasW}
+                          height={FLOW_Y_SPACING}
+                          fill={layer.color}
+                          rx={4}
+                        />
+                        <text
+                          x={-canvasW / 2 + 12}
+                          y={yCenter - FLOW_Y_SPACING / 2 + 16}
+                          fontSize={10}
+                          fill="#94a3b8"
+                          fontFamily="ui-monospace, monospace"
+                          style={{ pointerEvents: 'none', userSelect: 'none' }}
+                        >
+                          {layer.label}
+                        </text>
+                      </g>
+                    );
+                  });
+                })()}
+
                 {/* Edges */}
                 {edges.map(edge => {
                   const src = nodeMapRef.current.get(edge.from);
                   const tgt = nodeMapRef.current.get(edge.to);
                   if (!src || !tgt) return null;
                   const color = EDGE_COLORS[edge.kind] ?? '#475569';
+
+                  if (graphMode === 'flow') {
+                    const sx = src.x, sy = src.y;
+                    const tx = tgt.x, ty = tgt.y;
+                    const mx = (sx + tx) / 2;
+                    const my = (sy + ty) / 2 + 40;
+                    return (
+                      <path
+                        key={edge.id}
+                        d={`M ${sx.toFixed(2)} ${sy.toFixed(2)} Q ${mx.toFixed(2)} ${my.toFixed(2)} ${tx.toFixed(2)} ${ty.toFixed(2)}`}
+                        fill="none"
+                        stroke={color}
+                        strokeWidth={Math.max(1.5, 2 / zoom)}
+                        strokeOpacity={0.8}
+                        markerEnd={`url(#arrow-${edge.kind})`}
+                      />
+                    );
+                  }
+
                   const isDashed = edge.kind === 'imports';
                   return (
                     <line
@@ -887,8 +1061,8 @@ export default function CodeGraph() {
                       x2={tgt.x.toFixed(2)}
                       y2={tgt.y.toFixed(2)}
                       stroke={color}
-                      strokeWidth={1 / zoom}
-                      strokeOpacity={0.6}
+                      strokeWidth={Math.max(1.5, 2 / zoom)}
+                      strokeOpacity={0.8}
                       strokeDasharray={isDashed ? `${4 / zoom},${3 / zoom}` : undefined}
                       markerEnd={`url(#arrow-${edge.kind})`}
                     />
@@ -908,7 +1082,7 @@ export default function CodeGraph() {
                 ))}
               </g>
 
-              {/* Zoom/simulation controls (top-right of canvas) */}
+              {/* Zoom controls (top-right of canvas) */}
               <g transform={`translate(${(svgRef.current?.clientWidth ?? 800) - 44}, 12)`}>
                 {[
                   {
@@ -946,52 +1120,29 @@ export default function CodeGraph() {
                     title: 'Reset view',
                     onClick: () => { setZoom(0.9); setPanX(0); setPanY(0); },
                   },
-                ].map(btn => (
-                  <rect
-                    key={btn.label}
-                    width={32} height={32}
-                    rx={6}
-                    fill="#1e293b"
-                    stroke="#334155"
-                    strokeWidth={1}
-                    style={{ cursor: 'pointer' }}
-                    onClick={e => { e.stopPropagation(); btn.onClick(); }}
-                    y={[0, 38, 76][['+', '−', '⌂'].indexOf(btn.label)]}
-                  />
-                ))}
-                {['+', '−', '⌂'].map((lbl, i) => (
-                  <text
-                    key={lbl}
-                    x={16} y={i * 38 + 21}
-                    textAnchor="middle"
-                    fontSize={14}
-                    fill="#94a3b8"
-                    style={{ cursor: 'pointer', userSelect: 'none' }}
-                    onClick={e => {
-                      e.stopPropagation();
-                      [
-                        () => {
-                          const w = svgRef.current?.clientWidth ?? 800;
-                          const h = svgRef.current?.clientHeight ?? 600;
-                          const nz = Math.min(8, zoom * 1.3);
-                          setPanX(w / 2 - ((w / 2 - panX) / zoom) * nz);
-                          setPanY(h / 2 - ((h / 2 - panY) / zoom) * nz);
-                          setZoom(nz);
-                        },
-                        () => {
-                          const w = svgRef.current?.clientWidth ?? 800;
-                          const h = svgRef.current?.clientHeight ?? 600;
-                          const nz = Math.max(0.08, zoom * 0.77);
-                          setPanX(w / 2 - ((w / 2 - panX) / zoom) * nz);
-                          setPanY(h / 2 - ((h / 2 - panY) / zoom) * nz);
-                          setZoom(nz);
-                        },
-                        () => { setZoom(0.9); setPanX(0); setPanY(0); },
-                      ][i]();
-                    }}
-                  >
-                    {lbl}
-                  </text>
+                ].map((btn, i) => (
+                  <g key={btn.label}>
+                    <rect
+                      width={32} height={32}
+                      rx={6}
+                      fill="#1e293b"
+                      stroke="#334155"
+                      strokeWidth={1}
+                      y={i * 38}
+                      style={{ cursor: 'pointer' }}
+                      onClick={e => { e.stopPropagation(); btn.onClick(); }}
+                    />
+                    <text
+                      x={16} y={i * 38 + 21}
+                      textAnchor="middle"
+                      fontSize={14}
+                      fill="#94a3b8"
+                      style={{ cursor: 'pointer', userSelect: 'none' }}
+                      onClick={e => { e.stopPropagation(); btn.onClick(); }}
+                    >
+                      {btn.label}
+                    </text>
+                  </g>
                 ))}
               </g>
 
@@ -1011,9 +1162,10 @@ export default function CodeGraph() {
               {/* Node count badge */}
               {!simActive && (
                 <g transform="translate(12,12)">
-                  <rect width={110} height={22} rx={4} fill="#1e293b" stroke="#334155" strokeWidth={1} />
+                  <rect width={130} height={22} rx={4} fill="#1e293b" stroke="#334155" strokeWidth={1} />
                   <text x={8} y={15} fontSize={10} fill="#94a3b8" fontFamily="ui-monospace, monospace">
                     {nodes.length} nodes · {edges.length} edges
+                    {graphMode === 'flow' ? ' · flow' : ''}
                   </text>
                 </g>
               )}
@@ -1057,15 +1209,20 @@ export default function CodeGraph() {
       {graphData && (
         <div className="flex items-center gap-4 border-t border-outline-variant/20 bg-surface-container/30 px-4 py-1.5 text-[10px] text-on-surface-variant/60">
           <span className="flex items-center gap-1.5">
-            <span className="inline-block h-px w-6 border-t-2 border-dashed border-[#475569]" />
+            <span className="inline-block h-px w-6 border-t-2 border-dashed" style={{ borderColor: EDGE_COLORS.imports }} />
             imports
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="inline-block h-px w-6 border-t-2 border-[#1e40af]" />
+            <span className="inline-block h-px w-6 border-t-2" style={{ borderColor: EDGE_COLORS.contains }} />
             contains
           </span>
+          {graphMode === 'flow' && (
+            <span className="text-[10px] text-slate-500">
+              Top = entry points · Bottom = foundational layers
+            </span>
+          )}
           <span className="ml-auto">
-            Scroll to zoom · Drag nodes to reposition · Click for details
+            Scroll to zoom · Drag to pan · Click for details
           </span>
         </div>
       )}
