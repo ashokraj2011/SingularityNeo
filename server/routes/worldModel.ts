@@ -1,5 +1,9 @@
 import { Request, Response, Router } from 'express';
-import { readBlastRadiusSymbolGraph, searchCodeSymbols } from '../codeIndex/query';
+import {
+  readBlastRadiusSymbolGraph,
+  searchCodeSymbols,
+  getSymbolAstContext,
+} from '../codeIndex/query';
 import type { BlastRadiusSymbolGraphNode } from '../../src/types';
 
 /**
@@ -18,6 +22,8 @@ const determineNodeType = (node: BlastRadiusSymbolGraphNode): string => {
   return 'CapabilityNode';
 };
 
+// ─── GET /world-model/graph ───────────────────────────────────────────────────
+
 const getWorldModelGraph = async (req: Request, res: Response) => {
   try {
     const { capabilityId } = req.params;
@@ -28,8 +34,6 @@ const getWorldModelGraph = async (req: Request, res: Response) => {
     }
 
     // ── Step 1: Resolve symbol name → symbolId ───────────────────────────────
-    // The DB stores hashed/UUIDs as symbol_id; the user types a name.
-    // Search by name first, then use the found symbolId for the graph walk.
     const symbolMatches = await searchCodeSymbols(capabilityId, focusSymbol.trim(), {
       limit: 5,
     });
@@ -38,7 +42,6 @@ const getWorldModelGraph = async (req: Request, res: Response) => {
     let filePath:  string | undefined;
 
     if (symbolMatches.length > 0) {
-      // Prefer exact name match; fall back to first result
       const exact = symbolMatches.find(
         s =>
           s.symbolName.toLowerCase() === focusSymbol.trim().toLowerCase() ||
@@ -74,20 +77,30 @@ const getWorldModelGraph = async (req: Request, res: Response) => {
       });
     }
 
-    // ── Step 3: Shape response ───────────────────────────────────────────────
+    // ── Step 3: Shape response — include ALL structural fields in data ─────────
     const nodes = rawGraph.nodes.map(n => ({
       id:    n.symbolId,
       label: n.symbolName,
       type:  determineNodeType(n),
       data: {
-        filePath:        n.filePath,
-        kind:            n.kind,
-        signature:       n.signature,
-        qualifiedName:   n.qualifiedSymbolName,
-        isFocal:         n.relation === 'SEED',
-        depth:           n.depth,
-        relation:        n.relation,
-        repositoryLabel: n.repositoryLabel,
+        // Core identity
+        filePath:          n.filePath,
+        kind:              n.kind,
+        signature:         n.signature,
+        qualifiedName:     n.qualifiedSymbolName,
+        language:          n.language,
+        // Graph position
+        isFocal:           n.relation === 'SEED',
+        depth:             n.depth,
+        relation:          n.relation,
+        repositoryLabel:   n.repositoryLabel,
+        // Structural (containment) — needed for AST panel
+        containerSymbolId: n.containerSymbolId,
+        parentSymbol:      n.parentSymbol,
+        startLine:         n.startLine,
+        endLine:           n.endLine,
+        sliceStartLine:    n.sliceStartLine,
+        sliceEndLine:      n.sliceEndLine,
       },
     }));
 
@@ -100,12 +113,33 @@ const getWorldModelGraph = async (req: Request, res: Response) => {
     }));
 
     return res.json({ nodes, edges, focusedSymbol: symbolMatches[0]?.symbolName });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Internal error building world model';
     console.error('[world-model] graph error:', error);
-    return res.status(500).json({ error: error.message || 'Internal error building world model' });
+    return res.status(500).json({ error: msg });
   }
 };
 
+// ─── GET /world-model/ast-context/:symbolId ───────────────────────────────────
+
+const getAstContext = async (req: Request, res: Response) => {
+  try {
+    const { capabilityId, symbolId } = req.params;
+    if (!symbolId?.trim()) {
+      return res.status(400).json({ error: 'symbolId is required' });
+    }
+    const context = await getSymbolAstContext(capabilityId, symbolId);
+    return res.json(context);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Internal error fetching AST context';
+    console.error('[world-model] ast-context error:', error);
+    return res.status(500).json({ error: msg });
+  }
+};
+
+// ─── Router registration ───────────────────────────────────────────────────────
+
 export const registerWorldModelRoutes = (router: Router) => {
   router.get('/api/capabilities/:capabilityId/world-model/graph', getWorldModelGraph);
+  router.get('/api/capabilities/:capabilityId/world-model/ast-context/:symbolId', getAstContext);
 };

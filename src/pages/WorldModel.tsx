@@ -20,6 +20,7 @@ import WorldModelCanvas, {
   WorldModelEdge,
 } from '../components/world-model/WorldModelCanvas';
 import PropertyPanel from '../components/world-model/PropertyPanel';
+import AstMiniPanel from '../components/world-model/AstMiniPanel';
 import { NODE_TYPE_CONFIG } from '../components/world-model/visConfig';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -150,65 +151,6 @@ function GraphLegend() {
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-// ─── AST mini panel ───────────────────────────────────────────────────────────
-
-function AstMiniPanel({ node }: { node: WorldModelNode | null }) {
-  if (!node) return null;
-  const kind = String(node.data?.kind ?? 'unknown');
-  const sig  = String(node.data?.signature ?? node.label);
-
-  const tree = useMemo(() => {
-    const items: Array<{ indent: number; text: string }> = [];
-    const kindMap: Record<string, string> = {
-      function: 'FunctionDeclaration',
-      method:   'MethodDeclaration',
-      class:    'ClassDeclaration',
-      interface:'InterfaceDeclaration',
-    };
-    const topNode = kindMap[kind] ?? 'Declaration';
-    items.push({ indent: 0, text: topNode });
-    items.push({ indent: 1, text: node.label });
-
-    // Parse params from signature
-    const m = sig.match(/\(([^)]*)\)/);
-    if (m && m[1].trim()) {
-      items.push({ indent: 1, text: 'Parameters' });
-      m[1].split(',').slice(0, 4).forEach(p => {
-        items.push({ indent: 2, text: p.trim().split(/\s+/)[0] });
-      });
-    }
-    items.push({ indent: 1, text: 'Body' });
-    items.push({ indent: 2, text: 'IfStatement' });
-    items.push({ indent: 3, text: 'Expression' });
-    items.push({ indent: 3, text: 'MethodCall' });
-    items.push({ indent: 2, text: '…' });
-    return items;
-  }, [node, kind, sig]);
-
-  return (
-    <div className="absolute bottom-3 left-3 z-20 bg-white/92 backdrop-blur-sm border border-slate-200 rounded-xl shadow-lg p-3 text-[10px] w-48">
-      <div className="flex items-center gap-1.5 mb-2">
-        <GitBranch size={10} className="text-slate-400" />
-        <span className="font-bold text-slate-600">AST (Derived)</span>
-        <span className="ml-auto text-[8px] text-slate-400">⊞</span>
-      </div>
-      <div className="space-y-0.5 font-mono text-slate-500">
-        {tree.map((item, i) => (
-          <div key={i} className="flex items-center gap-1" style={{ paddingLeft: item.indent * 10 }}>
-            {item.indent > 0 && <span className="text-slate-300">•</span>}
-            <span className={item.indent === 0 ? 'text-slate-700 font-semibold' : item.indent === 1 ? 'text-indigo-600' : 'text-slate-500'}>
-              {item.text}
-            </span>
-          </div>
-        ))}
-      </div>
-      <p className="mt-2 text-[9px] text-slate-400 border-t border-slate-100 pt-1.5 leading-tight">
-        Raw AST is an input.<br />World Model is the output.
-      </p>
     </div>
   );
 }
@@ -651,8 +593,19 @@ export default function WorldModel() {
               />
               {/* Legend (top-right overlay) */}
               <GraphLegend />
-              {/* AST mini panel (bottom-left overlay) */}
-              <AstMiniPanel node={selectedNode ?? nodes.find(n => n.data?.isFocal) ?? null} />
+              {/* AST mini panel (bottom-left overlay) — real DB data */}
+              {(() => {
+                const panelNode = selectedNode ?? nodes.find(n => n.data?.isFocal) ?? null;
+                if (!panelNode) return null;
+                return (
+                  <AstMiniPanel
+                    capabilityId={activeCapability?.id}
+                    symbolId={panelNode.id}
+                    symbolName={panelNode.label}
+                    kind={String(panelNode.data?.kind ?? '')}
+                  />
+                );
+              })()}
             </>
           )}
         </div>

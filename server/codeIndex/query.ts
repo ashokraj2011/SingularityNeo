@@ -889,6 +889,113 @@ export const readBlastRadiusSymbolGraph = async (
   };
 };
 
+// ─── Symbol AST context ────────────────────────────────────────────────────────
+
+export interface AstSymbolEntry {
+  symbolId: string;
+  symbolName: string;
+  kind: string;
+  signature: string;
+  startLine: number;
+  endLine: number;
+}
+
+export interface SymbolAstContext {
+  /** The container symbol (parent class / module) of the focal symbol, if any. */
+  parent: { symbolId: string; symbolName: string; kind: string } | null;
+  /** Symbols that the focal symbol directly contains (e.g. methods of a class). */
+  children: AstSymbolEntry[];
+  /** Sibling symbols that share the same container as the focal symbol. */
+  siblings: AstSymbolEntry[];
+}
+
+/**
+ * Fetch the real structural context of a symbol from the code index:
+ *   parent  — the container symbol (e.g. the class that owns a method)
+ *   children — symbols contained within this symbol (e.g. methods of a class)
+ *   siblings — other symbols that share the same parent container
+ *
+ * All data comes from `capability_code_symbols` — no AST parser needed at
+ * runtime, the indexer already recorded containment relationships.
+ */
+export const getSymbolAstContext = async (
+  capabilityId: string,
+  symbolId: string,
+): Promise<SymbolAstContext> => {
+  // ── 1. Focal symbol row (need containerSymbolId) ────────────────────────────
+  const focalRes = await query<{ container_symbol_id: string | null }>(
+    `SELECT container_symbol_id
+       FROM capability_code_symbols
+      WHERE capability_id = $1 AND symbol_id = $2
+      LIMIT 1`,
+    [capabilityId, symbolId],
+  );
+  const containerSymbolId = focalRes.rows[0]?.container_symbol_id ?? null;
+
+  // ── 2. Parent ────────────────────────────────────────────────────────────────
+  let parent: SymbolAstContext['parent'] = null;
+  if (containerSymbolId) {
+    const parentRes = await query<{ symbol_id: string; symbol_name: string; kind: string }>(
+      `SELECT symbol_id, symbol_name, kind
+         FROM capability_code_symbols
+        WHERE capability_id = $1 AND symbol_id = $2
+        LIMIT 1`,
+      [capabilityId, containerSymbolId],
+    );
+    const p = parentRes.rows[0];
+    if (p) parent = { symbolId: p.symbol_id, symbolName: p.symbol_name, kind: p.kind };
+  }
+
+  // ── 3. Children (symbols whose container_symbol_id = focal symbolId) ─────────
+  const childRes = await query<{
+    symbol_id: string; symbol_name: string; kind: string;
+    signature: string | null; start_line: number; end_line: number;
+  }>(
+    `SELECT symbol_id, symbol_name, kind, signature, start_line, end_line
+       FROM capability_code_symbols
+      WHERE capability_id = $1 AND container_symbol_id = $2
+      ORDER BY start_line ASC
+      LIMIT 40`,
+    [capabilityId, symbolId],
+  );
+  const children: AstSymbolEntry[] = childRes.rows.map(r => ({
+    symbolId:   r.symbol_id,
+    symbolName: r.symbol_name,
+    kind:       r.kind,
+    signature:  r.signature ?? '',
+    startLine:  Number(r.start_line) || 0,
+    endLine:    Number(r.end_line)   || 0,
+  }));
+
+  // ── 4. Siblings (same container, excluding focal itself) ─────────────────────
+  let siblings: AstSymbolEntry[] = [];
+  if (containerSymbolId) {
+    const sibRes = await query<{
+      symbol_id: string; symbol_name: string; kind: string;
+      signature: string | null; start_line: number; end_line: number;
+    }>(
+      `SELECT symbol_id, symbol_name, kind, signature, start_line, end_line
+         FROM capability_code_symbols
+        WHERE capability_id = $1
+          AND container_symbol_id = $2
+          AND symbol_id != $3
+        ORDER BY start_line ASC
+        LIMIT 30`,
+      [capabilityId, containerSymbolId, symbolId],
+    );
+    siblings = sibRes.rows.map(r => ({
+      symbolId:   r.symbol_id,
+      symbolName: r.symbol_name,
+      kind:       r.kind,
+      signature:  r.signature ?? '',
+      startLine:  Number(r.start_line) || 0,
+      endLine:    Number(r.end_line)   || 0,
+    }));
+  }
+
+  return { parent, children, siblings };
+};
+
 // ─── Code Graph ───────────────────────────────────────────────────────────────
 
 const ENDPOINT_FILE_RE = /\/(route|controller|handler|api|endpoint|servlet|resource|rest|webhook|router)s?\./i;
