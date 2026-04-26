@@ -100,6 +100,7 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   'blast-radius': ScanEye,
   'ast-explorer': TreePine,
   'code-graph': Network,
+  'world-model': Network,
 };
 
 const Dashboard = () => {
