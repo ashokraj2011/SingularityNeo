@@ -3766,6 +3766,25 @@ export const fetchBlastRadiusSymbolGraph = async (
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Code Graph
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type { CapabilityCodeGraph, CodeGraphNode, CodeGraphEdge, CodeGraphFileNode, CodeGraphSymbolNode } from '../types';
+
+export const fetchCodeGraph = async (
+  capabilityId: string,
+  options: { maxFiles?: number; maxSymbols?: number } = {},
+): Promise<import('../types').CapabilityCodeGraph> => {
+  const params = new URLSearchParams();
+  if (typeof options.maxFiles === 'number') params.set('maxFiles', String(options.maxFiles));
+  if (typeof options.maxSymbols === 'number') params.set('maxSymbols', String(options.maxSymbols));
+  const qs = params.toString();
+  return requestJson<import('../types').CapabilityCodeGraph>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/code-index/graph${qs ? `?${qs}` : ''}`,
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Sentinel Mode
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -296,6 +296,60 @@ export interface LocalAstSnapshot {
   message?: string;
 }
 
+// ─── Code Graph ──────────────────────────────────────────────────────────────
+
+export type CodeGraphNodeKind =
+  | 'file'
+  | CapabilityCodeSymbolKind
+  | 'endpoint';
+
+export interface CodeGraphFileNode {
+  id: string; // = filePath
+  kind: 'file';
+  label: string; // basename
+  filePath: string;
+  repositoryId: string;
+  repositoryLabel?: string;
+  language: string;
+  symbolCount: number;
+  isEndpoint: boolean;
+}
+
+export interface CodeGraphSymbolNode {
+  id: string; // symbolId
+  kind: Exclude<CodeGraphNodeKind, 'file'>;
+  label: string; // symbolName
+  qualifiedName: string;
+  filePath: string;
+  repositoryId: string;
+  startLine: number;
+  signature: string;
+  isExported: boolean;
+  language: string;
+  containerSymbolId?: string;
+  isEndpoint: boolean;
+}
+
+export type CodeGraphNode = CodeGraphFileNode | CodeGraphSymbolNode;
+
+export interface CodeGraphEdge {
+  id: string;
+  from: string;
+  to: string;
+  kind: 'imports' | 'contains';
+}
+
+export interface CapabilityCodeGraph {
+  capabilityId: string;
+  generatedAt: string;
+  fileNodes: CodeGraphFileNode[];
+  symbolNodes: CodeGraphSymbolNode[];
+  fileEdges: CodeGraphEdge[];
+  symbolEdges: CodeGraphEdge[];
+}
+
+// ─── End Code Graph ───────────────────────────────────────────────────────────
+
 export interface WorkItemPhaseStakeholder {
   role: string;
   name: string;

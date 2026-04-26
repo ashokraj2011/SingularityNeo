@@ -53,6 +53,7 @@ import {
 } from '../repoGuidance';
 import { refreshCapabilityCodeIndex } from '../codeIndex/ingest';
 import {
+  getCapabilityCodeGraph,
   readBlastRadiusSymbolGraph,
   readCodeIndexSnapshot,
   searchCodeSymbols,
@@ -405,6 +406,33 @@ export const registerCapabilityManagementRoutes = (
           symbolId,
           maxDepth,
           maxNodes,
+        }),
+      );
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  /**
+   * GET /api/capabilities/:capabilityId/code-index/graph
+   *
+   * Returns a lightweight code graph (file nodes + symbol nodes + edges) for
+   * the capability, ready to feed into the CodeGraph force-directed visualization.
+   * Query params: maxFiles (default 120), maxSymbols (default 280).
+   */
+  app.get('/api/capabilities/:capabilityId/code-index/graph', async (request, response) => {
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'capability.read',
+      });
+      const maxFilesRaw = Number.parseInt(String(request.query?.maxFiles || ''), 10);
+      const maxSymbolsRaw = Number.parseInt(String(request.query?.maxSymbols || ''), 10);
+      response.json(
+        await getCapabilityCodeGraph(request.params.capabilityId, {
+          maxFiles: Number.isFinite(maxFilesRaw) ? maxFilesRaw : undefined,
+          maxSymbols: Number.isFinite(maxSymbolsRaw) ? maxSymbolsRaw : undefined,
         }),
       );
     } catch (error) {
