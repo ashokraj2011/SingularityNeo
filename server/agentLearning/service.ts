@@ -72,6 +72,7 @@ import {
   type DriftThresholds,
 } from './driftDetector';
 import type { AgentLearningDriftState } from '../../src/types';
+import { resolveAgentProviderKey } from '../providerRegistry';
 
 const tokenize = (value: string) =>
   value
@@ -675,7 +676,7 @@ const summarizeAgentLearning = async ({
 
   const response = await requestGitHubModel({
     model: agent.model,
-    providerKey: agent.providerKey || agent.provider,
+    providerKey: resolveAgentProviderKey(agent),
     timeoutMs: LEARNING_SUMMARY_TIMEOUT_MS,
     messages: [
       {
@@ -735,7 +736,7 @@ const summarizeExperienceDistillation = async ({
 }): Promise<ExperienceDistillationResult> => {
   const response = await requestGitHubModel({
     model: agent.model,
-    providerKey: agent.providerKey || agent.provider,
+    providerKey: resolveAgentProviderKey(agent),
     timeoutMs: LEARNING_SUMMARY_TIMEOUT_MS,
     messages: [
       {
@@ -2002,7 +2003,7 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
         versionId: committedVersion.versionId,
         profile: finalizedProfile,
         model: agent.model,
-        providerKey: agent.providerKey || agent.provider,
+        providerKey: resolveAgentProviderKey(agent),
       }).catch(error =>
         recordPipelineError({
           capabilityId,
