@@ -75,20 +75,16 @@ export const OrchestratorListWorkbench = ({
 
     {liveDetailWarning}
 
-    {/* Two-column workspace:
-        Left  (22 rem) — inbox panel only
-        Right (1fr)    — Capability Copilot dock (full width) then work detail below */}
+    {/* Workspace layout:
+        Top row  — inbox (22 rem) | selected work panel (1fr)
+        Below    — Capability Copilot dock full width, visually right under the inbox */}
     <div className="orchestrator-list-workspace">
       <div className="orchestrator-list-top-grid">
-        {/* Left column: inbox only */}
         {inboxPanel}
-
-        {/* Right column: copilot dock spans full column width, work panel sits below */}
-        <div className="flex flex-col gap-4">
-          {copilotDock}
-          {selectedWorkPanel}
-        </div>
+        {selectedWorkPanel}
       </div>
+
+      {copilotDock}
     </div>
   </div>
 );
