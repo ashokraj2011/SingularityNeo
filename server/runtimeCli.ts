@@ -276,7 +276,8 @@ const buildClaudeExecArgs = ({
   model?: string;
   config?: RuntimeProviderConfig | null;
 }) => {
-  const args = ['-p', commandPrompt, '--cwd', workingDirectory];
+  // Working directory is set via cwd: in spawn options — not a CLI flag.
+  const args = ['-p', commandPrompt];
   const configuredMode = resolveConfiguredWorkingMode(config);
   if (configuredMode === 'danger-full-access') {
     args.push('--permission-mode', 'bypassPermissions');
