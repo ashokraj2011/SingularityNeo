@@ -46,6 +46,84 @@ const execFileAsync = promisify(execFile);
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
+/**
+ * Build an augmented PATH string that covers all common CLI tool install
+ * locations on macOS and Linux.  When Singularity is launched as a desktop
+ * app (Electron / npm run desktop:start) the process inherits a minimal
+ * system PATH (/usr/bin:/bin:…) that does NOT include Homebrew, nvm, npm
+ * global bins, or user-local installs.  Any `spawn('claude', …)` call would
+ * fail with ENOENT even though `claude` is reachable from the user's terminal.
+ *
+ * Priority: user-configured env.PATH (if set) → standard macOS/Linux locations.
+ */
+const buildAugmentedPath = (extraEnv?: Record<string, string> | null): string => {
+  const existing = extraEnv?.PATH || process.env.PATH || '';
+  const homedir = os.homedir();
+
+  const extraDirs = [
+    // Homebrew — Apple Silicon
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    // Homebrew — Intel
+    '/usr/local/bin',
+    '/usr/local/sbin',
+    // npm global (typical locations)
+    path.join(homedir, '.npm-global', 'bin'),
+    path.join(homedir, '.npm', 'bin'),
+    // nvm (common version patterns)
+    path.join(homedir, '.nvm', 'versions', 'node', 'current', 'bin'),
+    // fnm / volta
+    path.join(homedir, '.fnm', 'current', 'bin'),
+    path.join(homedir, '.volta', 'bin'),
+    // user-local
+    path.join(homedir, '.local', 'bin'),
+    // pyenv / pipx for aider
+    path.join(homedir, '.pyenv', 'shims'),
+    path.join(homedir, '.local', 'pipx', 'venvs', 'aider-chat', 'bin'),
+    // Standard system bins
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+  ].filter(Boolean);
+
+  const parts = [
+    ...extraDirs,
+    ...existing.split(':').filter(Boolean),
+  ];
+  // Deduplicate while preserving first-wins order.
+  return [...new Set(parts)].join(':');
+};
+
+/**
+ * Resolve a short command name (e.g. "claude") to its full absolute path by
+ * running `which` inside a login shell that has the augmented PATH.  Falls
+ * back to the original command if resolution fails (e.g. it's already an
+ * absolute path, or `which` is unavailable).
+ */
+const resolveCommandPath = async (
+  command: string,
+  extraEnv?: Record<string, string> | null,
+): Promise<string> => {
+  // Already absolute — nothing to do.
+  if (path.isAbsolute(command)) return command;
+
+  try {
+    const augmentedPath = buildAugmentedPath(extraEnv);
+    const result = await execFileAsync('which', [command], {
+      env: { ...process.env, PATH: augmentedPath },
+      timeout: 5_000,
+    });
+    const resolved = result.stdout.trim();
+    if (resolved && path.isAbsolute(resolved)) {
+      return resolved;
+    }
+  } catch {
+    // `which` not available or command not found — fall through.
+  }
+  return command;
+};
+
 const trim = (value?: string | null) => String(value || '').trim();
 
 const providerDefaultCommand: Record<ProviderKey, string> = {
@@ -264,6 +342,7 @@ const runCliProcess = async ({
       env: {
         ...process.env,
         ...(env || {}),
+        PATH: buildAugmentedPath(env),
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -387,13 +466,19 @@ export const validateCliRuntimeProvider = async ({
     };
   }
 
+  // Resolve the command to its absolute path so execFile/spawn don't fail
+  // with ENOENT when the Electron process has a limited system PATH.
+  const resolvedCommand = await resolveCommandPath(command, config?.env);
+
   try {
-    const versionResult = await execFileAsync(command, ['--version'], {
+    const spawnEnv = {
+      ...process.env,
+      ...(config?.env || {}),
+      PATH: buildAugmentedPath(config?.env),
+    };
+    const versionResult = await execFileAsync(resolvedCommand, ['--version'], {
       cwd: workingDirectory || process.cwd(),
-      env: {
-        ...process.env,
-        ...(config?.env || {}),
-      },
+      env: spawnEnv,
       timeout: 15_000,
     });
     let authenticated: boolean | null = null;
@@ -401,12 +486,9 @@ export const validateCliRuntimeProvider = async ({
 
     if (providerKey === CODEX_CLI_PROVIDER_KEY) {
       try {
-        const loginStatus = await execFileAsync(command, ['login', 'status'], {
+        const loginStatus = await execFileAsync(resolvedCommand, ['login', 'status'], {
           cwd: workingDirectory || process.cwd(),
-          env: {
-            ...process.env,
-            ...(config?.env || {}),
-          },
+          env: spawnEnv,
           timeout: 15_000,
         });
         authenticated = /logged in/i.test(`${loginStatus.stdout}\n${loginStatus.stderr}`);
@@ -426,7 +508,7 @@ export const validateCliRuntimeProvider = async ({
       status: authenticated === false ? 'invalid' : 'configured',
       message: authMessage,
       transportMode,
-      detectedCommand: command,
+      detectedCommand: resolvedCommand,
       installed: true,
       authenticated,
       workingDirectoryAllowed:
@@ -434,7 +516,7 @@ export const validateCliRuntimeProvider = async ({
       usageEstimated: true,
       models,
       details: [
-        trim(versionResult.stdout) || trim(versionResult.stderr) || `${command} --version succeeded.`,
+        trim(versionResult.stdout) || trim(versionResult.stderr) || `${resolvedCommand} --version succeeded.`,
       ].filter(Boolean),
       checkedAt: new Date().toISOString(),
     };
@@ -445,9 +527,11 @@ export const validateCliRuntimeProvider = async ({
       providerKey,
       ok: false,
       status: /ENOENT|not found/i.test(message) ? 'missing' : 'unavailable',
-      message,
+      message: /ENOENT/i.test(message)
+        ? `Cannot find '${command}' — install it and run Validate to confirm the path. Checked in: ${buildAugmentedPath(config?.env).split(':').slice(0, 6).join(', ')}…`
+        : message,
       transportMode,
-      detectedCommand: command,
+      detectedCommand: resolvedCommand,
       installed: false,
       authenticated: null,
       workingDirectoryAllowed:
@@ -484,6 +568,11 @@ export const invokeCliRuntime = async ({
     throw new Error(`Configure a command path for ${resolveProviderDisplayName(providerKey)} first.`);
   }
 
+  // Resolve the short command name to its absolute path before spawning.
+  // Electron processes inherit a minimal system PATH that omits Homebrew,
+  // npm globals, and user-local bins — resolveCommandPath bridges that gap.
+  const resolvedCommand = await resolveCommandPath(command, config?.env);
+
   const prompt = buildCliPrompt(messages);
   const resolvedModel = resolveCliModel({ explicitModel: model, config });
   const tempOutputPath = path.join(os.tmpdir(), `singularity-runtime-${randomUUID()}.txt`);
@@ -511,7 +600,7 @@ export const invokeCliRuntime = async ({
         });
 
   const result = await runCliProcess({
-    command,
+    command: resolvedCommand,
     args: invocation.args,
     env: config?.env,
     workingDirectory,
