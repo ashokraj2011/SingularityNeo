@@ -152,6 +152,11 @@ import {
   RuntimeProviderStatus,
   RuntimeProviderValidationResult,
   RuntimeTransportMode,
+  AgentMindSnapshot,
+  PersistedPromptReceiptFragment,
+  PersistedPromptReceiptEviction,
+  PersistedPromptReceipt,
+  PromptReceiptReplayResponse,
 } from "../types";
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from "./desktop";
 
@@ -3836,65 +3841,14 @@ export const fetchSentinelMissions = async (
 // receipt against an alternate model without re-driving the whole step.
 // ────────────────────────────────────────────────────────────────────
 
-export interface PersistedPromptReceiptFragment {
-  source: string;
-  tokens: number;
-  meta?: Record<string, unknown>;
-}
-
-export interface PersistedPromptReceiptEviction {
-  source: string;
-  tokens: number;
-  reason: string;
-}
-
-export interface PersistedPromptReceipt {
-  id: string;
-  runStepId: string;
-  runId: string | null;
-  workItemId: string | null;
-  capabilityId: string;
-  agentId: string | null;
-  agentSnapshot: {
-    id?: string;
-    name?: string;
-    model?: string;
-    providerKey?: string;
-  };
-  scope: "GENERAL_CHAT" | "WORK_ITEM" | "TASK";
-  scopeId: string | null;
-  phase: string | null;
-  model: string | null;
-  providerKey: string | null;
-  userPrompt: string;
-  memoryPrompt: string | null;
-  developerPrompt: string | null;
-  responseContent: string;
-  responseUsage: Record<string, unknown> | null;
-  fragments: PersistedPromptReceiptFragment[];
-  evicted: PersistedPromptReceiptEviction[];
-  totalEstimatedTokens: number;
-  maxInputTokens: number;
-  reservedOutputTokens: number;
-  createdAt: string;
-}
-
-export interface PromptReceiptReplayResponse {
-  receiptId: string;
-  original: {
-    model: string | null;
-    content: string;
-    usage: Record<string, unknown> | null;
-    capturedAt: string;
-  };
-  replay: {
-    model: string | null;
-    content: string;
-    usage: Record<string, unknown> | null;
-    elapsedMs: number;
-    modelOverride: string | null;
-  };
-}
+// PersistedPromptReceipt types are defined in ../types and re-exported here
+// for backwards compatibility with importers that reference api.ts directly.
+export type {
+  PersistedPromptReceiptFragment,
+  PersistedPromptReceiptEviction,
+  PersistedPromptReceipt,
+  PromptReceiptReplayResponse,
+} from "../types";
 
 export const fetchPromptReceiptsForRun = async (
   capabilityId: string,
@@ -3932,4 +3886,18 @@ export const replayPromptReceipt = async (
       headers: jsonHeaders,
       body: JSON.stringify({ model: options?.model }),
     },
+  );
+
+// ─── Agent Mind ───────────────────────────────────────────────────────────────
+
+/**
+ * Fetch the full Agent Mind snapshot for a single agent.
+ * GET /api/capabilities/:capabilityId/agents/:agentId/mind
+ */
+export const fetchAgentMindSnapshot = async (
+  capabilityId: string,
+  agentId: string,
+): Promise<AgentMindSnapshot> =>
+  requestJson<AgentMindSnapshot>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/mind`,
   );

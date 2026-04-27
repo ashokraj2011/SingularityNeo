@@ -11,6 +11,7 @@ import {
   getAgentLearningProfileVersionHistory,
   queueSingleAgentLearningRefresh,
 } from '../agentLearning/service';
+import { getAgentMindSnapshot } from '../agentMind';
 import { distillAgentChatSession } from '../agentLearning/chatDistillation';
 import { wakeAgentLearningWorker } from '../agentLearning/worker';
 import {
@@ -531,6 +532,27 @@ export const registerReportingEvidenceRoutes = (app: express.Express) => {
           request.params.agentId,
         );
         response.json({ state });
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // ─── Agent Mind ───────────────────────────────────────────────────────────
+  app.get(
+    '/api/capabilities/:capabilityId/agents/:agentId/mind',
+    async (request, response) => {
+      try {
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor: parseActorContext(request, 'Workspace Operator'),
+          action: 'capability.read',
+        });
+        const snapshot = await getAgentMindSnapshot(
+          request.params.capabilityId,
+          request.params.agentId,
+        );
+        response.json(snapshot);
       } catch (error) {
         sendApiError(response, error);
       }

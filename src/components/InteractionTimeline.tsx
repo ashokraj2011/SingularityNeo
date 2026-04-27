@@ -1,7 +1,11 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { ChevronDown, ChevronUp } from 'lucide-react';
 import type { CapabilityInteractionFeed } from '../types';
 import { StatusBadge } from './EnterpriseUI';
 import { formatEnumLabel } from '../lib/enterprise';
+import { cn } from '../lib/utils';
+
+const INITIAL_VISIBLE = 2;
 
 const interactionTone = (
   level: CapabilityInteractionFeed['records'][number]['level'],
@@ -49,88 +53,126 @@ export const InteractionTimeline = ({
   onOpenArtifact?: (artifactId: string) => void;
   onOpenRun?: (runId: string) => void;
   onOpenTask?: (taskId: string) => void;
-}) => (
-  <div className="workspace-meta-card">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <p className="workspace-meta-label">{title}</p>
-        <p className="mt-2 text-sm leading-relaxed text-secondary">
-          One feed for chat turns, tool activity, waits, approvals, run events, and learning updates.
-        </p>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <StatusBadge tone="info">{feed.summary.totalCount} records</StatusBadge>
-        <StatusBadge tone="neutral">{feed.summary.toolCount} tools</StatusBadge>
-        <StatusBadge tone="neutral">{feed.summary.chatCount} chat</StatusBadge>
-        <StatusBadge tone="neutral">{feed.summary.artifactCount} artifacts</StatusBadge>
-        <StatusBadge tone="neutral">{feed.summary.taskCount} tasks</StatusBadge>
-        <StatusBadge tone="neutral">{feed.summary.learningCount} learning</StatusBadge>
-      </div>
-    </div>
+}) => {
+  const [expanded, setExpanded] = useState(false);
 
-    {feed.records.length === 0 ? (
-      <p className="mt-4 text-sm leading-relaxed text-secondary">{emptyMessage}</p>
-    ) : (
-      <div className="mt-4 space-y-3">
-        {feed.records.slice(0, maxItems).map(record => (
-          <div
-            key={record.id}
-            className="rounded-[1.25rem] border border-outline-variant/25 bg-surface-container-low/25 px-4 py-3"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-sm font-semibold text-on-surface">{record.title}</p>
-                  <StatusBadge tone={interactionTone(record.level)}>
-                    {record.interactionType}
-                  </StatusBadge>
-                  {record.toolId ? (
-                    <StatusBadge tone="neutral">{formatEnumLabel(record.toolId)}</StatusBadge>
-                  ) : null}
-                </div>
-                <p className="mt-2 text-xs leading-relaxed text-secondary">{record.summary}</p>
-                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[0.72rem] text-secondary">
-                  <span>{formatTimestamp(record.timestamp)}</span>
-                  {record.actorLabel ? <span>{record.actorLabel}</span> : null}
-                  {record.traceId ? <span>Trace {record.traceId.slice(-8)}</span> : null}
-                  {record.sessionId ? <span>Session {record.sessionId}</span> : null}
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {record.linkedArtifactId && onOpenArtifact ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenArtifact(record.linkedArtifactId!)}
-                    className="enterprise-button enterprise-button-secondary"
-                  >
-                    Open artifact
-                  </button>
-                ) : null}
-                {record.id.startsWith('task-') && onOpenTask ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenTask(record.id.replace(/^task-/, ''))}
-                    className="enterprise-button enterprise-button-secondary"
-                  >
-                    Open task
-                  </button>
-                ) : null}
-                {record.runId && onOpenRun ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenRun(record.runId!)}
-                    className="enterprise-button enterprise-button-secondary"
-                  >
-                    Open run
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        ))}
+  const allRecords = feed.records.slice(0, maxItems);
+  const visibleRecords = expanded ? allRecords : allRecords.slice(0, INITIAL_VISIBLE);
+  const hiddenCount = allRecords.length - INITIAL_VISIBLE;
+  const hasMore = hiddenCount > 0;
+
+  return (
+    <div className="workspace-meta-card">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="workspace-meta-label">{title}</p>
+          <p className="mt-2 text-sm leading-relaxed text-secondary">
+            One feed for chat turns, tool activity, waits, approvals, run events, and learning updates.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <StatusBadge tone="info">{feed.summary.totalCount} records</StatusBadge>
+          <StatusBadge tone="neutral">{feed.summary.toolCount} tools</StatusBadge>
+          <StatusBadge tone="neutral">{feed.summary.chatCount} chat</StatusBadge>
+          <StatusBadge tone="neutral">{feed.summary.artifactCount} artifacts</StatusBadge>
+          <StatusBadge tone="neutral">{feed.summary.taskCount} tasks</StatusBadge>
+          <StatusBadge tone="neutral">{feed.summary.learningCount} learning</StatusBadge>
+        </div>
       </div>
-    )}
-  </div>
-);
+
+      {feed.records.length === 0 ? (
+        <p className="mt-4 text-sm leading-relaxed text-secondary">{emptyMessage}</p>
+      ) : (
+        <>
+          {/* Scrollable record list — max-height kicks in only when expanded */}
+          <div
+            className={cn(
+              'mt-4 space-y-3',
+              expanded && 'max-h-[28rem] overflow-y-auto pr-1 custom-scrollbar',
+            )}
+          >
+            {visibleRecords.map(record => (
+              <div
+                key={record.id}
+                className="rounded-[1.25rem] border border-outline-variant/25 bg-surface-container-low/25 px-4 py-3"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold text-on-surface">{record.title}</p>
+                      <StatusBadge tone={interactionTone(record.level)}>
+                        {record.interactionType}
+                      </StatusBadge>
+                      {record.toolId ? (
+                        <StatusBadge tone="neutral">{formatEnumLabel(record.toolId)}</StatusBadge>
+                      ) : null}
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed text-secondary">{record.summary}</p>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[0.72rem] text-secondary">
+                      <span>{formatTimestamp(record.timestamp)}</span>
+                      {record.actorLabel ? <span>{record.actorLabel}</span> : null}
+                      {record.traceId ? <span>Trace {record.traceId.slice(-8)}</span> : null}
+                      {record.sessionId ? <span>Session {record.sessionId}</span> : null}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {record.linkedArtifactId && onOpenArtifact ? (
+                      <button
+                        type="button"
+                        onClick={() => onOpenArtifact(record.linkedArtifactId!)}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        Open artifact
+                      </button>
+                    ) : null}
+                    {record.id.startsWith('task-') && onOpenTask ? (
+                      <button
+                        type="button"
+                        onClick={() => onOpenTask(record.id.replace(/^task-/, ''))}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        Open task
+                      </button>
+                    ) : null}
+                    {record.runId && onOpenRun ? (
+                      <button
+                        type="button"
+                        onClick={() => onOpenRun(record.runId!)}
+                        className="enterprise-button enterprise-button-secondary"
+                      >
+                        Open run
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Show more / less toggle */}
+          {hasMore ? (
+            <button
+              type="button"
+              onClick={() => setExpanded(prev => !prev)}
+              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-2xl border border-outline-variant/30 bg-surface-container-low/40 py-2 text-xs font-semibold text-secondary transition-colors hover:border-primary/20 hover:bg-primary/5 hover:text-primary"
+            >
+              {expanded ? (
+                <>
+                  <ChevronUp size={13} />
+                  Show less
+                </>
+              ) : (
+                <>
+                  <ChevronDown size={13} />
+                  {hiddenCount} more {hiddenCount === 1 ? 'entry' : 'entries'}
+                </>
+              )}
+            </button>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+};
 
 export default InteractionTimeline;

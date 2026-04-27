@@ -91,7 +91,6 @@ import {
   getWorkItemTaskTypeLabel,
   resolveWorkItemEntryStep,
 } from "../lib/workItemTaskTypes";
-import { buildAgentKnowledgeLens } from "../lib/agentKnowledge";
 import { buildCapabilityInteractionFeed } from "../lib/interactionFeed";
 import { normalizeCompiledStepContext } from "../lib/workflowRuntime";
 import { cn } from "../lib/utils";
@@ -2869,18 +2868,6 @@ const Orchestrator = () => {
 
     return prompts.slice(0, 3);
   }, [selectedAttentionReason, selectedCurrentStep, selectedWorkItem]);
-  const selectedAgentKnowledgeLens = useMemo(
-    () =>
-      selectedAgent
-        ? buildAgentKnowledgeLens({
-            capability: activeCapability,
-            workspace,
-            agent: selectedAgent,
-            workItemId: selectedWorkItem?.id,
-          })
-        : null,
-    [activeCapability, selectedAgent, selectedWorkItem?.id, workspace],
-  );
   const selectedInteractionFeed = useMemo(
     () =>
       buildCapabilityInteractionFeed({
@@ -5942,8 +5929,6 @@ const Orchestrator = () => {
                         },
                       }}
                       operateProps={{
-                        briefing: workspace.briefing,
-                        selectedAgentKnowledgeLens,
                         selectedStateSummary,
                         selectedBlockerSummary,
                         selectedNextActionSummary,
@@ -6646,8 +6631,6 @@ const Orchestrator = () => {
                         },
                       }}
                       operateProps={{
-                        briefing: workspace.briefing,
-                        selectedAgentKnowledgeLens,
                         selectedStateSummary,
                         selectedBlockerSummary,
                         selectedNextActionSummary,

@@ -37,8 +37,6 @@ describe('OrchestratorOperatePanel', () => {
 
     render(
       <OrchestratorOperatePanel
-        briefing={{} as never}
-        selectedAgentKnowledgeLens={null}
         selectedStateSummary="Builder is preparing the implementation plan."
         selectedBlockerSummary="No blockers recorded."
         selectedNextActionSummary="Start implementation."

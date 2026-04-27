@@ -5410,3 +5410,118 @@ export interface RuntimeLanePolicy {
   priority: number;
   createdAt: string;
 }
+
+// ─── Prompt receipts (persisted LLM context debug records) ───────────────────
+
+export interface PersistedPromptReceiptFragment {
+  source: string;
+  tokens: number;
+  meta?: Record<string, unknown>;
+}
+
+export interface PersistedPromptReceiptEviction {
+  source: string;
+  tokens: number;
+  reason: string;
+}
+
+export interface PersistedPromptReceipt {
+  id: string;
+  runStepId: string;
+  runId: string | null;
+  workItemId: string | null;
+  capabilityId: string;
+  agentId: string | null;
+  agentSnapshot: {
+    id?: string;
+    name?: string;
+    model?: string;
+    providerKey?: string;
+  };
+  scope: "GENERAL_CHAT" | "WORK_ITEM" | "TASK";
+  scopeId: string | null;
+  phase: string | null;
+  model: string | null;
+  providerKey: string | null;
+  userPrompt: string;
+  memoryPrompt: string | null;
+  developerPrompt: string | null;
+  responseContent: string;
+  responseUsage: Record<string, unknown> | null;
+  fragments: PersistedPromptReceiptFragment[];
+  evicted: PersistedPromptReceiptEviction[];
+  totalEstimatedTokens: number;
+  maxInputTokens: number;
+  reservedOutputTokens: number;
+  createdAt: string;
+}
+
+export interface PromptReceiptReplayResponse {
+  receiptId: string;
+  original: {
+    model: string | null;
+    content: string;
+    usage: Record<string, unknown> | null;
+    capturedAt: string;
+  };
+  replay: {
+    model: string | null;
+    content: string;
+    usage: Record<string, unknown> | null;
+    elapsedMs: number;
+    modelOverride: string | null;
+  };
+}
+
+// ─── Agent Mind ───────────────────────────────────────────────────────────────
+
+/**
+ * A single rule in the agent's rule book — derived from its operating contract,
+ * learned notes, or governance controls. Presented in the Rules tab of the
+ * Agent Mind panel.
+ */
+export interface AgentMindRule {
+  id: string;
+  text: string;
+  kind: "GUARDRAIL" | "RESPONSIBILITY" | "APPROACH" | "LEARNED" | "GOVERNANCE";
+  /** Human-readable origin label, e.g. "Operating Contract" or "Learning Update". */
+  source: string;
+  /** 0..1 confidence score; undefined = deterministic rule (not LLM-inferred). */
+  confidence?: number;
+  /** ISO timestamp when this rule became effective. */
+  effectiveSince?: string;
+}
+
+/**
+ * A single entity in the agent's world model — derived from memory documents
+ * (MemoryDocument rows for this capability/agent).
+ */
+export interface AgentWorldEntity {
+  id: string;
+  kind: MemorySourceType;
+  label: string;
+  summary: string;
+  freshness?: "HOT" | "WARM" | "COLD";
+  sourceDocumentId: string;
+  updatedAt: string;
+}
+
+/**
+ * Full snapshot returned by GET /api/capabilities/:capabilityId/agents/:agentId/mind.
+ * Aggregates all existing data stores — no new DB schema required.
+ */
+export interface AgentMindSnapshot {
+  agentId: string;
+  capabilityId: string;
+  generatedAt: string;
+  /** Existing lens — passed verbatim to the Knowledge tab. */
+  lens: AgentKnowledgeLens;
+  driftState: AgentLearningDriftState | null;
+  profileStatus: AgentLearningStatus;
+  rules: AgentMindRule[];
+  worldEntities: AgentWorldEntity[];
+  /** Last 10 prompt receipts for this agent across all runs. */
+  recentReceipts: PersistedPromptReceipt[];
+  learningTimeline: LearningUpdate[];
+  versionHistory: AgentLearningProfileVersion[];
+}

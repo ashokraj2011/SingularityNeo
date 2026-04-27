@@ -40,7 +40,7 @@ import {
 } from './workItemExplain';
 import { getCompletedWorkOrderEvidence } from './ledger';
 import { buildWorkItemFlightRecorderDetail } from './flightRecorder';
-import { invokeCapabilityChat, requestGitHubModel } from './githubModels';
+import { invokeCapabilityChat, requestGitHubModel, resolveModelForProvider } from './githubModels';
 import { buildWorkItemRuntimeBriefing } from './chatWorkspace';
 import {
   compactApprovalDeterministicSummary,
@@ -557,7 +557,7 @@ const buildApprovalAiSummary = async ({
 
   try {
     const response = await requestGitHubModel({
-      model: agent?.model,
+      model: resolveModelForProvider(providerKey, agent?.model),
       providerKey,
       messages: [
         {

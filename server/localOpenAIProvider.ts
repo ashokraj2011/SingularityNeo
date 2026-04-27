@@ -117,11 +117,12 @@ const estimateUsage = (prompt: string, completion: string): ProviderUsage => {
 
 const getLocalProviderError = async (response: Response) => {
   try {
-    const payload = (await response.json()) as { error?: { message?: string } | string };
-    if (typeof payload.error === 'string') {
+    const rawPayload = await response.json();
+    const payload = Array.isArray(rawPayload) ? rawPayload[0] : rawPayload;
+    if (typeof payload?.error === 'string') {
       return payload.error;
     }
-    return payload.error?.message || `Local provider request failed with status ${response.status}.`;
+    return payload?.error?.message || `Local provider request failed with status ${response.status}.`;
   } catch {
     return `Local provider request failed with status ${response.status}.`;
   }
@@ -266,87 +267,106 @@ export const requestOpenAICompatModel = async ({
   tool_choice?: ProviderToolChoice;
   providerLabel?: string;
 }): Promise<ProviderCompletion> => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const maxRetries = 2;
+  let attempt = 0;
 
-  try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: 0.2,
-        stream: false,
-        ...(tools && tools.length > 0 ? { tools } : {}),
-        ...(tool_choice != null ? { tool_choice } : {}),
-      }),
-    });
+  while (true) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-    if (!response.ok) {
-      throw new Error(await getLocalProviderError(response));
-    }
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature: 0.2,
+          stream: false,
+          ...(tools && tools.length > 0 ? { tools } : {}),
+          ...(tool_choice != null ? { tool_choice } : {}),
+        }),
+      });
 
-    const payload = (await response.json()) as {
-      id?: string;
-      created?: number;
-      model?: string;
-      usage?: {
-        prompt_tokens?: number;
-        completion_tokens?: number;
-        total_tokens?: number;
-      };
-      choices?: Array<{
-        message?: {
-          content?: string | null;
-          tool_calls?: Array<{
-            id?: string;
-            type?: string;
-            function?: { name?: string; arguments?: string };
-          }>;
-        };
-      }>;
-    };
-
-    const toolCall = payload.choices?.[0]?.message?.tool_calls?.[0];
-    const content =
-      toolCall?.function?.arguments?.trim() ||
-      payload.choices?.[0]?.message?.content?.trim() ||
-      '';
-    if (!content) {
-      throw new Error(`${providerLabel} returned an empty response.`);
-    }
-
-    const promptText = messages.map(m => `${m.role}: ${m.content}`).join('\n');
-    const usage = payload.usage
-      ? {
-          promptTokens:     Number(payload.usage.prompt_tokens    || 0),
-          completionTokens: Number(payload.usage.completion_tokens || 0),
-          totalTokens:      Number(payload.usage.total_tokens      || 0),
-          estimatedCostUsd: Number((Number(payload.usage.total_tokens || 0) * 0.000002).toFixed(6)),
+      if (!response.ok) {
+        const errorMsg = await getLocalProviderError(response);
+        if (response.status === 429 && attempt < maxRetries) {
+          attempt++;
+          let delayMs = 5000;
+          const retryMatch = errorMsg.match(/retry in ([\d\.]+)/i);
+          if (retryMatch && retryMatch[1]) {
+            delayMs = Math.ceil(parseFloat(retryMatch[1])) * 1000 + 1000;
+          } else {
+            delayMs = attempt * 5000;
+          }
+          console.warn(`[${providerLabel}] 429 Quota Exceeded. Retrying in ${delayMs / 1000}s... (Attempt ${attempt}/${maxRetries}): ${errorMsg}`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          continue;
         }
-      : estimateUsage(promptText, content);
+        throw new Error(errorMsg);
+      }
 
-    return {
-      content,
-      model:      String(payload.model || model),
-      usage,
-      responseId: payload.id || null,
-      createdAt:  payload.created
-        ? new Date(payload.created * 1000).toISOString()
-        : new Date().toISOString(),
-    };
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`${providerLabel} timed out.`);
+      const payload = (await response.json()) as {
+        id?: string;
+        created?: number;
+        model?: string;
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+        };
+        choices?: Array<{
+          message?: {
+            content?: string | null;
+            tool_calls?: Array<{
+              id?: string;
+              type?: string;
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
+        }>;
+      };
+
+      const toolCall = payload.choices?.[0]?.message?.tool_calls?.[0];
+      const content =
+        toolCall?.function?.arguments?.trim() ||
+        payload.choices?.[0]?.message?.content?.trim() ||
+        '';
+      if (!content) {
+        throw new Error(`${providerLabel} returned an empty response.`);
+      }
+
+      const promptText = messages.map(m => `${m.role}: ${m.content}`).join('\n');
+      const usage = payload.usage
+        ? {
+            promptTokens:     Number(payload.usage.prompt_tokens    || 0),
+            completionTokens: Number(payload.usage.completion_tokens || 0),
+            totalTokens:      Number(payload.usage.total_tokens      || 0),
+            estimatedCostUsd: Number((Number(payload.usage.total_tokens || 0) * 0.000002).toFixed(6)),
+          }
+        : estimateUsage(promptText, content);
+
+      return {
+        content,
+        model:      String(payload.model || model),
+        usage,
+        responseId: payload.id || null,
+        createdAt:  payload.created
+          ? new Date(payload.created * 1000).toISOString()
+          : new Date().toISOString(),
+      };
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(`${providerLabel} timed out.`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
   }
 };
 

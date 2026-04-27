@@ -37,6 +37,7 @@ import {
 import { getCapabilityWorkspaceRoots } from './workspacePaths';
 import { loadGuidanceSystemPromptBlock } from './repoGuidance';
 import {
+  getLocalOpenAIDefaultModel,
   isLocalOpenAIConfigured,
   listLocalOpenAIModels,
   requestLocalOpenAIEmbeddings,
@@ -54,8 +55,8 @@ import {
   resolveAgentProviderKey,
   resolveProviderDisplayName,
 } from './providerRegistry';
-import { requestGeminiModel, requestGeminiModelStream } from './geminiProvider';
-import { requestCustomRouterModel, requestCustomRouterModelStream } from './customRouterProvider';
+import { getGeminiDefaultModel, listGeminiModels, requestGeminiModel, requestGeminiModelStream } from './geminiProvider';
+import { getCustomRouterDefaultModel, listCustomRouterModels, requestCustomRouterModel, requestCustomRouterModelStream } from './customRouterProvider';
 import {
   getStoredCliProviderConfigSync,
 } from './runtimeProviders';
@@ -167,6 +168,40 @@ const githubModelsHttpApiUrl = (
 const githubModelsCatalogApiUrl = new URL('/catalog/models', githubModelsHttpApiUrl).toString();
 
 export const defaultModel = 'gpt-4.1-mini';
+
+/**
+ * Resolves the effective model for the given provider key.
+ *
+ * When an agent's stored model was saved for a different provider
+ * (e.g. 'gpt-4.1-mini' from GitHub Copilot, now routed to Gemini via the
+ * configured runtime default) this substitutes the provider's own default
+ * so the call succeeds.  Explicit model values that already belong to the
+ * target provider are kept as-is.
+ */
+export const resolveModelForProvider = (
+  providerKey: string,
+  agentModel?: string | null,
+): string => {
+  const model = agentModel?.trim() || '';
+
+  if (providerKey === GEMINI_PROVIDER_KEY) {
+    // Only 'gemini-*' models are valid on the Gemini endpoint.
+    return model.toLowerCase().startsWith('gemini') ? model : getGeminiDefaultModel();
+  }
+
+  if (providerKey === CUSTOM_ROUTER_PROVIDER_KEY) {
+    // Use the agent model when it's set; otherwise fall back to the configured
+    // custom-router default (env var or runtime config).
+    return model || getCustomRouterDefaultModel();
+  }
+
+  if (providerKey === LOCAL_OPENAI_PROVIDER_KEY) {
+    return model || getLocalOpenAIDefaultModel();
+  }
+
+  // GitHub Copilot / all other providers: pass through as-is.
+  return model || defaultModel;
+};
 
 export const staticModels = [
   { id: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', profile: 'Lower cost' },
@@ -2262,7 +2297,7 @@ const getManagedScopedSession = async ({
     };
   }
 
-  if (providerKey === LOCAL_OPENAI_PROVIDER_KEY || isCliRuntimeProviderKey(providerKey)) {
+  if (providerKey === LOCAL_OPENAI_PROVIDER_KEY || providerKey === GEMINI_PROVIDER_KEY || providerKey === CUSTOM_ROUTER_PROVIDER_KEY || isCliRuntimeProviderKey(providerKey)) {
     const initialMessages: ProviderMessage[] =
       !resetSession && cached?.localMessages?.length
         ? cached.localMessages
@@ -2279,24 +2314,25 @@ const getManagedScopedSession = async ({
       agentName: agent.name,
       scope,
       scopeId,
-      model:
-        agent.model ||
-        (isCliRuntimeProviderKey(providerKey)
-          ? getStoredCliProviderConfigSync(providerKey)?.model
-          : undefined),
+      model: isCliRuntimeProviderKey(providerKey)
+        ? (getStoredCliProviderConfigSync(providerKey)?.model || agent.model || '')
+        : resolveModelForProvider(providerKey, agent.model),
       createdAt: new Date().toISOString(),
       lastUsedAt: new Date().toISOString(),
       localHistoryRollup: cached?.localHistoryRollup || '',
       localMessages: initialMessages,
     });
 
+    const resolvedModel = isCliRuntimeProviderKey(providerKey)
+      ? (getStoredCliProviderConfigSync(providerKey)?.model || agent.model || '')
+      : resolveModelForProvider(providerKey, agent.model);
     return {
       session: null,
       isNewSession: resetSession || !cached,
       sessionId,
       cacheKey,
       fingerprint,
-      model: agent.model,
+      model: resolvedModel,
       providerKey,
       localHistoryRollup: cached?.localHistoryRollup || '',
       localMessages: initialMessages,
@@ -2644,6 +2680,119 @@ export const invokeScopedCapabilitySession = async ({
                 },
               };
             })
+          : managedSession.providerKey === GEMINI_PROVIDER_KEY
+          ? await withSessionLock(managedSession.cacheKey, async () => {
+              const geminiMessages: ProviderMessage[] = [
+                { role: 'system', content: systemPrompt },
+                ...(managedSession!.localHistoryRollup?.trim()
+                  ? [
+                      {
+                        role: 'system' as const,
+                        content: managedSession!.localHistoryRollup!.trim(),
+                      },
+                    ]
+                  : []),
+                ...managedSession!.localMessages,
+              ];
+              const nextPrompt =
+                managedSession!.isNewSession && initialPrompt ? initialPrompt : prompt;
+              geminiMessages.push({
+                role: 'user',
+                content: nextPrompt,
+              });
+              const completion = onDelta
+                ? await requestGeminiModelStream({
+                    model: managedSession!.model || agent.model,
+                    messages: geminiMessages,
+                    timeoutMs,
+                    onDelta,
+                  })
+                : await requestGeminiModel({
+                    model: managedSession!.model || agent.model,
+                    messages: geminiMessages,
+                    timeoutMs,
+                    tools,
+                    tool_choice,
+                  });
+
+              const condensedState = await condenseLocalConversationState({
+                capability,
+                agent,
+                priorSummary: managedSession!.localHistoryRollup,
+                messages: [
+                  ...managedSession!.localMessages,
+                  { role: 'user', content: nextPrompt },
+                  { role: 'assistant', content: completion.content },
+                ],
+              });
+              updateManagedSessionRecord(managedSession!.sessionId, {
+                localHistoryRollup: condensedState.summary,
+                localMessages: condensedState.messages,
+              });
+              return {
+                ...completion,
+                usageEstimated: false,
+                runtimeTransportMode: 'http-api' as const,
+                runtimeProviderKey: managedSession!.providerKey,
+                raw: {
+                  assistantMessage: null,
+                  usageEvent: null,
+                },
+              };
+            })
+          : managedSession.providerKey === CUSTOM_ROUTER_PROVIDER_KEY
+          ? await withSessionLock(managedSession.cacheKey, async () => {
+              const routerMessages: ProviderMessage[] = [
+                { role: 'system', content: systemPrompt },
+                ...(managedSession!.localHistoryRollup?.trim()
+                  ? [
+                      {
+                        role: 'system' as const,
+                        content: managedSession!.localHistoryRollup!.trim(),
+                      },
+                    ]
+                  : []),
+                ...managedSession!.localMessages,
+              ];
+              const nextPrompt =
+                managedSession!.isNewSession && initialPrompt ? initialPrompt : prompt;
+              routerMessages.push({
+                role: 'user',
+                content: nextPrompt,
+              });
+              const completion = await requestCustomRouterModel({
+                model: managedSession!.model || agent.model,
+                messages: routerMessages,
+                timeoutMs,
+                tools,
+                tool_choice,
+              });
+
+              const condensedState = await condenseLocalConversationState({
+                capability,
+                agent,
+                priorSummary: managedSession!.localHistoryRollup,
+                messages: [
+                  ...managedSession!.localMessages,
+                  { role: 'user', content: nextPrompt },
+                  { role: 'assistant', content: completion.content },
+                ],
+              });
+              updateManagedSessionRecord(managedSession!.sessionId, {
+                localHistoryRollup: condensedState.summary,
+                localMessages: condensedState.messages,
+              });
+              return {
+                ...completion,
+                usageEstimated: false,
+                runtimeTransportMode: 'http-api' as const,
+                runtimeProviderKey: managedSession!.providerKey,
+                raw: {
+                  assistantMessage: null,
+                  usageEvent: null,
+                },
+              };
+            })
           : await withSessionLock(managedSession.cacheKey, async () =>
               runSessionExchange({
                 session: managedSession!.session!,
@@ -2757,7 +2906,23 @@ export const invokeScopedCapabilitySession = async ({
   const fallbackResult =
     resolveAgentProviderKey(agent) === LOCAL_OPENAI_PROVIDER_KEY
       ? await requestLocalOpenAIModel({
-          model: effectiveModel,
+          model: resolveModelForProvider(LOCAL_OPENAI_PROVIDER_KEY, effectiveModel),
+          messages: fallbackMessages,
+          timeoutMs: fallbackTimeoutMs,
+          tools,
+          tool_choice,
+        })
+      : resolveAgentProviderKey(agent) === GEMINI_PROVIDER_KEY
+      ? await requestGeminiModel({
+          model: resolveModelForProvider(GEMINI_PROVIDER_KEY, effectiveModel),
+          messages: fallbackMessages,
+          timeoutMs: fallbackTimeoutMs,
+          tools,
+          tool_choice,
+        })
+      : resolveAgentProviderKey(agent) === CUSTOM_ROUTER_PROVIDER_KEY
+      ? await requestCustomRouterModel({
+          model: resolveModelForProvider(CUSTOM_ROUTER_PROVIDER_KEY, effectiveModel),
           messages: fallbackMessages,
           timeoutMs: fallbackTimeoutMs,
           tools,
@@ -2860,6 +3025,17 @@ export const invokeBudgetModelSummary = async ({
     chosenModel =
       getStoredCliProviderConfigSync(providerKey)?.model ||
       normalizeModel(agent.model || defaultModel);
+  } else if (providerKey === GEMINI_PROVIDER_KEY) {
+    // For Gemini, use the Gemini model list — not the GitHub Copilot list.
+    // Picking a GPT model ID and sending it to the Gemini endpoint fails.
+    const geminiModels = await listGeminiModels().catch(() => [] as RuntimeModelOption[]);
+    const cheapest = pickLowestCostRuntimeModel(geminiModels);
+    chosenModel = cheapest?.apiModelId || getGeminiDefaultModel();
+  } else if (providerKey === CUSTOM_ROUTER_PROVIDER_KEY) {
+    // Same for custom router: use the router's own model list.
+    const routerModels = await listCustomRouterModels().catch(() => [] as RuntimeModelOption[]);
+    const cheapest = pickLowestCostRuntimeModel(routerModels);
+    chosenModel = cheapest?.apiModelId || getCustomRouterDefaultModel();
   } else {
     const { models } = await listAvailableRuntimeModels().catch(() => ({
       models: getStaticRuntimeModels(),
@@ -3024,16 +3200,22 @@ export const requestGitHubModel = async ({
   timeoutMs?: number;
 }) => {
   const normalizedProviderKey = normalizeProviderKey(providerKey);
+  // Resolve the model name to one valid for the live provider.  When the
+  // runtime has been switched (e.g. from GitHub Copilot to Gemini) the agent's
+  // stored model may be a GPT id that is not recognised by the new provider;
+  // resolveModelForProvider substitutes the provider's own default in that case.
+  const resolvedModel = resolveModelForProvider(normalizedProviderKey, model);
+
   if (normalizedProviderKey === LOCAL_OPENAI_PROVIDER_KEY) {
-    return requestLocalOpenAIModel({ model, messages, timeoutMs });
+    return requestLocalOpenAIModel({ model: resolvedModel, messages, timeoutMs });
   }
 
   if (normalizedProviderKey === GEMINI_PROVIDER_KEY) {
-    return requestGeminiModel({ model, messages, timeoutMs });
+    return requestGeminiModel({ model: resolvedModel, messages, timeoutMs });
   }
 
   if (normalizedProviderKey === CUSTOM_ROUTER_PROVIDER_KEY) {
-    return requestCustomRouterModel({ model, messages, timeoutMs });
+    return requestCustomRouterModel({ model: resolvedModel, messages, timeoutMs });
   }
 
   if (isCliRuntimeProviderKey(normalizedProviderKey)) {
@@ -3042,7 +3224,7 @@ export const requestGitHubModel = async ({
       config: getStoredCliProviderConfigSync(normalizedProviderKey),
       messages,
       workingDirectory: workingDirectory || resolveRuntimeWorkingDirectory(),
-      model,
+      model: resolvedModel,
       timeoutMs,
     });
   }
@@ -3117,16 +3299,20 @@ export const requestGitHubModelStream = async ({
   onDelta: (delta: string) => void;
 }) => {
   const normalizedProviderKey = normalizeProviderKey(providerKey);
+  // Same model resolution as requestGitHubModel — substitutes a provider-valid
+  // model name when the stored agent model doesn't match the live provider.
+  const resolvedModel = resolveModelForProvider(normalizedProviderKey, model);
+
   if (normalizedProviderKey === LOCAL_OPENAI_PROVIDER_KEY) {
-    return requestLocalOpenAIModelStream({ model, messages, timeoutMs, onDelta });
+    return requestLocalOpenAIModelStream({ model: resolvedModel, messages, timeoutMs, onDelta });
   }
 
   if (normalizedProviderKey === GEMINI_PROVIDER_KEY) {
-    return requestGeminiModelStream({ model, messages, timeoutMs, onDelta });
+    return requestGeminiModelStream({ model: resolvedModel, messages, timeoutMs, onDelta });
   }
 
   if (normalizedProviderKey === CUSTOM_ROUTER_PROVIDER_KEY) {
-    return requestCustomRouterModelStream({ model, messages, timeoutMs, onDelta });
+    return requestCustomRouterModelStream({ model: resolvedModel, messages, timeoutMs, onDelta });
   }
 
   if (isCliRuntimeProviderKey(normalizedProviderKey)) {
@@ -3135,7 +3321,7 @@ export const requestGitHubModelStream = async ({
       config: getStoredCliProviderConfigSync(normalizedProviderKey),
       messages,
       workingDirectory: workingDirectory || resolveRuntimeWorkingDirectory(),
-      model,
+      model: resolvedModel,
       timeoutMs,
       onDelta,
     });

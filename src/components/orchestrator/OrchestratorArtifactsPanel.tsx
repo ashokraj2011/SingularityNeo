@@ -1,5 +1,5 @@
-import React from 'react';
-import { Copy, ExternalLink, FileCode, FileText } from 'lucide-react';
+import React, { useState } from 'react';
+import { ChevronDown, ChevronUp, Copy, ExternalLink, FileCode, FileText } from 'lucide-react';
 import ArtifactPreview from '../ArtifactPreview';
 import { compactMarkdownPreview } from '../../lib/markdown';
 import { formatEnumLabel, getStatusTone } from '../../lib/enterprise';
@@ -42,7 +42,11 @@ export const OrchestratorArtifactsPanel = ({
   onOpenRunConsole,
   onOpenLedger,
   onOpenWorkflowDesigner,
-}: Props) => (
+}: Props) => {
+  const [tasksOpen, setTasksOpen] = useState(true);
+  const [logsOpen, setLogsOpen] = useState(true);
+
+  return (
   <div className="space-y-4">
     <div className="grid gap-3 sm:grid-cols-3">
       <div className="workspace-meta-card">
@@ -215,50 +219,82 @@ export const OrchestratorArtifactsPanel = ({
     </div>
 
     <div className="grid gap-4 lg:grid-cols-2">
+      {/* ── Workflow-managed tasks (collapsible) ─────────────────────────── */}
       <div className="workspace-meta-card">
-        <p className="workspace-meta-label">Workflow-managed tasks</p>
-        {selectedTasks.length === 0 ? (
-          <p className="mt-3 text-sm leading-relaxed text-secondary">
-            No workflow-managed tasks are linked to this work item yet.
-          </p>
-        ) : (
-          <div className="mt-3 space-y-3">
-            {selectedTasks.map(task => (
-              <div key={task.id} className="orchestrator-step-row">
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-on-surface">{task.title}</p>
-                  <p className="mt-1 text-xs text-secondary">
-                    {task.agent} · {formatEnumLabel(task.status)}
-                  </p>
+        <button
+          type="button"
+          onClick={() => setTasksOpen(o => !o)}
+          className="flex w-full items-center justify-between gap-2 text-left"
+          aria-expanded={tasksOpen}
+        >
+          <p className="workspace-meta-label">Workflow-managed tasks</p>
+          {tasksOpen ? (
+            <ChevronUp size={15} className="shrink-0 text-secondary" />
+          ) : (
+            <ChevronDown size={15} className="shrink-0 text-secondary" />
+          )}
+        </button>
+
+        {tasksOpen && (
+          selectedTasks.length === 0 ? (
+            <p className="mt-3 text-sm leading-relaxed text-secondary">
+              No workflow-managed tasks are linked to this work item yet.
+            </p>
+          ) : (
+            <div className="mt-3 space-y-3">
+              {selectedTasks.map(task => (
+                <div key={task.id} className="orchestrator-step-row">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-on-surface">{task.title}</p>
+                    <p className="mt-1 text-xs text-secondary">
+                      {task.agent} · {formatEnumLabel(task.status)}
+                    </p>
+                  </div>
+                  <StatusBadge tone={getStatusTone(task.status)}>
+                    {formatEnumLabel(task.status)}
+                  </StatusBadge>
                 </div>
-                <StatusBadge tone={getStatusTone(task.status)}>
-                  {formatEnumLabel(task.status)}
-                </StatusBadge>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )
         )}
       </div>
 
+      {/* ── Recent execution output (collapsible) ────────────────────────── */}
       <div className="workspace-meta-card">
-        <p className="workspace-meta-label">Recent execution output</p>
-        {selectedLogs.length === 0 ? (
-          <p className="mt-3 text-sm leading-relaxed text-secondary">
-            Execution logs will appear here once the step advances.
-          </p>
-        ) : (
-          <div className="mt-3 space-y-3">
-            {selectedLogs.slice(-5).reverse().map(log => (
-              <div key={log.id} className="orchestrator-step-row">
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-on-surface">{log.message}</p>
-                  <p className="mt-1 text-xs text-secondary">
-                    {formatTimestamp(log.timestamp)}
-                  </p>
+        <button
+          type="button"
+          onClick={() => setLogsOpen(o => !o)}
+          className="flex w-full items-center justify-between gap-2 text-left"
+          aria-expanded={logsOpen}
+        >
+          <p className="workspace-meta-label">Recent execution output</p>
+          {logsOpen ? (
+            <ChevronUp size={15} className="shrink-0 text-secondary" />
+          ) : (
+            <ChevronDown size={15} className="shrink-0 text-secondary" />
+          )}
+        </button>
+
+        {logsOpen && (
+          selectedLogs.length === 0 ? (
+            <p className="mt-3 text-sm leading-relaxed text-secondary">
+              Execution logs will appear here once the step advances.
+            </p>
+          ) : (
+            <div className="mt-3 space-y-3">
+              {selectedLogs.slice(-5).reverse().map(log => (
+                <div key={log.id} className="orchestrator-step-row">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-on-surface">{log.message}</p>
+                    <p className="mt-1 text-xs text-secondary">
+                      {formatTimestamp(log.timestamp)}
+                    </p>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )
         )}
       </div>
     </div>
@@ -293,4 +329,5 @@ export const OrchestratorArtifactsPanel = ({
       </div>
     </div>
   </div>
-);
+  );
+};

@@ -7,6 +7,8 @@ import {
   Clock3,
   ExternalLink,
   LoaderCircle,
+  Lock,
+  MessageSquare,
   MessageSquareText,
   RefreshCw,
   Send,
@@ -15,8 +17,6 @@ import {
   Workflow as WorkflowIcon,
 } from "lucide-react";
 import AgentGitSessionCard from "./AgentGitSessionCard";
-import AgentKnowledgeLensPanel from "../AgentKnowledgeLensPanel";
-import CapabilityBriefingPanel from "../CapabilityBriefingPanel";
 import ErrorBoundary from "../ErrorBoundary";
 import InteractionTimeline from "../InteractionTimeline";
 import MarkdownContent from "../MarkdownContent";
@@ -30,11 +30,9 @@ import { cn } from "../../lib/utils";
 import { StatusBadge } from "../EnterpriseUI";
 import type {
   AgentArtifactExpectation,
-  AgentKnowledgeLens,
   AgentTask,
   Artifact,
   CapabilityAgent,
-  CapabilityBriefing,
   CapabilityInteractionFeed,
   CapabilityRepository,
   CapabilityStakeholder,
@@ -66,8 +64,6 @@ import {
 type Tone = React.ComponentProps<typeof StatusBadge>["tone"];
 
 type Props = {
-  briefing: CapabilityBriefing;
-  selectedAgentKnowledgeLens: AgentKnowledgeLens | null;
   selectedStateSummary: string;
   selectedBlockerSummary: string;
   selectedNextActionSummary: string;
@@ -198,8 +194,6 @@ type Props = {
 };
 
 export const OrchestratorOperatePanel = ({
-  briefing,
-  selectedAgentKnowledgeLens,
   selectedStateSummary,
   selectedBlockerSummary,
   selectedNextActionSummary,
@@ -342,20 +336,293 @@ export const OrchestratorOperatePanel = ({
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
-        <CapabilityBriefingPanel
-          briefing={briefing}
-          compact
-          title="Capability brain"
-        />
-        {selectedAgentKnowledgeLens ? (
-          <AgentKnowledgeLensPanel
-            lens={selectedAgentKnowledgeLens}
-            compact
-            title="What this agent knows now"
-          />
-        ) : null}
+      {/* ── Operator Quick Actions ──────────────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-outline-variant/30 bg-surface-container-lowest px-4 py-3">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <p className="text-[0.6875rem] font-bold uppercase tracking-[0.16em] text-secondary">
+            {selectedCurrentStep?.phase ?? "Stage"}
+          </p>
+          <p className="mt-0.5 text-sm font-semibold text-on-surface">
+            {selectedCurrentStep?.name ?? "Awaiting orchestration"}
+            {selectedAgent ? (
+              <span className="ml-2 font-normal text-secondary">
+                · {selectedAgent.name}
+              </span>
+            ) : null}
+          </p>
+        </div>
+
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onToggleWriteControl}
+            disabled={busyAction !== null || !canControlWorkItems}
+            className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {busyAction === "claimWriteControl" ||
+            busyAction === "releaseWriteControl" ? (
+              <LoaderCircle size={14} className="animate-spin" />
+            ) : (
+              <Lock size={14} />
+            )}
+            {currentActorOwnsWriteControl ? "Release lock" : "Claim lock"}
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenFullChat}
+            disabled={!selectedAgent}
+            className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <MessageSquare size={14} />
+            Chat
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenStageControl}
+            disabled={!selectedCanTakeControl}
+            className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <MessageSquareText size={14} />
+            Take control
+          </button>
+
+          {selectedOpenWait?.type === "APPROVAL" ? (
+            <button
+              type="button"
+              onMouseDown={onApprovalReviewMouseDown}
+              onClick={onOpenApprovalReview}
+              className="enterprise-button enterprise-button-primary"
+            >
+              <ShieldCheck size={14} />
+              Approve
+            </button>
+          ) : null}
+
+          {selectedCanGuideBlockedAgent && !selectedOpenWait ? (
+            <button
+              type="button"
+              onClick={() =>
+                document
+                  .getElementById("orchestrator-guidance")
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }
+              className="enterprise-button enterprise-button-secondary"
+            >
+              <ArrowRight size={14} />
+              Guide agent ↓
+            </button>
+          ) : null}
+        </div>
       </div>
+      {/* ─────────────────────────────────────────────────────────────────── */}
+
+      {/* Direct agent chat — surfaced at the top for quick operator access */}
+      <ErrorBoundary
+        resetKey={`${selectedWorkItem.id}:${selectedAgent?.id || "none"}:${selectedCurrentStep?.id || "stage"}`}
+        title="Direct agent chat could not render"
+        description="The inline stage chat hit an unexpected UI problem. The rest of the workbench stays available, and you can still use Full Chat or Take control while we keep this route stable."
+      >
+        <div className="workspace-meta-card orchestrator-stage-chat-card">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="workspace-meta-label">Direct agent chat</p>
+              <p className="mt-2 text-sm leading-relaxed text-secondary">
+                {selectedAgent
+                  ? `Ask ${selectedAgent.name} what it's working on, clarify blockers, or steer the next attempt.`
+                  : "Chat with the stage agent to get more context or guide the next attempt."}
+              </p>
+            </div>
+          </div>
+
+          {!runtimeReady ? (
+            <p className="mt-4 text-sm leading-relaxed text-secondary">
+              Agent chat will unlock once the runtime connection is ready.
+            </p>
+          ) : !selectedAgent ? (
+            <p className="mt-4 text-sm leading-relaxed text-secondary">
+              This step does not have an assigned agent to chat with yet.
+            </p>
+          ) : (
+            <>
+              {stageChatSuggestedPrompts.length > 0 ? (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {stageChatSuggestedPrompts.map((prompt) => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      onClick={() => onSelectStageChatPrompt(prompt)}
+                      className="rounded-full border border-outline-variant/30 bg-surface-container-low px-3 py-1.5 text-xs font-medium text-secondary transition-colors hover:border-primary/20 hover:text-primary"
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+
+              <div
+                ref={stageChatThreadRef}
+                className="orchestrator-stage-chat-thread"
+                onScroll={onStageChatScroll}
+              >
+                {selectedStageChatMessages.length === 0 &&
+                !stageChatDraft &&
+                !isStageChatSending ? (
+                  <div className="orchestrator-stage-chat-empty">
+                    Ask <strong>{selectedAgent.name}</strong> what is happening
+                    in{" "}
+                    <strong>{selectedCurrentStep?.name || "this stage"}</strong>
+                    , what it needs, or which files and artifacts it plans to
+                    change.
+                  </div>
+                ) : (
+                  <>
+                    {selectedStageChatMessages.map((message) => (
+                      <motion.div
+                        key={message.id}
+                        initial={{ opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                        className={cn(
+                          "orchestrator-stage-chat-message",
+                          message.role === "user"
+                            ? "orchestrator-stage-chat-message-user"
+                            : "orchestrator-stage-chat-message-agent",
+                        )}
+                      >
+                        <div className="orchestrator-stage-chat-message-meta">
+                          <span className="inline-flex items-center gap-2">
+                            {message.role === "user" ? (
+                              <User size={14} />
+                            ) : (
+                              <Bot size={14} />
+                            )}
+                            {message.role === "user"
+                              ? "You"
+                              : selectedAgent.name}
+                          </span>
+                          <span>{message.timestamp}</span>
+                        </div>
+                        <CopilotMessageBody
+                          content={message.content}
+                          tone={message.role === "user" ? "user" : "agent"}
+                        />
+                        {message.deliveryState &&
+                        message.deliveryState !== "clean" ? (
+                          <p className="mt-2 text-xs text-secondary">
+                            {message.deliveryState === "recovered"
+                              ? "Recovered draft"
+                              : "Partial response"}
+                            {message.error ? ` · ${message.error}` : ""}
+                          </p>
+                        ) : null}
+                      </motion.div>
+                    ))}
+                    {stageChatDraft ? (
+                      <motion.div
+                        key="stage-chat-draft"
+                        initial={{ opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                        className="orchestrator-stage-chat-message orchestrator-stage-chat-message-agent"
+                      >
+                        <div className="orchestrator-stage-chat-message-meta">
+                          <span className="inline-flex items-center gap-2">
+                            <Bot size={14} />
+                            {selectedAgent.name}
+                          </span>
+                          <CopilotThinkingIndicator label="Typing" />
+                        </div>
+                        <CopilotMessageBody
+                          content={stageChatDraft}
+                          tone="draft"
+                          isStreaming
+                        />
+                      </motion.div>
+                    ) : isStageChatSending ? (
+                      <motion.div
+                        key="stage-chat-thinking"
+                        initial={{ opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                        className="orchestrator-stage-chat-message orchestrator-stage-chat-message-agent orchestrator-stage-chat-message-thinking"
+                      >
+                        <div className="orchestrator-stage-chat-message-meta">
+                          <span className="inline-flex items-center gap-2">
+                            <Bot size={14} />
+                            {selectedAgent.name}
+                          </span>
+                          <span>Just now</span>
+                        </div>
+                        <div className="mt-3">
+                          <CopilotThinkingIndicator label="Thinking" />
+                        </div>
+                      </motion.div>
+                    ) : null}
+                  </>
+                )}
+              </div>
+
+              {stageChatError ? (
+                <div className="mt-4 rounded-2xl border border-red-200/70 bg-red-50/70 px-4 py-3 text-sm text-red-900">
+                  {stageChatError}
+                </div>
+              ) : null}
+
+              <form onSubmit={onStageChatSend} className="mt-4 space-y-3">
+                <textarea
+                  value={stageChatInput}
+                  onChange={(event) =>
+                    onStageChatInputChange(event.target.value)
+                  }
+                  onKeyDown={(event) => {
+                    if (
+                      (event.metaKey || event.ctrlKey) &&
+                      event.key === "Enter"
+                    ) {
+                      event.preventDefault();
+                      event.currentTarget.closest("form")?.requestSubmit();
+                    }
+                  }}
+                  placeholder={`Ask ${selectedAgent.name} about this stage, blockers, files, artifacts, or next steps.`}
+                  className="field-textarea h-28 bg-white"
+                />
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-xs leading-relaxed text-secondary">
+                    Scoped to <strong>{selectedWorkItem.id}</strong> and{" "}
+                    <strong>
+                      {selectedCurrentStep?.name || "the active stage"}
+                    </strong>
+                    . <span className="opacity-60">⌘↵ to send.</span>
+                  </p>
+                  <button
+                    type="submit"
+                    disabled={
+                      !stageChatInput.trim() ||
+                      isStageChatSending ||
+                      !canWriteChat
+                    }
+                    title={
+                      !canWriteChat
+                        ? "Chat is read-only — take control to send messages."
+                        : undefined
+                    }
+                    className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {isStageChatSending ? (
+                      <RefreshCw size={16} className="animate-spin" />
+                    ) : (
+                      <Send size={16} />
+                    )}
+                    Send to agent
+                  </button>
+                </div>
+              </form>
+            </>
+          )}
+        </div>
+      </ErrorBoundary>
 
       <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
         <div className="workspace-meta-card">
@@ -1720,263 +1987,6 @@ export const OrchestratorOperatePanel = ({
           ) : null}
         </div>
       ) : null}
-
-      <div className="workspace-meta-card">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="workspace-meta-label">Direct stage control</p>
-            <p className="mt-2 text-sm leading-relaxed text-secondary">
-              Open a focused Codex-style work window for this stage, chat
-              directly with the assigned agent, and continue the workflow once
-              you are satisfied with the stage guidance or output direction.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onOpenStageControl}
-            disabled={!selectedCanTakeControl}
-            className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <MessageSquareText size={16} />
-            Take control
-          </button>
-        </div>
-        {!selectedAgent ? (
-          <p className="mt-3 text-xs text-secondary">
-            This work item does not currently have a resolved stage agent to
-            chat with.
-          </p>
-        ) : (
-          <p className="mt-3 text-xs text-secondary">
-            Direct control will stay scoped to{" "}
-            <strong>{selectedAgent.name}</strong> and the current work item
-            stage.
-          </p>
-        )}
-      </div>
-
-      <ErrorBoundary
-        resetKey={`${selectedWorkItem.id}:${selectedAgent?.id || "none"}:${selectedCurrentStep?.id || "stage"}`}
-        title="Direct agent chat could not render"
-        description="The inline stage chat hit an unexpected UI problem. The rest of the workbench stays available, and you can still use Full Chat or Take control while we keep this route stable."
-      >
-        <div className="workspace-meta-card orchestrator-stage-chat-card">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="workspace-meta-label">Direct agent chat</p>
-              <p className="mt-2 text-sm leading-relaxed text-secondary">
-                Work with the current stage agent right here, ask what it plans
-                to do, clarify blockers, or steer the next attempt before you
-                continue.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={onOpenFullChat}
-                disabled={!selectedAgent}
-                className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                Full Chat
-              </button>
-              <button
-                type="button"
-                onClick={onOpenStageControl}
-                disabled={!selectedCanTakeControl}
-                className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                Take control
-              </button>
-            </div>
-          </div>
-
-          {!runtimeReady ? (
-            <p className="mt-4 text-sm leading-relaxed text-secondary">
-              Agent chat will unlock once the runtime connection is ready.
-            </p>
-          ) : !selectedAgent ? (
-            <p className="mt-4 text-sm leading-relaxed text-secondary">
-              This step does not have an assigned agent to chat with yet.
-            </p>
-          ) : (
-            <>
-              {stageChatSuggestedPrompts.length > 0 ? (
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {stageChatSuggestedPrompts.map((prompt) => (
-                    <button
-                      key={prompt}
-                      type="button"
-                      onClick={() => onSelectStageChatPrompt(prompt)}
-                      className="rounded-full border border-outline-variant/30 bg-surface-container-low px-3 py-1.5 text-xs font-medium text-secondary transition-colors hover:border-primary/20 hover:text-primary"
-                    >
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-
-              <div
-                ref={stageChatThreadRef}
-                className="orchestrator-stage-chat-thread"
-                onScroll={onStageChatScroll}
-              >
-                {selectedStageChatMessages.length === 0 &&
-                !stageChatDraft &&
-                !isStageChatSending ? (
-                  <div className="orchestrator-stage-chat-empty">
-                    Ask <strong>{selectedAgent.name}</strong> what is happening
-                    in{" "}
-                    <strong>{selectedCurrentStep?.name || "this stage"}</strong>
-                    , what it needs, or which files and artifacts it plans to
-                    change.
-                  </div>
-                ) : (
-                  <>
-                    {selectedStageChatMessages.map((message) => (
-                      <motion.div
-                        key={message.id}
-                        initial={{ opacity: 0, y: 6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                        className={cn(
-                          "orchestrator-stage-chat-message",
-                          message.role === "user"
-                            ? "orchestrator-stage-chat-message-user"
-                            : "orchestrator-stage-chat-message-agent",
-                        )}
-                      >
-                        <div className="orchestrator-stage-chat-message-meta">
-                          <span className="inline-flex items-center gap-2">
-                            {message.role === "user" ? (
-                              <User size={14} />
-                            ) : (
-                              <Bot size={14} />
-                            )}
-                            {message.role === "user"
-                              ? "You"
-                              : selectedAgent.name}
-                          </span>
-                          <span>{message.timestamp}</span>
-                        </div>
-                        <CopilotMessageBody
-                          content={message.content}
-                          tone={message.role === "user" ? "user" : "agent"}
-                        />
-                        {message.deliveryState &&
-                        message.deliveryState !== "clean" ? (
-                          <p className="mt-2 text-xs text-secondary">
-                            {message.deliveryState === "recovered"
-                              ? "Recovered draft"
-                              : "Partial response"}
-                            {message.error ? ` · ${message.error}` : ""}
-                          </p>
-                        ) : null}
-                      </motion.div>
-                    ))}
-                    {stageChatDraft ? (
-                      <motion.div
-                        key="stage-chat-draft"
-                        initial={{ opacity: 0, y: 6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                        className="orchestrator-stage-chat-message orchestrator-stage-chat-message-agent"
-                      >
-                        <div className="orchestrator-stage-chat-message-meta">
-                          <span className="inline-flex items-center gap-2">
-                            <Bot size={14} />
-                            {selectedAgent.name}
-                          </span>
-                          <CopilotThinkingIndicator label="Typing" />
-                        </div>
-                        <CopilotMessageBody
-                          content={stageChatDraft}
-                          tone="draft"
-                          isStreaming
-                        />
-                      </motion.div>
-                    ) : isStageChatSending ? (
-                      <motion.div
-                        key="stage-chat-thinking"
-                        initial={{ opacity: 0, y: 6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                        className="orchestrator-stage-chat-message orchestrator-stage-chat-message-agent orchestrator-stage-chat-message-thinking"
-                      >
-                        <div className="orchestrator-stage-chat-message-meta">
-                          <span className="inline-flex items-center gap-2">
-                            <Bot size={14} />
-                            {selectedAgent.name}
-                          </span>
-                          <span>Just now</span>
-                        </div>
-                        <div className="mt-3">
-                          <CopilotThinkingIndicator label="Thinking" />
-                        </div>
-                      </motion.div>
-                    ) : null}
-                  </>
-                )}
-              </div>
-
-              {stageChatError ? (
-                <div className="mt-4 rounded-2xl border border-red-200/70 bg-red-50/70 px-4 py-3 text-sm text-red-900">
-                  {stageChatError}
-                </div>
-              ) : null}
-
-              <form onSubmit={onStageChatSend} className="mt-4 space-y-3">
-                <textarea
-                  value={stageChatInput}
-                  onChange={(event) =>
-                    onStageChatInputChange(event.target.value)
-                  }
-                  onKeyDown={(event) => {
-                    if (
-                      (event.metaKey || event.ctrlKey) &&
-                      event.key === "Enter"
-                    ) {
-                      event.preventDefault();
-                      event.currentTarget.closest("form")?.requestSubmit();
-                    }
-                  }}
-                  placeholder={`Ask ${selectedAgent.name} about this stage, blockers, files, artifacts, or next steps.`}
-                  className="field-textarea h-28 bg-white"
-                />
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <p className="text-xs leading-relaxed text-secondary">
-                    Scoped to <strong>{selectedWorkItem.id}</strong> and{" "}
-                    <strong>
-                      {selectedCurrentStep?.name || "the active stage"}
-                    </strong>
-                    . <span className="opacity-60">⌘↵ to send.</span>
-                  </p>
-                  <button
-                    type="submit"
-                    disabled={
-                      !stageChatInput.trim() ||
-                      isStageChatSending ||
-                      !canWriteChat
-                    }
-                    title={
-                      !canWriteChat
-                        ? "Chat is read-only — take control to send messages."
-                        : undefined
-                    }
-                    className="enterprise-button enterprise-button-primary disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {isStageChatSending ? (
-                      <RefreshCw size={16} className="animate-spin" />
-                    ) : (
-                      <Send size={16} />
-                    )}
-                    Send to agent
-                  </button>
-                </div>
-              </form>
-            </>
-          )}
-        </div>
-      </ErrorBoundary>
 
       <div className="workspace-meta-card">
         <p className="workspace-meta-label">Reset target</p>

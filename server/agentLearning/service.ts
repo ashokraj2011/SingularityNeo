@@ -10,7 +10,7 @@ import type {
   LearningUpdate,
   Skill,
 } from '../../src/types';
-import { requestGitHubModel } from '../githubModels';
+import { requestGitHubModel, resolveModelForProvider } from '../githubModels';
 import {
   getCapabilityMemoryCorpus,
   listMemoryDocuments,
@@ -674,9 +674,10 @@ const summarizeAgentLearning = async ({
     )
     .join('\n\n');
 
+  const learningProviderKey = resolveAgentProviderKey(agent);
   const response = await requestGitHubModel({
-    model: agent.model,
-    providerKey: resolveAgentProviderKey(agent),
+    model: resolveModelForProvider(learningProviderKey, agent.model),
+    providerKey: learningProviderKey,
     timeoutMs: LEARNING_SUMMARY_TIMEOUT_MS,
     messages: [
       {
@@ -734,9 +735,10 @@ const summarizeExperienceDistillation = async ({
   request: LearningReflectionRequest;
   tracePayload: string;
 }): Promise<ExperienceDistillationResult> => {
+  const reflectionProviderKey = resolveAgentProviderKey(agent);
   const response = await requestGitHubModel({
-    model: agent.model,
-    providerKey: resolveAgentProviderKey(agent),
+    model: resolveModelForProvider(reflectionProviderKey, agent.model),
+    providerKey: reflectionProviderKey,
     timeoutMs: LEARNING_SUMMARY_TIMEOUT_MS,
     messages: [
       {

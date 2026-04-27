@@ -6,6 +6,7 @@ import type {
   AgentSessionScope,
   AgentSessionSummary,
   OperatingPolicySnapshot,
+  PersistedPromptReceipt,
 } from '../../src/types';
 import { query, transaction } from '../db';
 
@@ -1671,4 +1672,61 @@ export const bootstrapAgentEvalFixturesFromMessages = async ({
     }
   }
   return inserted;
+};
+
+// ─── Prompt receipts (for Agent Mind) ────────────────────────────────────────
+
+const mapReceiptRow = (row: Record<string, any>): PersistedPromptReceipt => ({
+  id: String(row.id ?? ''),
+  runStepId: String(row.run_step_id ?? ''),
+  runId: row.run_id == null ? null : String(row.run_id),
+  workItemId: row.work_item_id == null ? null : String(row.work_item_id),
+  capabilityId: String(row.capability_id ?? ''),
+  agentId: row.agent_id == null ? null : String(row.agent_id),
+  agentSnapshot:
+    row.agent_snapshot && typeof row.agent_snapshot === 'object'
+      ? row.agent_snapshot
+      : {},
+  scope: String(row.scope ?? 'TASK') as PersistedPromptReceipt['scope'],
+  scopeId: row.scope_id == null ? null : String(row.scope_id),
+  phase: row.phase == null ? null : String(row.phase),
+  model: row.model == null ? null : String(row.model),
+  providerKey: row.provider_key == null ? null : String(row.provider_key),
+  userPrompt: String(row.user_prompt ?? ''),
+  memoryPrompt: row.memory_prompt == null ? null : String(row.memory_prompt),
+  developerPrompt: row.developer_prompt == null ? null : String(row.developer_prompt),
+  responseContent: String(row.response_content ?? ''),
+  responseUsage:
+    row.response_usage && typeof row.response_usage === 'object'
+      ? (row.response_usage as Record<string, unknown>)
+      : null,
+  fragments: Array.isArray(row.fragments) ? row.fragments : [],
+  evicted: Array.isArray(row.evicted) ? row.evicted : [],
+  totalEstimatedTokens: Number(row.total_estimated_tokens ?? 0),
+  maxInputTokens: Number(row.max_input_tokens ?? 0),
+  reservedOutputTokens: Number(row.reserved_output_tokens ?? 0),
+  createdAt:
+    row.created_at instanceof Date
+      ? row.created_at.toISOString()
+      : String(row.created_at ?? ''),
+});
+
+/**
+ * Fetch the most recent prompt receipts for a specific agent, ordered
+ * newest-first. Used by the Agent Mind "Reasoning" tab to show which context
+ * fragments entered the model's prompt and why.
+ */
+export const listRecentPromptReceiptsForAgent = async (
+  capabilityId: string,
+  agentId: string,
+  limit = 10,
+): Promise<PersistedPromptReceipt[]> => {
+  const result = await query<Record<string, unknown>>(
+    `SELECT * FROM run_step_prompt_receipts
+     WHERE capability_id = $1 AND agent_id = $2
+     ORDER BY created_at DESC
+     LIMIT $3`,
+    [capabilityId, agentId, Math.min(limit, 50)],
+  );
+  return result.rows.map(row => mapReceiptRow(row as Record<string, any>));
 };

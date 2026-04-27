@@ -54,6 +54,7 @@ const Sentinel = lazy(() => import('./pages/Sentinel'));
 const AstExplorer = lazy(() => import('./pages/AstExplorer'));
 const CodeGraph = lazy(() => import('./pages/CodeGraph'));
 const WorldModel = lazy(() => import('./pages/WorldModel'));
+const AgentMind = lazy(() => import('./pages/AgentMind'));
 
 const RouteLoader = () => (
   <div className="section-card ambient-shadow min-h-[calc(100vh-12rem)] p-8">
@@ -153,6 +154,7 @@ export default function App() {
                   <Route path="/ast-explorer" element={<AstExplorer />} />
                   <Route path="/code-graph" element={<CodeGraph />} />
                   <Route path="/world-model" element={<WorldModel />} />
+                  <Route path="/team/mind" element={<AgentMind />} />
                   <Route path="*" element={<Orchestrator />} />
                 </Routes>
               </Suspense>

@@ -573,9 +573,11 @@
   }
 
   .orchestrator-list-top-grid {
-    /* items-stretch: both panels expand to the same row height so their
-       top AND bottom edges always align — no more mismatched card heights. */
-    @apply grid items-stretch gap-4 xl:grid-cols-[22rem_minmax(0,1fr)];
+    /* items-start: left column (inbox + copilot dock stacked) and right column
+       (work detail) both anchor to the top so neither is force-stretched to
+       the other's height — the copilot dock would otherwise inflate to match
+       the work panel height. */
+    @apply grid items-start gap-4 xl:grid-cols-[22rem_minmax(0,1fr)];
   }
 
   .orchestrator-list-inbox-panel {
@@ -993,7 +995,10 @@
     @apply mt-0 min-h-0 flex-1 overflow-y-auto pr-1;
     /* Override the dark Operate-tab thread look with a soft, Claude-style surface */
     background: linear-gradient(180deg, rgba(250, 251, 255, 0.97), rgba(240, 243, 250, 0.95));
-    max-height: none;
+    /* Cap thread height so the conversation scrolls rather than pushing the
+       composer off-screen. The clamp keeps a readable minimum on small
+       viewports while not consuming the whole dock on tall ones. */
+    max-height: clamp(18rem, 48vh, 38rem);
     /* `auto` (not `contain`) so wheel events chain to the page when the
        thread is at its top/bottom boundary — lets users scroll the whole
        page from over the copilot dock. */
@@ -1058,11 +1063,13 @@
   }
 
   .orchestrator-copilot-dock-body {
-    /* No overflow-hidden here — the shell already clips rounded corners,
-       and the inner thread/status each manage their own scroll. Keeping this
-       container free of a scroll box lets wheel events bubble through to the
-       page when the thread is at a boundary. */
-    @apply flex min-h-0 flex-1 flex-col gap-4 px-5 py-4;
+    /* overflow: hidden clips content that exceeds max-height without creating
+       a scroll container — so wheel events over the thread/status still bubble
+       normally to the page (only overflow:auto/scroll would capture them).
+       This is the necessary complement to the thread's own overflow-y:auto:
+       without a clipping ancestor, flex-1 children can't compute a bounded
+       height and the thread grows to show all messages without scrolling. */
+    @apply flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-5 py-4;
     min-height: clamp(26rem, 56vh, 46rem);
     max-height: calc(100vh - 15rem);
   }

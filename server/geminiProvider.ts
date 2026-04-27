@@ -104,10 +104,16 @@ export const requestGeminiModel = async ({
     );
   }
 
+  let resolvedModel = model || getGeminiDefaultModel();
+  const isGeminiFamily = /gemini|gemma|veo|imagen|lyria/i.test(resolvedModel);
+  if (!isGeminiFamily) {
+    resolvedModel = getGeminiDefaultModel();
+  }
+
   return requestOpenAICompatModel({
     baseUrl:       getGeminiBaseUrl(),
     apiKey:        getGeminiApiKey(),
-    model:         model || getGeminiDefaultModel(),
+    model:         resolvedModel,
     messages,
     timeoutMs,
     tools,
@@ -148,11 +154,17 @@ export const validateGeminiProvider = async ({
     throw new Error('A Gemini API key is required. Get one at https://aistudio.google.com/app/apikey');
   }
 
+  let resolvedModel = model || getGeminiDefaultModel();
+  const isGeminiFamily = /gemini|gemma|veo|imagen|lyria/i.test(resolvedModel);
+  if (!isGeminiFamily) {
+    resolvedModel = getGeminiDefaultModel();
+  }
+
   // Probe with a tiny completion request
   await requestOpenAICompatModel({
     baseUrl:       getGeminiBaseUrl(),
     apiKey:        resolvedKey,
-    model:         model || getGeminiDefaultModel(),
+    model:         resolvedModel,
     messages:      [{ role: 'user', content: 'hi' }],
     timeoutMs,
     providerLabel: 'Google Gemini',

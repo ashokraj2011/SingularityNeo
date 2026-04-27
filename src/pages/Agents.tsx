@@ -1297,13 +1297,47 @@ export default function Agents() {
                     What this collaborator currently knows about the capability.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setDetailTab('learning')}
-                  className="enterprise-button enterprise-button-secondary"
-                >
-                  View learning
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDetailTab('learning')}
+                    className="enterprise-button enterprise-button-secondary"
+                  >
+                    View learning
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigate(
+                        `/team/mind?agentId=${encodeURIComponent(selectedAgent.id)}`,
+                      )
+                    }
+                    className="enterprise-button enterprise-button-primary flex items-center gap-2"
+                  >
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
+                      <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
+                      <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4" />
+                      <path d="M17.599 6.5a3 3 0 0 0 .399-1.375" />
+                      <path d="M6.003 5.125A3 3 0 0 0 6.401 6.5" />
+                      <path d="M3.477 10.896a4 4 0 0 1 .585-.396" />
+                      <path d="M19.938 10.5a4 4 0 0 1 .585.396" />
+                      <path d="M6 18a4 4 0 0 1-1.967-.516" />
+                      <path d="M19.967 17.484A4 4 0 0 1 18 18" />
+                    </svg>
+                    Open Mind
+                  </button>
+                </div>
               </div>
               <p className="mt-4 text-sm leading-7 text-secondary">
                 {getLearningSummaryText(selectedAgent)}
