@@ -57,6 +57,7 @@ import {
   setDefaultRuntimeProviderKey,
 } from './runtimeProviderConfig';
 import { listCliProviderModels, validateCliRuntimeProvider } from './runtimeCli';
+import { setDefaultLLMProviderKey } from './llmProviderConfig';
 
 type RuntimeProviderDefinition = {
   key: ProviderKey;
@@ -476,6 +477,11 @@ export const saveConfiguredRuntimeProvider = async ({
     config,
     setDefault,
   });
+  // Keep the LLM config file in sync so getConfiguredDefaultRuntimeProviderKey()
+  // always reflects the latest selection regardless of which file it reads first.
+  if (setDefault) {
+    await setDefaultLLMProviderKey({ providerKey }).catch(() => undefined);
+  }
   return getConfiguredRuntimeProviderStatus(providerKey);
 };
 
@@ -485,6 +491,10 @@ export const selectDefaultRuntimeProvider = async ({
   providerKey?: ProviderKey;
 }) => {
   await setDefaultRuntimeProviderKey({ providerKey });
+  // Sync the LLM config default too so both files stay consistent.
+  if (providerKey) {
+    await setDefaultLLMProviderKey({ providerKey }).catch(() => undefined);
+  }
   return listRuntimeProviderStatuses();
 };
 

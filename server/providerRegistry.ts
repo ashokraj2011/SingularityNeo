@@ -38,13 +38,15 @@ export const isCliRuntimeProviderKey = (providerKey?: string | null): providerKe
 /**
  * Single source of truth for "which provider should I use when nothing else
  * is specified?". Priority:
- *   1. `.llm-providers.local.json::defaultProviderKey` — the value set by the
- *      user in the Runtime Settings UI. ALWAYS wins when present so toggling
- *      the default in the UI takes effect everywhere (chat, work-item
- *      execution, swarm debate, embeddings) without any restart.
- *   2. `.runtime-providers.local.json::defaultProviderKey` — legacy CLI store
- *      written by the older runtime providers screen.
- *   3. `DEFAULT_PROVIDER_KEY` ('github-copilot') — hard fallback so the app
+ *   1. `.runtime-providers.local.json::defaultProviderKey` when it is a CLI
+ *      provider — the Operations page explicitly set a desktop CLI as the
+ *      active runtime, which must win over any HTTP provider default.
+ *   2. `.llm-providers.local.json::defaultProviderKey` — the value set by the
+ *      user in the Runtime Settings UI for HTTP providers (OpenRouter, Gemini,
+ *      local-openai).  Toggling here takes effect everywhere without restart.
+ *   3. `.runtime-providers.local.json::defaultProviderKey` for non-CLI keys
+ *      (legacy path kept for back-compat).
+ *   4. `DEFAULT_PROVIDER_KEY` ('github-copilot') — hard fallback so the app
  *      never throws on a missing config file.
  *
  * `resolveAgentProviderKey()` and `normalizeProviderKey()` both fall back
@@ -53,6 +55,15 @@ export const isCliRuntimeProviderKey = (providerKey?: string | null): providerKe
  * work-item execution. Adding a new code path? Funnel it through here.
  */
 export const getConfiguredDefaultRuntimeProviderKey = (): ProviderKey => {
+  // CLI selection always beats the HTTP-provider LLM config. When the user
+  // visits the Operations page and picks "Claude Code CLI" as the desktop
+  // default, that write goes to .runtime-providers.local.json.  Without this
+  // check the LLM config value would silently shadow the CLI selection.
+  const runtimeDefault = getConfiguredDefaultRuntimeProviderKeySync();
+  if (runtimeDefault && isCliRuntimeProviderKey(runtimeDefault)) {
+    return runtimeDefault;
+  }
+
   try {
     const llmDefault = getDefaultLLMProviderKey();
     if (llmDefault) {
@@ -61,7 +72,8 @@ export const getConfiguredDefaultRuntimeProviderKey = (): ProviderKey => {
   } catch {
     // Fall through to runtime-providers config / hardcoded default.
   }
-  return getConfiguredDefaultRuntimeProviderKeySync() || DEFAULT_PROVIDER_KEY;
+
+  return runtimeDefault || DEFAULT_PROVIDER_KEY;
 };
 
 export const normalizeProviderKey = (value?: string | null): ProviderKey => {

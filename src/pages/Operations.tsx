@@ -832,7 +832,10 @@ const Operations = () => {
       const nextDrafts = { ...current };
       for (const provider of runtimeProviders) {
         nextDrafts[provider.key] = {
-          command: provider.config?.command || provider.command || nextDrafts[provider.key]?.command || "",
+          command: provider.config?.command || provider.command || nextDrafts[provider.key]?.command ||
+            (provider.key === 'claude-code-cli' ? 'claude' :
+             provider.key === 'codex-cli' ? 'codex' :
+             provider.key === 'aider-cli' ? 'aider' : ""),
           model: provider.config?.model || provider.model || nextDrafts[provider.key]?.model || "",
           profile: provider.config?.profile || nextDrafts[provider.key]?.profile || "",
           workingMode:
