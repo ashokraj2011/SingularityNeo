@@ -27,6 +27,21 @@ const trimString = (value: unknown) => {
   return normalized || undefined;
 };
 
+/**
+ * Strip common endpoint path suffixes that users inadvertently paste as the
+ * base URL (e.g. "https://openrouter.ai/api/v1/chat/completions").
+ * The HTTP provider code always appends "/chat/completions" itself, so keeping
+ * the full path here doubles it up and produces a 404.
+ */
+const sanitizeBaseUrl = (value: unknown): string | undefined => {
+  const raw = String(value || '').trim();
+  if (!raw) return undefined;
+  return raw
+    .replace(/\/chat\/completions\/?$/, '')
+    .replace(/\/v1\/chat\/completions\/?$/, '/v1')
+    .replace(/\/+$/, '') || undefined;
+};
+
 const sanitizeLLMProviderConfig = (value: unknown): LLMProviderConfig | undefined => {
   if (!isRecord(value)) {
     return undefined;
@@ -34,7 +49,7 @@ const sanitizeLLMProviderConfig = (value: unknown): LLMProviderConfig | undefine
 
   const nextConfig: LLMProviderConfig = {
     label: trimString(value.label),
-    baseUrl: trimString(value.baseUrl),
+    baseUrl: sanitizeBaseUrl(value.baseUrl),
     apiKey: trimString(value.apiKey),
     defaultModel: trimString(value.defaultModel),
     updatedAt: trimString(value.updatedAt),

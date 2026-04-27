@@ -273,6 +273,9 @@ export const RuntimeSettings = () => {
                   {'  ·  LiteLLM → '}
                   <code className="rounded bg-surface-container px-1 text-xs">http://localhost:8000</code>
                 </p>
+                <p className={cn(hintCls, 'mt-1 text-amber-700')}>
+                  ⚠ Do not include <code className="rounded bg-surface-container px-1 text-xs">/chat/completions</code> — it is appended automatically.
+                </p>
               </div>
 
               <div>
@@ -379,6 +382,9 @@ export const RuntimeSettings = () => {
                   <code className="rounded bg-surface-container px-1 text-xs">http://localhost:11434/v1</code>
                   {'  ·  LM Studio → '}
                   <code className="rounded bg-surface-container px-1 text-xs">http://localhost:1234/v1</code>
+                </p>
+                <p className={cn(hintCls, 'mt-1 text-amber-700')}>
+                  ⚠ Do not include <code className="rounded bg-surface-container px-1 text-xs">/chat/completions</code> — it is appended automatically.
                 </p>
               </div>
 
