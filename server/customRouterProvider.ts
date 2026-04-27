@@ -9,15 +9,15 @@
  *   • Groq         (https://api.groq.com/openai/v1)
  *   • Anyscale, Perplexity, Fireworks, … any OpenAI-compat endpoint
  *
- * Configuration — two ways:
+ * Configuration priority:
  *
- *  1. Environment variables (simple, works out of the box):
+ *  1. .llm-providers.local.json (custom-router section) if saved via UI
+ *  2. Environment variables:
  *       CUSTOM_ROUTER_BASE_URL          required
  *       CUSTOM_ROUTER_API_KEY           optional (default: "none")
  *       CUSTOM_ROUTER_DEFAULT_MODEL     optional
  *       CUSTOM_ROUTER_LABEL             optional display name
- *
- *  2. Runtime config (stored in .runtime-providers.local.json via Settings UI):
+ *  3. Runtime config parameter (for programmatic use):
  *       cliUrl  → treated as base URL
  *       model   → default model
  *       env.CUSTOM_ROUTER_API_KEY → API key
@@ -33,36 +33,69 @@ import {
   type ProviderToolChoice,
 } from './localOpenAIProvider';
 import type { RuntimeProviderConfig } from '../src/types';
+import { getLLMProviderConfig } from './llmProviderConfig';
 
 // ─── Config helpers ───────────────────────────────────────────────────────────
 
-export const getCustomRouterBaseUrl = (config?: RuntimeProviderConfig | null): string =>
-  String(
+export const getCustomRouterBaseUrl = (config?: RuntimeProviderConfig | null): string => {
+  // Check LLM config file first (for UI-managed settings)
+  const llmConfig = getLLMProviderConfig('custom-router');
+  if (llmConfig?.baseUrl) {
+    return llmConfig.baseUrl.trim().replace(/\/+$/, '');
+  }
+
+  // Fall back to runtime config parameter, then env vars
+  return String(
     config?.cliUrl ||
     process.env.CUSTOM_ROUTER_BASE_URL ||
     '',
   ).trim().replace(/\/+$/, '');
+};
 
-export const getCustomRouterApiKey = (config?: RuntimeProviderConfig | null): string =>
-  String(
+export const getCustomRouterApiKey = (config?: RuntimeProviderConfig | null): string => {
+  // Check LLM config file first (for UI-managed settings)
+  const llmConfig = getLLMProviderConfig('custom-router');
+  if (llmConfig?.apiKey) {
+    return llmConfig.apiKey.trim();
+  }
+
+  // Fall back to runtime config parameter, then env vars
+  return String(
     config?.env?.['CUSTOM_ROUTER_API_KEY'] ||
     process.env.CUSTOM_ROUTER_API_KEY ||
     'none',
   ).trim();
+};
 
-export const getCustomRouterDefaultModel = (config?: RuntimeProviderConfig | null): string =>
-  String(
+export const getCustomRouterDefaultModel = (config?: RuntimeProviderConfig | null): string => {
+  // Check LLM config file first (for UI-managed settings)
+  const llmConfig = getLLMProviderConfig('custom-router');
+  if (llmConfig?.defaultModel) {
+    return llmConfig.defaultModel.trim();
+  }
+
+  // Fall back to runtime config parameter, then env vars
+  return String(
     config?.model ||
     process.env.CUSTOM_ROUTER_DEFAULT_MODEL ||
     '',
   ).trim();
+};
 
-export const getCustomRouterLabel = (config?: RuntimeProviderConfig | null): string =>
-  String(
+export const getCustomRouterLabel = (config?: RuntimeProviderConfig | null): string => {
+  // Check LLM config file first (for UI-managed settings)
+  const llmConfig = getLLMProviderConfig('custom-router');
+  if (llmConfig?.label) {
+    return llmConfig.label.trim();
+  }
+
+  // Fall back to runtime config parameter, then env vars
+  return String(
     config?.env?.['CUSTOM_ROUTER_LABEL'] ||
     process.env.CUSTOM_ROUTER_LABEL ||
     'Custom Router',
   ).trim();
+};
 
 export const isCustomRouterConfigured = (config?: RuntimeProviderConfig | null): boolean =>
   Boolean(getCustomRouterBaseUrl(config));

@@ -9,10 +9,12 @@
  *
  * No extra SDK needed — the same fetch-based core as local-openai.
  *
- * Environment variables:
- *   GEMINI_API_KEY          — required (or GOOGLE_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY)
- *   GEMINI_DEFAULT_MODEL    — optional, defaults to gemini-2.0-flash
- *   GEMINI_BASE_URL         — optional override (e.g. for Vertex AI proxy)
+ * Configuration priority:
+ *   1. .llm-providers.local.json (gemini section) if saved via UI
+ *   2. Environment variables:
+ *      - GEMINI_API_KEY (or GOOGLE_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY)
+ *      - GEMINI_DEFAULT_MODEL (defaults to gemini-2.0-flash)
+ *      - GEMINI_BASE_URL (optional override, e.g. for Vertex AI proxy)
  */
 
 import {
@@ -23,27 +25,52 @@ import {
   type ProviderTool,
   type ProviderToolChoice,
 } from './localOpenAIProvider';
+import { getLLMProviderConfig } from './llmProviderConfig';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export const GEMINI_DEFAULT_BASE_URL =
   'https://generativelanguage.googleapis.com/v1beta/openai';
 
-export const getGeminiApiKey = (): string =>
-  String(
+export const getGeminiApiKey = (): string => {
+  // Check config file first (for UI-managed settings)
+  const config = getLLMProviderConfig('gemini');
+  if (config?.apiKey) {
+    return config.apiKey;
+  }
+
+  // Fall back to environment variables
+  return String(
     process.env.GEMINI_API_KEY ||
     process.env.GOOGLE_API_KEY ||
     process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
     '',
   ).trim();
+};
 
-export const getGeminiBaseUrl = (): string =>
-  String(process.env.GEMINI_BASE_URL || GEMINI_DEFAULT_BASE_URL)
+export const getGeminiBaseUrl = (): string => {
+  // Check config file first (for UI-managed settings)
+  const config = getLLMProviderConfig('gemini');
+  if (config?.baseUrl) {
+    return config.baseUrl.trim().replace(/\/+$/, '');
+  }
+
+  // Fall back to environment variables
+  return String(process.env.GEMINI_BASE_URL || GEMINI_DEFAULT_BASE_URL)
     .trim()
     .replace(/\/+$/, '');
+};
 
-export const getGeminiDefaultModel = (): string =>
-  String(process.env.GEMINI_DEFAULT_MODEL || 'gemini-2.0-flash').trim();
+export const getGeminiDefaultModel = (): string => {
+  // Check config file first (for UI-managed settings)
+  const config = getLLMProviderConfig('gemini');
+  if (config?.defaultModel) {
+    return config.defaultModel.trim();
+  }
+
+  // Fall back to environment variables
+  return String(process.env.GEMINI_DEFAULT_MODEL || 'gemini-2.0-flash').trim();
+};
 
 export const isGeminiConfigured = (): boolean => Boolean(getGeminiApiKey());
 

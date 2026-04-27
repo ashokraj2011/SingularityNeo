@@ -5,6 +5,7 @@ import {
   LOCAL_OPENAI_PROVIDER_KEY,
   resolveProviderDisplayName,
 } from './providerRegistry';
+import { getLLMProviderConfig } from './llmProviderConfig';
 
 export type ProviderMessage = {
   role: 'developer' | 'system' | 'user' | 'assistant';
@@ -26,14 +27,38 @@ export type ProviderCompletion = {
   createdAt: string;
 };
 
-export const getLocalOpenAIBaseUrl = () =>
-  String(process.env.LOCAL_OPENAI_BASE_URL || process.env.OPENAI_COMPAT_BASE_URL || '').trim().replace(/\/+$/, '');
+export const getLocalOpenAIBaseUrl = () => {
+  // Check LLM config file first (for UI-managed settings)
+  const config = getLLMProviderConfig('local-openai');
+  if (config?.baseUrl) {
+    return config.baseUrl.trim().replace(/\/+$/, '');
+  }
 
-const LOCAL_OPENAI_API_KEY = () =>
-  String(process.env.LOCAL_OPENAI_API_KEY || process.env.OPENAI_COMPAT_API_KEY || 'local').trim();
+  // Fall back to environment variables
+  return String(process.env.LOCAL_OPENAI_BASE_URL || process.env.OPENAI_COMPAT_BASE_URL || '').trim().replace(/\/+$/, '');
+};
 
-export const getLocalOpenAIDefaultModel = () =>
-  String(process.env.LOCAL_OPENAI_DEFAULT_MODEL || process.env.OPENAI_COMPAT_MODEL || 'gpt-4.1-mini').trim();
+const LOCAL_OPENAI_API_KEY = () => {
+  // Check LLM config file first (for UI-managed settings)
+  const config = getLLMProviderConfig('local-openai');
+  if (config?.apiKey) {
+    return config.apiKey.trim();
+  }
+
+  // Fall back to environment variables
+  return String(process.env.LOCAL_OPENAI_API_KEY || process.env.OPENAI_COMPAT_API_KEY || 'local').trim();
+};
+
+export const getLocalOpenAIDefaultModel = () => {
+  // Check LLM config file first (for UI-managed settings)
+  const config = getLLMProviderConfig('local-openai');
+  if (config?.defaultModel) {
+    return config.defaultModel.trim();
+  }
+
+  // Fall back to environment variables
+  return String(process.env.LOCAL_OPENAI_DEFAULT_MODEL || process.env.OPENAI_COMPAT_MODEL || 'gpt-4.1-mini').trim();
+};
 
 export const getLocalOpenAIEmbeddingModel = () =>
   String(process.env.LOCAL_OPENAI_EMBEDDING_MODEL || process.env.OPENAI_COMPAT_EMBEDDING_MODEL || 'text-embedding-3-small').trim();
