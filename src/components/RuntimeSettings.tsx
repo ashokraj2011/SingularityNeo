@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { AlertCircle, Check, Loader2, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { resolveApiUrl } from '../lib/desktop';
 
 type ProviderStatus = {
   key: string;
@@ -39,7 +40,7 @@ export const RuntimeSettings = () => {
     setIsLoading(true);
     setLoadError(null);
     try {
-      const res = await fetch('/api/runtime-settings');
+      const res = await fetch(resolveApiUrl('/api/runtime-settings'));
       if (!res.ok) {
         const body = await res.json().catch(() => ({})) as { error?: string };
         setLoadError({ kind: 'api', text: body.error ?? `HTTP ${res.status}` });
@@ -63,7 +64,7 @@ export const RuntimeSettings = () => {
       }
     } catch (err) {
       // Distinguish: is the whole server down, or just this endpoint missing?
-      const serverAlive = await fetch('/api/health')
+      const serverAlive = await fetch(resolveApiUrl('/api/health'))
         .then(r => r.ok || r.status < 500)
         .catch(() => false);
       setLoadError({ kind: serverAlive ? 'route-missing' : 'network' });
@@ -79,7 +80,7 @@ export const RuntimeSettings = () => {
     setIsSaving(true);
     setMessage(null);
     try {
-      const res = await fetch('/api/runtime-settings/provider', {
+      const res = await fetch(resolveApiUrl('/api/runtime-settings/provider'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ providerKey, config, setDefault: defaultProvider === providerKey }),
@@ -103,7 +104,7 @@ export const RuntimeSettings = () => {
   const handleSetDefault = async (providerKey: string) => {
     setMessage(null);
     try {
-      const res = await fetch('/api/runtime-settings/default', {
+      const res = await fetch(resolveApiUrl('/api/runtime-settings/default'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ providerKey }),
