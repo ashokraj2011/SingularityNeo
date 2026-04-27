@@ -120,7 +120,8 @@ export type AdvancedToolId =
   | 'blast-radius'
   | 'ast-explorer'
   | 'code-graph'
-  | 'world-model';
+  | 'world-model'
+  | 'runtime-settings';
 
 export type AdvancedToolAudience =
   | 'ALL'
@@ -456,6 +457,17 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     description:
       'Semantic force-directed interactive graph of the capability world model: connects APIs, Services, Repositories, Data objects and impacted downstream workflows.',
     audience: 'BUILDERS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'runtime-settings',
+    label: 'Runtime Settings',
+    shortName: 'Runtime',
+    path: '/settings/runtime',
+    description:
+      'Configure LLM runtime providers — OpenRouter, Google Gemini, and local OpenAI-compatible endpoints. Set API keys, base URLs, default models, and the active default provider.',
+    audience: 'ADMINS',
     exposureMode: 'ALWAYS',
     contextTriggers: [],
   },

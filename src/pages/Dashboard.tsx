@@ -21,6 +21,7 @@ import {
   Network,
   ShieldCheck,
   ShieldOff,
+  SlidersHorizontal,
   Sparkles,
   Workflow,
   Wrench,
@@ -101,6 +102,7 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   'ast-explorer': TreePine,
   'code-graph': Network,
   'world-model': Network,
+  'runtime-settings': SlidersHorizontal,
 };
 
 const Dashboard = () => {
