@@ -4,6 +4,7 @@ import type {
   ProviderKey,
 } from '../src/types';
 import { getConfiguredDefaultRuntimeProviderKeySync } from './runtimeProviderConfig';
+import { getDefaultLLMProviderKey } from './llmProviderConfig';
 
 export const DEFAULT_PROVIDER_KEY: ProviderKey = 'github-copilot';
 export const DEFAULT_PROVIDER_LABEL = 'GitHub Copilot SDK';
@@ -34,8 +35,34 @@ export const isCliRuntimeProviderKey = (providerKey?: string | null): providerKe
   );
 };
 
-export const getConfiguredDefaultRuntimeProviderKey = (): ProviderKey =>
-  getConfiguredDefaultRuntimeProviderKeySync() || DEFAULT_PROVIDER_KEY;
+/**
+ * Single source of truth for "which provider should I use when nothing else
+ * is specified?". Priority:
+ *   1. `.llm-providers.local.json::defaultProviderKey` — the value set by the
+ *      user in the Runtime Settings UI. ALWAYS wins when present so toggling
+ *      the default in the UI takes effect everywhere (chat, work-item
+ *      execution, swarm debate, embeddings) without any restart.
+ *   2. `.runtime-providers.local.json::defaultProviderKey` — legacy CLI store
+ *      written by the older runtime providers screen.
+ *   3. `DEFAULT_PROVIDER_KEY` ('github-copilot') — hard fallback so the app
+ *      never throws on a missing config file.
+ *
+ * `resolveAgentProviderKey()` and `normalizeProviderKey()` both fall back
+ * here whenever the agent has no explicit provider set, which means the
+ * SAME function decides the provider for chat, swarm, embeddings, and
+ * work-item execution. Adding a new code path? Funnel it through here.
+ */
+export const getConfiguredDefaultRuntimeProviderKey = (): ProviderKey => {
+  try {
+    const llmDefault = getDefaultLLMProviderKey();
+    if (llmDefault) {
+      return llmDefault;
+    }
+  } catch {
+    // Fall through to runtime-providers config / hardcoded default.
+  }
+  return getConfiguredDefaultRuntimeProviderKeySync() || DEFAULT_PROVIDER_KEY;
+};
 
 export const normalizeProviderKey = (value?: string | null): ProviderKey => {
   const normalized = trim(value).toLowerCase();
@@ -162,6 +189,14 @@ export const normalizeEmbeddingProviderKey = (
 
 export const resolveAgentProviderKey = (
   agent?: Partial<CapabilityAgent> | null,
+  /**
+   * Optional override for the system default provider key. When provided
+   * it shadows `getConfiguredDefaultRuntimeProviderKey()` — used by
+   * deterministic call sites (tests, execution paths that already loaded
+   * the default once) so a mid-flight config change does not flip
+   * provider selection mid-decision.
+   */
+  defaultProviderOverride?: ProviderKey,
 ): ProviderKey => {
   const explicitKey = trim(agent?.providerKey);
   // Treat the DEFAULT_PROVIDER_KEY ('github-copilot') stored in providerKey as
@@ -173,7 +208,9 @@ export const resolveAgentProviderKey = (
   }
 
   if (isLegacyDefaultProviderLabel(agent?.provider)) {
-    return getConfiguredDefaultRuntimeProviderKey();
+    return defaultProviderOverride
+      ? normalizeProviderKey(defaultProviderOverride)
+      : getConfiguredDefaultRuntimeProviderKey();
   }
 
   return normalizeProviderKey(agent?.provider);

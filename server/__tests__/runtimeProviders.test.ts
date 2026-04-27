@@ -52,6 +52,22 @@ vi.mock('../runtimeProviderConfig', () => ({
   setDefaultRuntimeProviderKey,
 }));
 
+// `getConfiguredDefaultRuntimeProviderKey()` now reads `.llm-providers.local.json`
+// FIRST so the Runtime Settings UI default takes effect across the app. Tests
+// must mock this layer too — otherwise a non-empty user config file leaks
+// through and clobbers the runtime-provider mock above.
+const getDefaultLLMProviderKey = vi.fn(() => undefined);
+const getLLMProviderConfig = vi.fn(() => undefined);
+vi.mock('../llmProviderConfig', () => ({
+  getDefaultLLMProviderKey,
+  getLLMProviderConfig,
+  readLLMProviderConfigStateSync: () => ({ version: 1, providers: {} }),
+  readLLMProviderConfigState: async () => ({ version: 1, providers: {} }),
+  saveLLMProviderConfig: async () => undefined,
+  setDefaultLLMProviderKey: async () => undefined,
+  resolveLLMProviderConfigPath: () => '/tmp/test-llm-providers.json',
+}));
+
 const validateCliRuntimeProvider = vi.fn(async () => ({
   providerKey: 'codex-cli',
   ok: true,

@@ -28,6 +28,7 @@ const hintCls = 'mt-1 text-xs text-secondary';
 
 export const RuntimeSettings = () => {
   const [defaultProvider, setDefaultProvider] = useState<string | null>(null);
+  const [effectiveDefaultProvider, setEffectiveDefaultProvider] = useState<string | null>(null);
   const [providers, setProviders] = useState<Record<string, RuntimeConfig>>({});
   const [availableProviders, setAvailableProviders] = useState<ProviderStatus[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
@@ -49,11 +50,13 @@ export const RuntimeSettings = () => {
       const data = await res.json() as {
         success: boolean;
         defaultProvider: string | null;
+        effectiveDefaultProvider?: string | null;
         providers: Record<string, RuntimeConfig>;
         availableProviders: ProviderStatus[];
       };
       if (data.success) {
         setDefaultProvider(data.defaultProvider);
+        setEffectiveDefaultProvider(data.effectiveDefaultProvider ?? null);
         setProviders(data.providers ?? {});
         setAvailableProviders(data.availableProviders ?? []);
         setSelectedProvider(prev =>
@@ -193,6 +196,26 @@ export const RuntimeSettings = () => {
           </p>
         </div>
       </div>
+
+      {/* Active provider banner — proves to the operator that this single
+          setting is what every chat, work-item, swarm debate, and embedding
+          request will resolve to. The 'effective' value comes from the same
+          getConfiguredDefaultRuntimeProviderKey() the rest of the app uses. */}
+      {effectiveDefaultProvider && (
+        <div className="flex items-center gap-2 rounded-xl border border-primary/30 bg-primary/5 px-4 py-2.5 text-sm">
+          <Check size={16} className="text-primary shrink-0" />
+          <span className="text-on-surface">
+            Active across the app:{' '}
+            <code className="rounded bg-surface-container px-1.5 py-0.5 text-xs font-semibold">
+              {availableProviders.find(p => p.key === effectiveDefaultProvider)?.label
+                ?? effectiveDefaultProvider}
+            </code>
+            <span className="ml-2 text-secondary">
+              — every chat, work item, and embedding will use this provider unless an agent overrides it.
+            </span>
+          </span>
+        </div>
+      )}
 
       {/* Toast */}
       {message && (

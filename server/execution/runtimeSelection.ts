@@ -14,8 +14,12 @@ import {
   getLocalOpenAIDefaultModel,
   isLocalOpenAIConfigured,
 } from "../localOpenAIProvider";
+import { getCustomRouterDefaultModel } from "../customRouterProvider";
+import { getGeminiDefaultModel } from "../geminiProvider";
 import {
+  CUSTOM_ROUTER_PROVIDER_KEY,
   DEFAULT_PROVIDER_KEY,
+  GEMINI_PROVIDER_KEY,
   LOCAL_OPENAI_PROVIDER_KEY,
   getConfiguredDefaultRuntimeProviderKey,
   hasExplicitAgentProvider,
@@ -126,6 +130,19 @@ const resolveProviderModel = ({
     return trim(localOpenAIModel);
   }
 
+  // The agent's saved model only applies when we're routing to the SAME
+  // provider it was authored for. When we route to a different provider
+  // (e.g. agent.model is 'gpt-4.1-mini' but the active default is now
+  // OpenRouter), we must use that provider's configured default model —
+  // not the GitHub-Copilot model name, which would 404 at the endpoint.
+  if (providerKey === CUSTOM_ROUTER_PROVIDER_KEY) {
+    return trim(getCustomRouterDefaultModel());
+  }
+
+  if (providerKey === GEMINI_PROVIDER_KEY) {
+    return trim(getGeminiDefaultModel());
+  }
+
   if (isCliRuntimeProviderKey(providerKey)) {
     return trim(resolveCliModel(providerKey));
   }
@@ -193,7 +210,10 @@ export const resolveExecutionRuntimeForStep = ({
     source = "fallback-internal";
   }
 
-  const agentProviderKey = resolveAgentProviderKey(agent);
+  // Re-use the SAME default the caller passed in (or the live config
+  // default) so a config change between this line and the agent resolver
+  // can't flip `sameAsAgentProvider` from true to false mid-decision.
+  const agentProviderKey = resolveAgentProviderKey(agent, normalizedDefaultProvider);
   const model = resolveProviderModel({
     providerKey,
     agent,

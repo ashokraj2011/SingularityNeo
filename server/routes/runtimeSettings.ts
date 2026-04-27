@@ -7,6 +7,7 @@ import {
   getLLMProviderConfig,
   type LLMProviderConfig,
 } from '../llmProviderConfig';
+import { getConfiguredDefaultRuntimeProviderKey } from '../providerRegistry';
 import { sendApiError } from '../api/errors';
 
 /**
@@ -60,9 +61,17 @@ export const registerRuntimeSettingsRoutes = (app: express.Express) => {
     try {
       const configState = await readLLMProviderConfigState();
 
+      // `effectiveDefaultProvider` is what the rest of the app — chat, work
+      // item execution, swarm debate, embeddings — will ACTUALLY use when an
+      // agent has no explicit provider. Surfacing it here lets the UI prove
+      // to the user that switching the default is a single-source change.
+      // It MAY differ from `defaultProvider` only on first load when no
+      // value was ever saved (then it falls through to the legacy config
+      // file or to 'github-copilot').
       res.json({
         success: true,
         defaultProvider: configState.defaultProviderKey ?? null,
+        effectiveDefaultProvider: getConfiguredDefaultRuntimeProviderKey(),
         providers: configState.providers ?? {},
         availableProviders: LLM_PROVIDER_DEFINITIONS.map(def => ({
           key:           def.key,

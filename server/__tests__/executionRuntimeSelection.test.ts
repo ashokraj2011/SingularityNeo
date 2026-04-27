@@ -182,6 +182,10 @@ describe("execution runtime selection", () => {
         runtimeProviderKey: "codex-cli",
       }),
       agent: buildAgent(),
+      // Pin the default explicitly so the test is hermetic — without this
+      // it would depend on whatever default is currently saved in
+      // .llm-providers.local.json / .runtime-providers.local.json.
+      defaultProviderKey: "github-copilot",
       hasGitHubCodeRepository: false,
       localOpenAIAvailable: false,
       githubProviderModel: "gpt-4o-mini",
