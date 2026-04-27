@@ -16,7 +16,7 @@ type RuntimeConfig = {
   label?: string;
 };
 
-type LoadError = { kind: 'network' } | { kind: 'api'; text: string };
+type LoadError = { kind: 'network' } | { kind: 'route-missing' } | { kind: 'api'; text: string };
 
 const inputCls =
   'mt-1 w-full px-3 py-2 rounded-lg border border-outline-variant/30 bg-surface text-on-surface text-sm focus:outline-none focus:ring-2 focus:ring-primary/40 placeholder:text-secondary/50';
@@ -61,8 +61,12 @@ export const RuntimeSettings = () => {
             : data.availableProviders[0]?.key ?? null,
         );
       }
-    } catch {
-      setLoadError({ kind: 'network' });
+    } catch (err) {
+      // Distinguish: is the whole server down, or just this endpoint missing?
+      const serverAlive = await fetch('/api/health')
+        .then(r => r.ok || r.status < 500)
+        .catch(() => false);
+      setLoadError({ kind: serverAlive ? 'route-missing' : 'network' });
     } finally {
       setIsLoading(false);
     }
@@ -143,13 +147,20 @@ export const RuntimeSettings = () => {
           <p className="font-semibold text-on-surface">Could not reach the settings API</p>
           {loadError.kind === 'network' ? (
             <p className="mt-1 text-sm text-secondary">
-              The backend server is not responding on{' '}
-              <code className="rounded bg-surface-container px-1 py-0.5 text-xs">
-                /api/runtime-settings
-              </code>
-              . Make sure the server is running (
-              <code className="rounded bg-surface-container px-1 py-0.5 text-xs">npm run dev</code>
-              ) and refresh.
+              The backend server is not reachable. Stop any existing process,
+              run{' '}
+              <code className="rounded bg-surface-container px-1.5 py-0.5 text-xs font-mono">
+                npm run dev
+              </code>{' '}
+              from the project root, then click Retry.
+            </p>
+          ) : loadError.kind === 'route-missing' ? (
+            <p className="mt-1 text-sm text-secondary">
+              The server is running but{' '}
+              <code className="rounded bg-surface-container px-1 py-0.5 text-xs">/api/runtime-settings</code>{' '}
+              returned an error. The server may be running an <strong>old version</strong> — restart it with{' '}
+              <code className="rounded bg-surface-container px-1 py-0.5 text-xs font-mono">npm run dev</code>{' '}
+              to pick up the new route, then click Retry.
             </p>
           ) : (
             <p className="mt-1 text-sm text-secondary">{loadError.text}</p>
