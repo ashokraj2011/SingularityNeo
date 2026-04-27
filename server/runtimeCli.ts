@@ -178,6 +178,28 @@ const resolveCliModel = ({
   config?: RuntimeProviderConfig | null;
 }) => trim(explicitModel) || trim(config?.model) || '';
 
+/**
+ * Return true only if `model` is a valid model identifier for the given CLI
+ * provider.  Agents store the model they were created with, which may come
+ * from a completely different provider (e.g. 'gpt-4.1-mini' from github-copilot,
+ * 'openrouter/free' from custom-router).  Passing those to a CLI binary that
+ * doesn't recognise them causes a hard error — better to let the CLI use its
+ * own default.
+ */
+const isModelValidForCli = (providerKey: ProviderKey, model: string): boolean => {
+  if (!model) return false;
+  if (providerKey === CLAUDE_CODE_CLI_PROVIDER_KEY) {
+    // claude CLI only accepts Claude model names
+    return /^claude[-/]/i.test(model);
+  }
+  if (providerKey === CODEX_CLI_PROVIDER_KEY) {
+    // codex CLI uses OpenAI model names — reject vendor-prefixed router IDs
+    return !/\//.test(model) && !/^claude/i.test(model) && !/^gemini/i.test(model);
+  }
+  // aider is permissive — accept anything
+  return true;
+};
+
 const toEstimatedUsage = ({
   providerKey,
   model,
@@ -254,7 +276,7 @@ const buildCodexExecArgs = ({
     args.push('--profile', profile);
   }
 
-  if (model) {
+  if (model && isModelValidForCli(CODEX_CLI_PROVIDER_KEY, model)) {
     args.push('--model', model);
   }
 
@@ -287,7 +309,9 @@ const buildClaudeExecArgs = ({
     args.push('--permission-mode', 'plan');
   }
 
-  if (model) {
+  // Only pass --model when the name is actually a Claude model.
+  // Agents may carry a stale model from a different provider (e.g. 'gpt-4.1-mini').
+  if (model && isModelValidForCli(CLAUDE_CODE_CLI_PROVIDER_KEY, model)) {
     args.push('--model', model);
   }
 
