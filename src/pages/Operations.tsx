@@ -38,16 +38,21 @@ import {
   fetchDesktopWorkspaceMappings,
   fetchRuntimeStatus,
   fetchWorkspaceWriteLock,
+  fetchLLMSettings,
   probeRuntimeProvider,
   releaseCapabilityExecution,
   removeDesktopExecutor,
   saveRuntimeProviderConfig,
+  saveLLMProviderSettings,
+  setLLMDefaultProvider,
   saveDesktopPreferences,
   syncCapabilityRepositories,
   updateLocalEmbeddingSettings,
   updateRuntimeCredentials,
   validateRuntimeProvider,
   updateDesktopWorkspaceMapping,
+  type LLMProviderConfig,
+  type LLMProviderEntry,
   type RuntimeStatus,
 } from "../lib/api";
 import type {
@@ -166,6 +171,12 @@ const Operations = () => {
       }
     >
   >({});
+  // HTTP LLM provider drafts (custom-router, gemini, local-openai)
+  const [httpProviderDrafts, setHttpProviderDrafts] = useState<Record<string, LLMProviderConfig>>({});
+  const [httpProviderBusyKey, setHttpProviderBusyKey] = useState("");
+  const [httpEffectiveDefault, setHttpEffectiveDefault] = useState<string | null>(null);
+  const [httpAvailableProviders, setHttpAvailableProviders] = useState<LLMProviderEntry[]>([]);
+
   const [embeddingBaseUrlInput, setEmbeddingBaseUrlInput] = useState("");
   const [embeddingApiKeyInput, setEmbeddingApiKeyInput] = useState("");
   const [embeddingModelInput, setEmbeddingModelInput] = useState("");
@@ -725,6 +736,87 @@ const Operations = () => {
     }
   };
 
+  const handleHttpProviderDraftChange = (
+    providerKey: string,
+    patch: Partial<LLMProviderConfig>,
+  ) => {
+    setHttpProviderDrafts(current => ({
+      ...current,
+      [providerKey]: { ...current[providerKey], ...patch },
+    }));
+  };
+
+  const handleSaveHttpProvider = async (providerKey: string) => {
+    const draft = httpProviderDrafts[providerKey] ?? {};
+    setHttpProviderBusyKey(providerKey);
+    try {
+      await saveLLMProviderSettings({ providerKey, config: draft });
+      await loadHttpProviderSettings();
+      const [status, providers] = await Promise.all([
+        fetchRuntimeStatus().catch(() => null),
+        fetchRuntimeProviders().catch(() => runtimeProviders),
+      ]);
+      if (status) setRuntimeStatus(status);
+      setRuntimeProviders(providers);
+      success(
+        "Provider saved",
+        `${draft.label || providerKey} settings have been saved and are active across the app.`,
+      );
+    } catch (error) {
+      showError(
+        "Provider save failed",
+        error instanceof Error ? error.message : "Unable to save provider settings.",
+      );
+    } finally {
+      setHttpProviderBusyKey("");
+    }
+  };
+
+  const handleSetHttpProviderDefault = async (providerKey: string) => {
+    setHttpProviderBusyKey(`default:${providerKey}`);
+    try {
+      await setLLMDefaultProvider(providerKey);
+      await loadHttpProviderSettings();
+      // Also sync runtimeProviders so the "Desktop default provider" dropdown updates
+      const providers = await fetchRuntimeProviders().catch(() => runtimeProviders);
+      setRuntimeProviders(providers);
+      success(
+        "Default provider updated",
+        `${providerKey} is now the default runtime provider across the app.`,
+      );
+    } catch (error) {
+      showError(
+        "Default provider update failed",
+        error instanceof Error ? error.message : "Unable to update default provider.",
+      );
+    } finally {
+      setHttpProviderBusyKey("");
+    }
+  };
+
+  const loadHttpProviderSettings = async () => {
+    try {
+      const settings = await fetchLLMSettings();
+      setHttpEffectiveDefault(settings.effectiveDefaultProvider ?? null);
+      setHttpAvailableProviders(settings.availableProviders ?? []);
+      setHttpProviderDrafts(current => {
+        const nextDrafts = { ...current };
+        for (const provider of settings.availableProviders ?? []) {
+          const saved = settings.providers?.[provider.key] ?? {};
+          nextDrafts[provider.key] = {
+            apiKey: saved.apiKey ?? nextDrafts[provider.key]?.apiKey ?? "",
+            baseUrl: saved.baseUrl ?? nextDrafts[provider.key]?.baseUrl ?? "",
+            defaultModel: saved.defaultModel ?? nextDrafts[provider.key]?.defaultModel ?? "",
+            label: saved.label ?? nextDrafts[provider.key]?.label ?? "",
+          };
+        }
+        return nextDrafts;
+      });
+    } catch {
+      // Non-fatal — Operations page still works without HTTP provider settings
+    }
+  };
+
   const refreshData = async () => {
     setLoading(true);
     try {
@@ -787,6 +879,7 @@ const Operations = () => {
 
   useEffect(() => {
     void refreshData();
+    void loadHttpProviderSettings();
   }, [activeCapability.id]);
 
   // Load desktop preferences once on mount (desktop-only).
@@ -1291,6 +1384,10 @@ const Operations = () => {
         embeddingApiKeyInput={embeddingApiKeyInput}
         embeddingModelInput={embeddingModelInput}
         isUpdatingEmbeddings={isUpdatingEmbeddings}
+        httpProviderDrafts={httpProviderDrafts}
+        httpProviderBusyKey={httpProviderBusyKey}
+        httpEffectiveDefault={httpEffectiveDefault}
+        httpAvailableProviders={httpAvailableProviders}
         onRuntimeTokenInputChange={setRuntimeTokenInput}
         onSave={handleRuntimeOverrideSave}
         onClear={handleRuntimeOverrideClear}
@@ -1307,6 +1404,9 @@ const Operations = () => {
         onEmbeddingModelInputChange={setEmbeddingModelInput}
         onSaveEmbeddings={handleEmbeddingSettingsSave}
         onClearEmbeddings={handleEmbeddingSettingsClear}
+        onHttpProviderDraftChange={handleHttpProviderDraftChange}
+        onSaveHttpProvider={handleSaveHttpProvider}
+        onSetHttpProviderDefault={handleSetHttpProviderDefault}
       />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">

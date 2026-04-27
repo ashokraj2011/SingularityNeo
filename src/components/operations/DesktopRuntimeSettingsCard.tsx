@@ -1,10 +1,10 @@
 import React from 'react';
-import { AlertTriangle, KeyRound, RefreshCw, TerminalSquare } from 'lucide-react';
+import { AlertTriangle, Check, Globe, KeyRound, RefreshCw, TerminalSquare } from 'lucide-react';
 import type {
   ProviderKey,
   RuntimeProviderStatus,
 } from '../../types';
-import type { RuntimeStatus } from '../../lib/api';
+import type { LLMProviderConfig, LLMProviderEntry, RuntimeStatus } from '../../lib/api';
 import { SectionCard, StatusBadge } from '../EnterpriseUI';
 
 const runtimeAccessLabel = (runtimeStatus?: RuntimeStatus | null) =>
@@ -52,6 +52,11 @@ type DesktopRuntimeSettingsCardProps = {
   embeddingApiKeyInput: string;
   embeddingModelInput: string;
   isUpdatingEmbeddings: boolean;
+  // HTTP LLM providers (OpenRouter / Gemini / local-openai)
+  httpProviderDrafts: Record<string, LLMProviderConfig>;
+  httpProviderBusyKey: string;
+  httpEffectiveDefault: string | null;
+  httpAvailableProviders: LLMProviderEntry[];
   onRuntimeTokenInputChange: (value: string) => void;
   onSave: () => void | Promise<void>;
   onClear: () => void | Promise<void>;
@@ -71,6 +76,9 @@ type DesktopRuntimeSettingsCardProps = {
   onEmbeddingModelInputChange: (value: string) => void;
   onSaveEmbeddings: () => void | Promise<void>;
   onClearEmbeddings: () => void | Promise<void>;
+  onHttpProviderDraftChange: (providerKey: string, patch: Partial<LLMProviderConfig>) => void;
+  onSaveHttpProvider: (providerKey: string) => void | Promise<void>;
+  onSetHttpProviderDefault: (providerKey: string) => void | Promise<void>;
 };
 
 const providerTone = (provider: RuntimeProviderStatus) =>
@@ -89,6 +97,10 @@ export default function DesktopRuntimeSettingsCard({
   embeddingApiKeyInput,
   embeddingModelInput,
   isUpdatingEmbeddings,
+  httpProviderDrafts,
+  httpProviderBusyKey,
+  httpEffectiveDefault,
+  httpAvailableProviders,
   onRuntimeTokenInputChange,
   onSave,
   onClear,
@@ -105,6 +117,9 @@ export default function DesktopRuntimeSettingsCard({
   onEmbeddingModelInputChange,
   onSaveEmbeddings,
   onClearEmbeddings,
+  onHttpProviderDraftChange,
+  onSaveHttpProvider,
+  onSetHttpProviderDefault,
 }: DesktopRuntimeSettingsCardProps) {
   const defaultProviderBusy =
     runtimeProviderBusyKey === `probe:${defaultRuntimeProviderKey}` ||
@@ -283,6 +298,199 @@ export default function DesktopRuntimeSettingsCard({
             </button>
           </div>
         </div>
+
+        {/* ── HTTP / LLM API providers ─────────────────────────────────── */}
+        {httpAvailableProviders.length > 0 && (
+          <div className="rounded-3xl border border-outline-variant/30 bg-white p-5">
+            <div className="flex items-center gap-2">
+              <Globe size={18} className="text-primary" />
+              <div>
+                <p className="text-[0.625rem] font-bold uppercase tracking-[0.18em] text-outline">
+                  LLM API providers
+                </p>
+                <p className="text-sm text-secondary">
+                  OpenRouter, Google Gemini, and local Ollama / LM Studio — configure API keys, base URLs, and default models. Settings take effect immediately, no restart needed.
+                </p>
+              </div>
+            </div>
+
+            {httpEffectiveDefault && (
+              <div className="mt-3 flex items-center gap-2 rounded-xl border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
+                <Check size={13} className="text-primary shrink-0" />
+                <span className="text-on-surface">
+                  Active across the app:{' '}
+                  <code className="rounded bg-surface-container px-1.5 py-0.5 font-semibold">
+                    {httpAvailableProviders.find(p => p.key === httpEffectiveDefault)?.label ?? httpEffectiveDefault}
+                  </code>
+                  <span className="ml-1 text-secondary">— every chat and work item will use this unless an agent overrides it.</span>
+                </span>
+              </div>
+            )}
+
+            <div className="mt-4 grid gap-4 xl:grid-cols-3">
+              {httpAvailableProviders.map(provider => {
+                const draft = httpProviderDrafts[provider.key] ?? {};
+                const busy = httpProviderBusyKey === provider.key || httpProviderBusyKey === `default:${provider.key}`;
+                const isDefault = httpEffectiveDefault === provider.key;
+                return (
+                  <div
+                    key={provider.key}
+                    className="rounded-2xl border border-outline-variant/20 bg-surface-container-low p-4 space-y-3"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StatusBadge tone={provider.configured ? 'success' : 'warning'}>
+                        {provider.configured ? 'Configured' : 'Not configured'}
+                      </StatusBadge>
+                      {isDefault && (
+                        <StatusBadge tone="brand">Default</StatusBadge>
+                      )}
+                    </div>
+                    <p className="text-sm font-bold text-on-surface">{provider.label}</p>
+
+                    {/* Custom Router fields */}
+                    {provider.key === 'custom-router' && (
+                      <>
+                        <label className="block space-y-1">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">Display label</span>
+                          <input
+                            type="text"
+                            value={draft.label ?? ''}
+                            onChange={e => onHttpProviderDraftChange(provider.key, { label: e.target.value })}
+                            placeholder="e.g. OpenRouter"
+                            className="field-input"
+                          />
+                        </label>
+                        <label className="block space-y-1">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">Base URL</span>
+                          <input
+                            type="url"
+                            value={draft.baseUrl ?? ''}
+                            onChange={e => onHttpProviderDraftChange(provider.key, { baseUrl: e.target.value })}
+                            placeholder="https://openrouter.ai/api/v1"
+                            className="field-input font-mono text-[0.8rem]"
+                          />
+                          <p className="text-[0.7rem] text-amber-700 leading-tight">⚠ Do not include /chat/completions — appended automatically.</p>
+                        </label>
+                        <label className="block space-y-1">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">API key</span>
+                          <input
+                            type="password"
+                            value={draft.apiKey ?? ''}
+                            onChange={e => onHttpProviderDraftChange(provider.key, { apiKey: e.target.value })}
+                            placeholder="sk-or-…"
+                            className="field-input"
+                          />
+                        </label>
+                        <label className="block space-y-1">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">Default model</span>
+                          <input
+                            type="text"
+                            value={draft.defaultModel ?? ''}
+                            onChange={e => onHttpProviderDraftChange(provider.key, { defaultModel: e.target.value })}
+                            placeholder="openai/gpt-4o or openrouter/free"
+                            className="field-input"
+                          />
+                        </label>
+                      </>
+                    )}
+
+                    {/* Gemini fields */}
+                    {provider.key === 'gemini' && (
+                      <>
+                        <label className="block space-y-1">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">API key</span>
+                          <input
+                            type="password"
+                            value={draft.apiKey ?? ''}
+                            onChange={e => onHttpProviderDraftChange(provider.key, { apiKey: e.target.value })}
+                            placeholder="AIza…"
+                            className="field-input"
+                          />
+                        </label>
+                        <label className="block space-y-1">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">Default model</span>
+                          <input
+                            type="text"
+                            value={draft.defaultModel ?? ''}
+                            onChange={e => onHttpProviderDraftChange(provider.key, { defaultModel: e.target.value })}
+                            placeholder="gemini-2.0-flash"
+                            className="field-input"
+                          />
+                        </label>
+                        <label className="block space-y-1">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">Base URL (optional)</span>
+                          <input
+                            type="url"
+                            value={draft.baseUrl ?? ''}
+                            onChange={e => onHttpProviderDraftChange(provider.key, { baseUrl: e.target.value })}
+                            placeholder="https://generativelanguage.googleapis.com/v1beta/openai"
+                            className="field-input font-mono text-[0.8rem]"
+                          />
+                        </label>
+                      </>
+                    )}
+
+                    {/* Local OpenAI-compatible fields */}
+                    {provider.key === 'local-openai' && (
+                      <>
+                        <label className="block space-y-1">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">Base URL</span>
+                          <input
+                            type="url"
+                            value={draft.baseUrl ?? ''}
+                            onChange={e => onHttpProviderDraftChange(provider.key, { baseUrl: e.target.value })}
+                            placeholder="http://localhost:11434/v1"
+                            className="field-input font-mono text-[0.8rem]"
+                          />
+                          <p className="text-[0.7rem] text-amber-700 leading-tight">⚠ Do not include /chat/completions — appended automatically.</p>
+                        </label>
+                        <label className="block space-y-1">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">API key (optional)</span>
+                          <input
+                            type="password"
+                            value={draft.apiKey ?? ''}
+                            onChange={e => onHttpProviderDraftChange(provider.key, { apiKey: e.target.value })}
+                            placeholder="leave blank for Ollama / LM Studio"
+                            className="field-input"
+                          />
+                        </label>
+                        <label className="block space-y-1">
+                          <span className="text-[0.6875rem] font-bold uppercase tracking-[0.2em] text-outline">Default model</span>
+                          <input
+                            type="text"
+                            value={draft.defaultModel ?? ''}
+                            onChange={e => onHttpProviderDraftChange(provider.key, { defaultModel: e.target.value })}
+                            placeholder="llama3 or mistral"
+                            className="field-input"
+                          />
+                        </label>
+                      </>
+                    )}
+
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => void onSaveHttpProvider(provider.key)}
+                        disabled={busy}
+                        className="enterprise-button enterprise-button-brand-muted disabled:opacity-50"
+                      >
+                        {httpProviderBusyKey === provider.key ? 'Saving…' : 'Save'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void onSetHttpProviderDefault(provider.key)}
+                        disabled={busy || isDefault}
+                        className="enterprise-button enterprise-button-secondary disabled:opacity-50"
+                      >
+                        {isDefault ? '✓ Active default' : 'Set as default'}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         <div className="rounded-3xl border border-outline-variant/30 bg-white p-5">
           <div className="flex items-center gap-2">

@@ -41,7 +41,6 @@ import {
   Wrench,
   X,
   Zap,
-  SlidersHorizontal,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useCapability } from "../context/CapabilityContext";
@@ -106,7 +105,6 @@ const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
   "ast-explorer": TreePine,
   "code-graph": Network,
   "world-model": Network,
-  "runtime-settings": SlidersHorizontal,
 };
 
 // ─── Sidebar group definitions ───────────────────────────────────────────────
@@ -168,7 +166,6 @@ const PATH_TO_GROUP: Record<string, ToolGroup> = {
   "/studio": "platform",
   "/tasks": "platform",
   "/workspace/databases": "platform",
-  "/settings/runtime": "platform",
 };
 
 const routeTitles: Record<string, string> = {
@@ -199,7 +196,6 @@ const routeTitles: Record<string, string> = {
   "/ast-explorer": "AST Explorer",
   "/code-graph": "Code Graph",
   "/world-model": "Code World Model",
-  "/settings/runtime": "Runtime Settings",
 };
 
 const SIDEBAR_STORAGE_KEY = "singularity.sidebar.collapsed";

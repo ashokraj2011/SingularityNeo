@@ -3901,3 +3901,54 @@ export const fetchAgentMindSnapshot = async (
   requestJson<AgentMindSnapshot>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/agents/${encodeURIComponent(agentId)}/mind`,
   );
+
+// ─── LLM / HTTP provider settings ────────────────────────────────────────────
+//
+// These mirror what RuntimeSettings.tsx previously called directly with fetch().
+// Moving them here keeps the Operations page consistent with the rest of api.ts.
+
+export interface LLMProviderConfig {
+  apiKey?: string;
+  baseUrl?: string;
+  defaultModel?: string;
+  label?: string;
+}
+
+export interface LLMProviderEntry {
+  key: string;
+  label: string;
+  configured: boolean;
+  transportMode: string;
+}
+
+export interface LLMSettingsPayload {
+  defaultProvider: string | null;
+  effectiveDefaultProvider: string | null;
+  providers: Record<string, LLMProviderConfig>;
+  availableProviders: LLMProviderEntry[];
+}
+
+export const fetchLLMSettings = async (): Promise<LLMSettingsPayload> =>
+  requestJson<LLMSettingsPayload>('/api/runtime-settings');
+
+export const saveLLMProviderSettings = async ({
+  providerKey,
+  config,
+  setDefault,
+}: {
+  providerKey: string;
+  config: LLMProviderConfig;
+  setDefault?: boolean;
+}): Promise<{ success: boolean }> =>
+  requestJson<{ success: boolean }>('/api/runtime-settings/provider', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ providerKey, config, setDefault }),
+  });
+
+export const setLLMDefaultProvider = async (providerKey: string): Promise<{ success: boolean }> =>
+  requestJson<{ success: boolean }>('/api/runtime-settings/default', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ providerKey }),
+  });

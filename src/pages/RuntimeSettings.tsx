@@ -1,10 +1,5 @@
-import React from 'react';
-import RuntimeSettings from '../components/RuntimeSettings';
-
+// Consolidated into the Operations page (/operations).
+// The route /settings/runtime redirects to /operations — see App.tsx.
 export default function RuntimeSettingsPage() {
-  return (
-    <div className="min-h-screen bg-surface">
-      <RuntimeSettings />
-    </div>
-  );
+  return null;
 }
