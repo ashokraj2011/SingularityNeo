@@ -170,13 +170,60 @@ const githubModelsCatalogApiUrl = new URL('/catalog/models', githubModelsHttpApi
 export const defaultModel = 'gpt-4.1-mini';
 
 /**
+ * Heuristic shape-check: does this model name *look* like it belongs to the
+ * given provider? Used as a safety net when an agent's saved model was
+ * created against a different provider (e.g. an Ollama tag like
+ * 'qwen2.5-coder:7b' surviving on an agent that is now routed to OpenRouter)
+ * — without this check the wrong-format model is forwarded to the endpoint
+ * and the API returns a hard "is not a valid model ID" error.
+ */
+const looksLikeProviderModel = (
+  providerKey: string,
+  model: string,
+): boolean => {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) return false;
+
+  if (providerKey === GEMINI_PROVIDER_KEY) {
+    return normalized.startsWith('gemini');
+  }
+
+  if (providerKey === LOCAL_OPENAI_PROVIDER_KEY) {
+    // Local engines accept Ollama tags ('qwen2.5-coder:7b') and plain ids
+    // ('llama3.1'). Only OpenRouter-style 'vendor/model' strings should be
+    // rejected here, so a casually-typed local model still reaches the
+    // local endpoint.
+    return !/^(openai|anthropic|google|openrouter|meta|mistralai)\//.test(normalized);
+  }
+
+  if (providerKey === CUSTOM_ROUTER_PROVIDER_KEY) {
+    // OpenRouter / LiteLLM / Together / Groq use 'vendor/model' format,
+    // optionally with a tag suffix like ':free'. Reject Ollama-style tags
+    // (no slash + colon-version, e.g. 'qwen2.5-coder:7b') and bare GitHub
+    // Copilot ids (e.g. 'gpt-4.1-mini') that have no slash at all — both
+    // would trigger a 'not a valid model ID' error at the endpoint.
+    return /^[a-z0-9._-]+\/[a-z0-9._:-]+$/i.test(normalized);
+  }
+
+  // GitHub Copilot accepts a wide range of bare and slashed ids.
+  return true;
+};
+
+/**
  * Resolves the effective model for the given provider key.
  *
- * When an agent's stored model was saved for a different provider
- * (e.g. 'gpt-4.1-mini' from GitHub Copilot, now routed to Gemini via the
- * configured runtime default) this substitutes the provider's own default
- * so the call succeeds.  Explicit model values that already belong to the
- * target provider are kept as-is.
+ * When an agent's stored model was saved for a different provider (e.g.
+ * 'qwen2.5-coder:7b' from local-openai, now routed to OpenRouter via the
+ * configured runtime default) this substitutes the destination provider's
+ * own default so the call succeeds. Explicit model values that already
+ * belong to the target provider are kept as-is.
+ *
+ * The shape check is a SAFETY NET: when the user switches the runtime
+ * default in Runtime Settings, every agent in the DB silently re-routes,
+ * and many of those agents have a model name that only made sense for
+ * their original provider. Falling back to the destination provider's
+ * configured default model means the user's "switch the default and
+ * everything keeps working" expectation actually holds.
  */
 export const resolveModelForProvider = (
   providerKey: string,
@@ -185,18 +232,15 @@ export const resolveModelForProvider = (
   const model = agentModel?.trim() || '';
 
   if (providerKey === GEMINI_PROVIDER_KEY) {
-    // Only 'gemini-*' models are valid on the Gemini endpoint.
-    return model.toLowerCase().startsWith('gemini') ? model : getGeminiDefaultModel();
+    return looksLikeProviderModel(providerKey, model) ? model : getGeminiDefaultModel();
   }
 
   if (providerKey === CUSTOM_ROUTER_PROVIDER_KEY) {
-    // Use the agent model when it's set; otherwise fall back to the configured
-    // custom-router default (env var or runtime config).
-    return model || getCustomRouterDefaultModel();
+    return looksLikeProviderModel(providerKey, model) ? model : getCustomRouterDefaultModel();
   }
 
   if (providerKey === LOCAL_OPENAI_PROVIDER_KEY) {
-    return model || getLocalOpenAIDefaultModel();
+    return looksLikeProviderModel(providerKey, model) ? model : getLocalOpenAIDefaultModel();
   }
 
   // GitHub Copilot / all other providers: pass through as-is.
