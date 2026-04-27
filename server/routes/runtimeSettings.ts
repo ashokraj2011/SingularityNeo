@@ -6,29 +6,54 @@ import {
   setDefaultLLMProviderKey,
   type LLMProviderConfig,
 } from '../llmProviderConfig';
-import { listRuntimeProviderStatuses } from '../runtimeProviders';
+import { isGeminiConfigured } from '../geminiProvider';
+import { isCustomRouterConfigured } from '../customRouterProvider';
+import { isLocalOpenAIConfigured } from '../localOpenAIProvider';
 import { sendApiError } from '../api/errors';
 
-/**
- * GET /api/runtime-settings
- * Returns the current runtime provider configuration and available providers.
- */
+/** The three LLM API providers exposed via the Settings UI. */
+const LLM_PROVIDER_DEFINITIONS = [
+  {
+    key: 'custom-router' as ProviderKey,
+    label: 'Custom Router (OpenRouter, LiteLLM, …)',
+    transportMode: 'http',
+    isConfigured: () => isCustomRouterConfigured(),
+  },
+  {
+    key: 'gemini' as ProviderKey,
+    label: 'Google Gemini',
+    transportMode: 'http',
+    isConfigured: () => isGeminiConfigured(),
+  },
+  {
+    key: 'local-openai' as ProviderKey,
+    label: 'Local OpenAI-Compatible',
+    transportMode: 'http',
+    isConfigured: () => isLocalOpenAIConfigured(),
+  },
+];
+
 export const registerRuntimeSettingsRoutes = (app: express.Express) => {
+  /**
+   * GET /api/runtime-settings
+   * Returns saved LLM provider configs + live "configured" status for each.
+   */
   app.get('/api/runtime-settings', async (req: express.Request, res: express.Response) => {
     try {
       const configState = await readLLMProviderConfigState();
-      const providerStatuses = await listRuntimeProviderStatuses();
+
+      const availableProviders = LLM_PROVIDER_DEFINITIONS.map(def => ({
+        key: def.key,
+        label: def.label,
+        configured: def.isConfigured(),
+        transportMode: def.transportMode,
+      }));
 
       res.json({
         success: true,
-        defaultProvider: configState.defaultProviderKey,
-        providers: configState.providers || {},
-        availableProviders: providerStatuses.map(s => ({
-          key: s.key,
-          label: s.label,
-          configured: s.configured,
-          transportMode: s.transportMode,
-        })),
+        defaultProvider: configState.defaultProviderKey ?? null,
+        providers: configState.providers ?? {},
+        availableProviders,
       });
     } catch (error) {
       sendApiError(res, error);
@@ -37,33 +62,27 @@ export const registerRuntimeSettingsRoutes = (app: express.Express) => {
 
   /**
    * POST /api/runtime-settings/provider
-   * Saves a runtime provider configuration.
+   * Saves a single provider's LLM config.
    *
-   * Body: {
-   *   providerKey: string,
-   *   config: RuntimeProviderConfig,
-   *   setDefault?: boolean
-   * }
+   * Body: { providerKey: string, config: LLMProviderConfig, setDefault?: boolean }
    */
   app.post('/api/runtime-settings/provider', async (req: express.Request, res: express.Response) => {
     try {
-      const { providerKey, config, setDefault } = req.body;
+      const { providerKey, config, setDefault } = req.body as {
+        providerKey: string;
+        config: Record<string, string | undefined>;
+        setDefault?: boolean;
+      };
 
       if (!providerKey || typeof providerKey !== 'string') {
-        return res
-          .status(400)
-          .json({ success: false, error: 'providerKey is required' });
+        return res.status(400).json({ success: false, error: 'providerKey is required' });
       }
 
-      // Filter out undefined values from config
       const cleanConfig: LLMProviderConfig = {};
-      if (config.apiKey)
-        cleanConfig.apiKey = String(config.apiKey).trim();
-      if (config.baseUrl)
-        cleanConfig.baseUrl = String(config.baseUrl).trim();
-      if (config.defaultModel)
-        cleanConfig.defaultModel = String(config.defaultModel).trim();
-      if (config.label) cleanConfig.label = String(config.label).trim();
+      if (config?.apiKey)        cleanConfig.apiKey        = String(config.apiKey).trim();
+      if (config?.baseUrl)       cleanConfig.baseUrl       = String(config.baseUrl).trim();
+      if (config?.defaultModel)  cleanConfig.defaultModel  = String(config.defaultModel).trim();
+      if (config?.label)         cleanConfig.label         = String(config.label).trim();
 
       await saveLLMProviderConfig({
         providerKey: providerKey as ProviderKey,
@@ -79,18 +98,16 @@ export const registerRuntimeSettingsRoutes = (app: express.Express) => {
 
   /**
    * POST /api/runtime-settings/default
-   * Sets the default runtime provider.
+   * Sets the default LLM provider.
    *
    * Body: { providerKey: string }
    */
   app.post('/api/runtime-settings/default', async (req: express.Request, res: express.Response) => {
     try {
-      const { providerKey } = req.body;
+      const { providerKey } = req.body as { providerKey: string };
 
       if (!providerKey || typeof providerKey !== 'string') {
-        return res
-          .status(400)
-          .json({ success: false, error: 'providerKey is required' });
+        return res.status(400).json({ success: false, error: 'providerKey is required' });
       }
 
       await setDefaultLLMProviderKey({ providerKey: providerKey as ProviderKey });
