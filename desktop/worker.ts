@@ -319,7 +319,11 @@ const buildRuntimeSummary = async () => {
 };
 
 const syncExecutorRegistration = async () => {
-  if (!activeActorContext?.userId) {
+  // Only heartbeat with a real workspace user attached. A whitespace-only
+  // userId would still be truthy via `?.userId`, so trim before checking —
+  // otherwise the server would persist actor_user_id as a junk string and
+  // every downstream lookup keyed on userId would fail.
+  if (!activeActorContext?.userId?.trim()) {
     executorHeartbeatStatus = 'OFFLINE';
     executorHeartbeatAt = undefined;
     executorOwnedCapabilityIds = [];

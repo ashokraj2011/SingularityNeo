@@ -169,7 +169,20 @@ export const getWorkspaceOrganizationTx = async (
 };
 
 const replaceWorkspaceUsersTx = async (client: PoolClient, users: WorkspaceUser[]) => {
-  await client.query(`DELETE FROM workspace_users`);
+  // ⚠ Critical: do NOT use DELETE-then-INSERT here. `workspace_users.id` is
+  // the FK target for nine tables — including `desktop_user_workspace_mappings`
+  // (ON DELETE CASCADE), `desktop_work_item_checkout_sessions` (CASCADE),
+  // and `capability_execution_ownership.actor_user_id` (SET NULL). If we
+  // wipe and re-insert on every /api/state fetch (which is what was
+  // happening — fetchAppState calls syncWorkspaceOrganizationFromCapabilities
+  // unconditionally), the cascade silently nukes desktop workspace
+  // mappings and zeros out execution ownership, causing the executor's
+  // `approved_workspace_roots` to flap to {} on every page load and the
+  // EXECUTION_RUNTIME_READY readiness gate to permanently fail.
+  //
+  // Instead: UPSERT new/changed rows, then prune only rows whose id is
+  // no longer in the new set. Stable rows keep their identity so the
+  // FK cascades never fire.
   for (const user of users) {
     await client.query(
       `
@@ -184,6 +197,14 @@ const replaceWorkspaceUsersTx = async (client: PoolClient, users: WorkspaceUser[
           updated_at
         )
         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+        ON CONFLICT (id) DO UPDATE SET
+          name = EXCLUDED.name,
+          email = EXCLUDED.email,
+          title = EXCLUDED.title,
+          status = EXCLUDED.status,
+          team_ids = EXCLUDED.team_ids,
+          workspace_roles = EXCLUDED.workspace_roles,
+          updated_at = NOW()
       `,
       [
         user.id,
@@ -196,10 +217,23 @@ const replaceWorkspaceUsersTx = async (client: PoolClient, users: WorkspaceUser[
       ],
     );
   }
+
+  // Defensive: only prune when the new set is non-empty. An empty input
+  // is more likely a bug in the caller than a legitimate "no users" state,
+  // and pruning everything would still cascade-wipe desktop mappings.
+  if (users.length > 0) {
+    await client.query(
+      `DELETE FROM workspace_users WHERE id <> ALL($1::text[])`,
+      [users.map(user => user.id)],
+    );
+  }
 };
 
 const replaceWorkspaceTeamsTx = async (client: PoolClient, teams: WorkspaceTeam[]) => {
-  await client.query(`DELETE FROM workspace_teams`);
+  // Same pattern as replaceWorkspaceUsersTx — UPSERT + prune. workspace_teams.id
+  // cascades into workspace_memberships, capability_grants and others; a
+  // wholesale wipe-and-replace would tear down user→team membership rows
+  // on every state fetch and cause downstream readiness/permission flicker.
   for (const team of teams) {
     await client.query(
       `
@@ -212,6 +246,12 @@ const replaceWorkspaceTeamsTx = async (client: PoolClient, teams: WorkspaceTeam[
           updated_at
         )
         VALUES ($1,$2,$3,$4,$5,NOW())
+        ON CONFLICT (id) DO UPDATE SET
+          name = EXCLUDED.name,
+          description = EXCLUDED.description,
+          member_user_ids = EXCLUDED.member_user_ids,
+          capability_ids = EXCLUDED.capability_ids,
+          updated_at = NOW()
       `,
       [
         team.id,
@@ -220,6 +260,13 @@ const replaceWorkspaceTeamsTx = async (client: PoolClient, teams: WorkspaceTeam[
         team.memberUserIds,
         team.capabilityIds,
       ],
+    );
+  }
+
+  if (teams.length > 0) {
+    await client.query(
+      `DELETE FROM workspace_teams WHERE id <> ALL($1::text[])`,
+      [teams.map(team => team.id)],
     );
   }
 };

@@ -142,11 +142,18 @@ export const registerDesktopExecutor = async ({
     throw new Error('This desktop executor is already registered for a different workspace operator.');
   }
 
-  const normalizedRoots = actor?.userId
+  // Resolve roots from the user's mappings — preferring the request's
+  // userId, but falling back to the registration's persisted userId so a
+  // brief anonymous heartbeat (caused by a renderer re-render) doesn't
+  // wipe approved_workspace_roots to {}. Only when neither is available
+  // do we trust the caller-supplied map, which the worker normally sends
+  // as `{}` anyway.
+  const userIdForRootLookup = actor?.userId || existingRegistration?.actorUserId;
+  const normalizedRoots = userIdForRootLookup
     ? normalizeApprovedWorkspaceRoots(
         await listValidatedWorkspaceRootsByCapability({
           executorId,
-          userId: actor.userId,
+          userId: userIdForRootLookup,
         }),
       )
     : normalizeApprovedWorkspaceRoots(approvedWorkspaceRoots);
@@ -169,9 +176,28 @@ export const registerDesktopExecutor = async ({
       )
       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW())
       ON CONFLICT (id) DO UPDATE SET
-        actor_user_id = EXCLUDED.actor_user_id,
-        actor_display_name = EXCLUDED.actor_display_name,
-        actor_team_ids = EXCLUDED.actor_team_ids,
+        -- Preserve actor identity on anonymous heartbeats. The renderer's
+        -- React effect can briefly publish an actor with no userId between
+        -- two real-user pushes (e.g. while workspaceOrganization is being
+        -- refetched). Without COALESCE the row would flap NULL ↔ user-id
+        -- every few seconds and approved_workspace_roots — which is keyed
+        -- on userId — would be wiped to {}.
+        actor_user_id = COALESCE(
+          EXCLUDED.actor_user_id,
+          desktop_executor_registrations.actor_user_id
+        ),
+        actor_display_name = CASE
+          WHEN EXCLUDED.actor_user_id IS NULL
+               AND desktop_executor_registrations.actor_user_id IS NOT NULL
+            THEN desktop_executor_registrations.actor_display_name
+          ELSE EXCLUDED.actor_display_name
+        END,
+        actor_team_ids = CASE
+          WHEN EXCLUDED.actor_user_id IS NULL
+               AND desktop_executor_registrations.actor_user_id IS NOT NULL
+            THEN desktop_executor_registrations.actor_team_ids
+          ELSE EXCLUDED.actor_team_ids
+        END,
         approved_workspace_roots = CASE
           WHEN EXCLUDED.approved_workspace_roots = '{}'::jsonb
             THEN desktop_executor_registrations.approved_workspace_roots

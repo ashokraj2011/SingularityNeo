@@ -976,7 +976,18 @@ export const CapabilityProvider = ({ children }: { children: ReactNode }) => {
       currentUserId:
         currentWorkspaceUserId || workspaceOrganization.currentUserId || undefined,
     });
-    setCurrentActorContext(buildActorContextFromOrganization(normalizedOrganization));
+    const nextActor = buildActorContextFromOrganization(normalizedOrganization);
+    // Skip pushing the actor context to the desktop worker when we have no
+    // resolvable userId yet (initial app boot, or a mid-flight refetch of
+    // the workspace org). Pushing an actor with `userId: undefined` would
+    // overwrite the worker's `activeActorContext` and cause the heartbeat
+    // loop to fire anonymous heartbeats — wiping `actor_user_id` and
+    // `approved_workspace_roots` on the executor row in the DB. Better to
+    // hold the previous actor in place until we have a real user.
+    if (!nextActor.userId) {
+      return;
+    }
+    setCurrentActorContext(nextActor);
   }, [currentWorkspaceUserId, workspaceOrganization]);
 
   useEffect(() => {
