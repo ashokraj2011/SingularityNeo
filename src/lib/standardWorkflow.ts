@@ -60,6 +60,7 @@ const BROKERAGE_LIFECYCLE = createBrokerageCapabilityLifecycle();
 const BROKERAGE_VISIBLE_PHASE_IDS = getCapabilityGraphPhaseIds(BROKERAGE_LIFECYCLE);
 export const STANDARD_WORKFLOW_TEMPLATE_ID = 'STANDARD-SDLC';
 export const BROKERAGE_WORKFLOW_TEMPLATE_ID = 'BROKERAGE-SDLC';
+export const FDAS_WORKFLOW_TEMPLATE_ID = 'FDAS-BUSINESS';
 
 export const SDLC_BOARD_PHASES: WorkItemPhase[] = getCapabilityBoardPhaseIds(
   STANDARD_LIFECYCLE,
@@ -744,6 +745,261 @@ export const BROKERAGE_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
   },
 ];
 
+// ── FDAS Business Use Case — human-only 3-stage approval workflow ──────────
+// Each stage has one HUMAN_TASK step followed by one HUMAN_APPROVAL gate.
+// All steps are assigned to the capability owner (agentRef: 'OWNER').
+// No autonomous agent participates — this is a pure human approval flow.
+//
+// Stage 1 — INTAKE   : Request Submission → Initial Screening Approval
+// Stage 2 — REVIEW   : Business & Risk Assessment → Business Validation Approval
+// Stage 3 — RELEASE  : Compliance Review → Executive Sign-off Approval
+
+export const FDAS_BUSINESS_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
+  // ── Stage 1: INTAKE ────────────────────────────────────────────────
+  {
+    key: 'FDAS_REQUEST_SUBMISSION',
+    name: 'Business Request Submission',
+    phase: 'ANALYSIS',
+    stepType: 'HUMAN_TASK',
+    nodeType: 'HUMAN_TASK',
+    agentRef: 'OWNER',
+    action:
+      'Prepare and submit the FDAS business request package including business case, scope, and stakeholder list.',
+    description:
+      'The business submitter prepares a complete request package covering the business objective, expected outcomes, impacted stakeholders, preliminary scope, and supporting documentation required for initial screening.',
+    handoffToAgentRef: 'OWNER',
+    handoffToPhase: 'ANALYSIS',
+    handoffLabel: 'Request package hand-off to initial screening',
+    handoffRules: [
+      'Ensure the business case is clearly articulated with expected outcomes before submitting.',
+      'Attach a complete stakeholder list and preliminary scope boundary statement.',
+      'Confirm all required supporting documents are included before the package is handed to the sponsor.',
+    ],
+    exitCriteria: [
+      'Business case documented',
+      'Stakeholder list confirmed',
+      'Supporting documents attached',
+      'Request package submitted for screening',
+    ],
+    templatePath: '/out/steps/fdas-request-submission-template.md',
+    allowedToolIds: [],
+    executionNotes:
+      'This is a human-performed step. The submitter must complete and submit the FDAS request package before the workflow advances.',
+    artifactContract: createArtifactContract(
+      ['Business Request Form', 'Stakeholder Register', 'Preliminary Scope Notes'],
+      ['FDAS Request Package', 'Business Case Summary', 'Scope Boundary Statement'],
+      'The request package must be complete and accurate before it can be screened for initial intake.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['FDAS Request Package', 'Business Case Summary', 'Scope Boundary Statement'],
+      ['Initial Screening Brief'],
+      'The complete request package must be ready before the business sponsor can conduct the initial screening.',
+    ),
+  },
+  {
+    key: 'FDAS_STAGE1_APPROVAL',
+    name: 'Stage 1 Approval - Initial Screening',
+    phase: 'ANALYSIS',
+    stepType: 'HUMAN_APPROVAL',
+    nodeType: 'HUMAN_APPROVAL',
+    agentRef: 'OWNER',
+    action: 'Review the FDAS request package and approve or reject initial intake.',
+    description:
+      'The business sponsor reviews the submitted request package for completeness, strategic alignment, and initial viability. An approval advances the request into the business and risk assessment stage.',
+    handoffToAgentRef: 'OWNER',
+    handoffToPhase: 'QA',
+    handoffLabel: 'Stage 1 approval hand-off to business and risk assessment',
+    handoffRules: [
+      'Confirm that the request package is complete and the business case is clearly stated.',
+      'Verify strategic alignment before approving advancement to the assessment stage.',
+      'Document any conditions or constraints placed on the request in the approval decision.',
+    ],
+    approverRoles: ['Business Sponsor', 'Intake Coordinator'],
+    exitCriteria: [
+      'Request package reviewed',
+      'Strategic alignment confirmed',
+      'Initial screening decision recorded',
+    ],
+    templatePath: '/out/steps/fdas-stage1-approval-template.md',
+    allowedToolIds: [],
+    executionNotes:
+      'This step always pauses for explicit human approval. The workflow must not advance until the intake decision is captured.',
+    artifactContract: createArtifactContract(
+      ['FDAS Request Package', 'Business Case Summary', 'Scope Boundary Statement'],
+      ['Stage 1 Approval Decision', 'Intake Review Notes', 'Conditions for Advancement'],
+      'The stage 1 approval decision must document the rationale and any conditions placed on the request before it moves to assessment.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Stage 1 Approval Decision', 'Intake Review Notes', 'Conditions for Advancement'],
+      ['Assessment Intake Brief'],
+      'The approval decision and any intake conditions must be communicated to the assessment team before they begin their review.',
+    ),
+  },
+  // ── Stage 2: REVIEW ────────────────────────────────────────────────
+  {
+    key: 'FDAS_RISK_ASSESSMENT',
+    name: 'Business and Risk Assessment',
+    phase: 'QA',
+    stepType: 'HUMAN_TASK',
+    nodeType: 'HUMAN_TASK',
+    agentRef: 'OWNER',
+    action:
+      'Conduct the business impact, dependency, and risk assessment for the FDAS request.',
+    description:
+      'The business analyst and risk team perform a structured assessment of operational impact, upstream and downstream dependencies, feasibility, and risk posture. The output provides the evidence base needed for business validation.',
+    handoffToAgentRef: 'OWNER',
+    handoffToPhase: 'QA',
+    handoffLabel: 'Assessment report hand-off to business validation',
+    handoffRules: [
+      'Document all upstream and downstream dependencies before the assessment is submitted.',
+      'Capture a clear risk and control summary so the validation committee can assess residual risk.',
+      'Include a feasibility recommendation with supporting evidence in the assessment report.',
+    ],
+    exitCriteria: [
+      'Business impact documented',
+      'Dependencies and risks identified',
+      'Feasibility assessment completed',
+      'Assessment report submitted for validation',
+    ],
+    templatePath: '/out/steps/fdas-risk-assessment-template.md',
+    allowedToolIds: [],
+    executionNotes:
+      'This is a human-performed step. The assessment must be completed by the designated business analyst and risk officer before it advances to validation.',
+    artifactContract: createArtifactContract(
+      ['Stage 1 Approval Decision', 'FDAS Request Package', 'Intake Review Notes'],
+      ['Business and Risk Assessment Report', 'Dependency Register', 'Risk and Control Summary'],
+      'The assessment report must provide a clear and objective picture of business impact and risk before stakeholders can validate the request.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Business and Risk Assessment Report', 'Dependency Register', 'Risk and Control Summary'],
+      ['Validation Review Pack'],
+      'The full assessment report and risk summary must be packaged for senior stakeholder review before validation begins.',
+    ),
+  },
+  {
+    key: 'FDAS_STAGE2_APPROVAL',
+    name: 'Stage 2 Approval - Business Validation',
+    phase: 'QA',
+    stepType: 'HUMAN_APPROVAL',
+    nodeType: 'HUMAN_APPROVAL',
+    agentRef: 'OWNER',
+    action: 'Review the assessment report and validate or return the FDAS request for revision.',
+    description:
+      'Senior business stakeholders and the risk committee review the impact assessment, validate the business case against organisational priorities, and either approve advancement to the authorisation stage or return the request for revision.',
+    handoffToAgentRef: 'OWNER',
+    handoffToPhase: 'RELEASE',
+    handoffLabel: 'Stage 2 approval hand-off to compliance review',
+    handoffRules: [
+      'Review the assessment against current organisational priorities before issuing a decision.',
+      'Impose explicit conditions on the request if risk posture requires remediation before advancement.',
+      'Record any revised scope guidance so the compliance review team can address it directly.',
+    ],
+    approverRoles: ['Senior Business Stakeholder', 'Risk Committee Lead', 'Operations Manager'],
+    exitCriteria: [
+      'Assessment report reviewed',
+      'Business case validated against priorities',
+      'Risk posture accepted or conditions imposed',
+      'Stage 2 decision recorded',
+    ],
+    templatePath: '/out/steps/fdas-stage2-approval-template.md',
+    allowedToolIds: [],
+    executionNotes:
+      'This step always pauses for explicit human approval. The workflow must not advance until the business validation decision is captured.',
+    artifactContract: createArtifactContract(
+      ['Business and Risk Assessment Report', 'Dependency Register', 'Risk and Control Summary'],
+      ['Stage 2 Approval Decision', 'Validation Review Notes', 'Outstanding Conditions Register'],
+      'The stage 2 decision must record validation outcome, unresolved conditions, and any revised scope guidance before advancement.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Stage 2 Approval Decision', 'Validation Review Notes', 'Outstanding Conditions Register'],
+      ['Compliance Review Brief'],
+      'The stage 2 decision and any outstanding conditions must be handed off so the compliance officer can target their review appropriately.',
+    ),
+  },
+  // ── Stage 3: AUTHORIZATION ─────────────────────────────────────────
+  {
+    key: 'FDAS_COMPLIANCE_REVIEW',
+    name: 'Compliance and Regulatory Review',
+    phase: 'RELEASE',
+    stepType: 'HUMAN_TASK',
+    nodeType: 'HUMAN_TASK',
+    agentRef: 'OWNER',
+    action:
+      'Verify regulatory alignment, prepare sign-off documentation, and capture outstanding compliance conditions.',
+    description:
+      'The compliance officer reviews the validated FDAS request against applicable regulatory requirements, organisational policy, and audit obligations. The output is a compliance clearance package that supports executive sign-off.',
+    handoffToAgentRef: 'OWNER',
+    handoffToPhase: 'RELEASE',
+    handoffLabel: 'Compliance clearance hand-off to executive sign-off',
+    handoffRules: [
+      'Confirm the request is aligned with all applicable regulatory requirements before issuing clearance.',
+      'Document any outstanding compliance conditions so the executive committee is fully informed.',
+      'Prepare a concise regulatory alignment summary that can be read independently of the full report.',
+    ],
+    exitCriteria: [
+      'Regulatory requirements reviewed',
+      'Policy alignment confirmed',
+      'Compliance conditions documented',
+      'Clearance package submitted for executive review',
+    ],
+    templatePath: '/out/steps/fdas-compliance-review-template.md',
+    allowedToolIds: [],
+    executionNotes:
+      'This is a human-performed step. The compliance officer must complete the review and submit the clearance package before the executive sign-off step can begin.',
+    artifactContract: createArtifactContract(
+      ['Stage 2 Approval Decision', 'Validation Review Notes', 'Outstanding Conditions Register'],
+      ['Compliance Clearance Package', 'Regulatory Alignment Summary', 'Outstanding Compliance Conditions'],
+      'The compliance clearance package must clearly state the regulatory and policy position so the executive committee can make an informed final decision.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Compliance Clearance Package', 'Regulatory Alignment Summary', 'Outstanding Compliance Conditions'],
+      ['Executive Review Brief'],
+      'The compliance package and regulatory position must be clearly presented for the executive committee to make an informed authorisation decision.',
+    ),
+  },
+  {
+    key: 'FDAS_STAGE3_APPROVAL',
+    name: 'Stage 3 Approval - Executive Sign-off',
+    phase: 'RELEASE',
+    stepType: 'HUMAN_APPROVAL',
+    nodeType: 'HUMAN_APPROVAL',
+    agentRef: 'OWNER',
+    action: 'Provide final executive authorisation to proceed with the FDAS business use case.',
+    description:
+      'The executive sponsor reviews the compliance clearance package, validation decisions, and full request history. A formal sign-off authorises the business use case to move into execution. Any conditions or restrictions imposed at this stage are binding.',
+    handoffToAgentRef: 'OWNER',
+    handoffToPhase: 'DONE',
+    handoffLabel: 'Executive authorisation hand-off to workflow closure',
+    handoffRules: [
+      'Review the full approval trail — all three stage decisions — before issuing final authorisation.',
+      'Capture binding execution conditions in the authorisation record so they are enforceable downstream.',
+      'Confirm the authorised scope statement matches the request as validated through stages 1 and 2.',
+    ],
+    approverRoles: ['Executive Sponsor', 'Chief Business Officer', 'Accountable Officer'],
+    exitCriteria: [
+      'Compliance clearance reviewed',
+      'Executive decision recorded',
+      'Authorisation conditions documented',
+      'Business use case cleared for execution',
+    ],
+    templatePath: '/out/steps/fdas-stage3-approval-template.md',
+    allowedToolIds: [],
+    executionNotes:
+      'This step always pauses for explicit human approval. The workflow must not advance until the executive authorisation is captured and recorded.',
+    artifactContract: createArtifactContract(
+      ['Compliance Clearance Package', 'Stage 2 Approval Decision', 'Regulatory Alignment Summary'],
+      ['Executive Authorisation Record', 'Approved Scope Statement', 'Execution Conditions Register'],
+      'The executive authorisation record is the binding approval document. It must capture the decision, conditions, and authorised scope before execution begins.',
+    ),
+    handoffArtifactContract: createArtifactContract(
+      ['Executive Authorisation Record', 'Approved Scope Statement', 'Execution Conditions Register'],
+      ['FDAS Closure Packet', 'Authorised Business Use Case'],
+      'Close the FDAS Business Use Case workflow with the binding executive authorisation record and authorised scope statement.',
+    ),
+  },
+];
+// ── end FDAS Business Use Case step templates ───────────────────────────────
+
 type SharedWorkflowTemplateDefinition = {
   templateId: string;
   name: string;
@@ -1044,6 +1300,30 @@ export const applyWorkflowTemplateArtifacts = (
 
 export const applyStandardArtifactsToWorkflow = applyWorkflowTemplateArtifacts;
 
+// FDAS uses the first three phases of the standard lifecycle positionally:
+// ANALYSIS (intake) → QA (review) → RELEASE (authorisation).
+// For capabilities with a non-standard lifecycle, resolveTemplatePhase will
+// map these to the corresponding positional phases in their own lifecycle.
+const FDAS_TEMPLATE_PHASE_IDS: WorkItemPhase[] = ['ANALYSIS', 'QA', 'RELEASE'];
+
+export const createFdasBusinessWorkflow = (
+  capability: Pick<Capability, 'id' | 'name' | 'specialAgentId' | 'lifecycle'>,
+): Workflow => ({
+  ...createSharedCapabilityWorkflow(capability, {
+    templateId: FDAS_WORKFLOW_TEMPLATE_ID,
+    name: 'FDAS Business Use Case',
+    summary:
+      'Human-only three-stage business workflow for the Financial Data and Analytics Services (FDAS) use case. Each stage closes with a mandatory human approval gate: Stage 1 screens the initial request for strategic alignment, Stage 2 validates the business and risk assessment with senior stakeholders, and Stage 3 captures executive sign-off before the use case is cleared for execution. No autonomous agents participate — all actions and decisions are performed by designated human roles.',
+    stepTemplates: FDAS_BUSINESS_STEP_TEMPLATES,
+    templatePhaseIds: FDAS_TEMPLATE_PHASE_IDS,
+    startLabel: 'Begin FDAS business intake',
+  }),
+  workflowType: 'Custom',
+});
+
 export const getDefaultCapabilityWorkflows = (
   capability: Pick<Capability, 'id' | 'name' | 'specialAgentId' | 'lifecycle'>,
-): Workflow[] => [createStandardCapabilityWorkflow(capability)];
+): Workflow[] => [
+  createStandardCapabilityWorkflow(capability),
+  createFdasBusinessWorkflow(capability),
+];

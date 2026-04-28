@@ -250,6 +250,35 @@ Human approval should capture a durable authorization record and any release con
     TRUE
   ),
   (
+    'APPROVED-SCOPE-STATEMENT',
+    'Approved Scope Statement',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The executive authorisation record is the binding approval document. It must capture the decision, conditions, and authorised scope before execution begins.',
+    ARRAY['Compliance Clearance Package', 'Stage 2 Approval Decision', 'Regulatory Alignment Summary']::TEXT[],
+    '# Approved Scope Statement
+
+## Purpose
+The executive authorisation record is the binding approval document. It must capture the decision, conditions, and authorised scope before execution begins.
+
+## Required Inputs
+- Compliance Clearance Package
+- Stage 2 Approval Decision
+- Regulatory Alignment Summary
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
     'APPROVER-COMMENTS-LOG',
     'Approver Comments Log',
     'Workflow Output',
@@ -394,6 +423,35 @@ Architect depends on this artifact as an approved starting input.
     FALSE
   ),
   (
+    'ASSESSMENT-INTAKE-BRIEF',
+    'Assessment Intake Brief',
+    'Handoff Packet',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The approval decision and any intake conditions must be communicated to the assessment team before they begin their review.',
+    ARRAY['Stage 1 Approval Decision', 'Intake Review Notes', 'Conditions for Advancement']::TEXT[],
+    '# Assessment Intake Brief
+
+## Purpose
+The approval decision and any intake conditions must be communicated to the assessment team before they begin their review.
+
+## Required Inputs
+- Stage 1 Approval Decision
+- Intake Review Notes
+- Conditions for Advancement
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
     'ASSUMPTIONS-LOG',
     'Assumptions Log',
     'Workflow Output',
@@ -414,6 +472,35 @@ Analysis should produce a review-ready business and scope pack that downstream d
 - Stakeholder Priorities Register
 - Jira Story Context
 - Domain Constraints Register
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'AUTHORISED-BUSINESS-USE-CASE',
+    'Authorised Business Use Case',
+    'Handoff Packet',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'Close the FDAS Business Use Case workflow with the binding executive authorisation record and authorised scope statement.',
+    ARRAY['Executive Authorisation Record', 'Approved Scope Statement', 'Execution Conditions Register']::TEXT[],
+    '# Authorised Business Use Case
+
+## Purpose
+Close the FDAS Business Use Case workflow with the binding executive authorisation record and authorised scope statement.
+
+## Required Inputs
+- Executive Authorisation Record
+- Approved Scope Statement
+- Execution Conditions Register
 
 ## Summary
 - Capture the core decision, output, or evidence.
@@ -500,6 +587,91 @@ Give development a precise build plan, contract boundaries, and design decisions
 - Solution Design Document
 - Architecture Decision Log
 - Implementation Guardrails
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'BUSINESS-AND-RISK-ASSESSMENT-REPORT',
+    'Business and Risk Assessment Report',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The assessment report must provide a clear and objective picture of business impact and risk before stakeholders can validate the request.',
+    ARRAY['Stage 1 Approval Decision', 'FDAS Request Package', 'Intake Review Notes']::TEXT[],
+    '# Business and Risk Assessment Report
+
+## Purpose
+The assessment report must provide a clear and objective picture of business impact and risk before stakeholders can validate the request.
+
+## Required Inputs
+- Stage 1 Approval Decision
+- FDAS Request Package
+- Intake Review Notes
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'BUSINESS-CASE-SUMMARY',
+    'Business Case Summary',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The request package must be complete and accurate before it can be screened for initial intake.',
+    ARRAY['Business Request Form', 'Stakeholder Register', 'Preliminary Scope Notes']::TEXT[],
+    '# Business Case Summary
+
+## Purpose
+The request package must be complete and accurate before it can be screened for initial intake.
+
+## Required Inputs
+- Business Request Form
+- Stakeholder Register
+- Preliminary Scope Notes
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'BUSINESS-REQUEST-FORM',
+    'Business Request Form',
+    'Workflow Input',
+    'INPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'Required input for the Business Request Submission step.',
+    ARRAY[]::TEXT[],
+    '# Business Request Form
+
+## Purpose
+Required input for the Business Request Submission step.
+
+## Required Inputs
+- Add required context here
 
 ## Summary
 - Capture the core decision, output, or evidence.
@@ -679,6 +851,93 @@ Software Developer is expected to publish this artifact as part of its baseline 
     FALSE
   ),
   (
+    'COMPLIANCE-CLEARANCE-PACKAGE',
+    'Compliance Clearance Package',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The compliance clearance package must clearly state the regulatory and policy position so the executive committee can make an informed final decision.',
+    ARRAY['Stage 2 Approval Decision', 'Validation Review Notes', 'Outstanding Conditions Register']::TEXT[],
+    '# Compliance Clearance Package
+
+## Purpose
+The compliance clearance package must clearly state the regulatory and policy position so the executive committee can make an informed final decision.
+
+## Required Inputs
+- Stage 2 Approval Decision
+- Validation Review Notes
+- Outstanding Conditions Register
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'COMPLIANCE-REVIEW-BRIEF',
+    'Compliance Review Brief',
+    'Handoff Packet',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The stage 2 decision and any outstanding conditions must be handed off so the compliance officer can target their review appropriately.',
+    ARRAY['Stage 2 Approval Decision', 'Validation Review Notes', 'Outstanding Conditions Register']::TEXT[],
+    '# Compliance Review Brief
+
+## Purpose
+The stage 2 decision and any outstanding conditions must be handed off so the compliance officer can target their review appropriately.
+
+## Required Inputs
+- Stage 2 Approval Decision
+- Validation Review Notes
+- Outstanding Conditions Register
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'CONDITIONS-FOR-ADVANCEMENT',
+    'Conditions for Advancement',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The stage 1 approval decision must document the rationale and any conditions placed on the request before it moves to assessment.',
+    ARRAY['FDAS Request Package', 'Business Case Summary', 'Scope Boundary Statement']::TEXT[],
+    '# Conditions for Advancement
+
+## Purpose
+The stage 1 approval decision must document the rationale and any conditions placed on the request before it moves to assessment.
+
+## Required Inputs
+- FDAS Request Package
+- Business Case Summary
+- Scope Boundary Statement
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
     'CONFLICT-WAIT-CONTEXT',
     'Conflict wait context',
     'Agent Contract',
@@ -854,7 +1113,7 @@ Planning should produce a durable synthesis of stakeholder intent, milestones, a
     'BUSINESS-ANALYST',
     'Business Analyst',
     'Analysis should produce a review-ready business and scope pack that downstream design can trust.',
-    ARRAY['Capability Charter', 'Stakeholder Requirements', 'Planning Report', 'Stakeholder Priorities Register', 'Jira Story Context', 'Domain Constraints Register']::TEXT[],
+    ARRAY['Capability Charter', 'Stakeholder Requirements', 'Planning Report', 'Stakeholder Priorities Register', 'Jira Story Context', 'Domain Constraints Register', 'Stage 1 Approval Decision', 'FDAS Request Package', 'Intake Review Notes']::TEXT[],
     '# Dependency Register
 
 ## Purpose
@@ -867,6 +1126,9 @@ Analysis should produce a review-ready business and scope pack that downstream d
 - Stakeholder Priorities Register
 - Jira Story Context
 - Domain Constraints Register
+- Stage 1 Approval Decision
+- FDAS Request Package
+- Intake Review Notes
 
 ## Summary
 - Capture the core decision, output, or evidence.
@@ -1078,6 +1340,35 @@ Required input for the Business Analysis step.
     TRUE
   ),
   (
+    'EXECUTION-CONDITIONS-REGISTER',
+    'Execution Conditions Register',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The executive authorisation record is the binding approval document. It must capture the decision, conditions, and authorised scope before execution begins.',
+    ARRAY['Compliance Clearance Package', 'Stage 2 Approval Decision', 'Regulatory Alignment Summary']::TEXT[],
+    '# Execution Conditions Register
+
+## Purpose
+The executive authorisation record is the binding approval document. It must capture the decision, conditions, and authorised scope before execution begins.
+
+## Required Inputs
+- Compliance Clearance Package
+- Stage 2 Approval Decision
+- Regulatory Alignment Summary
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
     'EXECUTION-EVIDENCE',
     'Execution evidence',
     'Agent Contract',
@@ -1132,6 +1423,64 @@ Execution Agent is expected to publish this artifact as part of its baseline con
     FALSE
   ),
   (
+    'EXECUTIVE-AUTHORISATION-RECORD',
+    'Executive Authorisation Record',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The executive authorisation record is the binding approval document. It must capture the decision, conditions, and authorised scope before execution begins.',
+    ARRAY['Compliance Clearance Package', 'Stage 2 Approval Decision', 'Regulatory Alignment Summary']::TEXT[],
+    '# Executive Authorisation Record
+
+## Purpose
+The executive authorisation record is the binding approval document. It must capture the decision, conditions, and authorised scope before execution begins.
+
+## Required Inputs
+- Compliance Clearance Package
+- Stage 2 Approval Decision
+- Regulatory Alignment Summary
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'EXECUTIVE-REVIEW-BRIEF',
+    'Executive Review Brief',
+    'Handoff Packet',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The compliance package and regulatory position must be clearly presented for the executive committee to make an informed authorisation decision.',
+    ARRAY['Compliance Clearance Package', 'Regulatory Alignment Summary', 'Outstanding Compliance Conditions']::TEXT[],
+    '# Executive Review Brief
+
+## Purpose
+The compliance package and regulatory position must be clearly presented for the executive committee to make an informed authorisation decision.
+
+## Required Inputs
+- Compliance Clearance Package
+- Regulatory Alignment Summary
+- Outstanding Compliance Conditions
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
     'EXISTING-SOLUTION-CONTEXT',
     'Existing Solution Context',
     'Workflow Input',
@@ -1147,6 +1496,64 @@ Required input for the Solution Design step.
 
 ## Required Inputs
 - Add required context here
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'FDAS-CLOSURE-PACKET',
+    'FDAS Closure Packet',
+    'Handoff Packet',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'Close the FDAS Business Use Case workflow with the binding executive authorisation record and authorised scope statement.',
+    ARRAY['Executive Authorisation Record', 'Approved Scope Statement', 'Execution Conditions Register']::TEXT[],
+    '# FDAS Closure Packet
+
+## Purpose
+Close the FDAS Business Use Case workflow with the binding executive authorisation record and authorised scope statement.
+
+## Required Inputs
+- Executive Authorisation Record
+- Approved Scope Statement
+- Execution Conditions Register
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'FDAS-REQUEST-PACKAGE',
+    'FDAS Request Package',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The request package must be complete and accurate before it can be screened for initial intake.',
+    ARRAY['Business Request Form', 'Stakeholder Register', 'Preliminary Scope Notes']::TEXT[],
+    '# FDAS Request Package
+
+## Purpose
+The request package must be complete and accurate before it can be screened for initial intake.
+
+## Required Inputs
+- Business Request Form
+- Stakeholder Register
+- Preliminary Scope Notes
 
 ## Summary
 - Capture the core decision, output, or evidence.
@@ -1391,6 +1798,64 @@ DevOps depends on this artifact as an approved starting input.
     FALSE
   ),
   (
+    'INITIAL-SCREENING-BRIEF',
+    'Initial Screening Brief',
+    'Handoff Packet',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The complete request package must be ready before the business sponsor can conduct the initial screening.',
+    ARRAY['FDAS Request Package', 'Business Case Summary', 'Scope Boundary Statement']::TEXT[],
+    '# Initial Screening Brief
+
+## Purpose
+The complete request package must be ready before the business sponsor can conduct the initial screening.
+
+## Required Inputs
+- FDAS Request Package
+- Business Case Summary
+- Scope Boundary Statement
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'INTAKE-REVIEW-NOTES',
+    'Intake Review Notes',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The stage 1 approval decision must document the rationale and any conditions placed on the request before it moves to assessment.',
+    ARRAY['FDAS Request Package', 'Business Case Summary', 'Scope Boundary Statement']::TEXT[],
+    '# Intake Review Notes
+
+## Purpose
+The stage 1 approval decision must document the rationale and any conditions placed on the request before it moves to assessment.
+
+## Required Inputs
+- FDAS Request Package
+- Business Case Summary
+- Scope Boundary Statement
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
     'JIRA-STORY-CONTEXT',
     'Jira Story Context',
     'Workflow Input',
@@ -1504,6 +1969,64 @@ Execution Agent is expected to publish this artifact as part of its baseline con
     FALSE
   ),
   (
+    'OUTSTANDING-COMPLIANCE-CONDITIONS',
+    'Outstanding Compliance Conditions',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The compliance clearance package must clearly state the regulatory and policy position so the executive committee can make an informed final decision.',
+    ARRAY['Stage 2 Approval Decision', 'Validation Review Notes', 'Outstanding Conditions Register']::TEXT[],
+    '# Outstanding Compliance Conditions
+
+## Purpose
+The compliance clearance package must clearly state the regulatory and policy position so the executive committee can make an informed final decision.
+
+## Required Inputs
+- Stage 2 Approval Decision
+- Validation Review Notes
+- Outstanding Conditions Register
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'OUTSTANDING-CONDITIONS-REGISTER',
+    'Outstanding Conditions Register',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The stage 2 decision must record validation outcome, unresolved conditions, and any revised scope guidance before advancement.',
+    ARRAY['Business and Risk Assessment Report', 'Dependency Register', 'Risk and Control Summary']::TEXT[],
+    '# Outstanding Conditions Register
+
+## Purpose
+The stage 2 decision must record validation outcome, unresolved conditions, and any revised scope guidance before advancement.
+
+## Required Inputs
+- Business and Risk Assessment Report
+- Dependency Register
+- Risk and Control Summary
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
     'PLANNING-ASSUMPTIONS-LOG',
     'Planning Assumptions Log',
     'Workflow Output',
@@ -1611,6 +2134,33 @@ Close the workflow with a final operational and ownership hand-off back to the c
 - Deployment Summary
 - Production Verification Report
 - Release Notes
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'PRELIMINARY-SCOPE-NOTES',
+    'Preliminary Scope Notes',
+    'Workflow Input',
+    'INPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'Required input for the Business Request Submission step.',
+    ARRAY[]::TEXT[],
+    '# Preliminary Scope Notes
+
+## Purpose
+Required input for the Business Request Submission step.
+
+## Required Inputs
+- Add required context here
 
 ## Summary
 - Capture the core decision, output, or evidence.
@@ -1783,6 +2333,35 @@ Package the build candidate, developer validation, and risk notes for QA.
 - Code Change Set
 - Developer Test Evidence
 - Build Candidate Manifest
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'REGULATORY-ALIGNMENT-SUMMARY',
+    'Regulatory Alignment Summary',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The compliance clearance package must clearly state the regulatory and policy position so the executive committee can make an informed final decision.',
+    ARRAY['Stage 2 Approval Decision', 'Validation Review Notes', 'Outstanding Conditions Register']::TEXT[],
+    '# Regulatory Alignment Summary
+
+## Purpose
+The compliance clearance package must clearly state the regulatory and policy position so the executive committee can make an informed final decision.
+
+## Required Inputs
+- Stage 2 Approval Decision
+- Validation Review Notes
+- Outstanding Conditions Register
 
 ## Summary
 - Capture the core decision, output, or evidence.
@@ -2084,6 +2663,35 @@ Governance must distill all release evidence into an approval-ready control pack
     TRUE
   ),
   (
+    'RISK-AND-CONTROL-SUMMARY',
+    'Risk and Control Summary',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The assessment report must provide a clear and objective picture of business impact and risk before stakeholders can validate the request.',
+    ARRAY['Stage 1 Approval Decision', 'FDAS Request Package', 'Intake Review Notes']::TEXT[],
+    '# Risk and Control Summary
+
+## Purpose
+The assessment report must provide a clear and objective picture of business impact and risk before stakeholders can validate the request.
+
+## Required Inputs
+- Stage 1 Approval Decision
+- FDAS Request Package
+- Intake Review Notes
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
     'RISK-CHALLENGE-MEMO',
     'Risk Challenge Memo',
     'Agent Contract',
@@ -2138,6 +2746,35 @@ Required input for the Human Approval step.
     TRUE
   ),
   (
+    'SCOPE-BOUNDARY-STATEMENT',
+    'Scope Boundary Statement',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The request package must be complete and accurate before it can be screened for initial intake.',
+    ARRAY['Business Request Form', 'Stakeholder Register', 'Preliminary Scope Notes']::TEXT[],
+    '# Scope Boundary Statement
+
+## Purpose
+The request package must be complete and accurate before it can be screened for initial intake.
+
+## Required Inputs
+- Business Request Form
+- Stakeholder Register
+- Preliminary Scope Notes
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
     'SOLUTION-DESIGN-DOCUMENT',
     'Solution Design Document',
     'Workflow Output',
@@ -2156,6 +2793,64 @@ Design should translate business intent into an implementation-ready technical c
 - Acceptance Criteria Matrix
 - Architecture Intake Packet
 - Existing Solution Context
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'STAGE-1-APPROVAL-DECISION',
+    'Stage 1 Approval Decision',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The stage 1 approval decision must document the rationale and any conditions placed on the request before it moves to assessment.',
+    ARRAY['FDAS Request Package', 'Business Case Summary', 'Scope Boundary Statement']::TEXT[],
+    '# Stage 1 Approval Decision
+
+## Purpose
+The stage 1 approval decision must document the rationale and any conditions placed on the request before it moves to assessment.
+
+## Required Inputs
+- FDAS Request Package
+- Business Case Summary
+- Scope Boundary Statement
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'STAGE-2-APPROVAL-DECISION',
+    'Stage 2 Approval Decision',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The stage 2 decision must record validation outcome, unresolved conditions, and any revised scope guidance before advancement.',
+    ARRAY['Business and Risk Assessment Report', 'Dependency Register', 'Risk and Control Summary']::TEXT[],
+    '# Stage 2 Approval Decision
+
+## Purpose
+The stage 2 decision must record validation outcome, unresolved conditions, and any revised scope guidance before advancement.
+
+## Required Inputs
+- Business and Risk Assessment Report
+- Dependency Register
+- Risk and Control Summary
 
 ## Summary
 - Capture the core decision, output, or evidence.
@@ -2242,6 +2937,33 @@ Package the planning baseline so business analysis starts with agreed priorities
 - Planning Report
 - Delivery Milestone Plan
 - Planning Assumptions Log
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'STAKEHOLDER-REGISTER',
+    'Stakeholder Register',
+    'Workflow Input',
+    'INPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'Required input for the Business Request Submission step.',
+    ARRAY[]::TEXT[],
+    '# Stakeholder Register
+
+## Purpose
+Required input for the Business Request Submission step.
+
+## Required Inputs
+- Add required context here
 
 ## Summary
 - Capture the core decision, output, or evidence.
@@ -2419,6 +3141,64 @@ Validation Agent is expected to publish this artifact as part of its baseline co
 ## Follow-up
 - Record owners, next steps, and downstream hand-off expectations.',
     FALSE
+  ),
+  (
+    'VALIDATION-REVIEW-NOTES',
+    'Validation Review Notes',
+    'Workflow Output',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The stage 2 decision must record validation outcome, unresolved conditions, and any revised scope guidance before advancement.',
+    ARRAY['Business and Risk Assessment Report', 'Dependency Register', 'Risk and Control Summary']::TEXT[],
+    '# Validation Review Notes
+
+## Purpose
+The stage 2 decision must record validation outcome, unresolved conditions, and any revised scope guidance before advancement.
+
+## Required Inputs
+- Business and Risk Assessment Report
+- Dependency Register
+- Risk and Control Summary
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
+  ),
+  (
+    'VALIDATION-REVIEW-PACK',
+    'Validation Review Pack',
+    'Handoff Packet',
+    'OUTPUT',
+    'OWNER',
+    'Capability Owning Agent',
+    'The full assessment report and risk summary must be packaged for senior stakeholder review before validation begins.',
+    ARRAY['Business and Risk Assessment Report', 'Dependency Register', 'Risk and Control Summary']::TEXT[],
+    '# Validation Review Pack
+
+## Purpose
+The full assessment report and risk summary must be packaged for senior stakeholder review before validation begins.
+
+## Required Inputs
+- Business and Risk Assessment Report
+- Dependency Register
+- Risk and Control Summary
+
+## Summary
+- Capture the core decision, output, or evidence.
+
+## Details
+- Add the operational detail, assumptions, and trace notes.
+
+## Follow-up
+- Record owners, next steps, and downstream hand-off expectations.',
+    TRUE
   ),
   (
     'WAIT-RECORDS',

@@ -87,7 +87,9 @@ import {
   getDefaultCapabilityWorkflows,
   createBrokerageCapabilityWorkflow,
   createStandardCapabilityWorkflow,
+  createFdasBusinessWorkflow,
   STANDARD_WORKFLOW_TEMPLATE_ID,
+  FDAS_WORKFLOW_TEMPLATE_ID,
 } from '../src/lib/standardWorkflow';
 import {
   createWorkspaceFoundationCapability,
@@ -3625,6 +3627,54 @@ export const initializeSeedData = async () => {
       }
 
       await ensureBaseAgentsTx(client, capability);
+
+      // ── Backfill FDAS Business Use Case workflow ───────────────────────────
+      // Insert FDAS for any capability that is missing it.  ON CONFLICT DO
+      // NOTHING makes this idempotent — existing workflows are never touched.
+      if (capability.capabilityKind !== 'COLLECTION') {
+        const fdasWorkflowId = `WF-${row.id.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24)}-FDAS-BUSINESS`;
+        const fdasExists = await client.query<{ exists: boolean }>(
+          `SELECT EXISTS(
+             SELECT 1 FROM capability_workflows
+             WHERE capability_id = $1
+               AND (id = $2 OR template_id = $3)
+           ) AS exists`,
+          [row.id, fdasWorkflowId, FDAS_WORKFLOW_TEMPLATE_ID],
+        );
+
+        if (!fdasExists.rows[0]?.exists) {
+          const fdasWorkflow = createFdasBusinessWorkflow(capability);
+          const normalizedFdas = buildWorkflowFromGraph(
+            normalizeWorkflowGraph(fdasWorkflow, capability.lifecycle),
+            capability.lifecycle,
+          );
+          await client.query(
+            `INSERT INTO capability_workflows (
+               capability_id, id, name, status, workflow_type, scope, summary,
+               schema_version, entry_node_id, template_id,
+               nodes, edges, steps, publish_state, updated_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,${withUpdatedTimestamp})
+             ON CONFLICT (capability_id, id) DO NOTHING`,
+            [
+              row.id,
+              normalizedFdas.id,
+              normalizedFdas.name,
+              normalizedFdas.status,
+              normalizedFdas.workflowType || null,
+              normalizedFdas.scope || 'CAPABILITY',
+              normalizedFdas.summary || null,
+              normalizedFdas.schemaVersion || null,
+              normalizedFdas.entryNodeId || null,
+              normalizedFdas.templateId || null,
+              JSON.stringify(normalizedFdas.nodes || []),
+              JSON.stringify(normalizedFdas.edges || []),
+              JSON.stringify(normalizedFdas.steps),
+              normalizedFdas.publishState || 'DRAFT',
+            ],
+          );
+        }
+      }
+      // ── end FDAS backfill ──────────────────────────────────────────────────
     }
 
     await repairWorkItemProjectionsTx(client);

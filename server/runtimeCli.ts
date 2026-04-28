@@ -136,6 +136,24 @@ const providerDefaultCommand: Record<ProviderKey, string> = {
   'aider-cli': 'aider',
 };
 
+/**
+ * Known Claude models available via the Claude Code CLI — cheapest first.
+ * Haiku is the default because it is the fastest and most cost-effective.
+ */
+export const KNOWN_CLAUDE_CODE_MODELS = [
+  { id: 'claude-haiku-3-5',          label: 'Claude 3.5 Haiku (cheapest)',   profile: 'Claude Code CLI', apiModelId: 'claude-haiku-3-5' },
+  { id: 'claude-3-5-haiku-20241022',  label: 'Claude 3.5 Haiku (dated)',      profile: 'Claude Code CLI', apiModelId: 'claude-3-5-haiku-20241022' },
+  { id: 'claude-sonnet-4-5',          label: 'Claude Sonnet 4.5',             profile: 'Claude Code CLI', apiModelId: 'claude-sonnet-4-5' },
+  { id: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet (dated)',     profile: 'Claude Code CLI', apiModelId: 'claude-3-5-sonnet-20241022' },
+  { id: 'claude-opus-4-5',            label: 'Claude Opus 4.5 (most capable)', profile: 'Claude Code CLI', apiModelId: 'claude-opus-4-5' },
+  { id: 'claude-3-opus-20240229',     label: 'Claude 3 Opus (dated)',         profile: 'Claude Code CLI', apiModelId: 'claude-3-opus-20240229' },
+];
+
+/** Cheapest/default model for each CLI provider. */
+const providerDefaultModel: Partial<Record<ProviderKey, string>> = {
+  'claude-code-cli': 'claude-haiku-3-5',
+};
+
 const normalizeCliMessages = (messages: RuntimeCliMessage[]) =>
   messages
     .map(message => ({
@@ -173,10 +191,16 @@ const resolveCliCommand = ({
 const resolveCliModel = ({
   explicitModel,
   config,
+  providerKey,
 }: {
   explicitModel?: string;
   config?: RuntimeProviderConfig | null;
-}) => trim(explicitModel) || trim(config?.model) || '';
+  providerKey?: ProviderKey;
+}) =>
+  trim(explicitModel) ||
+  trim(config?.model) ||
+  (providerKey ? providerDefaultModel[providerKey] ?? '' : '') ||
+  '';
 
 /**
  * Return true only if `model` is a valid model identifier for the given CLI
@@ -440,6 +464,15 @@ export const listCliProviderModels = async ({
   providerKey: ProviderKey;
   config?: RuntimeProviderConfig | null;
 }): Promise<RuntimeModelOption[]> => {
+  // For Claude Code CLI we always expose the full known model list so the
+  // Agents screen can show a populated dropdown even before the operator has
+  // explicitly configured a model.  Haiku comes first because it is the
+  // cheapest and is the recommended default.
+  if (providerKey === CLAUDE_CODE_CLI_PROVIDER_KEY) {
+    return KNOWN_CLAUDE_CODE_MODELS;
+  }
+
+  // For other CLIs fall back to whatever is configured (single entry) or empty.
   const configuredModel = trim(config?.model);
   if (!configuredModel) {
     return [];
@@ -599,7 +632,7 @@ export const invokeCliRuntime = async ({
   const resolvedCommand = await resolveCommandPath(command, config?.env);
 
   const prompt = buildCliPrompt(messages);
-  const resolvedModel = resolveCliModel({ explicitModel: model, config });
+  const resolvedModel = resolveCliModel({ explicitModel: model, config, providerKey });
   const tempOutputPath = path.join(os.tmpdir(), `singularity-runtime-${randomUUID()}.txt`);
 
   const invocation =

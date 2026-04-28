@@ -5,7 +5,9 @@ import { BUILT_IN_AGENT_TEMPLATES, SKILL_LIBRARY } from '../src/constants';
 import { WORKSPACE_AGENT_TEMPLATES } from '../src/lib/workspaceFoundations';
 import {
   createBrokerageCapabilityWorkflow,
+  createFdasBusinessWorkflow,
   createStandardCapabilityWorkflow,
+  FDAS_BUSINESS_STEP_TEMPLATES,
   STANDARD_SDLC_STEP_TEMPLATES,
 } from '../src/lib/standardWorkflow';
 import {
@@ -154,7 +156,7 @@ const artifactSeeds = (() => {
     }
   }
 
-  for (const step of STANDARD_SDLC_STEP_TEMPLATES) {
+  for (const step of [...STANDARD_SDLC_STEP_TEMPLATES, ...FDAS_BUSINESS_STEP_TEMPLATES]) {
     for (const artifactName of step.artifactContract.requiredInputs) {
       upsertRecord({
         name: artifactName,
@@ -708,6 +710,12 @@ const createWorkflowSql = () => {
     specialAgentId: 'OWNERAGENTTOKEN',
     lifecycle: createBrokerageCapabilityLifecycle(),
   });
+  const fdasWorkflow = createFdasBusinessWorkflow({
+    id: 'CAPABILITYIDTOKEN',
+    name: 'Capability Template',
+    specialAgentId: 'OWNERAGENTTOKEN',
+    lifecycle: createDefaultCapabilityLifecycle(),
+  });
   const workflowTemplate = JSON.stringify({
     nodes: sampleWorkflow.nodes,
     edges: sampleWorkflow.edges,
@@ -717,6 +725,11 @@ const createWorkflowSql = () => {
     nodes: brokerageWorkflow.nodes,
     edges: brokerageWorkflow.edges,
     steps: brokerageWorkflow.steps,
+  });
+  const fdasWorkflowTemplate = JSON.stringify({
+    nodes: fdasWorkflow.nodes,
+    edges: fdasWorkflow.edges,
+    steps: fdasWorkflow.steps,
   });
 
   return `-- Singularity Neo capability-scoped shared workflow seed
@@ -849,6 +862,75 @@ ON CONFLICT (capability_id, id) DO UPDATE SET
   steps = EXCLUDED.steps,
   publish_state = EXCLUDED.publish_state,
   updated_at = NOW();
+
+-- ── FDAS Business Use Case workflow ────────────────────────────────────────
+-- Human-only three-stage approval workflow (workflow_type = BUSINESS / Custom).
+-- Stages: INTAKE (Analysis) → REVIEW (QA) → AUTHORIZATION (Release).
+-- All steps are performed by designated human roles — no autonomous agents.
+WITH fdas_workflow_payload AS (
+  SELECT
+    seed.capability_id,
+    seed.capability_slug,
+    seed.owner_agent_id,
+    REPLACE(
+      REPLACE(
+        ${sqlString(fdasWorkflowTemplate)}::TEXT,
+        'OWNERAGENTTOKEN',
+        seed.owner_agent_id
+      ),
+      'CAPABILITYIDTOKEN',
+      seed.capability_slug
+    )::jsonb AS payload
+  FROM tmp_singularity_seed_capabilities seed
+)
+INSERT INTO capability_workflows (
+  capability_id,
+  id,
+  name,
+  status,
+  workflow_type,
+  scope,
+  summary,
+  schema_version,
+  entry_node_id,
+  nodes,
+  edges,
+  steps,
+  publish_state,
+  created_at,
+  updated_at
+)
+SELECT
+  capability_id,
+  'WF-' || capability_slug || '-FDAS-BUSINESS',
+  'FDAS Business Use Case',
+  'STABLE',
+  'Custom',
+  'CAPABILITY',
+  'Human-only three-stage business workflow for the Financial Data and Analytics Services (FDAS) use case. Each stage closes with a mandatory human approval gate: Stage 1 screens the initial request for strategic alignment, Stage 2 validates the business and risk assessment with senior stakeholders, and Stage 3 captures executive sign-off before the use case is cleared for execution. No autonomous agents participate — all actions and decisions are performed by designated human roles.',
+  2,
+  'NODE-' || capability_slug || '-START',
+  payload->'nodes',
+  payload->'edges',
+  payload->'steps',
+  'PUBLISHED',
+  NOW(),
+  NOW()
+FROM fdas_workflow_payload
+ON CONFLICT (capability_id, id) DO UPDATE SET
+  name = EXCLUDED.name,
+  status = EXCLUDED.status,
+  workflow_type = EXCLUDED.workflow_type,
+  scope = EXCLUDED.scope,
+  summary = EXCLUDED.summary,
+  schema_version = EXCLUDED.schema_version,
+  entry_node_id = EXCLUDED.entry_node_id,
+  nodes = EXCLUDED.nodes,
+  edges = EXCLUDED.edges,
+  steps = EXCLUDED.steps,
+  publish_state = EXCLUDED.publish_state,
+  updated_at = NOW();
+-- ── end FDAS Business Use Case ──────────────────────────────────────────────
 
 COMMIT;
 `;
