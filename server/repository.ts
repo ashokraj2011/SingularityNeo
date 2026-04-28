@@ -3802,6 +3802,7 @@ export const initializeWorkspaceFoundations = async (): Promise<WorkspaceCatalog
     const foundationWorkflows = [
       createStandardCapabilityWorkflow(foundationCapability),
       createBrokerageCapabilityWorkflow(foundationCapability),
+      createFdasBusinessWorkflow(foundationCapability),
     ];
 
     await upsertCapabilityTx(client, foundationCapability);
