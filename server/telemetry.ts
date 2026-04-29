@@ -370,7 +370,7 @@ export const getTelemetrySummary = async (
           SELECT
             COUNT(*)::text AS total_runs,
             COUNT(*) FILTER (WHERE status IN ('QUEUED', 'RUNNING'))::text AS active_runs,
-            COUNT(*) FILTER (WHERE status IN ('WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT'))::text AS waiting_runs,
+            COUNT(*) FILTER (WHERE status IN ('WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_INPUT', 'WAITING_CONFLICT'))::text AS waiting_runs,
             COUNT(*) FILTER (WHERE status = 'FAILED')::text AS failed_runs
           FROM capability_workflow_runs
           WHERE capability_id = $1
@@ -445,7 +445,7 @@ export const buildRunConsoleSnapshot = async (
   capabilityId,
   telemetry: await getTelemetrySummary(capabilityId),
   activeRuns: recentRuns.filter(run =>
-    ['QUEUED', 'RUNNING', 'WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT'].includes(
+    ['QUEUED', 'RUNNING', 'WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_INPUT', 'WAITING_CONFLICT'].includes(
       run.status,
     ),
   ),

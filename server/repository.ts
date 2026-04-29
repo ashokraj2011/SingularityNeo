@@ -2506,7 +2506,12 @@ const mapRunStatusToWorkItemStatus = (status: string): WorkItemStatus => {
   if (status === 'WAITING_APPROVAL') {
     return 'PENDING_APPROVAL';
   }
-  if (status === 'WAITING_INPUT' || status === 'WAITING_CONFLICT' || status === 'FAILED') {
+  if (
+    status === 'WAITING_HUMAN_TASK' ||
+    status === 'WAITING_INPUT' ||
+    status === 'WAITING_CONFLICT' ||
+    status === 'FAILED'
+  ) {
     return 'BLOCKED';
   }
   return 'ACTIVE';
@@ -2546,7 +2551,12 @@ const buildRecoveredBlocker = (wait: Record<string, any> | undefined) => {
   }
 
   return {
-    type: wait.type === 'CONFLICT_RESOLUTION' ? 'CONFLICT_RESOLUTION' : 'HUMAN_INPUT',
+    type:
+      wait.type === 'CONFLICT_RESOLUTION'
+        ? 'CONFLICT_RESOLUTION'
+        : wait.type === 'HUMAN_TASK'
+          ? 'HUMAN_TASK'
+          : 'HUMAN_INPUT',
     message: wait.message,
     requestedBy: wait.requested_by,
     timestamp:
@@ -2694,7 +2704,10 @@ const repairWorkItemProjectionsTx = async (client: PoolClient) => {
         [],
         pendingRequest ? JSON.stringify(pendingRequest) : null,
         blocker ? JSON.stringify(blocker) : null,
-        latestRun && ['QUEUED', 'RUNNING', 'WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT'].includes(latestRun.status)
+        latestRun &&
+        ['QUEUED', 'RUNNING', 'WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_INPUT', 'WAITING_CONFLICT'].includes(
+          latestRun.status,
+        )
           ? latestRun.id
           : null,
         latestRun?.id || null,
@@ -2931,7 +2944,7 @@ const getCapabilityWorkspaceTx = async (
       SELECT queue_reason
       FROM capability_workflow_runs
       WHERE capability_id = $1
-        AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT')
+        AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_INPUT', 'WAITING_CONFLICT')
       ORDER BY updated_at DESC, created_at DESC
       LIMIT 1
     `,

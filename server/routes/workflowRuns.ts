@@ -12,6 +12,8 @@ import { getWorkflowRunDetail, listWorkflowRunEvents } from '../execution/reposi
 import {
   approveWorkflowRun,
   cancelWorkflowRun,
+  completeWorkflowRunHumanTask,
+  delegateWorkflowRunToHuman,
   pauseWorkflowRun,
   provideWorkflowRunInput,
   requestChangesWorkflowRun,
@@ -327,6 +329,82 @@ export const registerWorkflowRunRoutes = (
         resolution:
           String(request.body?.resolution || '').trim() ||
           'Conflict resolved for continuation.',
+        resolvedBy: actor.displayName,
+        actor,
+      });
+      wakeExecutionWorker();
+      response.json(detail);
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.post('/api/capabilities/:capabilityId/runs/:runId/delegate-to-human', async (request, response) => {
+    try {
+      const actor = parseActorContext(request, 'Workspace Operator');
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
+      const instructions = String(request.body?.instructions || '').trim();
+      if (!instructions) {
+        response.status(400).json({ error: 'Human instructions are required.' });
+        return;
+      }
+      const detail = await delegateWorkflowRunToHuman({
+        capabilityId: request.params.capabilityId,
+        runId: request.params.runId,
+        instructions,
+        checklist: Array.isArray(request.body?.checklist)
+          ? request.body.checklist
+              .map((value: unknown) => String(value || '').trim())
+              .filter(Boolean)
+          : undefined,
+        assigneeUserId:
+          typeof request.body?.assigneeUserId === 'string' &&
+          request.body.assigneeUserId.trim()
+            ? request.body.assigneeUserId.trim()
+            : undefined,
+        assigneeRole:
+          typeof request.body?.assigneeRole === 'string' &&
+          request.body.assigneeRole.trim()
+            ? request.body.assigneeRole.trim()
+            : undefined,
+        approvalPolicy:
+          request.body?.approvalPolicy && typeof request.body.approvalPolicy === 'object'
+            ? (request.body.approvalPolicy as any)
+            : undefined,
+        note:
+          typeof request.body?.note === 'string' && request.body.note.trim()
+            ? request.body.note.trim()
+            : undefined,
+        delegatedBy: actor.displayName,
+        actor,
+      });
+      response.json(detail);
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.post('/api/capabilities/:capabilityId/runs/:runId/complete-human-task', async (request, response) => {
+    try {
+      const actor = parseActorContext(
+        request,
+        parseActor(request.body?.resolvedBy, 'Workspace Operator'),
+      );
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor,
+        action: 'workitem.control',
+      });
+      const detail = await completeWorkflowRunHumanTask({
+        capabilityId: request.params.capabilityId,
+        runId: request.params.runId,
+        resolution:
+          String(request.body?.resolution || '').trim() ||
+          'Human task completed and ready for approval.',
         resolvedBy: actor.displayName,
         actor,
       });

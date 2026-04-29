@@ -310,7 +310,7 @@ export const unregisterDesktopExecutor = async (executorId: string): Promise<voi
           updated_at = NOW()
         WHERE capability_id = $1
           AND assigned_executor_id = $2
-          AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT')
+          AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_INPUT', 'WAITING_CONFLICT')
       `,
       [capabilityId, executorId],
     );
@@ -394,7 +394,7 @@ export const buildExecutorRegistrySummary = async (): Promise<ExecutorRegistrySu
           assigned_executor_id AS executor_id,
           capability_id,
           COUNT(*) FILTER (
-            WHERE status IN ('RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT')
+            WHERE status IN ('RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_INPUT', 'WAITING_CONFLICT')
           )::text AS active_run_count,
           COUNT(*) FILTER (WHERE status = 'QUEUED')::text AS queued_run_count,
           COUNT(*)::text AS total_count
@@ -545,7 +545,7 @@ export const reconcileDesktopExecutionOwnerships = async (): Promise<void> => {
             updated_at = NOW()
           WHERE capability_id = $1
             AND assigned_executor_id = $2
-            AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT')
+            AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_INPUT', 'WAITING_CONFLICT')
           RETURNING id
         `,
         [capabilityId, executorId],
@@ -733,7 +733,7 @@ export const releaseCapabilityExecution = async ({
         updated_at = NOW()
       WHERE capability_id = $1
         AND assigned_executor_id = $2
-        AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT')
+        AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_INPUT', 'WAITING_CONFLICT')
     `,
     [capabilityId, executorId],
   );

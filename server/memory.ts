@@ -1057,7 +1057,11 @@ const getAgentSourceFilter = async (capabilityId: string, agentId?: string) => {
 
 export const refreshCapabilityMemory = async (
   capabilityId: string,
-  options?: { requeueAgents?: boolean; requestReason?: string },
+  options?: {
+    requeueAgents?: boolean;
+    requestReason?: string;
+    strictOnEmbeddingAbort?: boolean;
+  },
 ) => {
   if (isRemoteExecutionClient()) {
     return executionRuntimeRpc<MemoryDocument[]>('refreshCapabilityMemory', {
@@ -1078,6 +1082,16 @@ export const refreshCapabilityMemory = async (
     capabilityId,
     documents: refreshPlan,
   });
+  if (
+    options?.strictOnEmbeddingAbort &&
+    refreshPlan.some(document =>
+      /abort|timed out/i.test(String(document.embeddingFallbackReason || '')),
+    )
+  ) {
+    throw new Error(
+      'Capability memory refresh aborted before semantic embeddings completed. Keeping the previous learning profile live.',
+    );
+  }
   if (refreshFallbackSummary) {
     console.warn(refreshFallbackSummary);
   }
@@ -1091,16 +1105,18 @@ export const refreshCapabilityMemory = async (
   });
 
   if (options?.requeueAgents !== false) {
-    await Promise.all(
-      bundle.workspace.agents.map(agent =>
-        queueAgentLearningJob({
-          capabilityId,
-          agentId: agent.id,
-          requestReason: options?.requestReason || 'memory-refresh',
-          makeStale: true,
-        }).catch(() => undefined),
-      ),
-    );
+    const ownerAgent =
+      bundle.workspace.agents.find(agent => agent.isOwner) ||
+      bundle.workspace.agents.find(agent => agent.roleStarterKey === 'OWNER') ||
+      bundle.workspace.agents[0];
+    if (ownerAgent) {
+      await queueAgentLearningJob({
+        capabilityId,
+        agentId: ownerAgent.id,
+        requestReason: options?.requestReason || 'memory-refresh',
+        makeStale: true,
+      }).catch(() => undefined);
+    }
   }
 
   return listMemoryDocuments(capabilityId);

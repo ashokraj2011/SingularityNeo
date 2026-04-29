@@ -1484,6 +1484,9 @@ export interface AgentLearningProfile {
   sourceDocumentIds: string[];
   sourceArtifactIds: string[];
   sourceCount: number;
+  derivationMode?: "OWNER_DISTILLED" | "OWNER_DERIVED" | "AGENT_SPECIFIC";
+  derivedFromAgentId?: string;
+  sourceVersionId?: string;
   refreshedAt?: string;
   lastRequestedAt?: string;
   lastError?: string;
@@ -1519,6 +1522,9 @@ export interface AgentLearningProfileVersion {
   sourceDocumentIds: string[];
   sourceArtifactIds: string[];
   sourceCount: number;
+  derivationMode?: "OWNER_DISTILLED" | "OWNER_DERIVED" | "AGENT_SPECIFIC";
+  derivedFromAgentId?: string;
+  sourceVersionId?: string;
   contextBlockTokens?: number;
   judgeScore?: number;
   judgeReport?: unknown;
@@ -1711,6 +1717,10 @@ export interface AgentKnowledgeLens {
    * the UI surfaces this as "Previous version still serving".
    */
   profileStatus?: AgentLearningStatus;
+  derivationMode?: AgentLearningProfile["derivationMode"];
+  derivedFromAgentId?: string;
+  derivedFromAgentName?: string;
+  sourceVersionId?: string;
 }
 
 export interface CapabilityAgent {
@@ -3011,14 +3021,19 @@ export interface WorkspaceWriteLock {
 }
 
 export interface WorkItemPendingRequest {
-  type: "APPROVAL" | "INPUT" | "CONFLICT_RESOLUTION" | "SUB_WORKFLOW_WAIT";
+  type:
+    | "APPROVAL"
+    | "INPUT"
+    | "CONFLICT_RESOLUTION"
+    | "SUB_WORKFLOW_WAIT"
+    | "HUMAN_TASK";
   message: string;
   requestedBy: string;
   timestamp: string;
 }
 
 export interface WorkItemBlocker {
-  type: "CONFLICT_RESOLUTION" | "HUMAN_INPUT" | "APPROVAL";
+  type: "CONFLICT_RESOLUTION" | "HUMAN_INPUT" | "APPROVAL" | "HUMAN_TASK";
   message: string;
   requestedBy: string;
   timestamp: string;
@@ -3322,6 +3337,7 @@ export type WorkflowRunStatus =
   | "RUNNING"
   | "PAUSED"
   | "WAITING_APPROVAL"
+  | "WAITING_HUMAN_TASK"
   | "WAITING_INPUT"
   | "WAITING_CONFLICT"
   | "COMPLETED"
@@ -3343,7 +3359,12 @@ export type ToolInvocationStatus =
   | "FAILED"
   | "CANCELLED";
 
-export type RunWaitType = "APPROVAL" | "INPUT" | "CONFLICT_RESOLUTION" | "SUB_WORKFLOW_WAIT";
+export type RunWaitType =
+  | "APPROVAL"
+  | "HUMAN_TASK"
+  | "INPUT"
+  | "CONFLICT_RESOLUTION"
+  | "SUB_WORKFLOW_WAIT";
 
 export type RunWaitStatus = "OPEN" | "RESOLVED" | "CANCELLED";
 

@@ -78,7 +78,7 @@ export const OrchestratorAttemptsPanel = ({
         <p className="mt-1 text-xs text-secondary">
           {selectedOpenWait
             ? `Opened ${formatTimestamp(selectedOpenWait.createdAt)}`
-            : 'Execution is not paused on approval, input, or conflict resolution.'}
+            : 'Execution is not paused on approval, delegated human work, input, or conflict resolution.'}
         </p>
       </div>
     </div>

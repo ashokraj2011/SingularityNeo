@@ -91,6 +91,7 @@ const runStatusTone = (status?: string) => {
     case 'CANCELLED':
       return 'danger' as const;
     case 'WAITING_APPROVAL':
+    case 'WAITING_HUMAN_TASK':
     case 'WAITING_INPUT':
     case 'WAITING_CONFLICT':
       return 'warning' as const;

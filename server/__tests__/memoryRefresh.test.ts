@@ -104,7 +104,9 @@ beforeEach(() => {
       query: clientQueryMock,
     }),
   );
+  clientQueryMock.mockImplementation(async () => ({ rows: [], rowCount: 1 }));
   getCapabilityBundleMock.mockResolvedValue(buildBundle() as any);
+  queueAgentLearningJobMock.mockResolvedValue(undefined);
   requestLocalOpenAIEmbeddingsMock.mockImplementation(async ({ texts }: { texts: string[] }) => ({
     providerKey: 'local-openai',
     model: 'text-embedding-3-small',
@@ -161,5 +163,31 @@ describe('memory refresh transactionality', () => {
         String(sql).includes('DELETE FROM capability_memory_documents'),
       ),
     ).toBe(false);
+  });
+
+  it('requeues only the owner agent after a capability-wide refresh', async () => {
+    getCapabilityBundleMock.mockResolvedValue({
+      ...buildBundle(),
+      workspace: {
+        ...buildBundle().workspace,
+        agents: [
+          { id: 'AGENT-OWNER', name: 'Owner', role: 'Owner', isOwner: true },
+          { id: 'AGENT-DEV', name: 'Developer', role: 'Developer' },
+        ],
+      },
+    } as any);
+
+    await refreshCapabilityMemory('CAP-REFRESH', {
+      requeueAgents: true,
+      requestReason: 'manual-memory-refresh',
+    });
+
+    expect(queueAgentLearningJobMock).toHaveBeenCalledTimes(1);
+    expect(queueAgentLearningJobMock).toHaveBeenCalledWith({
+      capabilityId: 'CAP-REFRESH',
+      agentId: 'AGENT-OWNER',
+      requestReason: 'manual-memory-refresh',
+      makeStale: true,
+    });
   });
 });

@@ -24,6 +24,7 @@ const STATUS_TONE_MAP: Record<string, EnterpriseTone> = {
   CANCELLED: 'neutral',
   PENDING_APPROVAL: 'warning',
   WAITING_APPROVAL: 'warning',
+  WAITING_HUMAN_TASK: 'warning',
   WAITING_INPUT: 'warning',
   WAITING_CONFLICT: 'danger',
   URGENT: 'danger',

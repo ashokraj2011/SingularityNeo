@@ -861,6 +861,8 @@ const canActorApproveWait = ({
 export const __executionServiceTestUtils = {
   canActorApproveWait,
   buildQueuedRunForExternalAdvance,
+  getRunStatusForWaitType: (waitType: "APPROVAL" | "HUMAN_TASK" | "INPUT" | "CONFLICT_RESOLUTION") =>
+    getRunStatusForWaitType(waitType),
 };
 
 /**
@@ -934,6 +936,7 @@ const buildApprovalAssignmentsForWait = ({
   runId,
   waitId,
   waitMessage,
+  approvalPolicyOverride,
 }: {
   capability: Capability;
   workItem: WorkItem;
@@ -941,9 +944,10 @@ const buildApprovalAssignmentsForWait = ({
   runId: string;
   waitId: string;
   waitMessage: string;
+  approvalPolicyOverride?: ApprovalPolicy;
 }) => {
   const ownership = compileStepOwnership({ capability, step });
-  const policy = step.approvalPolicy;
+  const policy = approvalPolicyOverride || step.approvalPolicy;
   const fallbackTeamIds =
     ownership.approvalTeamIds.length > 0
       ? ownership.approvalTeamIds
@@ -1141,7 +1145,11 @@ const formatContrarianReviewMarkdown = (review: ContrarianConflictReview) =>
   ]);
 
 const getStepStatus = (step?: WorkflowStep): WorkItemStatus =>
-  step?.stepType === "HUMAN_APPROVAL" ? "PENDING_APPROVAL" : "ACTIVE";
+  step?.stepType === "HUMAN_APPROVAL"
+    ? "PENDING_APPROVAL"
+    : step?.stepType === "HUMAN_TASK"
+      ? "BLOCKED"
+      : "ACTIVE";
 
 const buildPendingRequest = (
   step: WorkflowStep | undefined,
@@ -1175,6 +1183,8 @@ const buildBlocker = (
     type:
       wait.type === "CONFLICT_RESOLUTION"
         ? "CONFLICT_RESOLUTION"
+        : wait.type === "HUMAN_TASK"
+          ? "HUMAN_TASK"
         : "HUMAN_INPUT",
     message: wait.message,
     requestedBy: step.agentId,
@@ -3548,7 +3558,11 @@ const syncWaitingProjection = async ({
       ...projection.workItem.history,
       createHistoryEntry(
         "System",
-        waitType === "APPROVAL" ? "Approval requested" : "Execution paused",
+        waitType === "APPROVAL"
+          ? "Approval requested"
+          : waitType === "HUMAN_TASK"
+            ? "Delegated to human"
+            : "Execution paused",
         waitMessage,
         currentStep.phase,
         nextStatus,
@@ -3982,6 +3996,8 @@ const buildHumanInteractionArtifact = ({
   const artifactKind =
     wait.type === "APPROVAL"
       ? "APPROVAL_RECORD"
+      : wait.type === "HUMAN_TASK"
+        ? "INPUT_NOTE"
       : wait.type === "CONFLICT_RESOLUTION"
         ? "CONFLICT_RESOLUTION"
         : "INPUT_NOTE";
@@ -3991,6 +4007,8 @@ const buildHumanInteractionArtifact = ({
       ? `${step.name} Code Review Approval`
       : wait.type === "APPROVAL"
         ? `${step.name} Approval Record`
+        : wait.type === "HUMAN_TASK"
+          ? `${step.name} Human Task Record`
         : wait.type === "CONFLICT_RESOLUTION"
           ? `${step.name} Conflict Resolution`
           : `${step.name} Human Input Note`;
@@ -5325,7 +5343,9 @@ const resolveRunWaitAndQueue = async ({
     }
 
     // Delegation guard — if the policy disallows delegation, reject delegated decisions.
-    const policy = currentStep.approvalPolicy as ApprovalPolicy | undefined;
+    const policy =
+      (openWait.payload?.approvalPolicy as ApprovalPolicy | undefined) ||
+      (currentStep.approvalPolicy as ApprovalPolicy | undefined);
     if (
       policy &&
       !policy.delegationAllowed &&
@@ -5817,6 +5837,256 @@ export const resolveWorkflowRunConflict = async ({
     actor,
   });
 
+export const delegateWorkflowRunToHuman = async ({
+  capabilityId,
+  runId,
+  instructions,
+  checklist,
+  assigneeUserId,
+  assigneeRole,
+  approvalPolicy,
+  note,
+  delegatedBy,
+  actor,
+}: {
+  capabilityId: string;
+  runId: string;
+  instructions: string;
+  checklist?: string[];
+  assigneeUserId?: string;
+  assigneeRole?: string;
+  approvalPolicy?: ApprovalPolicy;
+  note?: string;
+  delegatedBy: string;
+  actor?: ActorContext;
+}) => {
+  const detail = await getWorkflowRunDetail(capabilityId, runId);
+  if (
+    detail.run.status === "CANCELLED" ||
+    detail.run.status === "COMPLETED" ||
+    detail.run.status === "FAILED"
+  ) {
+    throw new Error("Only active workflow runs can be delegated to a human.");
+  }
+  if (detail.run.status === "WAITING_HUMAN_TASK") {
+    throw new Error("This run is already waiting on a delegated human task.");
+  }
+
+  const projection = await resolveProjectionContext(
+    capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
+  if (!canActorOperateWorkItem({ actor, workItem: projection.workItem })) {
+    throw new Error("Only the current phase owner can delegate this workflow stage.");
+  }
+
+  const currentStep = getCurrentWorkflowStep(detail);
+  const currentRunStep = getCurrentRunStep(detail);
+  const trimmedInstructions = instructions.trim();
+  if (!trimmedInstructions) {
+    throw new Error("Add human instructions before delegating this stage.");
+  }
+
+  const effectiveApprovalPolicy = currentStep.approvalPolicy || approvalPolicy;
+  if (
+    !currentStep.approvalPolicy &&
+    (!effectiveApprovalPolicy || effectiveApprovalPolicy.targets.length === 0)
+  ) {
+    throw new Error(
+      "Delegating a stage without an existing approval policy requires explicit approver targets.",
+    );
+  }
+
+  const openWait = [...detail.waits].reverse().find(wait => wait.status === "OPEN");
+  if (openWait) {
+    await resolveRunWait({
+      capabilityId,
+      waitId: openWait.id,
+      resolution: `Superseded by delegated human task. ${note?.trim() || trimmedInstructions}`,
+      resolvedBy: delegatedBy,
+      resolvedByActorUserId: actor?.userId,
+      resolvedByActorTeamIds: getActorTeamIds(actor),
+    });
+    if (openWait.type === "APPROVAL" && (openWait.approvalAssignments || []).length > 0) {
+      await updateApprovalAssignmentsForWait({
+        capabilityId,
+        waitId: openWait.id,
+        status: "CANCELLED",
+      });
+    }
+  }
+
+  const updatedRunStep = await updateWorkflowRunStep({
+    ...currentRunStep,
+    status: "WAITING",
+    metadata: {
+      ...(currentRunStep.metadata || {}),
+      delegatedHumanTask: {
+        delegatedAt: new Date().toISOString(),
+        delegatedBy,
+        delegatedByUserId: actor?.userId,
+        instructions: trimmedInstructions,
+        checklist: checklist || [],
+        assigneeUserId: assigneeUserId || undefined,
+        assigneeRole: assigneeRole || undefined,
+        note: note?.trim() || undefined,
+      },
+    },
+  });
+
+  await insertRunEvent(
+    createRunEvent({
+      capabilityId,
+      runId,
+      workItemId: detail.run.workItemId,
+      runStepId: currentRunStep.id,
+      traceId: detail.run.traceId,
+      spanId: currentRunStep.spanId,
+      type: "STEP_DELEGATED_TO_HUMAN",
+      level: "INFO",
+      message: `${currentStep.name} was delegated to a human.`,
+      details: {
+        instructions: trimmedInstructions,
+        assigneeUserId: assigneeUserId || null,
+        assigneeRole: assigneeRole || null,
+      },
+    }),
+  );
+
+  return completeRunWithWait({
+    detail,
+    waitType: "HUMAN_TASK",
+    waitMessage: trimmedInstructions,
+    waitPayload: {
+      checklist: checklist || [],
+      assigneeUserId: assigneeUserId || undefined,
+      assigneeRole: assigneeRole || undefined,
+      approvalPolicy: effectiveApprovalPolicy,
+      operatorNote: note?.trim() || undefined,
+      delegatedBy,
+    },
+    runStepOverride: updatedRunStep,
+  });
+};
+
+export const completeWorkflowRunHumanTask = async ({
+  capabilityId,
+  runId,
+  resolution,
+  resolvedBy,
+  actor,
+}: {
+  capabilityId: string;
+  runId: string;
+  resolution: string;
+  resolvedBy: string;
+  actor?: ActorContext;
+}) => {
+  const detail = await getWorkflowRunDetail(capabilityId, runId);
+  const projection = await resolveProjectionContext(
+    capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
+  if (!canActorOperateWorkItem({ actor, workItem: projection.workItem })) {
+    throw new Error("Only the current phase owner can mark this human task done.");
+  }
+
+  const openWait = [...detail.waits]
+    .reverse()
+    .find(wait => wait.status === "OPEN" && wait.type === "HUMAN_TASK");
+  if (!openWait) {
+    throw new Error(`Run ${runId} does not have an open delegated human task.`);
+  }
+
+  const currentStep = getCurrentWorkflowStep(detail);
+  const currentRunStep = getCurrentRunStep(detail);
+  const effectiveApprovalPolicy =
+    (openWait.payload?.approvalPolicy as ApprovalPolicy | undefined) ||
+    currentStep.approvalPolicy;
+  if (!effectiveApprovalPolicy || effectiveApprovalPolicy.targets.length === 0) {
+    throw new Error(
+      "This delegated human task cannot be completed without an approval configuration.",
+    );
+  }
+
+  const trimmedResolution = resolution.trim();
+  if (!trimmedResolution) {
+    throw new Error("Add a completion summary before marking the human task done.");
+  }
+
+  const resolvedWait = await resolveRunWait({
+    capabilityId,
+    waitId: openWait.id,
+    resolution: trimmedResolution,
+    resolvedBy,
+    resolvedByActorUserId: actor?.userId,
+    resolvedByActorTeamIds: getActorTeamIds(actor),
+  });
+
+  const humanTaskArtifact = buildHumanInteractionArtifact({
+    detail,
+    workItem: projection.workItem,
+    lifecycle: projection.capability.lifecycle,
+    step: currentStep,
+    runStep: currentRunStep,
+    wait: resolvedWait,
+    resolution: trimmedResolution,
+    resolvedBy,
+  });
+
+  const updatedRunStep = await updateWorkflowRunStep({
+    ...currentRunStep,
+    status: "WAITING",
+    metadata: {
+      ...(currentRunStep.metadata || {}),
+      delegatedHumanTask: {
+        ...((currentRunStep.metadata?.delegatedHumanTask as Record<string, unknown>) || {}),
+        completedAt: new Date().toISOString(),
+        completedBy: resolvedBy,
+        completionSummary: trimmedResolution,
+      },
+    },
+  });
+
+  await insertRunEvent(
+    createRunEvent({
+      capabilityId,
+      runId,
+      workItemId: detail.run.workItemId,
+      runStepId: currentRunStep.id,
+      traceId: detail.run.traceId,
+      spanId: currentRunStep.spanId,
+      type: "HUMAN_TASK_COMPLETED",
+      level: "INFO",
+      message: `${currentStep.name} was marked complete by a human and is waiting for approval.`,
+      details: {
+        waitId: openWait.id,
+        resolution: trimmedResolution,
+      },
+    }),
+  );
+
+  const approvalDetail = await completeRunWithWait({
+    detail,
+    waitType: "APPROVAL",
+    waitMessage: `${currentStep.name} is waiting for approval after human completion.`,
+    waitPayload: {
+      postStepApproval: true,
+      completionSummary: trimmedResolution,
+      generatedArtifactIds: [humanTaskArtifact.id],
+      humanTaskWaitId: openWait.id,
+      approvalPolicy: effectiveApprovalPolicy,
+    },
+    artifacts: [humanTaskArtifact],
+    runStepOverride: updatedRunStep,
+    approvalPolicyOverride: effectiveApprovalPolicy,
+  });
+
+  return approvalDetail;
+};
+
 export const cancelWorkflowRun = async ({
   capabilityId,
   runId,
@@ -5897,6 +6167,9 @@ const getRunStatusForWaitType = (
 ): WorkflowRun["status"] => {
   if (waitType === "APPROVAL") {
     return "WAITING_APPROVAL";
+  }
+  if (waitType === "HUMAN_TASK") {
+    return "WAITING_HUMAN_TASK";
   }
   if (waitType === "INPUT") {
     return "WAITING_INPUT";
@@ -6935,6 +7208,7 @@ const completeRunWithWait = async ({
   waitPayload,
   artifacts,
   runStepOverride,
+  approvalPolicyOverride,
 }: {
   detail: WorkflowRunDetail;
   waitType: RunWaitType;
@@ -6942,6 +7216,7 @@ const completeRunWithWait = async ({
   waitPayload?: Record<string, any>;
   artifacts?: Artifact[];
   runStepOverride?: WorkflowRunStep;
+  approvalPolicyOverride?: ApprovalPolicy;
 }) => {
   const waitRunStatus = await getWorkflowRunStatus(
     detail.run.capabilityId,
@@ -6971,7 +7246,7 @@ const completeRunWithWait = async ({
     status: "OPEN",
     message: waitMessage,
     requestedBy: currentRunStep.agentId,
-    approvalPolicyId: currentStep.approvalPolicy?.id,
+    approvalPolicyId: approvalPolicyOverride?.id || currentStep.approvalPolicy?.id,
     payload: {
       stepName: currentRunStep.name,
       ...(waitPayload || {}),
@@ -6989,6 +7264,7 @@ const completeRunWithWait = async ({
       runId: detail.run.id,
       waitId: wait.id,
       waitMessage,
+      approvalPolicyOverride,
     });
     if (assignments.length > 0) {
       wait.approvalAssignments = await createApprovalAssignments(assignments);
@@ -7005,6 +7281,8 @@ const completeRunWithWait = async ({
       status:
         waitType === "APPROVAL"
           ? "WAITING_APPROVAL"
+          : waitType === "HUMAN_TASK"
+            ? "WAITING_HUMAN_TASK"
           : waitType === "INPUT"
             ? "WAITING_INPUT"
             : "WAITING_CONFLICT",
@@ -8498,6 +8776,7 @@ export const processWorkflowRun = async (
       currentDetail.run.status === "COMPLETED" ||
       currentDetail.run.status === "FAILED" ||
       currentDetail.run.status === "WAITING_APPROVAL" ||
+      currentDetail.run.status === "WAITING_HUMAN_TASK" ||
       currentDetail.run.status === "WAITING_INPUT" ||
       currentDetail.run.status === "WAITING_CONFLICT" ||
       currentDetail.run.status === "PAUSED" ||

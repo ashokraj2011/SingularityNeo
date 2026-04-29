@@ -224,6 +224,14 @@ export const buildAgentKnowledgeLens = ({
     // version-history disclosure.
     lastError: agent.learningProfile.lastError || undefined,
     profileStatus: agent.learningProfile.status,
+    derivationMode: agent.learningProfile.derivationMode,
+    derivedFromAgentId: agent.learningProfile.derivedFromAgentId,
+    derivedFromAgentName: agent.learningProfile.derivedFromAgentId
+      ? workspace.agents.find(
+          current => current.id === agent.learningProfile.derivedFromAgentId,
+        )?.name
+      : undefined,
+    sourceVersionId: agent.learningProfile.sourceVersionId,
   };
 };
 

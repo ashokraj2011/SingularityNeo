@@ -164,7 +164,7 @@ describe('OrchestratorOperatePanel', () => {
     );
 
     expect(screen.getByText('Readiness contract')).toBeInTheDocument();
-    expect(screen.getByText('Direct stage control')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Take control' })[0]).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Open tasks' }));
     expect(onOpenTaskList).toHaveBeenCalledTimes(1);

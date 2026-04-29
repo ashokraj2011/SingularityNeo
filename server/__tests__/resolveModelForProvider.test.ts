@@ -78,6 +78,12 @@ describe('resolveModelForProvider — cross-provider safety net', () => {
       expect(resolveModelForProvider('local-openai', 'llama3.1')).toBe('llama3.1');
     });
 
+    it('strips an OpenAI-style local prefix when the model is really local', () => {
+      expect(resolveModelForProvider('local-openai', 'openai/qwen2.5-coder:7b')).toBe(
+        'qwen2.5-coder:7b',
+      );
+    });
+
     it('FALLS BACK when given an OpenRouter vendor/model (openai/gpt-4)', () => {
       expect(resolveModelForProvider('local-openai', 'openai/gpt-4')).toBe('qwen2.5-coder:7b');
     });

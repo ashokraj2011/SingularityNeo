@@ -47,11 +47,13 @@ import {
   clearCapabilityMessageHistoryRecord,
   claimCapabilityWorkItemControl,
   claimCapabilityWorkItemWriteControl,
+  completeCapabilityWorkflowRunHumanTask,
   createCapabilityWorkItemHandoff,
   createCapabilityWorkItem,
   createEvidencePacketForWorkItem,
   createDesktopWorkspaceMapping,
   createCapabilityWorkItemSharedBranch,
+  delegateCapabilityWorkflowRunToHuman,
   fetchCapabilityWorkflowRun,
   fetchCapabilityWorkflowRunEvents,
   fetchDesktopWorkspaceMappings,
@@ -163,6 +165,7 @@ import {
 } from "../lib/orchestrator/support";
 import type {
   AgentArtifactExpectation,
+  ApprovalPolicy,
   ApprovalDecision,
   Artifact,
   CapabilityStakeholder,
@@ -209,6 +212,10 @@ const RUN_STATUS_META: Record<
     label: "Waiting Approval",
     accent: "bg-amber-100 text-amber-700",
   },
+  WAITING_HUMAN_TASK: {
+    label: "Waiting Human Task",
+    accent: "bg-rose-100 text-rose-700",
+  },
   WAITING_INPUT: {
     label: "Waiting Input",
     accent: "bg-orange-100 text-orange-700",
@@ -243,6 +250,7 @@ const ACTIVE_RUN_STATUSES: WorkflowRun["status"][] = [
   "RUNNING",
   "PAUSED",
   "WAITING_APPROVAL",
+  "WAITING_HUMAN_TASK",
   "WAITING_INPUT",
   "WAITING_CONFLICT",
 ];
@@ -330,11 +338,17 @@ const getAttentionLabel = ({
   if (blocker?.status === "OPEN") {
     return blocker.type === "HUMAN_INPUT"
       ? "Waiting for human input"
-      : "Waiting for conflict resolution";
+      : blocker.type === "HUMAN_TASK"
+        ? "Waiting for delegated human task"
+        : "Waiting for conflict resolution";
   }
 
   if (wait?.type === "APPROVAL" || pendingRequest?.type === "APPROVAL") {
     return "Waiting for approval";
+  }
+
+  if (wait?.type === "HUMAN_TASK" || pendingRequest?.type === "HUMAN_TASK") {
+    return "Waiting for delegated human task";
   }
 
   if (wait?.type === "INPUT" || pendingRequest?.type === "INPUT") {
@@ -364,6 +378,10 @@ const getAttentionCallToAction = ({
     return "Review approval";
   }
 
+  if (wait?.type === "HUMAN_TASK" || pendingRequest?.type === "HUMAN_TASK") {
+    return "Mark task done";
+  }
+
   if (wait?.type === "INPUT" || pendingRequest?.type === "INPUT") {
     return "Provide input";
   }
@@ -386,6 +404,61 @@ const getWorkItemAttentionTimestamp = (item: WorkItem) =>
 
 const buildBlockedGuidanceSeed = (reason: string) =>
   `Blocking reason from agent:\n- ${reason}\n\nGuidance for the next attempt:\n- `;
+
+const buildDelegatedHumanApprovalPolicy = ({
+  step,
+  workItem,
+  phaseStakeholders,
+}: {
+  step: Workflow["steps"][number] | null;
+  workItem: WorkItem | null;
+  phaseStakeholders: CapabilityStakeholder[];
+}): ApprovalPolicy | undefined => {
+  if (step?.approvalPolicy?.targets?.length) {
+    return step.approvalPolicy;
+  }
+
+  const roleTargets = Array.from(
+    new Set(
+      [
+        ...(step?.approverRoles || []),
+        ...phaseStakeholders
+          .map((stakeholder) => String(stakeholder.role || "").trim())
+          .filter(Boolean),
+      ],
+    ),
+  ).map((role) => ({
+    targetType: "CAPABILITY_ROLE" as const,
+    targetId: role,
+    label: role,
+  }));
+
+  const teamTargets = workItem?.phaseOwnerTeamId
+    ? [
+        {
+          targetType: "TEAM" as const,
+          targetId: workItem.phaseOwnerTeamId,
+          label: workItem.phaseOwnerTeamId,
+        },
+      ]
+    : [];
+
+  const targets = roleTargets.length > 0 ? roleTargets : teamTargets;
+  if (targets.length === 0) {
+    return undefined;
+  }
+
+  return {
+    id: `AUTO-DELEGATION-${step?.id || workItem?.id || "WORK"}`,
+    name: "Delegated human task approval",
+    description:
+      "Generated from the active workflow ownership so delegated human work still returns through the standard approval gate.",
+    mode: "ANY_ONE",
+    targets,
+    minimumApprovals: 1,
+    delegationAllowed: true,
+  };
+};
 
 const getRunEventTone = (event: RunEvent) => {
   if (
@@ -1934,6 +2007,8 @@ const Orchestrator = () => {
   const actionButtonLabel =
     selectedOpenWait?.type === "APPROVAL"
       ? "Approve and continue"
+      : selectedOpenWait?.type === "HUMAN_TASK"
+        ? "Mark human task done"
       : selectedOpenWait?.type === "INPUT"
         ? "Submit details and unblock"
         : selectedOpenWait?.type === "CONFLICT_RESOLUTION"
@@ -1945,6 +2020,8 @@ const Orchestrator = () => {
       ? "Guide the developer with code review notes, implementation conditions, or sign-off guidance before continuing."
       : selectedOpenWait?.type === "APPROVAL"
         ? "Add approval notes, release conditions, or sign-off details."
+        : selectedOpenWait?.type === "HUMAN_TASK"
+          ? "Summarize what the human completed, include any evidence or follow-up notes, and submit it for approval."
         : selectedOpenWait?.type === "INPUT"
           ? "Guide the agent with the missing business, technical, or governance details needed to unblock this work item."
           : selectedOpenWait?.type === "CONFLICT_RESOLUTION"
@@ -1955,6 +2032,8 @@ const Orchestrator = () => {
   const dockComposerLabel = selectedOpenWait
     ? selectedOpenWait.type === "APPROVAL"
       ? "Prepare approval decision"
+      : selectedOpenWait.type === "HUMAN_TASK"
+        ? "Close delegated human work"
       : selectedOpenWait.type === "INPUT"
         ? "Provide requested details"
         : "Resolve the conflict"
@@ -1982,12 +2061,14 @@ const Orchestrator = () => {
         ? "Start execution"
         : "Send";
   const dockInterventionMode =
+    selectedOpenWait?.type === "HUMAN_TASK" ||
     selectedOpenWait?.type === "INPUT" ||
     selectedOpenWait?.type === "CONFLICT_RESOLUTION" ||
     selectedCanGuideBlockedAgent;
   const dockAllowsChatOnly = !dockInterventionMode;
 
   const resolutionIsRequired =
+    selectedOpenWait?.type === "HUMAN_TASK" ||
     selectedOpenWait?.type === "INPUT" ||
     selectedOpenWait?.type === "CONFLICT_RESOLUTION";
   const requestChangesIsAvailable = codeDiffReviewRequiresResponse;
@@ -2009,6 +2090,17 @@ const Orchestrator = () => {
     selectedCanGuideBlockedAgent &&
     Boolean(resolutionNote.trim()) &&
     canRestartWorkItems;
+  const canDelegateCurrentStage = Boolean(
+    currentRun &&
+      selectedCurrentStep &&
+      !selectedOpenWait &&
+      canControlWorkItems &&
+      selectedWorkItem &&
+      selectedWorkItem.status !== "ARCHIVED" &&
+      selectedWorkItem.status !== "COMPLETED" &&
+      selectedWorkItem.status !== "CANCELLED" &&
+      ACTIVE_RUN_STATUSES.includes(currentRun.status),
+  );
 
   const requirePermission = (allowed: boolean, summary: string) => {
     if (allowed) {
@@ -2529,6 +2621,7 @@ const Orchestrator = () => {
     [selectedWorkItem, workspace.messages],
   );
   const dockResolutionRequired =
+    selectedOpenWait?.type === "HUMAN_TASK" ||
     selectedOpenWait?.type === "INPUT" ||
     selectedOpenWait?.type === "CONFLICT_RESOLUTION";
   const dockMissingFields = useMemo(
@@ -3032,6 +3125,9 @@ const Orchestrator = () => {
     if (selectedOpenWait?.type === "APPROVAL") {
       return "Review the approval request and continue once the output meets the required conditions.";
     }
+    if (selectedOpenWait?.type === "HUMAN_TASK") {
+      return "Capture what the human completed, then send the stage through the required approval gate.";
+    }
     if (selectedOpenWait?.type === "INPUT") {
       return "Provide the missing structured input so the engine can continue this stage.";
     }
@@ -3232,6 +3328,15 @@ const Orchestrator = () => {
     () =>
       getWorkItemPhaseStakeholders(selectedWorkItem, selectedWorkItem?.phase),
     [selectedWorkItem],
+  );
+  const delegatedHumanApprovalPolicy = useMemo(
+    () =>
+      buildDelegatedHumanApprovalPolicy({
+        step: selectedCurrentStep,
+        workItem: selectedWorkItem,
+        phaseStakeholders: selectedCurrentPhaseStakeholders,
+      }),
+    [selectedCurrentPhaseStakeholders, selectedCurrentStep, selectedWorkItem],
   );
 
   const sanitizeDraftPhaseStakeholderAssignments = useCallback(
@@ -4119,6 +4224,15 @@ const Orchestrator = () => {
           setIsDiffReviewOpen(false);
           setIsApprovalReviewOpen(false);
           setIsApprovalReviewHydrated(false);
+        } else if (selectedOpenWait.type === "HUMAN_TASK") {
+          await completeCapabilityWorkflowRunHumanTask(
+            activeCapability.id,
+            currentRun.id,
+            {
+              resolution,
+              resolvedBy: currentActorContext.displayName,
+            },
+          );
         } else if (selectedOpenWait.type === "INPUT") {
           await provideCapabilityWorkflowRunInput(
             activeCapability.id,
@@ -4146,10 +4260,15 @@ const Orchestrator = () => {
         title:
           selectedOpenWait.type === "APPROVAL"
             ? "Approval submitted"
+            : selectedOpenWait.type === "HUMAN_TASK"
+              ? "Human task completed"
             : selectedOpenWait.type === "INPUT"
               ? "Input submitted"
               : "Conflict resolved",
-        description: `${selectedWorkItem.title} was updated and can continue through the workflow.`,
+        description:
+          selectedOpenWait.type === "HUMAN_TASK"
+            ? `${selectedWorkItem.title} is now waiting on approval before the workflow advances.`
+            : `${selectedWorkItem.title} was updated and can continue through the workflow.`,
       },
     );
   };
@@ -4209,6 +4328,7 @@ const Orchestrator = () => {
         : actionButtonLabel;
     const resolution = trimmedDockInput || fallbackResolution;
     const resolutionRequired =
+      selectedOpenWait.type === "HUMAN_TASK" ||
       selectedOpenWait.type === "INPUT" ||
       selectedOpenWait.type === "CONFLICT_RESOLUTION";
 
@@ -4228,7 +4348,16 @@ const Orchestrator = () => {
       async () => {
         await uploadDockFilesIfNeeded();
 
-        if (selectedOpenWait.type === "INPUT") {
+        if (selectedOpenWait.type === "HUMAN_TASK") {
+          await completeCapabilityWorkflowRunHumanTask(
+            activeCapability.id,
+            currentRun.id,
+            {
+              resolution,
+              resolvedBy: currentActorContext.displayName,
+            },
+          );
+        } else if (selectedOpenWait.type === "INPUT") {
           await provideCapabilityWorkflowRunInput(
             activeCapability.id,
             currentRun.id,
@@ -4253,10 +4382,109 @@ const Orchestrator = () => {
       },
       {
         title:
-          selectedOpenWait.type === "INPUT"
+          selectedOpenWait.type === "HUMAN_TASK"
+            ? "Human task completed"
+            : selectedOpenWait.type === "INPUT"
             ? "Input submitted"
             : "Conflict resolved",
-        description: `${selectedWorkItem.title} can continue through the workflow.`,
+        description:
+          selectedOpenWait.type === "HUMAN_TASK"
+            ? `${selectedWorkItem.title} is now waiting on approval before the workflow advances.`
+            : `${selectedWorkItem.title} can continue through the workflow.`,
+      },
+    );
+  };
+
+  const handleDelegateToHuman = async () => {
+    if (!currentRun || !selectedWorkItem || !selectedCurrentStep) {
+      return;
+    }
+
+    if (
+      !requirePermission(
+        canControlWorkItems,
+        "This operator cannot delegate the current workflow stage to a human.",
+      )
+    ) {
+      return;
+    }
+
+    const instructions = resolutionNote.trim();
+    if (!instructions) {
+      setActionError(
+        "Add clear instructions for the human task before delegating this stage.",
+      );
+      return;
+    }
+
+    if (!delegatedHumanApprovalPolicy) {
+      setActionError(
+        "This stage does not define an approval owner yet. Configure approver roles or a phase owner team before delegating it to a human.",
+      );
+      return;
+    }
+
+    await withAction(
+      "delegateToHuman",
+      async () => {
+        await delegateCapabilityWorkflowRunToHuman(
+          activeCapability.id,
+          currentRun.id,
+          {
+            instructions,
+            approvalPolicy: delegatedHumanApprovalPolicy,
+            note: `Delegated from ${selectedCurrentStep.name}`,
+          },
+        );
+        setResolutionNote("");
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: "Stage delegated to human",
+        description: `${selectedWorkItem.title} is now waiting on human completion and will return through approval.`,
+      },
+    );
+  };
+
+  const handleDockDelegateToHuman = async () => {
+    if (!currentRun || !selectedWorkItem || !selectedCurrentStep) {
+      return;
+    }
+
+    if (!delegatedHumanApprovalPolicy) {
+      setActionError(
+        "Configure approver roles or a phase owner team for this stage before delegating it to a human.",
+      );
+      return;
+    }
+
+    const instructions = dockInput.trim();
+    if (!instructions) {
+      setActionError(
+        "Add the human-task instructions in the dock before delegating this stage.",
+      );
+      return;
+    }
+
+    await withAction(
+      "dockDelegateToHuman",
+      async () => {
+        await uploadDockFilesIfNeeded();
+        await delegateCapabilityWorkflowRunToHuman(
+          activeCapability.id,
+          currentRun.id,
+          {
+            instructions,
+            approvalPolicy: delegatedHumanApprovalPolicy,
+            note: `Delegated from ${selectedCurrentStep.name}`,
+          },
+        );
+        setDockInput("");
+        await refreshSelection(selectedWorkItem.id);
+      },
+      {
+        title: "Stage delegated to human",
+        description: `${selectedWorkItem.title} is now waiting on human completion and will return through approval.`,
       },
     );
   };
@@ -5537,6 +5765,14 @@ const Orchestrator = () => {
         !hasApprovedWorkspaceConfigured
       ),
     );
+    const dockCanDelegateToHuman = Boolean(
+      canDelegateCurrentStage &&
+        selectedWorkItem &&
+        currentRun &&
+        delegatedHumanApprovalPolicy &&
+        Boolean(dockInput.trim()) &&
+        busyAction === null,
+    );
 
     const phaseRailCurrentIndex = selectedWorkItem
       ? lifecycleBoardPhases.indexOf(selectedWorkItem.phase)
@@ -5963,6 +6199,8 @@ const Orchestrator = () => {
                           handleApprovalReviewMouseDown,
                         onOpenApprovalReview: handleOpenApprovalReview,
                         onResolveWait: () => void handleResolveWait(),
+                        onDelegateToHuman: () => void handleDelegateToHuman(),
+                        canDelegateToHuman: canDelegateCurrentStage,
                         canResolveSelectedWait,
                         actionButtonLabel,
                         selectedFailureReason,
@@ -6221,7 +6459,9 @@ const Orchestrator = () => {
                   canWriteChat={canWriteChat}
                   onAskAgent={() => void handleDockAskAgent()}
                   onResolveWait={() => void handleDockResolveWait()}
+                  onDelegateToHuman={() => void handleDockDelegateToHuman()}
                   dockCanResolveWait={dockCanResolveWait}
+                  dockCanDelegateToHuman={dockCanDelegateToHuman}
                   dockPrimaryActionLabel={dockPrimaryActionLabel}
                   selectedOpenWaitType={selectedOpenWait?.type || null}
                   selectedCanGuideBlockedAgent={selectedCanGuideBlockedAgent}
@@ -6665,6 +6905,8 @@ const Orchestrator = () => {
                           handleApprovalReviewMouseDown,
                         onOpenApprovalReview: handleOpenApprovalReview,
                         onResolveWait: () => void handleResolveWait(),
+                        onDelegateToHuman: () => void handleDelegateToHuman(),
+                        canDelegateToHuman: canDelegateCurrentStage,
                         canResolveSelectedWait,
                         actionButtonLabel,
                         selectedFailureReason,

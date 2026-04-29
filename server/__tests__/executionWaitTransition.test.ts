@@ -83,3 +83,11 @@ describe('buildQueuedRunForExternalAdvance', () => {
     expect(queuedRun.leaseExpiresAt).toBeUndefined();
   });
 });
+
+describe('getRunStatusForWaitType', () => {
+  it('maps delegated human tasks to WAITING_HUMAN_TASK', () => {
+    expect(__executionServiceTestUtils.getRunStatusForWaitType('HUMAN_TASK')).toBe(
+      'WAITING_HUMAN_TASK',
+    );
+  });
+});

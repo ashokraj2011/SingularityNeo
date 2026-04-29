@@ -455,6 +455,9 @@ export const schemaStatements = [
       source_document_ids TEXT[] NOT NULL DEFAULT '{}',
       source_artifact_ids TEXT[] NOT NULL DEFAULT '{}',
       source_count INTEGER NOT NULL DEFAULT 0,
+      derivation_mode TEXT,
+      derived_from_agent_id TEXT,
+      source_version_id TEXT,
       refreshed_at TIMESTAMPTZ,
       last_requested_at TIMESTAMPTZ,
       last_error TEXT,
@@ -2823,6 +2826,9 @@ export const migrationStatements = [
       source_document_ids TEXT[] NOT NULL DEFAULT '{}',
       source_artifact_ids TEXT[] NOT NULL DEFAULT '{}',
       source_count INTEGER NOT NULL DEFAULT 0,
+      derivation_mode TEXT,
+      derived_from_agent_id TEXT,
+      source_version_id TEXT,
       context_block_tokens INTEGER,
       judge_score NUMERIC,
       judge_report JSONB,
@@ -2844,6 +2850,18 @@ export const migrationStatements = [
   `
     ALTER TABLE capability_agent_learning_profiles
     ADD COLUMN IF NOT EXISTS previous_version_id TEXT
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS derivation_mode TEXT
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS derived_from_agent_id TEXT
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profiles
+    ADD COLUMN IF NOT EXISTS source_version_id TEXT
   `,
   `
     CREATE INDEX IF NOT EXISTS capability_agent_learning_profile_versions_created_idx
@@ -2909,6 +2927,18 @@ export const migrationStatements = [
   `
     ALTER TABLE capability_agent_learning_profile_versions
     ADD COLUMN IF NOT EXISTS frozen_request_count INTEGER
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profile_versions
+    ADD COLUMN IF NOT EXISTS derivation_mode TEXT
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profile_versions
+    ADD COLUMN IF NOT EXISTS derived_from_agent_id TEXT
+  `,
+  `
+    ALTER TABLE capability_agent_learning_profile_versions
+    ADD COLUMN IF NOT EXISTS source_version_id TEXT
   `,
   `
     ALTER TABLE capability_agent_learning_profile_versions

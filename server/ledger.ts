@@ -29,6 +29,7 @@ const ACTIVE_RUN_STATUSES = new Set([
   'QUEUED',
   'RUNNING',
   'WAITING_APPROVAL',
+  'WAITING_HUMAN_TASK',
   'WAITING_INPUT',
   'WAITING_CONFLICT',
 ]);
@@ -88,7 +89,12 @@ const mapRunStatusToWorkItemStatus = (status: string): WorkItemStatus => {
   if (status === 'WAITING_APPROVAL') {
     return 'PENDING_APPROVAL';
   }
-  if (status === 'WAITING_INPUT' || status === 'WAITING_CONFLICT' || status === 'FAILED') {
+  if (
+    status === 'WAITING_HUMAN_TASK' ||
+    status === 'WAITING_INPUT' ||
+    status === 'WAITING_CONFLICT' ||
+    status === 'FAILED'
+  ) {
     return 'BLOCKED';
   }
   return 'ACTIVE';

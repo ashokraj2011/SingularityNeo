@@ -70,6 +70,7 @@ export const ACTIVE_RUN_STATUSES: WorkflowRunStatus[] = [
   'RUNNING',
   'PAUSED',
   'WAITING_APPROVAL',
+  'WAITING_HUMAN_TASK',
   'WAITING_INPUT',
   'WAITING_CONFLICT',
 ];

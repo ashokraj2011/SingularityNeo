@@ -36,9 +36,11 @@ type Props = {
   canWriteChat: boolean;
   onAskAgent: () => void;
   onResolveWait: () => void;
+  onDelegateToHuman?: () => void;
   dockCanResolveWait: boolean;
+  dockCanDelegateToHuman?: boolean;
   dockPrimaryActionLabel: string;
-  selectedOpenWaitType?: 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION' | 'SUB_WORKFLOW_WAIT' | null;
+  selectedOpenWaitType?: 'APPROVAL' | 'HUMAN_TASK' | 'INPUT' | 'CONFLICT_RESOLUTION' | 'SUB_WORKFLOW_WAIT' | null;
   selectedCanGuideBlockedAgent: boolean;
   onGuideAndRestart: () => void;
   canStartExecution: boolean;
@@ -65,7 +67,9 @@ export const OrchestratorCopilotComposer = ({
   canWriteChat,
   onAskAgent,
   onResolveWait,
+  onDelegateToHuman,
   dockCanResolveWait,
+  dockCanDelegateToHuman = false,
   dockPrimaryActionLabel,
   selectedOpenWaitType,
   selectedCanGuideBlockedAgent,
@@ -283,6 +287,21 @@ export const OrchestratorCopilotComposer = ({
               Send
             </button>
           )}
+          {!selectedOpenWaitPresent && onDelegateToHuman ? (
+            <button
+              type="button"
+              onClick={onDelegateToHuman}
+              disabled={busyAction !== null || !dockCanDelegateToHuman}
+              className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {busyAction === 'dockDelegateToHuman' ? (
+                <LoaderCircle size={16} className="animate-spin" />
+              ) : (
+                <ArrowRight size={16} />
+              )}
+              Delegate to human
+            </button>
+          ) : null}
         </div>
       </div>
     </div>

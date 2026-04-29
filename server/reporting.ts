@@ -476,7 +476,7 @@ export const buildExecutiveSummarySnapshot = async (
           SELECT
             COUNT(*)::text AS total_runs,
             COUNT(*) FILTER (WHERE status = 'FAILED')::text AS failed_runs,
-            COUNT(*) FILTER (WHERE status IN ('WAITING_APPROVAL', 'WAITING_INPUT', 'WAITING_CONFLICT'))::text AS waiting_runs,
+            COUNT(*) FILTER (WHERE status IN ('WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_INPUT', 'WAITING_CONFLICT'))::text AS waiting_runs,
             (
               SELECT SUM(metric_value)
               FROM capability_metric_samples

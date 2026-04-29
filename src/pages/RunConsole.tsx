@@ -593,7 +593,7 @@ const RunConsole = () => {
                     </button>
                   ) : null}
                   {/* Recovery actions — shown when run is in a terminal/waiting state */}
-                  {['FAILED', 'WAITING_INPUT', 'WAITING_APPROVAL', 'WAITING_CONFLICT'].includes(
+                  {['FAILED', 'WAITING_INPUT', 'WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_CONFLICT'].includes(
                     selectedRun.status,
                   ) ? (
                     <button
@@ -606,7 +606,7 @@ const RunConsole = () => {
                       {runActionBusy === 'restart' ? 'Restarting…' : 'Restart run'}
                     </button>
                   ) : null}
-                  {['RUNNING', 'WAITING_INPUT', 'WAITING_APPROVAL', 'WAITING_CONFLICT', 'FAILED'].includes(
+                  {['RUNNING', 'WAITING_INPUT', 'WAITING_APPROVAL', 'WAITING_HUMAN_TASK', 'WAITING_CONFLICT', 'FAILED'].includes(
                     selectedRun.status,
                   ) ? (
                     <button

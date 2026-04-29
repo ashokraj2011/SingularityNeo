@@ -37,9 +37,11 @@ type Props = {
   canWriteChat: boolean;
   onAskAgent: () => void;
   onResolveWait: () => void;
+  onDelegateToHuman?: () => void;
   dockCanResolveWait: boolean;
+  dockCanDelegateToHuman?: boolean;
   dockPrimaryActionLabel: string;
-  selectedOpenWaitType?: 'APPROVAL' | 'INPUT' | 'CONFLICT_RESOLUTION' | 'SUB_WORKFLOW_WAIT' | null;
+  selectedOpenWaitType?: 'APPROVAL' | 'HUMAN_TASK' | 'INPUT' | 'CONFLICT_RESOLUTION' | 'SUB_WORKFLOW_WAIT' | null;
   selectedCanGuideBlockedAgent: boolean;
   onGuideAndRestart: () => void;
   canStartExecution: boolean;
@@ -94,7 +96,9 @@ export const OrchestratorCopilotDock = ({
   canWriteChat,
   onAskAgent,
   onResolveWait,
+  onDelegateToHuman,
   dockCanResolveWait,
+  dockCanDelegateToHuman = false,
   dockPrimaryActionLabel,
   selectedOpenWaitType,
   selectedCanGuideBlockedAgent,
@@ -198,7 +202,9 @@ export const OrchestratorCopilotDock = ({
         canWriteChat={canWriteChat}
         onAskAgent={onAskAgent}
         onResolveWait={onResolveWait}
+        onDelegateToHuman={onDelegateToHuman}
         dockCanResolveWait={dockCanResolveWait}
+        dockCanDelegateToHuman={dockCanDelegateToHuman}
         dockPrimaryActionLabel={dockPrimaryActionLabel}
         selectedOpenWaitType={selectedOpenWaitType}
         selectedCanGuideBlockedAgent={selectedCanGuideBlockedAgent}

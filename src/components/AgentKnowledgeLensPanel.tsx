@@ -381,6 +381,29 @@ export const AgentKnowledgeLensPanel = ({
         </button>
       </div>
     ) : null}
+    {lens.derivationMode ? (
+      <div className="mt-3 rounded-[1rem] border border-outline-variant/25 bg-surface-container-low/20 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusBadge tone={lens.derivationMode === 'OWNER_DERIVED' ? 'info' : 'neutral'}>
+            {lens.derivationMode === 'OWNER_DERIVED'
+              ? 'Capability-derived learning'
+              : lens.derivationMode === 'OWNER_DISTILLED'
+                ? 'Owner-distilled learning'
+                : 'Agent-specific learning'}
+          </StatusBadge>
+          {lens.derivedFromAgentName ? (
+            <span className="text-xs text-secondary">
+              Source agent: <strong>{lens.derivedFromAgentName}</strong>
+            </span>
+          ) : null}
+          {lens.sourceVersionId ? (
+            <span className="text-xs text-secondary">
+              Source version: <strong>{lens.sourceVersionId}</strong>
+            </span>
+          ) : null}
+        </div>
+      </div>
+    ) : null}
 
     <div className="mt-4 grid gap-3 lg:grid-cols-2">
       <div className="rounded-[1.25rem] border border-outline-variant/25 bg-surface-container-low/30 px-4 py-3">

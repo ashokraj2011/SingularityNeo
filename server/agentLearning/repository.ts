@@ -60,6 +60,14 @@ const learningProfileFromRow = (row: Record<string, any>): AgentLearningProfile 
     ? row.source_artifact_ids.filter((item: unknown) => typeof item === 'string')
     : [],
   sourceCount: Number(row.source_count || 0),
+  derivationMode:
+    row.derivation_mode === 'OWNER_DISTILLED' ||
+    row.derivation_mode === 'OWNER_DERIVED' ||
+    row.derivation_mode === 'AGENT_SPECIFIC'
+      ? row.derivation_mode
+      : undefined,
+  derivedFromAgentId: row.derived_from_agent_id || undefined,
+  sourceVersionId: row.source_version_id || undefined,
   refreshedAt: row.refreshed_at ? asIso(row.refreshed_at) : undefined,
   lastRequestedAt: row.last_requested_at ? asIso(row.last_requested_at) : undefined,
   lastError: row.last_error || undefined,
@@ -117,6 +125,14 @@ const profileVersionFromRow = (row: Record<string, any>): AgentLearningProfileVe
     ? row.source_artifact_ids.filter((item: unknown) => typeof item === 'string')
     : [],
   sourceCount: Number(row.source_count || 0),
+  derivationMode:
+    row.derivation_mode === 'OWNER_DISTILLED' ||
+    row.derivation_mode === 'OWNER_DERIVED' ||
+    row.derivation_mode === 'AGENT_SPECIFIC'
+      ? row.derivation_mode
+      : undefined,
+  derivedFromAgentId: row.derived_from_agent_id || undefined,
+  sourceVersionId: row.source_version_id || undefined,
   contextBlockTokens: toOptionalNumber(row.context_block_tokens),
   judgeScore: toOptionalNumber(row.judge_score),
   judgeReport: parseJsonValue(row.judge_report),
@@ -211,6 +227,9 @@ const insertProfileVersionTx = async (
     sourceDocumentIds,
     sourceArtifactIds,
     sourceCount,
+    derivationMode,
+    derivedFromAgentId,
+    sourceVersionId,
     contextBlockTokens,
     shapeReport,
     judgeScore,
@@ -227,6 +246,9 @@ const insertProfileVersionTx = async (
     sourceDocumentIds: string[];
     sourceArtifactIds: string[];
     sourceCount: number;
+    derivationMode?: AgentLearningProfile['derivationMode'];
+    derivedFromAgentId?: string;
+    sourceVersionId?: string;
     contextBlockTokens?: number;
     shapeReport?: unknown;
     judgeScore?: number;
@@ -252,6 +274,9 @@ const insertProfileVersionTx = async (
         source_document_ids,
         source_artifact_ids,
         source_count,
+        derivation_mode,
+        derived_from_agent_id,
+        source_version_id,
         context_block_tokens,
         judge_score,
         judge_report,
@@ -260,7 +285,7 @@ const insertProfileVersionTx = async (
         notes,
         created_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
       RETURNING *
     `,
     [
@@ -275,6 +300,9 @@ const insertProfileVersionTx = async (
       sourceDocumentIds || [],
       sourceArtifactIds || [],
       sourceCount || 0,
+      derivationMode || null,
+      derivedFromAgentId || null,
+      sourceVersionId || null,
       contextBlockTokens ?? null,
       judgeScore ?? null,
       judgeReport === undefined ? null : JSON.stringify(judgeReport),
@@ -402,13 +430,16 @@ export const upsertAgentLearningProfile = async ({
           source_document_ids,
           source_artifact_ids,
           source_count,
+          derivation_mode,
+          derived_from_agent_id,
+          source_version_id,
           refreshed_at,
           last_requested_at,
           last_error,
           updated_at
         )
         VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW()
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW()
         )
         ON CONFLICT (capability_id, agent_id) DO UPDATE SET
           status = EXCLUDED.status,
@@ -418,6 +449,9 @@ export const upsertAgentLearningProfile = async ({
           source_document_ids = EXCLUDED.source_document_ids,
           source_artifact_ids = EXCLUDED.source_artifact_ids,
           source_count = EXCLUDED.source_count,
+          derivation_mode = EXCLUDED.derivation_mode,
+          derived_from_agent_id = EXCLUDED.derived_from_agent_id,
+          source_version_id = EXCLUDED.source_version_id,
           refreshed_at = EXCLUDED.refreshed_at,
           last_requested_at = EXCLUDED.last_requested_at,
           last_error = EXCLUDED.last_error,
@@ -433,6 +467,9 @@ export const upsertAgentLearningProfile = async ({
         profile.sourceDocumentIds || [],
         profile.sourceArtifactIds || [],
         profile.sourceCount || 0,
+        profile.derivationMode || null,
+        profile.derivedFromAgentId || null,
+        profile.sourceVersionId || null,
         profile.refreshedAt || null,
         profile.lastRequestedAt || null,
         profile.lastError || null,
@@ -472,6 +509,9 @@ export const commitAgentLearningProfileVersion = async ({
   judgeReport?: unknown;
   createdByUpdateId?: string;
   notes?: string;
+  derivationMode?: AgentLearningProfile['derivationMode'];
+  derivedFromAgentId?: string;
+  sourceVersionId?: string;
   /**
    * Slice B: when false, the candidate is saved to the version table but the
    * live pointer on capability_agent_learning_profiles is NOT flipped — the
@@ -517,6 +557,9 @@ export const commitAgentLearningProfileVersion = async ({
       sourceDocumentIds: profile.sourceDocumentIds || [],
       sourceArtifactIds: profile.sourceArtifactIds || [],
       sourceCount: profile.sourceCount || 0,
+      derivationMode: profile.derivationMode,
+      derivedFromAgentId: profile.derivedFromAgentId,
+      sourceVersionId: profile.sourceVersionId,
       contextBlockTokens,
       shapeReport,
       judgeScore,
@@ -583,11 +626,14 @@ export const commitAgentLearningProfileVersion = async ({
           source_document_ids = $7,
           source_artifact_ids = $8,
           source_count = $9,
-          refreshed_at = $10,
-          last_requested_at = $11,
-          last_error = $12,
-          previous_version_id = $13,
-          current_version_id = $14,
+          derivation_mode = $10,
+          derived_from_agent_id = $11,
+          source_version_id = $12,
+          refreshed_at = $13,
+          last_requested_at = $14,
+          last_error = $15,
+          previous_version_id = $16,
+          current_version_id = $17,
           -- Slice C — reset canary for the newly-live version.
           canary_started_at = NOW(),
           canary_request_count = 0,
@@ -610,6 +656,9 @@ export const commitAgentLearningProfileVersion = async ({
         profile.sourceDocumentIds || [],
         profile.sourceArtifactIds || [],
         profile.sourceCount || 0,
+        profile.derivationMode || null,
+        profile.derivedFromAgentId || null,
+        profile.sourceVersionId || null,
         profile.refreshedAt || null,
         profile.lastRequestedAt || null,
         profile.lastError || null,
@@ -1007,10 +1056,13 @@ export const activateAgentLearningProfileVersion = async ({
           source_document_ids = $7,
           source_artifact_ids = $8,
           source_count = $9,
+          derivation_mode = $10,
+          derived_from_agent_id = $11,
+          source_version_id = $12,
           refreshed_at = NOW(),
           last_error = NULL,
-          previous_version_id = $10,
-          current_version_id = $11,
+          previous_version_id = $13,
+          current_version_id = $14,
           -- Slice C — revert resets canary: the restored version starts
           -- tracking fresh signals from the moment of activation.
           canary_started_at = NOW(),
@@ -1034,6 +1086,9 @@ export const activateAgentLearningProfileVersion = async ({
         version.sourceDocumentIds || [],
         version.sourceArtifactIds || [],
         version.sourceCount || 0,
+        version.derivationMode || null,
+        version.derivedFromAgentId || null,
+        version.sourceVersionId || null,
         previousVersionId,
         version.versionId,
       ],

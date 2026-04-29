@@ -27,6 +27,18 @@ export type ProviderCompletion = {
   createdAt: string;
 };
 
+const normalizeLocalCompatModel = (value: unknown) => {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return '';
+  }
+  if (/^(openai|anthropic|google|openrouter|meta|mistralai)\//i.test(normalized)) {
+    const stripped = normalized.split('/').slice(1).join('/').trim();
+    return stripped || normalized;
+  }
+  return normalized;
+};
+
 export const getLocalOpenAIBaseUrl = () => {
   // Check LLM config file first (for UI-managed settings)
   const config = getLLMProviderConfig('local-openai');
@@ -53,11 +65,15 @@ export const getLocalOpenAIDefaultModel = () => {
   // Check LLM config file first (for UI-managed settings)
   const config = getLLMProviderConfig('local-openai');
   if (config?.defaultModel) {
-    return config.defaultModel.trim();
+    return normalizeLocalCompatModel(config.defaultModel) || 'gpt-4.1-mini';
   }
 
   // Fall back to environment variables
-  return String(process.env.LOCAL_OPENAI_DEFAULT_MODEL || process.env.OPENAI_COMPAT_MODEL || 'gpt-4.1-mini').trim();
+  return (
+    normalizeLocalCompatModel(
+      process.env.LOCAL_OPENAI_DEFAULT_MODEL || process.env.OPENAI_COMPAT_MODEL,
+    ) || 'gpt-4.1-mini'
+  );
 };
 
 export const getLocalOpenAIEmbeddingModel = () =>
@@ -165,6 +181,7 @@ export const listLocalOpenAIModels = async () => {
       headers: {
         Authorization: `Bearer ${LOCAL_OPENAI_API_KEY()}`,
       },
+      signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) {
       return [];
@@ -411,6 +428,7 @@ export const listOpenAICompatModels = async ({
   try {
     const resp = await fetch(`${baseUrl}/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
     });
     if (!resp.ok) return [];
     const payload = (await resp.json()) as { data?: Array<{ id?: string }> };

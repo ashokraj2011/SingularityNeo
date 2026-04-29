@@ -1513,6 +1513,8 @@ export const getBusinessWorkStatusLabel = (status: string) => {
     case 'PENDING_APPROVAL':
     case 'WAITING_APPROVAL':
       return 'Waiting for approval';
+    case 'WAITING_HUMAN_TASK':
+      return 'Waiting for human task';
     case 'WAITING_INPUT':
       return 'Waiting for input';
     case 'RUNNING':

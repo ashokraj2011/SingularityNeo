@@ -220,6 +220,7 @@ export const mapRunStatusToSegmentStatus = (
     case 'PAUSED':
       return 'WAITING';
     case 'WAITING_APPROVAL':
+    case 'WAITING_HUMAN_TASK':
     case 'WAITING_INPUT':
     case 'WAITING_CONFLICT':
       return 'WAITING';

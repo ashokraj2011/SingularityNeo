@@ -133,6 +133,9 @@ const createId = (prefix: string) =>
 const LEARNING_PIPELINE_STAGE_LABELS: Record<string, string> = {
   'memory-refresh': 'memory-refresh',
   'memory-refresh-reflection': 'memory-refresh-reflection',
+  'owner-fanout': 'owner-fanout',
+  'provider-resolution': 'provider-resolution',
+  'model-resolution': 'model-resolution',
   'judge-evaluation': 'judge-evaluation',
   'judge-persist': 'judge-persist',
   'judge-fixture-bootstrap': 'judge-fixture-bootstrap',
@@ -261,6 +264,17 @@ const recordLearningLockWait = async (
 const EXPERIENCE_DISTILLATION_PREFIX = 'experience-distillation';
 const INCIDENT_DERIVED_PREFIX = 'incident-derived';
 const USER_CORRECTION_PREFIX = 'learning-correction';
+const CAPABILITY_WIDE_LEARNING_REASONS = new Set([
+  'capability-created',
+  'capability-updated',
+  'capability-skill-added',
+  'capability-skill-removed',
+  'capability-contract-published',
+  'workspace-content-updated',
+  'manual-memory-refresh',
+  'memory-refresh',
+  'work-item-uploaded',
+]);
 
 const mergeUniqueStrings = (values: Array<string | undefined>, limit: number) =>
   unique(
@@ -350,6 +364,33 @@ const parseLearningReflectionRequest = (
 
   return null;
 };
+
+const isCapabilityWideLearningReason = (requestReason: string) => {
+  if (!requestReason.trim()) {
+    return false;
+  }
+  if (parseLearningReflectionRequest(requestReason)) {
+    return false;
+  }
+  if (
+    requestReason === 'manual-agent-refresh' ||
+    requestReason === 'startup-backfill' ||
+    requestReason.startsWith('agent-learning:') ||
+    requestReason.startsWith('agent-learning-reflection:') ||
+    requestReason.startsWith('agent-learning-revert:')
+  ) {
+    return false;
+  }
+  return (
+    CAPABILITY_WIDE_LEARNING_REASONS.has(requestReason) ||
+    requestReason.startsWith('capability-')
+  );
+};
+
+const findOwnerAgent = (agents: CapabilityAgent[]) =>
+  agents.find(current => current.isOwner) ||
+  agents.find(current => current.roleStarterKey === 'OWNER') ||
+  agents[0];
 
 const createGeneratedDistillationSkillId = (agentId: string) =>
   `SKILL-${agentId}-${GENERATED_DISTILLATION_SKILL_SUFFIX}`;
@@ -619,6 +660,122 @@ const summarizeContract = (contract?: AgentOperatingContract) => {
     .join('\n');
 };
 
+const buildAgentRoleFocusHighlights = (
+  agent: CapabilityAgent,
+  skills: Skill[] = [],
+) =>
+  mergeUniqueStrings(
+    [
+      ...((agent.contract?.primaryResponsibilities || []).map(item => `Responsibility: ${item}`)),
+      ...((agent.contract?.guardrails || []).map(item => `Guardrail: ${item}`)),
+      ...skills.map(skill => `Attached skill: ${skill.name}`),
+      ...(agent.learningNotes || []).map(item => `Learned note: ${item}`),
+    ],
+    6,
+  );
+
+const buildDerivedAgentLearningProfile = ({
+  ownerAgent,
+  ownerProfile,
+  ownerVersionId,
+  agent,
+  skills,
+  requestedAt,
+}: {
+  ownerAgent: CapabilityAgent;
+  ownerProfile: AgentLearningProfile;
+  ownerVersionId?: string;
+  agent: CapabilityAgent;
+  skills: Skill[];
+  requestedAt: string;
+}): AgentLearningProfile => {
+  const roleFocus = buildAgentRoleFocusHighlights(agent, skills);
+  const summaryParts = [
+    `${agent.name} inherits the shared capability learning curated by ${ownerAgent.name} for the ${agent.role} role.`,
+    ownerProfile.summary.trim(),
+    roleFocus.length > 0
+      ? `Primary role focus: ${roleFocus
+          .slice(0, 3)
+          .map(item => item.replace(/^[A-Za-z ]+:\s*/, '').trim())
+          .join('; ')}.`
+      : null,
+  ].filter(Boolean);
+
+  const contextSections = [
+    'Shared capability context:',
+    ownerProfile.contextBlock.trim() || ownerProfile.summary.trim(),
+    '',
+    `Agent-specific focus for ${agent.name} (${agent.role}):`,
+    summarizeContract(agent.contract) || 'No structured contract was available.',
+    skills.length > 0
+      ? `Attached skills: ${skills.map(skill => skill.name).join(', ')}`
+      : null,
+    agent.learningNotes?.length
+      ? `Learning notes: ${agent.learningNotes.join(' | ')}`
+      : null,
+  ].filter(Boolean);
+
+  return {
+    status: 'READY',
+    summary: summaryParts.join(' ').trim(),
+    highlights: mergeUniqueStrings(
+      [...roleFocus, ...ownerProfile.highlights],
+      8,
+    ),
+    contextBlock: contextSections.join('\n'),
+    sourceDocumentIds: [...ownerProfile.sourceDocumentIds],
+    sourceArtifactIds: [...ownerProfile.sourceArtifactIds],
+    sourceCount: ownerProfile.sourceCount,
+    derivationMode: 'OWNER_DERIVED',
+    derivedFromAgentId: ownerAgent.id,
+    sourceVersionId: ownerVersionId,
+    refreshedAt: new Date().toISOString(),
+    lastRequestedAt: requestedAt,
+  };
+};
+
+const fanOutCapabilityLearningFromOwner = async ({
+  bundle,
+  ownerAgent,
+  ownerProfile,
+  ownerVersion,
+  requestedAt,
+  requestReason,
+}: {
+  bundle: CapabilityBundle;
+  ownerAgent: CapabilityAgent;
+  ownerProfile: AgentLearningProfile;
+  ownerVersion: AgentLearningProfileVersion;
+  requestedAt: string;
+  requestReason: string;
+}) => {
+  for (const agent of bundle.workspace.agents) {
+    if (agent.id === ownerAgent.id) {
+      continue;
+    }
+
+    const attachedSkills = bundle.capability.skillLibrary.filter(skill =>
+      agent.skillIds.includes(skill.id),
+    );
+    const derivedProfile = buildDerivedAgentLearningProfile({
+      ownerAgent,
+      ownerProfile,
+      ownerVersionId: ownerVersion.versionId,
+      agent,
+      skills: attachedSkills,
+      requestedAt,
+    });
+
+    await commitAgentLearningProfileVersion({
+      capabilityId: bundle.capability.id,
+      agentId: agent.id,
+      profile: derivedProfile,
+      contextBlockTokens: estimateTokenCount(derivedProfile.contextBlock),
+      notes: `${requestReason} (derived from ${ownerAgent.id}:${ownerVersion.versionId})`,
+    });
+  }
+};
+
 const rankCorpusForAgent = async (
   capabilityId: string,
   agent: CapabilityAgent,
@@ -649,6 +806,8 @@ export const __agentLearningTestUtils = {
   buildExperienceDistillationReason,
   buildLearningCorrectionReason,
   parseLearningReflectionRequest,
+  isCapabilityWideLearningReason,
+  buildDerivedAgentLearningProfile,
   appendGeneratedSkillSection,
   mergeUniqueStrings,
   rankCorpusForAgent,
@@ -1058,16 +1217,16 @@ export const queueCapabilityAgentLearningRefresh = async (
   requestReason: string,
 ) => {
   const bundle = await getCapabilityBundle(capabilityId);
-  await Promise.all(
-    bundle.workspace.agents.map(agent =>
-      queueAgentLearningJob({
-        capabilityId,
-        agentId: agent.id,
-        requestReason,
-        makeStale: true,
-      }),
-    ),
-  );
+  const ownerAgent = findOwnerAgent(bundle.workspace.agents);
+  if (!ownerAgent) {
+    return;
+  }
+  await queueAgentLearningJob({
+    capabilityId,
+    agentId: ownerAgent.id,
+    requestReason,
+    makeStale: true,
+  });
 };
 
 export const queueSingleAgentLearningRefresh = async (
@@ -1744,6 +1903,8 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
   const bundle = await getCapabilityBundle(capabilityId);
   const agent = bundle.workspace.agents.find(current => current.id === job.agentId);
   const reflectionRequest = parseLearningReflectionRequest(job.requestReason);
+  const capabilityWideRefresh = isCapabilityWideLearningReason(job.requestReason);
+  const ownerAgent = findOwnerAgent(bundle.workspace.agents);
 
   if (!agent) {
     await updateAgentLearningJob({
@@ -1751,6 +1912,52 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
       status: 'FAILED',
       error: `Agent ${job.agentId} was not found.`,
       completedAt: new Date().toISOString(),
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+    });
+    return;
+  }
+
+  if (
+    capabilityWideRefresh &&
+    ownerAgent &&
+    agent.id !== ownerAgent.id
+  ) {
+    const ownerProfile = await getAgentLearningProfile(capabilityId, ownerAgent.id);
+    const ownerVersion = ownerProfile.currentVersionId
+      ? await getAgentLearningProfileVersion(
+          capabilityId,
+          ownerAgent.id,
+          ownerProfile.currentVersionId,
+        )
+      : null;
+
+    if (ownerVersion && hasUsableLearningProfile(ownerProfile)) {
+      const attachedSkills = bundle.capability.skillLibrary.filter(skill =>
+        agent.skillIds.includes(skill.id),
+      );
+      const derivedProfile = buildDerivedAgentLearningProfile({
+        ownerAgent,
+        ownerProfile,
+        ownerVersionId: ownerVersion.versionId,
+        agent,
+        skills: attachedSkills,
+        requestedAt: job.requestedAt,
+      });
+      await commitAgentLearningProfileVersion({
+        capabilityId,
+        agentId: agent.id,
+        profile: derivedProfile,
+        contextBlockTokens: estimateTokenCount(derivedProfile.contextBlock),
+        notes: `${job.requestReason} (derived from ${ownerAgent.id}:${ownerVersion.versionId})`,
+      });
+    }
+
+    await updateAgentLearningJob({
+      ...job,
+      status: 'COMPLETED',
+      completedAt: new Date().toISOString(),
+      error: undefined,
       leaseOwner: undefined,
       leaseExpiresAt: undefined,
     });
@@ -1774,6 +1981,7 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
     await refreshCapabilityMemory(capabilityId, {
       requeueAgents: false,
       requestReason: `agent-learning:${agent.id}`,
+      strictOnEmbeddingAbort: capabilityWideRefresh,
     });
 
     const corpus = await getCapabilityMemoryCorpus(capabilityId);
@@ -1936,6 +2144,8 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
       sourceDocumentIds,
       sourceArtifactIds,
       sourceCount: selected.length,
+      derivationMode: capabilityWideRefresh ? 'OWNER_DISTILLED' : 'AGENT_SPECIFIC',
+      derivedFromAgentId: capabilityWideRefresh && ownerAgent ? ownerAgent.id : undefined,
       refreshedAt: new Date().toISOString(),
       lastRequestedAt: job.requestedAt,
     };
@@ -1992,6 +2202,36 @@ export const processAgentLearningJob = async (job: AgentLearningJobRecord) => {
       flipPointer,
       versionStatusOverride,
     });
+
+    if (
+      capabilityWideRefresh &&
+      ownerAgent &&
+      ownerAgent.id === agent.id &&
+      flipPointer
+    ) {
+      try {
+        await fanOutCapabilityLearningFromOwner({
+          bundle,
+          ownerAgent,
+          ownerProfile: {
+            ...finalizedProfile,
+            status: 'READY',
+            currentVersionId: committedVersion.versionId,
+          },
+          ownerVersion: committedVersion,
+          requestedAt: job.requestedAt,
+          requestReason: job.requestReason,
+        });
+      } catch (error) {
+        await recordPipelineError({
+          capabilityId,
+          agentId: agent.id,
+          stage: 'owner-fanout',
+          error,
+        });
+        throw error;
+      }
+    }
 
     // Slice B: kick off the async LLM-judge after the transaction closes.
     // Judge results are advisory in v1 — we annotate the version row and

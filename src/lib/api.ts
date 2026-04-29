@@ -3079,6 +3079,41 @@ export const resolveCapabilityWorkflowRunConflict = async (
     },
   );
 
+export const delegateCapabilityWorkflowRunToHuman = async (
+  capabilityId: string,
+  runId: string,
+  payload: {
+    instructions: string;
+    checklist?: string[];
+    assigneeUserId?: string;
+    assigneeRole?: string;
+    approvalPolicy?: ApprovalPolicy;
+    note?: string;
+  },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/delegate-to-human`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const completeCapabilityWorkflowRunHumanTask = async (
+  capabilityId: string,
+  runId: string,
+  payload: { resolution: string; resolvedBy: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/runs/${encodeURIComponent(runId)}/complete-human-task`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
 export const cancelCapabilityWorkflowRun = async (
   capabilityId: string,
   runId: string,

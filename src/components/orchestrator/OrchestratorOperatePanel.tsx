@@ -92,6 +92,8 @@ type Props = {
   onApprovalReviewMouseDown: React.MouseEventHandler<HTMLButtonElement>;
   onOpenApprovalReview: () => void;
   onResolveWait: () => void;
+  onDelegateToHuman?: () => void;
+  canDelegateToHuman?: boolean;
   canResolveSelectedWait: boolean;
   actionButtonLabel: string;
   selectedFailureReason: string;
@@ -222,6 +224,8 @@ export const OrchestratorOperatePanel = ({
   onApprovalReviewMouseDown,
   onOpenApprovalReview,
   onResolveWait,
+  onDelegateToHuman,
+  canDelegateToHuman = false,
   canResolveSelectedWait,
   actionButtonLabel,
   selectedFailureReason,
@@ -412,6 +416,22 @@ export const OrchestratorOperatePanel = ({
             >
               <ArrowRight size={14} />
               Guide agent ↓
+            </button>
+          ) : null}
+
+          {canDelegateToHuman && !selectedOpenWait && onDelegateToHuman ? (
+            <button
+              type="button"
+              onClick={onDelegateToHuman}
+              disabled={busyAction !== null}
+              className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {busyAction === "delegateToHuman" ? (
+                <LoaderCircle size={14} className="animate-spin" />
+              ) : (
+                <User size={14} />
+              )}
+              Delegate to human
             </button>
           ) : null}
         </div>
@@ -837,6 +857,21 @@ export const OrchestratorOperatePanel = ({
                 >
                   <ShieldCheck size={16} />
                   Open approval review
+                </button>
+              ) : null}
+              {canDelegateToHuman && !selectedOpenWait && onDelegateToHuman ? (
+                <button
+                  type="button"
+                  onClick={onDelegateToHuman}
+                  disabled={busyAction !== null}
+                  className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busyAction === "delegateToHuman" ? (
+                    <LoaderCircle size={16} className="animate-spin" />
+                  ) : (
+                    <User size={16} />
+                  )}
+                  Delegate to human
                 </button>
               ) : null}
               {selectedOpenWait && selectedOpenWait.type !== "APPROVAL" ? (
