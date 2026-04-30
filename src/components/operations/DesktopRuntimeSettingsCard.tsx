@@ -37,6 +37,13 @@ type RuntimeProviderDraft = {
   enabled: boolean;
   envText: string;
   setDefault: boolean;
+  /**
+   * When true, this provider manages its own conversation history and prompt
+   * cache (typical of CLI lanes).  Singularity then skips its own context
+   * bundling and tool-history persistence.  Default depends on provider:
+   * CLIs default ON, HTTP/SDK lanes default OFF (see providerRegistry).
+   */
+  selfManagesContext: boolean;
 };
 
 type DesktopRuntimeSettingsCardProps = {
@@ -630,6 +637,32 @@ export default function DesktopRuntimeSettingsCard({
                       />
                       <span className="text-sm text-secondary">
                         Enable this provider on this desktop
+                      </span>
+                    </label>
+
+                    <label className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(draft?.selfManagesContext)}
+                        onChange={event =>
+                          onRuntimeProviderDraftChange(provider.key, {
+                            selfManagesContext: event.target.checked,
+                          })
+                        }
+                        className="mt-1 h-4 w-4 rounded border-outline-variant accent-primary"
+                      />
+                      <span className="text-sm text-secondary">
+                        <span className="block font-medium text-on-surface">
+                          Self-managed context
+                        </span>
+                        <span className="block text-[0.78rem] text-secondary/85">
+                          Default ON for CLIs, OFF for HTTP/SDK providers. When
+                          this provider manages its own conversation history and
+                          prompt cache, leave this on so Singularity does not
+                          double-bundle context. Disable to let Singularity
+                          forward conversation history and reuse prompt fragments
+                          itself.
+                        </span>
                       </span>
                     </label>
 

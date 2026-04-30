@@ -19,6 +19,11 @@ import {
   listToolDescriptions,
 } from "./execution/tools";
 import { normalizeToolAdapterId } from "./toolIds";
+import {
+  providerSelfManagesContext,
+  resolveAgentProviderKey,
+} from "./providerRegistry";
+import { getStoredRuntimeProviderConfigSync } from "./runtimeProviderConfig";
 
 type AgentRuntimeLane =
   | "server-runtime-route"
@@ -31,6 +36,13 @@ type AgentRuntimeUsage = {
   completionTokens: number;
   totalTokens: number;
   estimatedCostUsd: number;
+  /**
+   * In-process prompt-fragment cache hits / misses.  Surfaces from
+   * `drainPromptFragmentCacheTelemetry()` in `githubModels.ts`.  Optional
+   * because legacy creation sites and CLI lanes don't populate them.
+   */
+  promptCacheHits?: number;
+  promptCacheMisses?: number;
 };
 
 type ToolLoopReason =
@@ -75,6 +87,14 @@ type SharedAgentRuntimeResult = Awaited<ReturnType<typeof invokeCapabilityChat>>
   codeDiscoveryFallback?: "none" | "capability-index" | "text-search";
   astSource?: "none" | "local-checkout" | "capability-index" | "text-search";
   runtimeLane?: AgentRuntimeLane;
+  /**
+   * Tool-loop call/result narration accumulated across iterations.  When
+   * present, the route layer should persist these as hidden chat rows
+   * (metadata.toolHistory=true) so subsequent user turns inherit the
+   * evidence without having to re-run the tools.  Only populated when the
+   * provider does NOT self-manage context (see `selfManagesContext`).
+   */
+  toolHistory?: ChatHistoryMessage[];
 };
 
 type InvokeCommonAgentRuntimeArgs = {
@@ -108,7 +128,16 @@ type ToolLoopDecision =
       message: string;
     };
 
-const MAX_READ_ONLY_TOOL_LOOPS = 4;
+// Maximum number of LLM tool-loop iterations before the runtime falls back to
+// the forced-answer recovery path.  Was 4 — reduced to 3 because the loop was
+// burning iterations on duplicate tool calls (see `attemptedToolSignatures`
+// dedup guard below).  After this many iterations, recovery still fires.
+const MAX_READ_ONLY_TOOL_LOOPS = 3;
+
+// Hard wall on duplicate tool calls within a single user turn.  After this
+// many duplicate (toolId, args) emissions, the loop breaks early so the
+// post-loop forced-answer path runs instead of wasting iterations.
+const MAX_DUPLICATE_TOOL_ATTEMPTS = 2;
 
 const normalizeString = (value: unknown) => String(value || "").trim();
 
@@ -122,6 +151,10 @@ const combineUsage = (left: AgentRuntimeUsage, right: AgentRuntimeUsage): AgentR
   estimatedCostUsd: Number(
     (left.estimatedCostUsd + right.estimatedCostUsd).toFixed(4),
   ),
+  promptCacheHits:
+    (left.promptCacheHits ?? 0) + (right.promptCacheHits ?? 0) || undefined,
+  promptCacheMisses:
+    (left.promptCacheMisses ?? 0) + (right.promptCacheMisses ?? 0) || undefined,
 });
 
 const extractBalancedJsonCandidates = (value: string) => {
@@ -348,6 +381,26 @@ const buildRejectedToolIntentPrompt = ({
     .filter(Boolean)
     .join("\n");
 
+/**
+ * Detect whether a tool returned an empty / no-data result.  When true,
+ * `formatToolResultSummary` prepends an explicit `TOOL_RESULT_EMPTY` banner
+ * so the LLM gets a clear signal that calling the same tool with the same
+ * args again will not help.  The detector is conservative — keyed on either
+ * an explicit `details.error` field (preferred, set by tool authors) or a
+ * known empty array shape (`symbols`, `files`, `results`).
+ */
+const isEmptyToolResult = (
+  _toolId: ToolAdapterId,
+  result: Awaited<ReturnType<typeof executeTool>>,
+): boolean => {
+  const details = (result.details ?? {}) as Record<string, unknown>;
+  if (typeof details.error === "string" && details.error.trim()) return true;
+  if (Array.isArray(details.symbols) && details.symbols.length === 0) return true;
+  if (Array.isArray(details.files) && details.files.length === 0) return true;
+  if (Array.isArray(details.results) && details.results.length === 0) return true;
+  return false;
+};
+
 const formatToolResultSummary = (
   toolId: ToolAdapterId,
   result: Awaited<ReturnType<typeof executeTool>>,
@@ -356,7 +409,11 @@ const formatToolResultSummary = (
     ? JSON.stringify(result.details, null, 2).slice(0, 2400)
     : "{}";
   const output = normalizeString(result.stdoutPreview || result.stderrPreview);
+  const emptyHeader = isEmptyToolResult(toolId, result)
+    ? `TOOL_RESULT_EMPTY: ${toolId} returned no matches — DO NOT call this tool again with the same args.`
+    : null;
   return [
+    emptyHeader,
     `Tool result for ${toolId}:`,
     `Summary: ${result.summary}`,
     output ? `Output preview:\n${output}` : null,
@@ -366,13 +423,52 @@ const formatToolResultSummary = (
     .join("\n\n");
 };
 
+/**
+ * Stable JSON.stringify — keys sorted at every object level so two equivalent
+ * argument objects always serialise to the same string.  Used to fingerprint
+ * tool calls for the dedup guard inside the tool loop.
+ */
+const stableStringify = (value: unknown): string => {
+  if (value === null || value === undefined) return "null";
+  if (typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
+};
+
+/**
+ * 32-bit FNV-1a hash of `${toolId}::${stableStringify(args)}`.  Collisions
+ * across different (toolId, args) pairs are not a security concern here —
+ * we only need a stable bucket to detect "the LLM just emitted this same
+ * call again".
+ */
+const hashToolCall = (toolId: string, args: unknown): string => {
+  const s = `${toolId}::${stableStringify(args ?? {})}`;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(16);
+};
+
+const buildDuplicateToolNotice = (toolId: ToolAdapterId): string =>
+  [
+    `TOOL_DUPLICATE: ${toolId} was already invoked with these exact args in this turn.`,
+    "The previous result is unchanged.  Do NOT call this tool again with the same args.",
+    "Either answer directly using the evidence already gathered, or pick a different tool / different args.",
+  ].join("\n");
+
 const summarizeToolResult = (
   toolId: ToolAdapterId,
   result: Awaited<ReturnType<typeof executeTool>>,
 ) =>
   [
     formatToolResultSummary(toolId, result),
-    "Now continue answering the original request. Either answer directly or invoke exactly one more allowed tool.",
+    "Now continue answering the original request. Prefer answering directly; only invoke another tool if it's clearly needed AND uses different args from the calls already made.",
   ].join("\n\n");
 
 const summarizeToolResults = (
@@ -383,7 +479,7 @@ const summarizeToolResults = (
 ) =>
   [
     ...entries.map(entry => formatToolResultSummary(entry.toolId, entry.result)),
-    "Now continue answering the original request. Either answer directly or invoke exactly one more allowed tool.",
+    "Now continue answering the original request. Prefer answering directly; only invoke another tool if it's clearly needed AND uses different args from the calls already made.",
   ].join("\n\n");
 
 export const resolveReadOnlyToolIds = (
@@ -960,6 +1056,24 @@ export const invokeCommonAgentRuntime = async ({
   const toolHistory: ChatHistoryMessage[] = [];
   const toolResults: Array<Awaited<ReturnType<typeof executeTool>>> = [];
   const attemptedToolIds: ToolAdapterId[] = [];
+  // Loop-local set of `(toolId, args)` fingerprints — guards against the LLM
+  // emitting the same tool call repeatedly (the symptom that produced
+  // "[agentRuntime] recovered final answer after tool-loop exhaustion").
+  const attemptedToolSignatures = new Set<string>();
+  let duplicateAttemptCount = 0;
+  // Resolve whether the active provider self-manages context (CLI lanes do).
+  // When true, do NOT preserve all history end-to-end — the underlying CLI
+  // already maintains its own conversation state and our bundling would
+  // double-handle context.
+  const resolvedProviderKey = resolveAgentProviderKey(agent);
+  const resolvedProviderConfig = getStoredRuntimeProviderConfigSync({
+    providerKey: resolvedProviderKey,
+  });
+  const selfManagesContext = providerSelfManagesContext(
+    resolvedProviderKey,
+    resolvedProviderConfig,
+  );
+  const preserveAllHistoryForToolLoop = !selfManagesContext;
   let parsedToolIntent: SharedAgentRuntimeResult["parsedToolIntent"];
   let toolIntentDisposition: ToolIntentDisposition = "none";
   let toolIntentRejectionReason: string | undefined;
@@ -982,6 +1096,7 @@ export const invokeCommonAgentRuntime = async ({
         scope: "TASK",
         scopeId: toolLoopScopeId,
         resetSession: iteration === 0 ? resetSession : false,
+        preserveAllHistory: preserveAllHistoryForToolLoop,
       });
 
       lastResult = loopResponse;
@@ -1052,6 +1167,9 @@ export const invokeCommonAgentRuntime = async ({
           toolIntentDisposition,
           toolIntentRejectionReason,
           runtimeLane,
+          // Persist tool narration for non-self-managing providers (see B.4).
+          toolHistory:
+            !selfManagesContext && toolHistory.length > 0 ? [...toolHistory] : undefined,
         };
       }
 
@@ -1118,6 +1236,9 @@ export const invokeCommonAgentRuntime = async ({
           toolIntentDisposition,
           toolIntentRejectionReason,
           runtimeLane,
+          // Persist tool narration for non-self-managing providers (see B.4).
+          toolHistory:
+            !selfManagesContext && toolHistory.length > 0 ? [...toolHistory] : undefined,
         };
       }
 
@@ -1140,6 +1261,9 @@ export const invokeCommonAgentRuntime = async ({
           toolIntentDisposition,
           toolIntentRejectionReason,
           runtimeLane,
+          // Persist tool narration for non-self-managing providers (see B.4).
+          toolHistory:
+            !selfManagesContext && toolHistory.length > 0 ? [...toolHistory] : undefined,
         };
       }
 
@@ -1205,6 +1329,35 @@ export const invokeCommonAgentRuntime = async ({
         continue;
       }
 
+      // ── Dedup guard ────────────────────────────────────────────────
+      // The LLM occasionally re-emits the same (toolId, args) call after an
+      // empty result, which used to consume all 4 iterations and trigger the
+      // "recovered final answer after tool-loop exhaustion" warning.  Hash
+      // the call and bail out if we have already executed it this turn.
+      const callSignature = hashToolCall(decision.toolCall.toolId, decision.toolCall.args);
+      if (attemptedToolSignatures.has(callSignature)) {
+        duplicateAttemptCount += 1;
+        console.warn("[agentRuntime] skipped duplicate tool invocation", {
+          runtimeLane,
+          toolId: decision.toolCall.toolId,
+          callSignature,
+          duplicateAttemptCount,
+        });
+        toolHistory.push(
+          { role: "agent", content: loopResponse.content },
+          { role: "user", content: buildDuplicateToolNotice(decision.toolCall.toolId) },
+        );
+        if (duplicateAttemptCount >= MAX_DUPLICATE_TOOL_ATTEMPTS) {
+          // Bail out of the loop — the post-loop forced-answer recovery path
+          // (`fallbackToolIntent` block below) will produce a plain-text
+          // answer using the evidence already gathered.
+          break;
+        }
+        currentMessage = `Continue answering the original request without re-running ${decision.toolCall.toolId}: ${message}`;
+        continue;
+      }
+      // ───────────────────────────────────────────────────────────────
+
       const executedToolCalls = await executeReadOnlyToolChain({
         capability: capability as Capability,
         agent: agent as CapabilityAgent,
@@ -1221,6 +1374,7 @@ export const invokeCommonAgentRuntime = async ({
         : "repaired";
       toolIntentRejectionReason = undefined;
       attemptedToolIds.push(...executedToolCalls.map(entry => entry.toolId));
+      attemptedToolSignatures.add(callSignature);
       toolResults.push(...executedToolCalls.map(entry => entry.result));
       parsedToolIntent = {
         action: "invoke_tool",
@@ -1264,7 +1418,13 @@ export const invokeCommonAgentRuntime = async ({
       fallbackDecision?.action === "invoke_tool"
         ? fallbackDecision
         : null;
-    if (fallbackToolIntent && attemptedToolIds.length > 0) {
+    // Trigger forced-answer recovery if the LLM still wants to call tools
+    // (fallbackToolIntent set) OR if we broke out of the loop because of
+    // duplicate-call exhaustion.  Either way we have evidence to answer with.
+    const shouldForceAnswer =
+      (fallbackToolIntent && attemptedToolIds.length > 0) ||
+      (duplicateAttemptCount >= MAX_DUPLICATE_TOOL_ATTEMPTS && attemptedToolIds.length > 0);
+    if (shouldForceAnswer) {
       const forcedAnswerScopeId = `tool-final-answer-${randomUUID()}`;
       try {
         const forcedAnswer = await invokeCapabilityChat({
@@ -1279,6 +1439,7 @@ export const invokeCommonAgentRuntime = async ({
           scope: "TASK",
           scopeId: forcedAnswerScopeId,
           resetSession: false,
+          preserveAllHistory: preserveAllHistoryForToolLoop,
         });
         const forcedAnswerContent = extractUserFacingContent(forcedAnswer.content || "");
         if (forcedAnswerContent) {
@@ -1302,15 +1463,22 @@ export const invokeCommonAgentRuntime = async ({
             ...deriveDiscoveryMetadata(attemptedToolIds, toolResults),
             resolvedAllowedToolIds: readOnlyToolIds,
             resolvedAgentSource,
-            parsedToolIntent: {
-              action: "invoke_tool",
-              toolId: fallbackToolIntent.toolCall.toolId,
-              requestedToolId: fallbackToolIntent.toolCall.requestedToolId,
-              args: fallbackToolIntent.toolCall.args,
-            },
+            parsedToolIntent: fallbackToolIntent
+              ? {
+                  action: "invoke_tool",
+                  toolId: fallbackToolIntent.toolCall.toolId,
+                  requestedToolId: fallbackToolIntent.toolCall.requestedToolId,
+                  args: fallbackToolIntent.toolCall.args,
+                }
+              : parsedToolIntent,
             toolIntentDisposition: "repaired",
-            toolIntentRejectionReason: "tool-loop-exhausted-final-answer-recovery",
+            toolIntentRejectionReason:
+              duplicateAttemptCount >= MAX_DUPLICATE_TOOL_ATTEMPTS
+                ? "tool-loop-duplicate-call-exhausted"
+                : "tool-loop-exhausted-final-answer-recovery",
             runtimeLane,
+            toolHistory:
+              !selfManagesContext && toolHistory.length > 0 ? [...toolHistory] : undefined,
           };
         }
       } finally {
@@ -1366,6 +1534,8 @@ export const invokeCommonAgentRuntime = async ({
       toolIntentDisposition,
       toolIntentRejectionReason,
       runtimeLane,
+      toolHistory:
+        !selfManagesContext && toolHistory.length > 0 ? [...toolHistory] : undefined,
     };
   } finally {
     await evictManagedCapabilitySessions({

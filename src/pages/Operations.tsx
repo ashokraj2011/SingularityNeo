@@ -168,6 +168,7 @@ const Operations = () => {
         enabled: boolean;
         envText: string;
         setDefault: boolean;
+        selfManagesContext: boolean;
       }
     >
   >({});
@@ -385,9 +386,15 @@ const Operations = () => {
       enabled: boolean;
       envText: string;
       setDefault: boolean;
+      selfManagesContext: boolean;
     }>,
   ) => {
     setRuntimeProviderDrafts(current => {
+      const isCliLane =
+        providerKey === "claude-code-cli" ||
+        providerKey === "codex-cli" ||
+        providerKey === "aider-cli" ||
+        providerKey === "github-copilot-cli";
       const nextDrafts = {
         ...current,
         [providerKey]: {
@@ -398,6 +405,8 @@ const Operations = () => {
           enabled: false,
           envText: "",
           setDefault: false,
+          // CLIs default to self-managing context; HTTP/SDK lanes don't.
+          selfManagesContext: isCliLane,
           ...(current[providerKey] || {}),
           ...patch,
         },
@@ -436,6 +445,7 @@ const Operations = () => {
           workingMode: draft.workingMode as RuntimeProviderConfig["workingMode"],
           enabled: draft.enabled,
           env: parseProviderEnvText(draft.envText),
+          selfManagesContext: draft.selfManagesContext,
         },
         setDefault: draft.setDefault,
       });
@@ -924,11 +934,17 @@ const Operations = () => {
     setRuntimeProviderDrafts(current => {
       const nextDrafts = { ...current };
       for (const provider of runtimeProviders) {
+        const isCliLane =
+          provider.key === 'claude-code-cli' ||
+          provider.key === 'codex-cli' ||
+          provider.key === 'aider-cli' ||
+          provider.key === 'github-copilot-cli';
         nextDrafts[provider.key] = {
           command: provider.config?.command || provider.command || nextDrafts[provider.key]?.command ||
             (provider.key === 'claude-code-cli' ? 'claude' :
              provider.key === 'codex-cli' ? 'codex' :
-             provider.key === 'aider-cli' ? 'aider' : ""),
+             provider.key === 'aider-cli' ? 'aider' :
+             provider.key === 'github-copilot-cli' ? 'gh-copilot' : ""),
           model: provider.config?.model || provider.model || nextDrafts[provider.key]?.model || "",
           profile: provider.config?.profile || nextDrafts[provider.key]?.profile || "",
           workingMode:
@@ -941,6 +957,10 @@ const Operations = () => {
               ? stringifyProviderEnv(provider.config.env)
               : nextDrafts[provider.key]?.envText || "",
           setDefault: Boolean(provider.defaultSelected),
+          selfManagesContext:
+            provider.config?.selfManagesContext ??
+            nextDrafts[provider.key]?.selfManagesContext ??
+            isCliLane,
         };
       }
       return nextDrafts;

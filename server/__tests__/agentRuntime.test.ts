@@ -499,6 +499,11 @@ describe("invokeCommonAgentRuntime", () => {
   });
 
   it("forces a final answer after repeated tool calls instead of leaking the last tool intent", async () => {
+    // New flow with the dedup guard:
+    //   - Iter 1: LLM emits browse_code(class) → executed (mock #1).
+    //   - Iter 2: LLM emits browse_code(class) again → dedup skip (mock #2 consumed).
+    //   - Iter 3: LLM emits browse_code(class) again → dedup skip + BREAK (mock #3 consumed).
+    //   - Forced-answer recovery: returns plain text (mock #4).
     invokeCapabilityChatMock
       .mockResolvedValueOnce({
         content:
@@ -523,14 +528,6 @@ describe("invokeCommonAgentRuntime", () => {
         usage,
         responseId: "resp-loop-3",
         createdAt: "2026-04-30T00:00:02.000Z",
-      })
-      .mockResolvedValueOnce({
-        content:
-          '{"action":"browse_code","reasoning":"Still browsing.","summary":"Browsing code again.","toolCall":{"kind":"class"}}',
-        model: "test-model",
-        usage,
-        responseId: "resp-loop-4",
-        createdAt: "2026-04-30T00:00:03.000Z",
       })
       .mockResolvedValueOnce({
         content: "The indexed checkout shows 2 operator classes.",
@@ -565,10 +562,16 @@ describe("invokeCommonAgentRuntime", () => {
       runtimeLane: "desktop-runtime-worker",
     });
 
-    expect(executeToolMock).toHaveBeenCalledTimes(4);
+    // The runtime now dedups repeated (toolId, args) emissions inside a
+    // single user turn — see the `attemptedToolSignatures` guard in
+    // agentRuntime.ts.  Earlier the LLM could re-call browse_code 4× and
+    // burn every iteration; now the second emission is rejected and after
+    // MAX_DUPLICATE_TOOL_ATTEMPTS the loop breaks into the forced-answer
+    // recovery path with a distinct rejection reason.
+    expect(executeToolMock).toHaveBeenCalledTimes(1);
     expect(result.toolIntentDisposition).toBe("repaired");
     expect(result.toolIntentRejectionReason).toBe(
-      "tool-loop-exhausted-final-answer-recovery",
+      "tool-loop-duplicate-call-exhausted",
     );
     expect(result.content).toBe(
       "The indexed checkout shows 2 operator classes.",

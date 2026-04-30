@@ -1557,7 +1557,8 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
           }
           return {
             summary: "No local base clones available and no DB code index found. Run repo-sync first.",
-            details: { symbols: [], source: "none" },
+            stderrPreview: "TOOL_RESULT_EMPTY: browse_code returned no symbols (no clones, no DB index).",
+            details: { symbols: [], source: "none", error: "no-index" },
           };
         }
         const output = dbResults

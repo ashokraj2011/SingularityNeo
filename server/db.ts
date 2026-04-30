@@ -529,6 +529,7 @@ export const schemaStatements = [
       work_item_id TEXT,
       run_id TEXT,
       workflow_step_id TEXT,
+      hidden BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id)
     )
@@ -3169,6 +3170,13 @@ export const migrationStatements = [
   `
     ALTER TABLE capability_messages
     ADD COLUMN IF NOT EXISTS source_capability_id TEXT
+  `,
+  // Hidden tool-history rows persisted by the agentRuntime tool-loop so
+  // follow-up user turns inherit prior tool evidence.  UI surfaces filter
+  // these out by default; the LLM still sees them in the forwarded history.
+  `
+    ALTER TABLE capability_messages
+    ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE
   `,
   `
     ALTER TABLE capability_artifacts

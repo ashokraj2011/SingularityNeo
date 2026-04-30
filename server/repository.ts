@@ -928,6 +928,7 @@ const messageFromRow = (row: Record<string, any>): CapabilityChatMessage => ({
   workItemId: row.work_item_id || undefined,
   runId: row.run_id || undefined,
   workflowStepId: row.workflow_step_id || undefined,
+  hidden: row.hidden === true ? true : undefined,
 });
 
 const workflowFromRow = (
@@ -1767,9 +1768,10 @@ const appendMessageTx = async (
         session_scope_id,
         work_item_id,
         run_id,
-        workflow_step_id
+        workflow_step_id,
+        hidden
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
       ON CONFLICT (capability_id, id) DO UPDATE SET
         content = EXCLUDED.content,
         timestamp = EXCLUDED.timestamp,
@@ -1782,7 +1784,8 @@ const appendMessageTx = async (
         session_scope_id = EXCLUDED.session_scope_id,
         work_item_id = EXCLUDED.work_item_id,
         run_id = EXCLUDED.run_id,
-        workflow_step_id = EXCLUDED.workflow_step_id
+        workflow_step_id = EXCLUDED.workflow_step_id,
+        hidden = EXCLUDED.hidden
     `,
     [
       capabilityId,
@@ -1800,6 +1803,7 @@ const appendMessageTx = async (
       message.workItemId || null,
       message.runId || null,
       message.workflowStepId || null,
+      message.hidden === true,
     ],
   );
 };

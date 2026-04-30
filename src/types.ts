@@ -16,6 +16,7 @@ export type SkillKind = "GENERAL" | "ROLE" | "CUSTOM" | "LEARNING";
 export type SkillOrigin = "FOUNDATION" | "CAPABILITY";
 export type ProviderKey =
   | "github-copilot"
+  | "github-copilot-cli"
   | "local-openai"
   | "gemini"
   | "custom-router"
@@ -1834,6 +1835,15 @@ export interface CapabilityChatMessage {
   swarmSessionId?: string;
   swarmTurnType?: SwarmTurnType;
   sourceCapabilityId?: string;
+  /**
+   * When true, this message is a tool-history row written by the agent
+   * runtime so subsequent LLM turns can see prior tool evidence.  Both the
+   * Event Horizon dock and the main Chat page filter these from rendering;
+   * the runtime forwards them back into the next LLM call so context is
+   * preserved across turns.  Persisted via the `hidden` column on
+   * capability_messages (added in migration; defaults to FALSE).
+   */
+  hidden?: boolean;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -3003,6 +3013,16 @@ export interface RuntimeProviderConfig {
   workingMode?: "plan" | "read-only" | "workspace-write" | "danger-full-access";
   enabled?: boolean;
   env?: Record<string, string>;
+  /**
+   * When true, this provider manages its own conversation history and prompt
+   * cache (typical of CLI lanes such as `claude-code-cli`).  The Singularity
+   * runtime then skips its own history bundling, prompt-fragment LRU, and
+   * hidden tool-result persistence — preventing double-handling.  When false,
+   * the runtime takes responsibility for context (typical of HTTP/SDK lanes).
+   * Undefined → fall back to the per-provider default in `runtimeProviders.ts`
+   * (CLIs default ON, HTTP providers default OFF).
+   */
+  selfManagesContext?: boolean;
   updatedAt?: string;
 }
 

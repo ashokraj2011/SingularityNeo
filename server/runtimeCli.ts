@@ -15,6 +15,7 @@ import {
   AIDER_CLI_PROVIDER_KEY,
   CLAUDE_CODE_CLI_PROVIDER_KEY,
   CODEX_CLI_PROVIDER_KEY,
+  GITHUB_COPILOT_CLI_PROVIDER_KEY,
   isCliRuntimeProviderKey,
   resolveProviderDisplayName,
 } from './providerRegistry';
@@ -128,6 +129,7 @@ const trim = (value?: string | null) => String(value || '').trim();
 
 const providerDefaultCommand: Record<ProviderKey, string> = {
   'github-copilot': '',
+  'github-copilot-cli': 'gh-copilot',
   'local-openai': '',
   'gemini': '',
   'custom-router': '',
@@ -149,9 +151,22 @@ export const KNOWN_CLAUDE_CODE_MODELS = [
   { id: 'claude-3-opus-20240229',     label: 'Claude 3 Opus (dated)',         profile: 'Claude Code CLI', apiModelId: 'claude-3-opus-20240229' },
 ];
 
+/**
+ * Known models exposed by the GitHub Copilot CLI.  The CLI itself routes the
+ * actual model selection internally, so these are mostly informational labels
+ * shown in the Agents screen — pick the cheapest gpt-4.1-mini as default.
+ */
+export const KNOWN_COPILOT_CLI_MODELS = [
+  { id: 'gpt-4.1-mini', label: 'GPT-4.1 mini (cheapest)', profile: 'GitHub Copilot CLI', apiModelId: 'gpt-4.1-mini' },
+  { id: 'gpt-4.1',      label: 'GPT-4.1',                  profile: 'GitHub Copilot CLI', apiModelId: 'gpt-4.1' },
+  { id: 'gpt-4o',       label: 'GPT-4o',                   profile: 'GitHub Copilot CLI', apiModelId: 'gpt-4o' },
+  { id: 'gpt-4o-mini',  label: 'GPT-4o mini',              profile: 'GitHub Copilot CLI', apiModelId: 'gpt-4o-mini' },
+];
+
 /** Cheapest/default model for each CLI provider. */
 const providerDefaultModel: Partial<Record<ProviderKey, string>> = {
   'claude-code-cli': 'claude-haiku-3-5',
+  'github-copilot-cli': 'gpt-4.1-mini',
 };
 
 const normalizeCliMessages = (messages: RuntimeCliMessage[]) =>
@@ -219,6 +234,10 @@ const isModelValidForCli = (providerKey: ProviderKey, model: string): boolean =>
   if (providerKey === CODEX_CLI_PROVIDER_KEY) {
     // codex CLI uses OpenAI model names — reject vendor-prefixed router IDs
     return !/\//.test(model) && !/^claude/i.test(model) && !/^gemini/i.test(model);
+  }
+  if (providerKey === GITHUB_COPILOT_CLI_PROVIDER_KEY) {
+    // gh-copilot routes the model internally — accept gpt-* style ids only.
+    return /^gpt-/i.test(model);
   }
   // aider is permissive — accept anything
   return true;
@@ -342,6 +361,43 @@ const buildClaudeExecArgs = ({
   return {
     args,
     stdin: '',
+  };
+};
+
+const buildCopilotCliExecArgs = ({
+  commandPrompt,
+  model,
+  config,
+}: {
+  commandPrompt: string;
+  workingDirectory: string;
+  model?: string;
+  config?: RuntimeProviderConfig | null;
+}) => {
+  // The `gh copilot` extension takes the prompt either via stdin or as a
+  // positional argument on `gh copilot suggest`.  We pass the prompt on
+  // stdin (works for both `gh-copilot` direct binary and the `gh copilot
+  // suggest` subcommand spelling) and let the binary pick its own model.
+  // Most installs only accept `--target` / `--shell`, so we keep the args
+  // surface minimal and pass-through model only when explicitly compatible.
+  const args: string[] = ['suggest', '--target', 'shell'];
+
+  if (model && isModelValidForCli(GITHUB_COPILOT_CLI_PROVIDER_KEY, model)) {
+    // No native --model flag — surfaced as env var the upstream CLI honours.
+    // Caller may also set this in `config.env` if they want full control.
+    args.unshift(`--model=${model}`);
+  }
+
+  // Re-route depending on the configured profile (advanced users may set
+  // `config.profile` to `"explain"` to call the explain subcommand instead).
+  const profile = trim(config?.profile);
+  if (profile === 'explain') {
+    args[0] = 'explain';
+  }
+
+  return {
+    args,
+    stdin: commandPrompt,
   };
 };
 
@@ -470,6 +526,10 @@ export const listCliProviderModels = async ({
   // cheapest and is the recommended default.
   if (providerKey === CLAUDE_CODE_CLI_PROVIDER_KEY) {
     return KNOWN_CLAUDE_CODE_MODELS;
+  }
+
+  if (providerKey === GITHUB_COPILOT_CLI_PROVIDER_KEY) {
+    return KNOWN_COPILOT_CLI_MODELS;
   }
 
   // For other CLIs fall back to whatever is configured (single entry) or empty.
@@ -646,6 +706,13 @@ export const invokeCliRuntime = async ({
         })
       : providerKey === CLAUDE_CODE_CLI_PROVIDER_KEY
       ? buildClaudeExecArgs({
+          commandPrompt: prompt,
+          workingDirectory,
+          model: resolvedModel,
+          config,
+        })
+      : providerKey === GITHUB_COPILOT_CLI_PROVIDER_KEY
+      ? buildCopilotCliExecArgs({
           commandPrompt: prompt,
           workingDirectory,
           model: resolvedModel,

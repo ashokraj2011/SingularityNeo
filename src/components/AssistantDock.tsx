@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useCapability } from '../context/CapabilityContext';
 import { streamCapabilityChat } from '../lib/api';
+import { MAX_HISTORY_FOR_LLM } from '../lib/chatLimits';
 import { getRouteDescription, type RouteDescription } from '../lib/routeDescriptions';
 import { cn } from '../lib/utils';
 import { StatusBadge } from './EnterpriseUI';
@@ -54,7 +55,7 @@ type DockMessage = {
 };
 
 const STORAGE_KEY = 'singularity.assistant-dock.open';
-const MAX_HISTORY_FOR_LLM = 12;
+// MAX_HISTORY_FOR_LLM is imported from ../lib/chatLimits (shared with Chat.tsx).
 
 /**
  * Brand of this dock's assistant persona.

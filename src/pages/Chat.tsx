@@ -33,6 +33,7 @@ import {
   type RuntimeStatus,
   type RuntimeUsage,
 } from '../lib/api';
+import { MAX_HISTORY_FOR_LLM } from '../lib/chatLimits';
 import AgentKnowledgeLensPanel from '../components/AgentKnowledgeLensPanel';
 import CapabilityBriefingPanel from '../components/CapabilityBriefingPanel';
 import { EmptyState, StatusBadge } from '../components/EnterpriseUI';
@@ -414,6 +415,13 @@ const Chat = () => {
   const generalChatMessages = useMemo(
     () =>
       workspace.messages.filter(message => {
+        // Hidden rows are tool-history entries persisted by the agent
+        // runtime so subsequent LLM turns inherit prior tool evidence.
+        // They are kept out of the rendered transcript here; the runtime
+        // forwards them back through the next LLM call automatically.
+        if (message.hidden) {
+          return false;
+        }
         if (message.workItemId) {
           return false;
         }
@@ -857,7 +865,28 @@ const Chat = () => {
     const requestedSessionMode = options?.sessionMode || pendingSessionMode;
     const userMessageId = `${Date.now()}-user`;
     const userTimestamp = formatTimestamp();
-    const historyForRequest = generalChatMessages.slice(-10);
+    // Build the LLM-bound history WITHOUT filtering hidden rows so prior
+    // tool-history evidence is forwarded back to the runtime.  We still
+    // apply the same general-chat scope filter here so foreign work-item
+    // turns are not pulled in.
+    const historyForRequest = workspace.messages
+      .filter(message => {
+        if (message.workItemId) {
+          return false;
+        }
+        if (message.sessionScope && message.sessionScope !== 'GENERAL_CHAT') {
+          return false;
+        }
+        if (
+          message.sessionScope === 'GENERAL_CHAT' &&
+          message.sessionScopeId &&
+          message.sessionScopeId !== activeCapability.id
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .slice(-MAX_HISTORY_FOR_LLM);
 
     setInput('');
     setError('');

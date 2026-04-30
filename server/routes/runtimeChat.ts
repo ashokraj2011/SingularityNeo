@@ -2,7 +2,10 @@ import type express from 'express';
 import type { Capability, CapabilityAgent, CapabilityWorkspace, WorkItem } from '../../src/types';
 import { assertCapabilityPermission } from '../access';
 import { GitHubProviderRateLimitError, type ChatHistoryMessage } from '../githubModels';
-import { auditRuntimeChatTurn } from '../domains/context-fabric';
+import {
+  auditRuntimeChatTurn,
+  appendCapabilityMessageRecord,
+} from '../domains/context-fabric';
 import { getCapabilityBundle } from '../domains/self-service';
 import { parseActorContext } from '../requestActor';
 import { resolveAuthorizedSwarmParticipants } from '../swarmParticipants';
@@ -596,6 +599,42 @@ export const registerRuntimeChatRoutes = (
         ...evidenceDiagnostics,
       });
 
+      // Persist tool-loop narration as hidden chat rows so subsequent user
+      // turns inherit prior tool evidence without re-running the tools.  UI
+      // surfaces filter `hidden=true` from rendering; the runtime forwards
+      // them back into the next LLM call as part of the history window.
+      // Skipped when the provider self-manages context (see Section D).
+      const toolHistoryRows = (publicChatResponse as unknown as {
+        toolHistory?: Array<{ role: 'user' | 'agent'; content: string }>;
+      }).toolHistory;
+      if (toolHistoryRows && toolHistoryRows.length > 0) {
+        const baseTimestamp = new Date();
+        for (const [index, entry] of toolHistoryRows.entries()) {
+          const stamp = new Date(baseTimestamp.getTime() + index).toISOString();
+          await appendCapabilityMessageRecord(liveCapability.id, {
+            id: `${traceId || stamp}-tool-${index}`,
+            role: entry.role === 'agent' ? 'agent' : 'user',
+            content: entry.content,
+            timestamp: stamp,
+            agentId: liveAgent.id,
+            agentName: liveAgent.name,
+            traceId,
+            sessionId: publicChatResponse.sessionId || undefined,
+            sessionScope: chatContext.chatScope || undefined,
+            sessionScopeId: chatContext.chatScopeId || undefined,
+            workItemId: body.workItemId || undefined,
+            runId: body.runId || undefined,
+            workflowStepId: body.workflowStepId || undefined,
+            hidden: true,
+          }).catch(err => {
+            console.warn(
+              '[chat-audit] failed to persist tool-history row:',
+              err instanceof Error ? err.message : err,
+            );
+          });
+        }
+      }
+
       // Fire-and-forget audit record so desktop chat turns are always
       // traceable on the control plane, even if the operator never
       // explicitly saves them as evidence.
@@ -1000,6 +1039,39 @@ export const registerRuntimeChatRoutes = (
         ...streamDiagnostics,
       });
       response.end();
+
+      // Persist tool-loop narration as hidden chat rows (see /api/runtime/chat
+      // non-streaming route above for the rationale).
+      const streamToolHistoryRows = (publicStreamed as unknown as {
+        toolHistory?: Array<{ role: 'user' | 'agent'; content: string }>;
+      }).toolHistory;
+      if (streamToolHistoryRows && streamToolHistoryRows.length > 0) {
+        const baseTimestamp = new Date();
+        for (const [index, entry] of streamToolHistoryRows.entries()) {
+          const stamp = new Date(baseTimestamp.getTime() + index).toISOString();
+          await appendCapabilityMessageRecord(liveCapability.id, {
+            id: `${traceId || stamp}-tool-${index}`,
+            role: entry.role === 'agent' ? 'agent' : 'user',
+            content: entry.content,
+            timestamp: stamp,
+            agentId: liveAgent.id,
+            agentName: liveAgent.name,
+            traceId,
+            sessionId: publicStreamed.sessionId || undefined,
+            sessionScope: chatContext.chatScope || undefined,
+            sessionScopeId: chatContext.chatScopeId || undefined,
+            workItemId: body.workItemId || undefined,
+            runId: body.runId || undefined,
+            workflowStepId: body.workflowStepId || undefined,
+            hidden: true,
+          }).catch(err => {
+            console.warn(
+              '[chat-audit] failed to persist tool-history row:',
+              err instanceof Error ? err.message : err,
+            );
+          });
+        }
+      }
 
       // Fire-and-forget audit record (same as the non-streaming route).
       void auditRuntimeChatTurn({

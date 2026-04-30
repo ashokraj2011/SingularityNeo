@@ -20,6 +20,8 @@ export const CODEX_CLI_PROVIDER_KEY: ProviderKey = 'codex-cli';
 export const CODEX_CLI_PROVIDER_LABEL = 'Codex CLI';
 export const AIDER_CLI_PROVIDER_KEY: ProviderKey = 'aider-cli';
 export const AIDER_CLI_PROVIDER_LABEL = 'Aider CLI';
+export const GITHUB_COPILOT_CLI_PROVIDER_KEY: ProviderKey = 'github-copilot-cli';
+export const GITHUB_COPILOT_CLI_PROVIDER_LABEL = 'GitHub Copilot CLI';
 export const DEFAULT_EMBEDDING_PROVIDER_KEY: EmbeddingProviderKey = 'local-openai';
 export const HASH_EMBEDDING_PROVIDER_KEY: EmbeddingProviderKey = 'deterministic-hash';
 
@@ -31,8 +33,42 @@ export const isCliRuntimeProviderKey = (providerKey?: string | null): providerKe
   return (
     normalized === CLAUDE_CODE_CLI_PROVIDER_KEY ||
     normalized === CODEX_CLI_PROVIDER_KEY ||
-    normalized === AIDER_CLI_PROVIDER_KEY
+    normalized === AIDER_CLI_PROVIDER_KEY ||
+    normalized === GITHUB_COPILOT_CLI_PROVIDER_KEY
   );
+};
+
+/**
+ * Per-provider default for `RuntimeProviderConfig.selfManagesContext`.  CLI
+ * lanes manage their own conversation context internally, so the runtime
+ * skips its own bundling/caching for them.  HTTP/SDK lanes need the runtime
+ * to manage context, so they default to false.  An explicit value on the
+ * provider config wins over this default.
+ */
+const PROVIDER_SELF_MANAGES_CONTEXT_DEFAULTS: Record<ProviderKey, boolean> = {
+  'claude-code-cli': true,
+  'codex-cli': true,
+  'aider-cli': true,
+  'github-copilot-cli': true,
+  'github-copilot': false,
+  'local-openai': false,
+  'gemini': false,
+  'custom-router': false,
+};
+
+/**
+ * Resolve the effective `selfManagesContext` flag for a provider, honouring
+ * an explicit user choice on the runtime config and falling back to the
+ * per-provider default.  Used by `agentRuntime` and `runtimeChat` to gate
+ * Sections B.3, B.4, and C of the LLM-context fixes.
+ */
+export const providerSelfManagesContext = (
+  providerKey: ProviderKey,
+  config?: { selfManagesContext?: boolean } | null,
+): boolean => {
+  if (config?.selfManagesContext === true) return true;
+  if (config?.selfManagesContext === false) return false;
+  return PROVIDER_SELF_MANAGES_CONTEXT_DEFAULTS[providerKey] ?? false;
 };
 
 /**

@@ -39,8 +39,11 @@ type SectionFragment = {
 };
 
 const DEFAULT_TOKEN_POLICY: ResolvedTokenOptimizationPolicy = {
-  chatHistoryKeepLastN: 6,
-  chatRollupThreshold: 12,
+  // Bumped 6 → 16 so users don't lose context after ~6 turns of chat.
+  // Capability overrides can still go either direction (clamp 2..32 below).
+  chatHistoryKeepLastN: 16,
+  // Kept at 1.5× chatHistoryKeepLastN so the rollup threshold scales together.
+  chatRollupThreshold: 24,
   chatMaxInputTokens: 12_000,
   memoryPromptMaxTokens: 2_200,
   memoryChunkMaxTokens: 350,
@@ -75,14 +78,14 @@ export const resolveTokenOptimizationPolicy = (
         readEnvNumber('SINGULARITY_CHAT_HISTORY_KEEP_LAST_N') ??
         DEFAULT_TOKEN_POLICY.chatHistoryKeepLastN,
       2,
-      12,
+      32,
     ),
     chatRollupThreshold: clamp(
       toPositiveInteger(config.chatRollupThreshold) ??
         readEnvNumber('SINGULARITY_CHAT_ROLLUP_THRESHOLD') ??
         DEFAULT_TOKEN_POLICY.chatRollupThreshold,
       4,
-      24,
+      48,
     ),
     chatMaxInputTokens: clamp(
       toPositiveInteger(config.chatMaxInputTokens) ??
@@ -186,7 +189,10 @@ export const renderChatTranscript = (
   },
 ) => {
   const maxTurns = options?.maxTurns ?? turns.length;
-  const maxCharsPerTurn = options?.maxCharsPerTurn ?? 280;
+  // Default lifted 280 → 1200 so the LLM sees enough of each turn to actually
+  // remember what was said.  Callers can still override (e.g. agentRuntime
+  // tool-loop pass uses 4000 to preserve full tool-call narration).
+  const maxCharsPerTurn = options?.maxCharsPerTurn ?? 1_200;
   return turns
     .slice(-maxTurns)
     .map(turn => {

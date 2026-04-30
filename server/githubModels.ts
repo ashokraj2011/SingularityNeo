@@ -1998,6 +1998,61 @@ const formatHistorySummaryFragment = (summary?: string | null) =>
 const formatMemoryFragment = (memoryPrompt?: string | null) =>
   memoryPrompt?.trim() ? memoryPrompt.trim() : '';
 
+// ── In-process prompt-fragment cache (Section C) ───────────────────────────
+// A bounded FIFO map keyed by `(capability+agent+scope+input-hash)`.  Used to
+// memoise the deterministic chat-rollup so repeated tool-loop iterations
+// inside a single user turn don't recompute the same rollup string.  Bounded
+// at 256 entries so the cache cannot grow unbounded; eviction is FIFO which
+// is good enough — we are caching deterministic outputs of pure functions.
+const PROMPT_FRAGMENT_CACHE_MAX = 256;
+const promptFragmentCache = new Map<string, string>();
+let promptFragmentCacheHits = 0;
+let promptFragmentCacheMisses = 0;
+
+const getOrComputePromptFragment = (key: string, build: () => string): string => {
+  const cached = promptFragmentCache.get(key);
+  if (cached !== undefined) {
+    promptFragmentCacheHits += 1;
+    // Refresh insertion order so frequent keys stay warm.
+    promptFragmentCache.delete(key);
+    promptFragmentCache.set(key, cached);
+    return cached;
+  }
+  promptFragmentCacheMisses += 1;
+  const value = build();
+  promptFragmentCache.set(key, value);
+  if (promptFragmentCache.size > PROMPT_FRAGMENT_CACHE_MAX) {
+    // Evict the oldest entry (Map keeps insertion order).
+    const oldest = promptFragmentCache.keys().next().value;
+    if (oldest !== undefined) {
+      promptFragmentCache.delete(oldest);
+    }
+  }
+  return value;
+};
+
+/** Telemetry surface for the in-process prompt-fragment cache (Section C.4). */
+export const drainPromptFragmentCacheTelemetry = () => {
+  const snapshot = {
+    promptCacheHits: promptFragmentCacheHits,
+    promptCacheMisses: promptFragmentCacheMisses,
+    promptCacheSize: promptFragmentCache.size,
+  };
+  promptFragmentCacheHits = 0;
+  promptFragmentCacheMisses = 0;
+  return snapshot;
+};
+
+/** Cheap stable hash for cache keys (FNV-1a 32-bit hex). */
+const hashFragmentSeed = (seed: string): string => {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i += 1) {
+    h ^= seed.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(16);
+};
+
 const buildChatPromptPlan = ({
   capability,
   providerKey,
@@ -2010,6 +2065,7 @@ const buildChatPromptPlan = ({
   history,
   message,
   memoryPrompt,
+  preserveAllHistory,
 }: {
   capability: Partial<Capability>;
   providerKey?: string;
@@ -2022,16 +2078,31 @@ const buildChatPromptPlan = ({
   history: Array<{ role: 'assistant' | 'user'; content: string }>;
   message: string;
   memoryPrompt?: string;
+  /**
+   * When true (used by the agentRuntime tool-loop), do NOT slice or roll up
+   * the conversation history.  The contextBudget is then the only safety
+   * floor — token budget will still evict if total tokens exceed
+   * `chatMaxInputTokens`, but turn-count truncation is skipped.
+   */
+  preserveAllHistory?: boolean;
 }) => {
   const tokenPolicy = resolveTokenOptimizationPolicy(capability);
-  const keepLastN = tokenPolicy.chatHistoryKeepLastN;
+  const keepLastN = preserveAllHistory ? history.length : tokenPolicy.chatHistoryKeepLastN;
   const recentHistory = history.slice(-keepLastN);
-  const olderHistory = history.slice(0, Math.max(0, history.length - keepLastN));
+  const olderHistory = preserveAllHistory
+    ? []
+    : history.slice(0, Math.max(0, history.length - keepLastN));
   const historySummary =
     olderHistory.length > 0
-      ? buildDeterministicChatRollup(olderHistory, {
-          maxChars: tokenPolicy.approvalExcerptMaxChars,
-        })
+      ? getOrComputePromptFragment(
+          `rollup::${capability.id || 'unknown'}::${tokenPolicy.approvalExcerptMaxChars}::${hashFragmentSeed(
+            olderHistory.map(turn => `${turn.role}|${turn.content}`).join('\n'),
+          )}`,
+          () =>
+            buildDeterministicChatRollup(olderHistory, {
+              maxChars: tokenPolicy.approvalExcerptMaxChars,
+            }),
+        )
       : '';
 
   const protectedFragments = [
@@ -2074,7 +2145,9 @@ const buildChatPromptPlan = ({
             source: 'CONVERSATION_HISTORY' as const,
             text: `Recent conversation turns:\n${renderChatTranscript(recentHistory, {
               maxTurns: recentHistory.length,
-              maxCharsPerTurn: 280,
+              // preserveAllHistory expands the per-turn cap to keep tool-call
+              // narration intact through repeated tool-loop iterations.
+              maxCharsPerTurn: preserveAllHistory ? 4_000 : 1_200,
             })}`,
           }
         : null,
@@ -3432,6 +3505,7 @@ export const invokeCapabilityChat = async ({
   resetSession = false,
   tools,
   tool_choice,
+  preserveAllHistory,
 }: {
   capability: Partial<Capability>;
   agent: Partial<CapabilityAgent>;
@@ -3452,6 +3526,13 @@ export const invokeCapabilityChat = async ({
    */
   tools?: import('./localOpenAIProvider').ProviderTool[];
   tool_choice?: import('./localOpenAIProvider').ProviderToolChoice;
+  /**
+   * Set by `agentRuntime.ts` tool-loop iterations to bypass the keep-last-N
+   * truncation on chat history.  When true, all history (including stitched
+   * tool-call results) is preserved through `buildChatPromptPlan` so the LLM
+   * sees what it already tried before deciding the next move.
+   */
+  preserveAllHistory?: boolean;
 }) => {
   const normalizedHistory = normalizeChatHistory({
     history: history || [],
@@ -3491,6 +3572,7 @@ export const invokeCapabilityChat = async ({
     history: normalizedHistory,
     message: message.trim(),
     memoryPrompt,
+    preserveAllHistory,
   });
 
   const result = await invokeScopedCapabilitySession({
@@ -3534,6 +3616,7 @@ export const invokeCapabilityChatStream = async ({
   scope = 'GENERAL_CHAT',
   scopeId,
   resetSession = false,
+  preserveAllHistory,
 }: {
   capability: Partial<Capability>;
   agent: Partial<CapabilityAgent>;
@@ -3546,6 +3629,7 @@ export const invokeCapabilityChatStream = async ({
   scopeId?: string;
   temperature?: number;
   resetSession?: boolean;
+  preserveAllHistory?: boolean;
 }) => {
   const normalizedHistory = normalizeChatHistory({
     history: history || [],
@@ -3585,6 +3669,7 @@ export const invokeCapabilityChatStream = async ({
     history: normalizedHistory,
     message: message.trim(),
     memoryPrompt,
+    preserveAllHistory,
   });
 
   const result = await invokeScopedCapabilitySession({
