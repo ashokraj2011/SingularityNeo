@@ -139,6 +139,31 @@ describe('normalizeExecutionDecision', () => {
       },
     });
   });
+
+  it('maps browse aliases like code_browse to the canonical AST tool id', () => {
+    expect(
+      normalizeExecutionDecision({
+        action: 'invoke_tool',
+        reasoning: 'Need to inventory classes before reading files.',
+        toolCall: {
+          toolId: 'code_browse',
+          args: {
+            kind: 'class',
+          },
+        },
+      }),
+    ).toEqual({
+      action: 'invoke_tool',
+      reasoning: 'Need to inventory classes before reading files.',
+      summary: 'Prepared the next tool action for this workflow step.',
+      toolCall: {
+        toolId: 'browse_code',
+        args: {
+          kind: 'class',
+        },
+      },
+    });
+  });
 });
 
 describe('getExecutionDecisionRepairReason', () => {

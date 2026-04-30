@@ -1,20 +1,12 @@
 import type { Capability, CapabilityCodeSymbolKind, WorkItem } from "../src/types";
 import { searchCodeSymbols } from "./codeIndex/query";
+import { buildCodeSearchCandidates, looksLikeCodeQuestion } from "./codeDiscovery";
 import {
   getLocalCheckoutAstFreshness,
   listLocalCheckoutAllSymbols,
   searchLocalCheckoutSymbols,
 } from "./localCodeIndex";
 import { getCapabilityBaseClones } from "./desktopRepoSync";
-
-const CODE_PROMPT_PATTERNS = [
-  /\b(code|function|method|class|symbol|ast|call(s|er|ee)?|implement|change|patch|diff|bug|fix|refactor|file|module|api|query|branch|repo|repository|operator|operators|interface|enum|package|import|extends|implements)\b/i,
-  /\bhow many\b.*\b(classes?|operators?|interfaces?|enums?|methods?|files?)\b/i,
-  /[`'"]?[A-Z][A-Za-z0-9_]+[`'"]?/,
-  /\b[a-z][A-Za-z0-9_]*\.[a-z][A-Za-z0-9_]*\b/,
-  /\b[a-z][A-Za-z0-9_]*(?:Service|Controller|Repository|Manager|Client|Handler|Operator)\b/,
-  /\bsrc\/|\.ts\b|\.tsx\b|\.js\b|\.java\b|\.py\b/i,
-];
 
 export type AstGroundingSummary = {
   prompt?: string;
@@ -31,90 +23,6 @@ export type AstGroundingSummary = {
   groundingEvidenceSource?: "local-checkout" | "capability-index" | "none";
 };
 
-const normalizeIdentifierCandidate = (value: string) =>
-  value
-    .replace(/^[`'"(<[{]+|[`'")>\]},.:;!?]+$/g, "")
-    .trim();
-
-const STOP_WORDS = new Set([
-  "what",
-  "when",
-  "where",
-  "which",
-  "should",
-  "would",
-  "could",
-  "there",
-  "their",
-  "about",
-  "have",
-  "with",
-  "from",
-  "into",
-  "after",
-  "before",
-  "needs",
-  "need",
-  "this",
-  "that",
-  "these",
-  "those",
-  "many",
-  "much",
-  "rule",
-  "engine",
-  "count",
-  "total",
-  "there",
-  "are",
-  "is",
-  "the",
-  "in",
-]);
-
-const extractCodeQueries = (message: string) => {
-  const queries = new Set<string>();
-  const trimmed = String(message || "").trim();
-  if (!trimmed) return [];
-
-  const backtickMatches: string[] = trimmed.match(/`([^`]+)`/g) || [];
-  backtickMatches.forEach((match) => {
-    const normalized = normalizeIdentifierCandidate(match.slice(1, -1));
-    if (normalized) queries.add(normalized);
-  });
-
-  const dotMatches =
-    trimmed.match(/\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\b/g) || [];
-  dotMatches.forEach((match) => queries.add(match));
-
-  const identifierMatches: string[] =
-    trimmed.match(/\b[A-Za-z_][A-Za-z0-9_]{2,}\b/g) || [];
-  identifierMatches.forEach((match) => {
-    if (STOP_WORDS.has(match.toLowerCase())) {
-      return;
-    }
-    queries.add(match);
-  });
-
-  return [...queries].slice(0, 6);
-};
-
-const toSearchTerms = (queries: string[]) => {
-  const terms = new Set<string>();
-  queries.forEach((query) => {
-    const normalized = normalizeIdentifierCandidate(query).toLowerCase();
-    if (!normalized || STOP_WORDS.has(normalized)) {
-      return;
-    }
-    terms.add(normalized);
-    if (normalized.endsWith("ies") && normalized.length > 4) {
-      terms.add(`${normalized.slice(0, -3)}y`);
-    } else if (normalized.endsWith("s") && normalized.length > 3) {
-      terms.add(normalized.slice(0, -1));
-    }
-  });
-  return [...terms];
-};
 
 const buildLocalPathFallback = async ({
   checkoutPath,
@@ -230,9 +138,6 @@ const formatSymbolRows = (
     return `- ${displayName} (${symbol.kind}) at ${absolutePath}:${range}${signature}`;
   });
 
-export const looksLikeCodeQuestion = (message: string) =>
-  CODE_PROMPT_PATTERNS.some((pattern) => pattern.test(String(message || "")));
-
 export const buildAstGroundingSummary = async ({
   capability,
   workItem,
@@ -258,7 +163,7 @@ export const buildAstGroundingSummary = async ({
     };
   }
 
-  const queries = extractCodeQueries(message);
+  const { queries, searchTerms } = buildCodeSearchCandidates(message);
   if (queries.length === 0) {
     return {
       astGroundingMode: "no-ast-grounding",
@@ -267,7 +172,6 @@ export const buildAstGroundingSummary = async ({
       groundingEvidenceSource: "none",
     };
   }
-  const searchTerms = toSearchTerms(queries);
 
   // Build a list of (checkoutPath, repositoryId) pairs to try for local grounding.
   // Priority: explicit work-item clone → base clones registered at desktop claim time.

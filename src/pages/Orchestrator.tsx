@@ -4761,19 +4761,7 @@ const Orchestrator = () => {
       const threadHistory = workspace.messages
         .filter((message) => message.workItemId === selectedWorkItem.id)
         .slice(-10);
-      const historyForRequest = [
-        ...threadHistory,
-        {
-          id: userMessageId,
-          capabilityId: activeCapability.id,
-          role: "user" as const,
-          content: messageContent,
-          timestamp: userTimestamp,
-          workItemId: selectedWorkItem.id,
-          runId: currentRun?.id,
-          workflowStepId: selectedCurrentStep?.id,
-        },
-      ];
+      const historyForRequest = threadHistory;
 
       await appendCapabilityMessageRecord(activeCapability.id, {
         id: userMessageId,

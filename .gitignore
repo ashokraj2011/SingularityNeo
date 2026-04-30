@@ -28,3 +28,4 @@ _repos/
 
 # Local provider config — machine-specific, contains no secrets but is not shared
 .runtime-providers.local.json
+.llm-providers.local.json

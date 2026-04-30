@@ -35,10 +35,9 @@ import {
   getConfiguredToken,
   getConfiguredTokenSource,
   githubModelsApiUrl,
-  invokeCapabilityChat,
-  invokeCapabilityChatStream,
   normalizeModel,
 } from '../server/githubModels';
+import { invokeCommonAgentRuntime } from '../server/agentRuntime';
 import {
   clearPersistedRuntimeToken,
   clearPersistedLocalEmbeddingSettings,
@@ -68,8 +67,18 @@ import { getLifecyclePhaseLabel } from '../src/lib/capabilityLifecycle';
 import {
   buildFocusedWorkItemDeveloperPrompt,
   extractChatWorkspaceReferenceId,
+  maybeHandleCapabilityChatAction,
   resolveMentionedWorkItem,
 } from '../server/chatWorkspace';
+import {
+  buildStructuredChatEvidencePrompt,
+  sanitizeGroundedChatResponse,
+} from '../server/chatEvidence';
+import {
+  buildUnifiedChatContextPrompt,
+  resolveChatFollowUpContext,
+  type FollowUpBindingMode,
+} from '../server/chatContinuity';
 import {
   buildAstGroundingSummary,
   type AstGroundingSummary,
@@ -164,6 +173,7 @@ const loadPreferencesFromServer = async () => {
   try {
     const raw = await fetch(`${controlPlaneUrl}/api/runtime/desktop-preferences`, {
       headers: { 'x-desktop-hostname': desktopHostname },
+      signal: AbortSignal.timeout(15_000),
     });
     if (!raw.ok) return;
     const prefs = await raw.json() as {
@@ -277,12 +287,14 @@ const controlPlaneRequest = async <T>(
     method?: string;
     body?: unknown;
     actorContext?: ActorContext | null;
+    timeoutMs?: number;
   },
 ): Promise<T> => {
   const response = await fetch(new URL(path, `${controlPlaneUrl}/`), {
     method: options?.method || 'GET',
     headers: withActorHeaders(options?.actorContext),
     body: options?.body !== undefined ? JSON.stringify(options.body) : undefined,
+    signal: AbortSignal.timeout(options?.timeoutMs || 15_000),
   });
 
   if (!response.ok) {
@@ -760,9 +772,14 @@ const resolveDesktopRuntimeContext = async (
 ): Promise<{
   capability: Partial<Capability>;
   agent: Partial<CapabilityAgent>;
+  bundle?: CapabilityBundleSnapshot;
+  chatAction?: Awaited<ReturnType<typeof maybeHandleCapabilityChatAction>>;
   developerPrompt?: string;
   memoryPrompt?: string;
   memoryReferences: MemoryReference[];
+  followUpBindingMode: FollowUpBindingMode;
+  historyTurnCount: number;
+  memoryTrustMode: 'standard' | 'repo-evidence-only';
   astGroundingMode?:
     | 'ast-grounded-local-clone'
     | 'ast-grounded-remote-index'
@@ -771,6 +788,11 @@ const resolveDesktopRuntimeContext = async (
   branchName?: string;
   codeIndexSource?: 'local-checkout' | 'capability-index';
   codeIndexFreshness?: string;
+  verifiedPaths?: string[];
+  groundingEvidenceSource?: 'local-checkout' | 'capability-index' | 'none';
+  workContextHydrated: boolean;
+  workContextSource: 'live-work-item' | 'live-workspace';
+  workItem?: WorkItem;
   scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
   scopeId?: string;
 }> => {
@@ -779,6 +801,16 @@ const resolveDesktopRuntimeContext = async (
   const actorContext = payload.actorContext;
   const capabilityId = capability.id || payload.capability?.id;
   const agentId = payload.agent?.id;
+  const originalMessage = String(payload.message || '').trim();
+  const followUpContext = resolveChatFollowUpContext({
+    history: (payload.history as CapabilityChatMessage[] | undefined) || [],
+    latestMessage: originalMessage,
+    sessionScope: payload.sessionScope as 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK' | undefined,
+    sessionScopeId: payload.sessionScopeId as string | undefined,
+    workItemId: payload.workItemId as string | undefined,
+    runId: payload.runId as string | undefined,
+    workflowStepId: payload.workflowStepId as string | undefined,
+  });
 
   let liveBriefing = '';
   let memoryReferences: MemoryReference[] = [];
@@ -793,9 +825,14 @@ const resolveDesktopRuntimeContext = async (
         actorContext,
       },
     );
+    const chatAction = await maybeHandleCapabilityChatAction({
+      bundle,
+      agent,
+      message: originalMessage,
+    });
     const referencedRunId =
       (payload.runId as string | undefined) ||
-      extractChatWorkspaceReferenceId(String(payload.message || ''), 'RUN');
+      extractChatWorkspaceReferenceId(followUpContext.contextMessage || originalMessage, 'RUN');
     const requestedWorkItemId =
       (payload.workItemId as string | undefined) ||
       (scope === 'WORK_ITEM' ? scopeId : undefined);
@@ -803,7 +840,7 @@ const resolveDesktopRuntimeContext = async (
       ? bundle.workspace.workItems.find(item => item.id === requestedWorkItemId)
       : undefined;
     const mentionedWorkItem = !requestedWorkItem
-      ? resolveMentionedWorkItem(bundle, String(payload.message || ''))
+      ? resolveMentionedWorkItem(bundle, followUpContext.contextMessage || originalMessage)
       : undefined;
     const referencedWorkItem =
       requestedWorkItem ||
@@ -886,7 +923,7 @@ const resolveDesktopRuntimeContext = async (
     const queryText =
       payload.contextMode === 'WORK_ITEM_STAGE' && requestedWorkItem
         ? [
-            payload.message?.trim(),
+            followUpContext.contextMessage || originalMessage,
             requestedWorkItem.title,
             requestedWorkItem.description,
             requestedWorkflow?.steps.find(
@@ -897,7 +934,7 @@ const resolveDesktopRuntimeContext = async (
             .join('\n')
         : referencedWorkItem && !mentionedWorkItem?.ambiguous?.length
           ? [
-              payload.message?.trim(),
+              followUpContext.contextMessage || originalMessage,
               referencedWorkItem.id,
               referencedWorkItem.title,
               referencedWorkItem.description,
@@ -913,7 +950,7 @@ const resolveDesktopRuntimeContext = async (
             ]
               .filter(Boolean)
               .join('\n')
-        : String(payload.message || '').trim();
+        : followUpContext.contextMessage || originalMessage;
     const astRepository =
       (bundle.capability.repositories || []).find(
         repository =>
@@ -936,7 +973,7 @@ const resolveDesktopRuntimeContext = async (
     const astGrounding: AstGroundingSummary = await buildAstGroundingSummary({
       capability: bundle.capability,
       workItem: referencedWorkItem,
-      message: String(payload.message || ''),
+      message: followUpContext.contextMessage || originalMessage,
       checkoutPath: astCheckoutPath,
       repositoryId: astRepository?.id,
       branchName: referencedWorkItem?.id,
@@ -953,7 +990,7 @@ const resolveDesktopRuntimeContext = async (
     }));
 
     if (queryText) {
-      const memoryResults = await controlPlaneRequest<MemorySearchResult[]>(
+      const rawMemoryResults = await controlPlaneRequest<MemorySearchResult[]>(
         `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/search?q=${encodeURIComponent(queryText)}&limit=6${
           agentId ? `&agentId=${encodeURIComponent(agentId)}` : ''
         }`,
@@ -961,45 +998,55 @@ const resolveDesktopRuntimeContext = async (
           actorContext,
         },
       ).catch(() => []);
+      const memoryTrustMode =
+        astGrounding.isCodeQuestion ? 'repo-evidence-only' : 'standard';
+      const memoryResults =
+        memoryTrustMode === 'repo-evidence-only'
+          ? rawMemoryResults.filter(result => result.reference.sourceType !== 'CHAT_SESSION')
+          : rawMemoryResults;
       memoryReferences = memoryResults.map(result => result.reference);
       const serializedMemory = buildMemoryPrompt(memoryResults);
-      if (serializedMemory || astGrounding.prompt) {
-        const combined = [
-          liveBriefing,
-          astGrounding.prompt,
-          serializedMemory ? `Retrieved memory context:\n${serializedMemory}` : null,
-        ]
-          .filter(Boolean)
-          .join('\n\n');
-        return {
-          capability,
-          agent,
-          developerPrompt,
-          memoryPrompt: combined,
-          memoryReferences,
-          astGroundingMode: astGrounding.astGroundingMode,
-          checkoutPath: astGrounding.checkoutPath,
-          branchName: astGrounding.branchName,
-          codeIndexSource: astGrounding.codeIndexSource,
-          codeIndexFreshness: astGrounding.codeIndexFreshness,
-          scope,
-          scopeId,
-        };
-      }
-
+      const evidencePrompt = buildStructuredChatEvidencePrompt({
+        verifiedCodeGrounding: astGrounding.prompt,
+        verifiedRepositoryEvidence: astGrounding.checkoutPath
+          ? [
+              `Repository root on disk: ${astGrounding.checkoutPath}`,
+              astGrounding.branchName ? `Active branch: ${astGrounding.branchName}` : null,
+              astGrounding.codeIndexFreshness
+                ? `Code index freshness: ${astGrounding.codeIndexFreshness}`
+                : null,
+            ]
+              .filter(Boolean)
+              .join('\n')
+          : null,
+        advisoryMemory: serializedMemory ? `Anchor capability memory:\n${serializedMemory}` : null,
+        memoryTrustMode,
+      });
       return {
         capability,
         agent,
+        bundle,
+        chatAction,
         developerPrompt,
-        memoryPrompt:
-          [liveBriefing, astGrounding.prompt].filter(Boolean).join('\n\n') ||
-          undefined,
+        memoryPrompt: buildUnifiedChatContextPrompt({
+          liveContext: liveBriefing,
+          followUpContextPrompt: followUpContext.followUpContextPrompt,
+          evidencePrompt,
+        }) || undefined,
         memoryReferences,
+        followUpBindingMode: followUpContext.followUpBindingMode,
+        historyTurnCount: followUpContext.history.length,
+        memoryTrustMode,
         astGroundingMode: astGrounding.astGroundingMode,
         checkoutPath: astGrounding.checkoutPath,
         branchName: astGrounding.branchName,
         codeIndexSource: astGrounding.codeIndexSource,
         codeIndexFreshness: astGrounding.codeIndexFreshness,
+        verifiedPaths: astGrounding.verifiedPaths,
+        groundingEvidenceSource: astGrounding.groundingEvidenceSource,
+        workContextHydrated: Boolean(liveBriefing.trim()),
+        workContextSource: scope === 'WORK_ITEM' ? 'live-work-item' : 'live-workspace',
+        workItem: referencedWorkItem,
         scope,
         scopeId,
       };
@@ -1008,16 +1055,44 @@ const resolveDesktopRuntimeContext = async (
     return {
       capability,
       agent,
+      bundle,
+      chatAction,
       developerPrompt,
       memoryPrompt:
-        [liveBriefing, astGrounding.prompt].filter(Boolean).join('\n\n') ||
-        undefined,
+        buildUnifiedChatContextPrompt({
+          liveContext: liveBriefing,
+          followUpContextPrompt: followUpContext.followUpContextPrompt,
+          evidencePrompt: buildStructuredChatEvidencePrompt({
+            verifiedCodeGrounding: astGrounding.prompt,
+            verifiedRepositoryEvidence: astGrounding.checkoutPath
+              ? [
+                  `Repository root on disk: ${astGrounding.checkoutPath}`,
+                  astGrounding.branchName ? `Active branch: ${astGrounding.branchName}` : null,
+                  astGrounding.codeIndexFreshness
+                    ? `Code index freshness: ${astGrounding.codeIndexFreshness}`
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join('\n')
+              : null,
+            advisoryMemory: null,
+            memoryTrustMode: astGrounding.isCodeQuestion ? 'repo-evidence-only' : 'standard',
+          }),
+        }) || undefined,
       memoryReferences,
+      followUpBindingMode: followUpContext.followUpBindingMode,
+      historyTurnCount: followUpContext.history.length,
+      memoryTrustMode: astGrounding.isCodeQuestion ? 'repo-evidence-only' : 'standard',
       astGroundingMode: astGrounding.astGroundingMode,
       checkoutPath: astGrounding.checkoutPath,
       branchName: astGrounding.branchName,
       codeIndexSource: astGrounding.codeIndexSource,
       codeIndexFreshness: astGrounding.codeIndexFreshness,
+      verifiedPaths: astGrounding.verifiedPaths,
+      groundingEvidenceSource: astGrounding.groundingEvidenceSource,
+      workContextHydrated: Boolean(liveBriefing.trim()),
+      workContextSource: scope === 'WORK_ITEM' ? 'live-work-item' : 'live-workspace',
+      workItem: referencedWorkItem,
       scope,
       scopeId,
     };
@@ -1027,8 +1102,17 @@ const resolveDesktopRuntimeContext = async (
     capability,
     agent,
     developerPrompt,
-    memoryPrompt: liveBriefing || undefined,
+    memoryPrompt:
+      buildUnifiedChatContextPrompt({
+        liveContext: liveBriefing,
+        followUpContextPrompt: followUpContext.followUpContextPrompt,
+      }) || undefined,
     memoryReferences,
+    followUpBindingMode: followUpContext.followUpBindingMode,
+    historyTurnCount: followUpContext.history.length,
+    memoryTrustMode: 'standard',
+    workContextHydrated: Boolean(liveBriefing.trim()),
+    workContextSource: 'live-workspace',
     scope,
     scopeId,
   };
@@ -1410,6 +1494,7 @@ reader.on('line', async line => {
       try {
         const raw = await fetch(`${controlPlaneUrl}/api/runtime/desktop-preferences`, {
           headers: { 'x-desktop-hostname': desktopHostname },
+          signal: AbortSignal.timeout(15_000),
         });
         const prefs = raw.ok ? await raw.json() : null;
         respond({ requestId, payload: prefs });
@@ -1430,6 +1515,7 @@ reader.on('line', async line => {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(15_000),
         });
         if (!raw.ok) {
           const err = await raw.json().catch(() => ({ error: 'Unknown error' }));
@@ -1468,15 +1554,46 @@ reader.on('line', async line => {
         throw new Error('Capability, agent, and message are required.');
       }
 
+      const context = await resolveDesktopRuntimeContext(payload as DesktopRuntimePayload);
+      if (context.chatAction?.handled) {
+        if (context.chatAction.wakeWorker && activeActorContext?.userId) {
+          await syncExecutorRegistration().catch(() => undefined);
+          ensureDesktopExecutorLoop();
+        }
+        respond({
+          requestId,
+          payload: {
+            content:
+              context.chatAction.content ||
+              'The workspace request completed, but there was no additional message to show.',
+            model: 'workspace-control',
+            usage: {
+              promptTokens: 0,
+              completionTokens: 0,
+              totalTokens: 0,
+              estimatedCostUsd: 0,
+            },
+            responseId: null,
+            createdAt: new Date().toISOString(),
+            sessionMode: (payload.sessionMode as 'resume' | 'fresh') || 'resume',
+            memoryReferences: [],
+            historyTurnCount: context.historyTurnCount,
+            historyRolledUp: false,
+            workContextHydrated: context.workContextHydrated,
+            workContextSource: context.workContextSource,
+            followUpBindingMode: context.followUpBindingMode,
+            chatRuntimeLane: 'desktop-runtime-worker',
+          },
+        });
+        return;
+      }
       const runtimeStatus = await buildDesktopRuntimeStatus();
       if (!runtimeStatus.configured) {
         throw new Error(getMissingRuntimeConfigurationMessage());
       }
 
-      const context = await resolveDesktopRuntimeContext(payload as DesktopRuntimePayload);
-
-      const result = await invokeCapabilityChat({
-        capability: context.capability,
+      const result = await invokeCommonAgentRuntime({
+        capability: context.bundle?.capability || context.capability,
         agent: context.agent,
         history: (payload.history as CapabilityChatMessage[]) || [],
         message: String(payload.message),
@@ -1486,19 +1603,44 @@ reader.on('line', async line => {
         scope: context.scope,
         scopeId: context.scopeId,
         resetSession: payload.sessionMode === 'fresh',
+        workItem: context.workItem,
+        preferReadOnlyToolLoop: context.memoryTrustMode === 'repo-evidence-only',
+        runtimeLane: 'desktop-runtime-worker',
       });
       const runtimeTarget = await resolveRuntimeProviderTarget(result.runtimeProviderKey);
+      const sanitizedResult = await sanitizeGroundedChatResponse({
+        content: result.content || '',
+        checkoutPath: context.checkoutPath,
+        verifiedPaths: context.verifiedPaths,
+        enforceEvidenceOnly: context.memoryTrustMode === 'repo-evidence-only',
+      });
 
       respond({
         requestId,
         payload: {
           ...result,
           ...runtimeTarget,
+          content: sanitizedResult.content,
           astGroundingMode: context.astGroundingMode,
           checkoutPath: context.checkoutPath,
           branchName: context.branchName,
           codeIndexSource: context.codeIndexSource,
           codeIndexFreshness: context.codeIndexFreshness,
+          groundingEvidenceSource: context.groundingEvidenceSource,
+          memoryTrustMode: context.memoryTrustMode,
+          pathValidationState: sanitizedResult.pathValidationState,
+          unverifiedPathClaimsRemoved: sanitizedResult.unverifiedPathClaimsRemoved,
+          historyTurnCount: result.historyTurnCount || context.historyTurnCount,
+          historyRolledUp: Boolean(result.historyRolledUp),
+          workContextHydrated: context.workContextHydrated,
+          workContextSource: context.workContextSource,
+          followUpBindingMode: context.followUpBindingMode,
+          chatRuntimeLane: 'desktop-runtime-worker',
+          toolLoopUsed: result.toolLoopUsed,
+          attemptedToolIds: result.attemptedToolIds,
+          codeDiscoveryMode: result.codeDiscoveryMode,
+          codeDiscoveryFallback: result.codeDiscoveryFallback,
+          astSource: result.astSource,
         },
       });
       return;
@@ -1551,6 +1693,7 @@ reader.on('line', async line => {
         {
           method: 'DELETE',
           headers: withActorHeaders(activeActorContext),
+          signal: AbortSignal.timeout(15_000),
         },
       );
 
@@ -1583,10 +1726,6 @@ reader.on('line', async line => {
         throw new Error('Capability, agent, and message are required.');
       }
 
-      const runtimeStatus = await buildDesktopRuntimeStatus();
-      if (!runtimeStatus.configured) {
-        throw new Error(getMissingRuntimeConfigurationMessage());
-      }
       const context = await resolveDesktopRuntimeContext(payload as DesktopRuntimePayload);
 
       sendStreamEvent(streamId, {
@@ -1595,13 +1734,68 @@ reader.on('line', async line => {
         createdAt: new Date().toISOString(),
         sessionMode: (payload.sessionMode as 'resume' | 'fresh') || 'resume',
       });
+      if (context.chatAction?.handled) {
+        if (context.chatAction.wakeWorker && activeActorContext?.userId) {
+          await syncExecutorRegistration().catch(() => undefined);
+          ensureDesktopExecutorLoop();
+        }
+        sendStreamEvent(streamId, {
+          type: 'complete',
+          content:
+            context.chatAction.content ||
+            'The workspace request completed, but there was no additional message to show.',
+          createdAt: new Date().toISOString(),
+          model: 'workspace-control',
+          usage: {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            estimatedCostUsd: 0,
+          },
+          sessionMode: (payload.sessionMode as 'resume' | 'fresh') || 'resume',
+          memoryReferences: [],
+          historyTurnCount: context.historyTurnCount,
+          historyRolledUp: false,
+          workContextHydrated: context.workContextHydrated,
+          workContextSource: context.workContextSource,
+          followUpBindingMode: context.followUpBindingMode,
+          chatRuntimeLane: 'desktop-runtime-worker',
+        });
+        respond({
+          requestId,
+          streamId,
+          payload: {
+            ok: true,
+          },
+        });
+        return;
+      }
+      const runtimeStatus = await buildDesktopRuntimeStatus();
+      if (!runtimeStatus.configured) {
+        throw new Error(getMissingRuntimeConfigurationMessage());
+      }
       sendStreamEvent(streamId, {
         type: 'memory',
         memoryReferences: context.memoryReferences,
+        groundingEvidenceSource: context.groundingEvidenceSource,
+        memoryTrustMode: context.memoryTrustMode,
+        historyTurnCount: context.historyTurnCount,
+        historyRolledUp: false,
+        workContextHydrated: context.workContextHydrated,
+        workContextSource: context.workContextSource,
+        followUpBindingMode: context.followUpBindingMode,
+        chatRuntimeLane: 'desktop-runtime-worker',
+        toolLoopUsed: false,
+        attemptedToolIds: [],
+        codeDiscoveryMode: 'prompt-only',
+        codeDiscoveryFallback: 'none',
+        astSource: 'none',
       });
+      const shouldBufferValidatedStream =
+        context.memoryTrustMode === 'repo-evidence-only';
 
-      const streamed = await invokeCapabilityChatStream({
-        capability: context.capability,
+      const streamed = await invokeCommonAgentRuntime({
+        capability: context.bundle?.capability || context.capability,
         agent: context.agent,
         history: (payload.history as CapabilityChatMessage[]) || [],
         message: String(payload.message),
@@ -1611,18 +1805,29 @@ reader.on('line', async line => {
         scope: context.scope,
         scopeId: context.scopeId,
         resetSession: payload.sessionMode === 'fresh',
+        workItem: context.workItem,
+        preferReadOnlyToolLoop: context.memoryTrustMode === 'repo-evidence-only',
+        runtimeLane: 'desktop-runtime-worker',
         onDelta: delta => {
-          sendStreamEvent(streamId, {
-            type: 'delta',
-            content: delta,
-          });
+          if (!shouldBufferValidatedStream) {
+            sendStreamEvent(streamId, {
+              type: 'delta',
+              content: delta,
+            });
+          }
         },
       });
       const runtimeTarget = await resolveRuntimeProviderTarget(streamed.runtimeProviderKey);
+      const sanitizedStream = await sanitizeGroundedChatResponse({
+        content: streamed.content || '',
+        checkoutPath: context.checkoutPath,
+        verifiedPaths: context.verifiedPaths,
+        enforceEvidenceOnly: context.memoryTrustMode === 'repo-evidence-only',
+      });
 
       const completeEvent: ChatStreamEvent = {
         type: 'complete',
-        content: streamed.content,
+        content: sanitizedStream.content,
         createdAt: streamed.createdAt,
         model: streamed.model,
         usage: streamed.usage,
@@ -1635,7 +1840,28 @@ reader.on('line', async line => {
         isNewSession: streamed.isNewSession,
         sessionMode: (payload.sessionMode as 'resume' | 'fresh') || 'resume',
         memoryReferences: context.memoryReferences,
+        groundingEvidenceSource: context.groundingEvidenceSource,
+        memoryTrustMode: context.memoryTrustMode,
+        pathValidationState: sanitizedStream.pathValidationState,
+        unverifiedPathClaimsRemoved: sanitizedStream.unverifiedPathClaimsRemoved,
+        historyTurnCount: streamed.historyTurnCount || context.historyTurnCount,
+        historyRolledUp: Boolean(streamed.historyRolledUp),
+        workContextHydrated: context.workContextHydrated,
+        workContextSource: context.workContextSource,
+        followUpBindingMode: context.followUpBindingMode,
+        chatRuntimeLane: 'desktop-runtime-worker',
+        toolLoopUsed: streamed.toolLoopUsed,
+        attemptedToolIds: streamed.attemptedToolIds,
+        codeDiscoveryMode: streamed.codeDiscoveryMode,
+        codeDiscoveryFallback: streamed.codeDiscoveryFallback,
+        astSource: streamed.astSource,
       };
+      if (shouldBufferValidatedStream && sanitizedStream.content) {
+        sendStreamEvent(streamId, {
+          type: 'delta',
+          content: sanitizedStream.content,
+        });
+      }
       sendStreamEvent(streamId, completeEvent);
 
       respond({

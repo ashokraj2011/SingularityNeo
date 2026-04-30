@@ -90,6 +90,12 @@ type ChatMessageAnnotation = {
   sessionScopeId?: string;
   isNewSession?: boolean;
   sessionMode?: SessionMode;
+  historyTurnCount?: number;
+  historyRolledUp?: boolean;
+  workContextHydrated?: boolean;
+  workContextSource?: 'live-work-item' | 'live-workspace';
+  followUpBindingMode?: 'none' | 'latest-assistant-turn' | 'active-work-scope';
+  chatRuntimeLane?: 'server-runtime-route' | 'desktop-runtime-worker';
 };
 
 const INSPECTOR_OPEN_KEY = 'singularity.chat.inspector.open';
@@ -851,16 +857,7 @@ const Chat = () => {
     const requestedSessionMode = options?.sessionMode || pendingSessionMode;
     const userMessageId = `${Date.now()}-user`;
     const userTimestamp = formatTimestamp();
-    const historyForRequest = [
-      ...generalChatMessages.slice(-10),
-      {
-        id: userMessageId,
-        capabilityId: activeCapability.id,
-        role: 'user' as const,
-        content: userContent,
-        timestamp: userTimestamp,
-      },
-    ];
+    const historyForRequest = generalChatMessages.slice(-10);
 
     setInput('');
     setError('');
@@ -979,6 +976,12 @@ const Chat = () => {
         sessionScopeId: streamResult.completeEvent?.sessionScopeId,
         isNewSession: streamResult.completeEvent?.isNewSession,
         sessionMode: requestedSessionMode,
+        historyTurnCount: streamResult.completeEvent?.historyTurnCount,
+        historyRolledUp: streamResult.completeEvent?.historyRolledUp,
+        workContextHydrated: streamResult.completeEvent?.workContextHydrated,
+        workContextSource: streamResult.completeEvent?.workContextSource,
+        followUpBindingMode: streamResult.completeEvent?.followUpBindingMode,
+        chatRuntimeLane: streamResult.completeEvent?.chatRuntimeLane,
       });
 
       setLastSessionSnapshot({
@@ -1332,6 +1335,28 @@ const Chat = () => {
                   {annotation.usage ? <span>{formatUsageLabel(annotation.usage)}</span> : null}
                   {annotation.memoryReferences?.length ? (
                     <span>{annotation.memoryReferences.length} memory sources</span>
+                  ) : null}
+                  {annotation.historyTurnCount ? (
+                    <span>
+                      {annotation.historyTurnCount} prior turn
+                      {annotation.historyTurnCount === 1 ? '' : 's'}
+                      {annotation.historyRolledUp ? ' + rollup' : ''}
+                    </span>
+                  ) : null}
+                  {annotation.workContextHydrated ? (
+                    <span>
+                      {annotation.workContextSource === 'live-work-item'
+                        ? 'Live work-item context'
+                        : 'Live workspace context'}
+                    </span>
+                  ) : null}
+                  {annotation.followUpBindingMode &&
+                  annotation.followUpBindingMode !== 'none' ? (
+                    <span>
+                      {annotation.followUpBindingMode === 'latest-assistant-turn'
+                        ? 'Bound to prior assistant turn'
+                        : 'Bound to active work scope'}
+                    </span>
                   ) : null}
                   {annotation.traceId ? <span>Trace {annotation.traceId.slice(-8)}</span> : null}
                 </div>

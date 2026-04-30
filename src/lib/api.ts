@@ -38,6 +38,7 @@ import {
   CompletedWorkOrderDetail,
   CompletedWorkOrderSummary,
   ConnectorValidationResult,
+  ToolAdapterId,
   CapabilityConnectorContext,
   DeploymentTargetValidationResult,
   ChatStreamEvent,
@@ -244,6 +245,17 @@ export interface CapabilityChatResponse {
   memoryTrustMode?: "standard" | "repo-evidence-only";
   pathValidationState?: "verified" | "repaired" | "stripped" | "none";
   unverifiedPathClaimsRemoved?: string[];
+  historyTurnCount?: number;
+  historyRolledUp?: boolean;
+  workContextHydrated?: boolean;
+  workContextSource?: "live-work-item" | "live-workspace";
+  followUpBindingMode?: "none" | "latest-assistant-turn" | "active-work-scope";
+  chatRuntimeLane?: "server-runtime-route" | "desktop-runtime-worker";
+  toolLoopUsed?: boolean;
+  attemptedToolIds?: ToolAdapterId[];
+  codeDiscoveryMode?: "prompt-only" | "ast-first-tool-loop";
+  codeDiscoveryFallback?: "none" | "capability-index" | "text-search";
+  astSource?: "none" | "local-checkout" | "capability-index" | "text-search";
 }
 
 export interface CapabilityChatStreamResult {

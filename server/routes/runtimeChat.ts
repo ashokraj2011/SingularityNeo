@@ -1,5 +1,5 @@
 import type express from 'express';
-import type { Capability, CapabilityAgent, CapabilityWorkspace } from '../../src/types';
+import type { Capability, CapabilityAgent, CapabilityWorkspace, WorkItem } from '../../src/types';
 import { assertCapabilityPermission } from '../access';
 import { GitHubProviderRateLimitError, type ChatHistoryMessage } from '../githubModels';
 import { auditRuntimeChatTurn, getCapabilityBundle } from '../repository';
@@ -15,6 +15,12 @@ import {
   type MemoryTrustMode,
   type PathValidationState,
 } from '../chatEvidence';
+import {
+  buildUnifiedChatContextPrompt,
+  resolveChatFollowUpContext,
+  type FollowUpBindingMode,
+} from '../chatContinuity';
+import { invokeCommonAgentRuntime } from '../agentRuntime';
 
 type ChatRequestBody = {
   capability?: Capability;
@@ -71,6 +77,7 @@ type ChatContext = {
   liveBriefing: string;
   chatScope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
   chatScopeId?: string;
+  workItem?: WorkItem;
   memoryQueryText: string;
   astGroundingPrompt?: string;
   astGroundingMode?:
@@ -146,19 +153,49 @@ export const registerRuntimeChatRoutes = (
     memoryTrustMode,
     pathValidationState,
     unverifiedPathClaimsRemoved,
+    followUpBindingMode,
+    historyTurnCount,
+    historyRolledUp,
+    chatRuntimeLane,
+    toolLoopUsed,
+    attemptedToolIds,
+    codeDiscoveryMode,
+    codeDiscoveryFallback,
+    astSource,
   }: {
     chatContext: ChatContext;
     memoryTrustMode: MemoryTrustMode;
     pathValidationState?: PathValidationState;
     unverifiedPathClaimsRemoved?: string[];
+    followUpBindingMode: FollowUpBindingMode;
+    historyTurnCount: number;
+    historyRolledUp?: boolean;
+    chatRuntimeLane: 'server-runtime-route';
+    toolLoopUsed?: boolean;
+    attemptedToolIds?: string[];
+    codeDiscoveryMode?: 'prompt-only' | 'ast-first-tool-loop';
+    codeDiscoveryFallback?: 'none' | 'capability-index' | 'text-search';
+    astSource?: 'none' | 'local-checkout' | 'capability-index' | 'text-search';
   }) => ({
     groundingEvidenceSource:
       chatContext.groundingEvidenceSource ||
       chatContext.codeIndexSource ||
       'none',
+    historyTurnCount,
+    historyRolledUp: Boolean(historyRolledUp),
+    workContextHydrated: Boolean(chatContext.liveBriefing?.trim()),
+    workContextSource:
+      chatContext.chatScope === 'WORK_ITEM' ? 'live-work-item' : 'live-workspace',
+    followUpBindingMode,
+    chatRuntimeLane,
     memoryTrustMode,
     pathValidationState: pathValidationState || 'none',
     unverifiedPathClaimsRemoved: unverifiedPathClaimsRemoved || [],
+    toolLoopUsed: Boolean(toolLoopUsed),
+    attemptedToolIds: attemptedToolIds || [],
+    codeDiscoveryMode: codeDiscoveryMode || 'prompt-only',
+    codeDiscoveryFallback: codeDiscoveryFallback || 'none',
+    astSource: astSource || 'none',
   });
 
   const buildCodeEvidencePrompt = ({
@@ -194,6 +231,24 @@ export const registerRuntimeChatRoutes = (
       memoryTrustMode,
     });
 
+  const buildTurnMemoryPrompt = ({
+    chatContext,
+    evidencePrompt,
+    followUpContextPrompt,
+  }: {
+    chatContext: ChatContext;
+    evidencePrompt?: string;
+    followUpContextPrompt?: string;
+  }) =>
+    buildChatMemoryPrompt({
+      liveBriefing: '',
+      memoryPrompt: buildUnifiedChatContextPrompt({
+        liveContext: chatContext.liveBriefing,
+        followUpContextPrompt,
+        evidencePrompt,
+      }),
+    });
+
   const maybeRefreshCodeGroundingMemory = (capabilityId: string, shouldRefresh: boolean) => {
     if (!shouldRefresh) {
       return;
@@ -206,8 +261,8 @@ export const registerRuntimeChatRoutes = (
 
   app.post('/api/runtime/chat', async (request, response) => {
     const body = request.body as ChatRequestBody;
-    const message = body.message?.trim();
-    if (!message || !body.capability || !body.agent) {
+    const originalMessage = body.message?.trim();
+    if (!originalMessage || !body.capability || !body.agent) {
       response.status(400).json({
         error: 'Capability, agent, and message are required.',
       });
@@ -258,8 +313,6 @@ export const registerRuntimeChatRoutes = (
         taggedParticipant &&
           taggedParticipant.capabilityId !== body.capability.id,
       );
-      const homeBundle = taggedParticipant?.bundle || anchorBundle;
-
       const liveAgent =
         taggedParticipant?.agent ||
         anchorBundle.workspace.agents.find(agent => agent.id === body.agent?.id) ||
@@ -278,10 +331,19 @@ export const registerRuntimeChatRoutes = (
       // never mutate anchor workspace state.
       const bundle = anchorBundle;
       const liveCapability = bundle.capability;
+      const followUpContext = resolveChatFollowUpContext({
+        history: body.history || [],
+        latestMessage: originalMessage,
+        sessionScope: body.sessionScope,
+        sessionScopeId: body.sessionScopeId,
+        workItemId: body.workItemId,
+        runId: body.runId,
+        workflowStepId: body.workflowStepId,
+      });
       const chatAction = await maybeHandleCapabilityChatAction({
         bundle,
         agent: liveAgent,
-        message,
+        message: originalMessage,
       });
       if (chatAction.handled) {
         if (chatAction.wakeWorker) {
@@ -325,7 +387,11 @@ export const registerRuntimeChatRoutes = (
         },
       });
       const chatContext = await resolveChatRuntimeContext({
-        body,
+        body: {
+          ...body,
+          history: followUpContext.history,
+          message: followUpContext.contextMessage || originalMessage,
+        },
         bundle,
         liveAgent,
       });
@@ -335,7 +401,7 @@ export const registerRuntimeChatRoutes = (
       const anchorMemoryContext = await buildMemoryContext({
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
-        queryText: chatContext.memoryQueryText || message,
+        queryText: chatContext.memoryQueryText || followUpContext.contextMessage || originalMessage,
         excludeSourceTypes:
           memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
       });
@@ -347,7 +413,8 @@ export const registerRuntimeChatRoutes = (
           ? await buildMemoryContext({
               capabilityId: taggedParticipant.capabilityId,
               agentId: taggedParticipant.agentId,
-              queryText: chatContext.memoryQueryText || message,
+              queryText:
+                chatContext.memoryQueryText || followUpContext.contextMessage || originalMessage,
               excludeSourceTypes:
                 memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
             }).catch(() => null)
@@ -361,19 +428,23 @@ export const registerRuntimeChatRoutes = (
           : undefined,
         memoryTrustMode,
       });
-      const chatResponse = await invokeCapabilityChat({
+      const chatResponse = await invokeCommonAgentRuntime({
         capability: liveCapability,
         agent: liveAgent,
-        history: body.history || [],
-        message,
+        history: followUpContext.history,
+        message: originalMessage,
         resetSession: body.sessionMode === 'fresh',
         scope: chatContext.chatScope,
         scopeId: chatContext.chatScopeId,
         developerPrompt: chatContext.developerPrompt,
-        memoryPrompt: buildChatMemoryPrompt({
-          liveBriefing: chatContext.liveBriefing,
-          memoryPrompt: mergedMemoryPrompt,
+        memoryPrompt: buildTurnMemoryPrompt({
+          chatContext,
+          evidencePrompt: mergedMemoryPrompt,
+          followUpContextPrompt: followUpContext.followUpContextPrompt,
         }),
+        workItem: chatContext.workItem,
+        preferReadOnlyToolLoop: Boolean(chatContext.isCodeQuestion),
+        runtimeLane: 'server-runtime-route',
       });
       const { promptReceipt, tokenPolicy, ...publicChatResponse } = chatResponse as typeof chatResponse & {
         promptReceipt?: Record<string, unknown>;
@@ -390,6 +461,15 @@ export const registerRuntimeChatRoutes = (
         memoryTrustMode,
         pathValidationState: sanitizedChat.pathValidationState,
         unverifiedPathClaimsRemoved: sanitizedChat.unverifiedPathClaimsRemoved,
+        followUpBindingMode: followUpContext.followUpBindingMode,
+        historyTurnCount: chatResponse.historyTurnCount || followUpContext.history.length,
+        historyRolledUp: chatResponse.historyRolledUp,
+        chatRuntimeLane: 'server-runtime-route',
+        toolLoopUsed: chatResponse.toolLoopUsed,
+        attemptedToolIds: chatResponse.attemptedToolIds,
+        codeDiscoveryMode: chatResponse.codeDiscoveryMode,
+        codeDiscoveryFallback: chatResponse.codeDiscoveryFallback,
+        astSource: chatResponse.astSource,
       });
       const runtimeTarget = await resolveRuntimeTarget(
         publicChatResponse.runtimeProviderKey || liveAgent.providerKey || liveAgent.provider,
@@ -446,7 +526,7 @@ export const registerRuntimeChatRoutes = (
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
         agentName: liveAgent.name,
-        userMessage: message,
+        userMessage: originalMessage,
         agentMessage: sanitizedChat.content || '',
         model: publicChatResponse.model || null,
         traceId,
@@ -481,8 +561,8 @@ export const registerRuntimeChatRoutes = (
 
   app.post('/api/runtime/chat/stream', async (request, response) => {
     const body = request.body as ChatRequestBody;
-    const message = body.message?.trim();
-    if (!message || !body.capability || !body.agent) {
+    const originalMessage = body.message?.trim();
+    if (!originalMessage || !body.capability || !body.agent) {
       response.status(400).json({
         error: 'Capability, agent, and message are required.',
       });
@@ -544,8 +624,6 @@ export const registerRuntimeChatRoutes = (
         foreignParticipant &&
           foreignParticipant.capabilityId !== body.capability.id,
       );
-      const homeBundle = foreignParticipant?.bundle || anchorBundle;
-
       const liveAgent =
         foreignParticipant?.agent ||
         anchorBundle.workspace.agents.find(agent => agent.id === body.agent?.id) ||
@@ -566,10 +644,19 @@ export const registerRuntimeChatRoutes = (
 
       const bundle = anchorBundle;
       const liveCapability = bundle.capability;
+      const followUpContext = resolveChatFollowUpContext({
+        history: body.history || [],
+        latestMessage: originalMessage,
+        sessionScope: body.sessionScope,
+        sessionScopeId: body.sessionScopeId,
+        workItemId: body.workItemId,
+        runId: body.runId,
+        workflowStepId: body.workflowStepId,
+      });
       const chatAction = await maybeHandleCapabilityChatAction({
         bundle,
         agent: liveAgent,
-        message,
+        message: originalMessage,
       });
 
       if (chatAction.handled) {
@@ -605,7 +692,11 @@ export const registerRuntimeChatRoutes = (
       }
 
       const chatContext = await resolveChatRuntimeContext({
-        body,
+        body: {
+          ...body,
+          history: followUpContext.history,
+          message: followUpContext.contextMessage || originalMessage,
+        },
         bundle,
         liveAgent,
       });
@@ -615,7 +706,7 @@ export const registerRuntimeChatRoutes = (
       const anchorMemoryContext = await buildMemoryContext({
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
-        queryText: chatContext.memoryQueryText || message,
+        queryText: chatContext.memoryQueryText || followUpContext.contextMessage || originalMessage,
         excludeSourceTypes:
           memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
       });
@@ -624,7 +715,8 @@ export const registerRuntimeChatRoutes = (
           ? await buildMemoryContext({
               capabilityId: foreignParticipant.capabilityId,
               agentId: foreignParticipant.agentId,
-              queryText: chatContext.memoryQueryText || message,
+              queryText:
+                chatContext.memoryQueryText || followUpContext.contextMessage || originalMessage,
               excludeSourceTypes:
                 memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
             }).catch(() => null)
@@ -641,6 +733,15 @@ export const registerRuntimeChatRoutes = (
       const memoryDiagnostics = buildEvidenceDiagnostics({
         chatContext,
         memoryTrustMode,
+        followUpBindingMode: followUpContext.followUpBindingMode,
+        historyTurnCount: followUpContext.history.length,
+        historyRolledUp: false,
+        chatRuntimeLane: 'server-runtime-route',
+        toolLoopUsed: false,
+        attemptedToolIds: [],
+        codeDiscoveryMode: 'prompt-only',
+        codeDiscoveryFallback: 'none',
+        astSource: 'none',
       });
       writeSseEvent(response, 'memory', {
         type: 'memory',
@@ -668,19 +769,23 @@ export const registerRuntimeChatRoutes = (
         },
       });
       const shouldBufferValidatedStream = Boolean(chatContext.isCodeQuestion);
-      const streamed = await invokeCapabilityChatStream({
+      const streamed = await invokeCommonAgentRuntime({
         capability: liveCapability,
         agent: liveAgent,
-        history: body.history || [],
-        message,
+        history: followUpContext.history,
+        message: originalMessage,
         resetSession: body.sessionMode === 'fresh',
         scope: chatContext.chatScope,
         scopeId: chatContext.chatScopeId,
         developerPrompt: chatContext.developerPrompt,
-        memoryPrompt: buildChatMemoryPrompt({
-          liveBriefing: chatContext.liveBriefing,
-          memoryPrompt: streamMergedMemoryPrompt,
+        memoryPrompt: buildTurnMemoryPrompt({
+          chatContext,
+          evidencePrompt: streamMergedMemoryPrompt,
+          followUpContextPrompt: followUpContext.followUpContextPrompt,
         }),
+        workItem: chatContext.workItem,
+        preferReadOnlyToolLoop: Boolean(chatContext.isCodeQuestion),
+        runtimeLane: 'server-runtime-route',
         onDelta: delta => {
           if (!shouldBufferValidatedStream) {
             writeSseEvent(response, 'delta', {
@@ -707,6 +812,15 @@ export const registerRuntimeChatRoutes = (
         memoryTrustMode,
         pathValidationState: sanitizedStream.pathValidationState,
         unverifiedPathClaimsRemoved: sanitizedStream.unverifiedPathClaimsRemoved,
+        followUpBindingMode: followUpContext.followUpBindingMode,
+        historyTurnCount: streamed.historyTurnCount || followUpContext.history.length,
+        historyRolledUp: streamed.historyRolledUp,
+        chatRuntimeLane: 'server-runtime-route',
+        toolLoopUsed: streamed.toolLoopUsed,
+        attemptedToolIds: streamed.attemptedToolIds,
+        codeDiscoveryMode: streamed.codeDiscoveryMode,
+        codeDiscoveryFallback: streamed.codeDiscoveryFallback,
+        astSource: streamed.astSource,
       });
       const runtimeTarget = await resolveRuntimeTarget(
         publicStreamed.runtimeProviderKey || liveAgent.providerKey || liveAgent.provider,
@@ -776,7 +890,7 @@ export const registerRuntimeChatRoutes = (
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
         agentName: liveAgent.name,
-        userMessage: message,
+        userMessage: originalMessage,
         agentMessage: sanitizedStream.content || '',
         model: publicStreamed.model || null,
         traceId,

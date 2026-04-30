@@ -1084,11 +1084,12 @@ export const STANDARD_AGENT_PREFERRED_TOOL_IDS: Record<
   StandardAgentTemplateKey,
   ToolAdapterId[]
 > = {
-  OWNER: ['workspace_read', 'workspace_search'],
-  PLANNING: ['workspace_read', 'workspace_search'],
-  'BUSINESS-ANALYST': ['workspace_read', 'workspace_search'],
-  ARCHITECT: ['workspace_read', 'workspace_search', 'git_status', 'delegate_task'],
+  OWNER: ['browse_code', 'workspace_read', 'workspace_search'],
+  PLANNING: ['browse_code', 'workspace_read', 'workspace_search'],
+  'BUSINESS-ANALYST': ['browse_code', 'workspace_read', 'workspace_search'],
+  ARCHITECT: ['browse_code', 'workspace_read', 'workspace_search', 'git_status', 'delegate_task'],
   'SOFTWARE-DEVELOPER': [
+    'browse_code',
     'workspace_list',
     'workspace_read',
     'workspace_search',
@@ -1099,8 +1100,9 @@ export const STANDARD_AGENT_PREFERRED_TOOL_IDS: Record<
     'run_build',
     'run_test',
   ],
-  QA: ['workspace_read', 'workspace_search', 'run_build', 'run_test'],
+  QA: ['browse_code', 'workspace_read', 'workspace_search', 'run_build', 'run_test'],
   DEVOPS: [
+    'browse_code',
     'workspace_read',
     'workspace_search',
     'git_status',
@@ -1108,9 +1110,9 @@ export const STANDARD_AGENT_PREFERRED_TOOL_IDS: Record<
     'run_test',
     'run_deploy',
   ],
-  VALIDATION: ['workspace_read', 'workspace_search', 'run_test'],
-  'EXECUTION-OPS': ['workspace_read', 'workspace_search', 'git_status', 'delegate_task'],
-  'CONTRARIAN-REVIEWER': ['workspace_read', 'workspace_search'],
+  VALIDATION: ['browse_code', 'workspace_read', 'workspace_search', 'run_test'],
+  'EXECUTION-OPS': ['browse_code', 'workspace_read', 'workspace_search', 'git_status', 'delegate_task'],
+  'CONTRARIAN-REVIEWER': ['browse_code', 'workspace_read', 'workspace_search'],
 };
 
 export const getStandardAgentDefaultSkillIds = (

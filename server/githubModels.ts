@@ -71,6 +71,7 @@ import {
   resolveTokenOptimizationPolicy,
   truncateTextToTokenBudget,
 } from './tokenOptimization';
+import { normalizeChatHistory } from './chatContinuity';
 
 export type ChatHistoryMessage = {
   role?: 'user' | 'agent';
@@ -701,6 +702,7 @@ const fetchGitHubIdentityForToken = async (token: string) => {
         Authorization: `Bearer ${token}`,
         'X-GitHub-Api-Version': '2022-11-28',
       },
+      signal: AbortSignal.timeout(15_000),
     });
 
     if (!response.ok) {
@@ -2134,6 +2136,8 @@ const buildChatPromptPlan = ({
     tokenPolicy,
     historySummary,
     recentHistory,
+    historyTurnCount: history.length,
+    historyRolledUp: Boolean(historySummary),
     prompt: currentBudget.prompt,
     initialPrompt: initialBudget.prompt || currentBudget.prompt,
     currentReceipt: currentBudget.receipt,
@@ -3449,7 +3453,10 @@ export const invokeCapabilityChat = async ({
   tools?: import('./localOpenAIProvider').ProviderTool[];
   tool_choice?: import('./localOpenAIProvider').ProviderToolChoice;
 }) => {
-  const normalizedHistory = (history || [])
+  const normalizedHistory = normalizeChatHistory({
+    history: history || [],
+    latestMessage: message,
+  })
     .filter(item => item?.content?.trim())
     .map(item => ({
       role: item.role === 'agent' ? 'assistant' : 'user',
@@ -3510,6 +3517,8 @@ export const invokeCapabilityChat = async ({
 
   return {
     ...result,
+    historyTurnCount: promptPlan.historyTurnCount,
+    historyRolledUp: promptPlan.historyRolledUp,
     tokenPolicy: promptPlan.tokenPolicy,
   };
 };
@@ -3538,7 +3547,10 @@ export const invokeCapabilityChatStream = async ({
   temperature?: number;
   resetSession?: boolean;
 }) => {
-  const normalizedHistory = (history || [])
+  const normalizedHistory = normalizeChatHistory({
+    history: history || [],
+    latestMessage: message,
+  })
     .filter(item => item?.content?.trim())
     .map(item => ({
       role: item.role === 'agent' ? 'assistant' : 'user',
@@ -3598,6 +3610,8 @@ export const invokeCapabilityChatStream = async ({
 
   return {
     ...result,
+    historyTurnCount: promptPlan.historyTurnCount,
+    historyRolledUp: promptPlan.historyRolledUp,
     tokenPolicy: promptPlan.tokenPolicy,
   };
 };

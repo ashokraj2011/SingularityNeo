@@ -11,6 +11,7 @@ import {
   ToolAdapterId,
   WorkItem,
 } from "../../src/types";
+import type { ProviderTool } from "../localOpenAIProvider";
 import { executionRuntimeRpc, isRemoteExecutionClient } from "./runtimeClient";
 import {
   runSandboxedCommand,
@@ -57,6 +58,7 @@ import {
   getPrimaryBaseClone,
 } from "../desktopRepoSync";
 import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
+import { buildCodeSearchCandidates, looksLikeSymbolPattern } from "../codeDiscovery";
 
 const execFileAsync = promisify(execFile);
 
@@ -81,6 +83,7 @@ type ToolAdapter = {
   id: ToolAdapterId;
   description: string;
   usageExample?: string;
+  parameterSchema?: Record<string, unknown>;
   retryable: boolean;
   execute: (
     context: ToolExecutionContext,
@@ -342,9 +345,23 @@ const requireRemoteWorkspaceResolution = (
   };
 };
 
-const looksLikeSymbolPattern = (value: string) =>
-  /^[A-Za-z_][A-Za-z0-9_.$-]{1,120}$/.test(String(value || "").trim()) &&
-  !/\s/.test(String(value || ""));
+const summarizeSchemaArguments = (schema?: Record<string, unknown>) => {
+  const properties =
+    schema && typeof schema === "object"
+      ? ((schema.properties as Record<string, { type?: string; description?: string }> | undefined) ||
+          undefined)
+      : undefined;
+  if (!properties || Object.keys(properties).length === 0) {
+    return "";
+  }
+
+  return Object.entries(properties)
+    .map(([key, definition]) => {
+      const type = String(definition?.type || "value");
+      return `${key}:${type}`;
+    })
+    .join(", ");
+};
 
 const resolveWorkspacePath = async (
   capability: Capability,
@@ -681,6 +698,19 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     id: "workspace_list",
     description: "List files inside the current desktop-user workspace path.",
     usageExample: '{"path":"src","limit":200,"cursor":"..."}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        path: { type: "string", description: "Optional relative path to scope the listing." },
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root or child directory override.",
+        },
+        limit: { type: "number", description: "Maximum number of files to return." },
+        cursor: { type: "string", description: "Opaque pagination cursor from a previous call." },
+      },
+    },
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
       const workspacePath = await resolveWorkspacePath(
@@ -748,6 +778,35 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       "Read a text file. Prefer passing `symbol` (an exact function/class name from the code index) to get JUST that symbol body plus ~10 lines of context instead of the whole file — this saves 80-95% of input tokens. Pass `includeCallers` (0-3) and/or `includeCallees` (0-3) to additionally surface neighbor-file paths + their top exported signatures so cross-method invariants stay in scope for refactors. Only omit `symbol` when you truly need the full file.",
     usageExample:
       '{"path":"src/auth/token.ts","symbol":"validateToken","includeCallers":2} (semantic hunk + 2 dependents) OR {"path":"README.md"} (whole file fallback)',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path"],
+      properties: {
+        path: { type: "string", description: "Relative or absolute approved file path to read." },
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root or child directory override.",
+        },
+        symbol: {
+          type: "string",
+          description: "Exact function, class, method, or symbol name to read as a semantic hunk.",
+        },
+        symbolContextLines: {
+          type: "number",
+          description: "Extra surrounding lines to include around a semantic symbol hunk.",
+        },
+        includeCallers: {
+          type: "number",
+          description: "How many dependent neighbor files to surface as related references.",
+        },
+        includeCallees: {
+          type: "number",
+          description: "How many dependency neighbor files to surface as related references.",
+        },
+        maxBytes: { type: "number", description: "Soft cap on preview size." },
+      },
+    },
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
       const workspacePath = await resolveWorkspacePath(
@@ -974,6 +1033,24 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       "Search within the current desktop-user workspace for a string or regex pattern.",
     usageExample:
       '{"pattern":"Operator","path":"src","limit":100,"cursor":"..."}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pattern"],
+      properties: {
+        pattern: {
+          type: "string",
+          description: "String, symbol name, or natural-language code query to search for.",
+        },
+        path: { type: "string", description: "Optional relative path to scope the search." },
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root or child directory override.",
+        },
+        limit: { type: "number", description: "Maximum number of results to return." },
+        cursor: { type: "string", description: "Opaque pagination cursor from a previous call." },
+      },
+    },
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
       const pattern = getRequiredStringArg(args, "pattern", "workspace_search");
@@ -996,7 +1073,14 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         .relative(workspacePath, scopePath)
         .replace(/\\/g, "/");
 
-      if (capability.id && looksLikeSymbolPattern(pattern)) {
+      const codeSearch = capability.id
+        ? buildCodeSearchCandidates(pattern)
+        : { isCodeQuestion: false, candidates: [] as string[] };
+
+      if (
+        capability.id &&
+        (looksLikeSymbolPattern(pattern) || codeSearch.isCodeQuestion)
+      ) {
         // Determine which checkout paths to search.
         // Priority 1: explicit work-item checkout (remote executor mode).
         // Priority 2: base clones registered at desktop claim time (chat / no workItem).
@@ -1017,16 +1101,21 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         let localSymbolResults: Awaited<ReturnType<typeof searchLocalCheckoutSymbols>> | null = null;
         let localSymbolCheckoutRoot = "";
         for (const candidate of localCheckoutCandidates) {
-          const result = await searchLocalCheckoutSymbols({
-            checkoutPath: candidate.checkoutPath,
-            capabilityId: capability.id,
-            repositoryId: candidate.repositoryId,
-            query: pattern,
-            limit: Math.min(limit, 25),
-          }).catch(() => null);
-          if (result && result.symbols.length > 0) {
-            localSymbolResults = result;
-            localSymbolCheckoutRoot = candidate.checkoutPath.replace(/\/+$/, "");
+          for (const candidateQuery of codeSearch.candidates) {
+            const result = await searchLocalCheckoutSymbols({
+              checkoutPath: candidate.checkoutPath,
+              capabilityId: capability.id,
+              repositoryId: candidate.repositoryId,
+              query: candidateQuery,
+              limit: Math.min(limit, 25),
+            }).catch(() => null);
+            if (result && result.symbols.length > 0) {
+              localSymbolResults = result;
+              localSymbolCheckoutRoot = candidate.checkoutPath.replace(/\/+$/, "");
+              break;
+            }
+          }
+          if (localSymbolResults) {
             break;
           }
         }
@@ -1059,6 +1148,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             stdoutPreview: previewText(output),
             details: {
               pattern,
+              normalizedQueries: codeSearch.candidates,
               scopePath,
               matches: filteredLocalSymbols.map((symbol) => ({
                 symbolId: symbol.symbolId,
@@ -1074,20 +1164,27 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               mode: "symbol-search",
               codeIndexSource: "local-checkout",
               codeIndexFreshness: localSymbolResults?.builtAt,
+              codeDiscoveryMode: "ast-first",
             },
           };
         }
 
-        const indexedMatches = (await searchCodeSymbols(capability.id, pattern, {
-          limit: Math.min(limit, 25),
-        }).catch(() => []))
-          .filter((symbol) =>
-            !relativeScopePath || relativeScopePath === "."
-              ? true
-              : symbol.filePath.startsWith(
-                  `${relativeScopePath.replace(/\/+$/, "")}/`,
-                ) || symbol.filePath === relativeScopePath,
-          );
+        let indexedMatches: Awaited<ReturnType<typeof searchCodeSymbols>> = [];
+        for (const candidateQuery of codeSearch.candidates) {
+          indexedMatches = (await searchCodeSymbols(capability.id, candidateQuery, {
+            limit: Math.min(limit, 25),
+          }).catch(() => []))
+            .filter((symbol) =>
+              !relativeScopePath || relativeScopePath === "."
+                ? true
+                : symbol.filePath.startsWith(
+                    `${relativeScopePath.replace(/\/+$/, "")}/`,
+                  ) || symbol.filePath === relativeScopePath,
+            );
+          if (indexedMatches.length > 0) {
+            break;
+          }
+        }
         if (indexedMatches.length > 0) {
           const output = indexedMatches
             .map(
@@ -1102,6 +1199,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             stdoutPreview: previewText(output),
             details: {
               pattern,
+              normalizedQueries: codeSearch.candidates,
               scopePath,
               matches: indexedMatches.map((symbol) => ({
                 symbolId: symbol.symbolId,
@@ -1115,6 +1213,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               totalScanned: indexedMatches.length,
               mode: "symbol-search",
               codeIndexSource: "capability-index",
+              codeDiscoveryMode: "ast-first",
             },
           };
         }
@@ -1176,11 +1275,15 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         details: {
           pattern,
           scopePath,
+          normalizedQueries: codeSearch.candidates,
           matches: paged.matches,
           nextCursor: paged.nextCursor,
           totalScanned: paged.totalScanned,
           truncated: paged.truncated,
           mode: "text-search",
+          codeDiscoveryMode: codeSearch.isCodeQuestion
+            ? "text-search-fallback"
+            : "text-search",
           fallback: isCommandMissing(result) ? "node-filesystem" : undefined,
         },
       };
@@ -1195,8 +1298,27 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       "Does NOT require cloning — uses the pre-synced _repos/ directory. " +
       "Use this to discover API endpoints, service contracts, interfaces, and top-level exports.",
     usageExample: '{"kind":"interface","limit":30}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: {
+          type: "string",
+          description: "Optional symbol kind filter such as class, function, interface, method, type, enum, or variable.",
+        },
+        filePathPrefix: {
+          type: "string",
+          description: "Optional relative path prefix to restrict matching files.",
+        },
+        path: {
+          type: "string",
+          description: "Alias for filePathPrefix.",
+        },
+        limit: { type: "number", description: "Maximum number of symbols to return." },
+      },
+    },
     retryable: true,
-    execute: async ({ capability }, args) => {
+    execute: async ({ capability, workItem }, args) => {
       if (!capability.id) {
         throw new Error("browse_code requires a capability context.");
       }
@@ -1217,6 +1339,40 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         // Fall back to DB index.
         const dbResults = await searchCodeSymbols(capability.id, kindRaw || "*", { limit: limit as any }).catch(() => []);
         if (dbResults.length === 0) {
+          const workspacePath = await resolveWorkspacePath(
+            capability,
+            workItem,
+            args.workspacePath,
+          ).catch(() => "");
+          if (workspacePath) {
+            const fileListing = await runProcess(
+              "rg",
+              ["--files", workspacePath],
+              workspacePath,
+            ).catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+            const files = (fileListing.stdout || "")
+              .split("\n")
+              .filter(Boolean)
+              .filter((filePath) => /\.(ts|tsx|js|jsx|mjs|cjs|java|py|pyw)$/i.test(filePath))
+              .filter((filePath) =>
+                filePathPrefix ? filePath.startsWith(filePathPrefix.replace(/^\/+/, "")) : true,
+              )
+              .slice(0, limit);
+            if (files.length > 0) {
+              const output = files
+                .map((filePath) => `${workspacePath.replace(/\/+$/, "")}/${filePath.replace(/^\/+/, "")}`)
+                .join("\n");
+              return {
+                summary: `AST index unavailable. Returning ${files.length} source file candidate${files.length === 1 ? "" : "s"} from the workspace fallback.`,
+                stdoutPreview: previewText(output),
+                details: {
+                  files,
+                  source: "workspace-text-fallback",
+                  codeDiscoveryMode: "text-search-fallback",
+                },
+              };
+            }
+          }
           return {
             summary: "No local base clones available and no DB code index found. Run repo-sync first.",
             details: { symbols: [], source: "none" },
@@ -1291,6 +1447,17 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   git_status: {
     id: "git_status",
     description: "Inspect git status for the current desktop-user workspace repository.",
+    usageExample: '{"workspacePath":"src"}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root or child directory override.",
+        },
+      },
+    },
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
       const workspacePath = await resolveWorkspacePath(
@@ -1749,10 +1916,39 @@ export const getToolAdapter = (toolId: ToolAdapterId) => {
   return adapter;
 };
 
+export const READ_ONLY_AGENT_TOOL_IDS: ToolAdapterId[] = [
+  "browse_code",
+  "workspace_search",
+  "workspace_read",
+  "workspace_list",
+  "git_status",
+];
+
 export const listToolDescriptions = (toolIds: ToolAdapterId[]) =>
   toolIds.map((toolId) => {
     const adapter = getToolAdapter(toolId);
-    return `- ${adapter.id}: ${adapter.description}${adapter.usageExample ? ` Example args: ${adapter.usageExample}` : ""}`;
+    const schemaArgs = summarizeSchemaArguments(adapter.parameterSchema);
+    return `- ${adapter.id}: ${adapter.description}${
+      schemaArgs ? ` Args: ${schemaArgs}.` : ""
+    }${adapter.usageExample ? ` Example args: ${adapter.usageExample}` : ""}`;
+  });
+
+export const buildProviderToolDefinitions = (toolIds: ToolAdapterId[]): ProviderTool[] =>
+  toolIds.flatMap((toolId) => {
+    const adapter = getToolAdapter(toolId);
+    if (!adapter.parameterSchema) {
+      return [];
+    }
+    return [
+      {
+        type: "function",
+        function: {
+          name: adapter.id,
+          description: adapter.description,
+          parameters: adapter.parameterSchema,
+        },
+      } satisfies ProviderTool,
+    ];
   });
 
 const SHADOW_MOCKED_TOOLS = new Set([

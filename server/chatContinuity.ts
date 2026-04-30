@@ -1,0 +1,208 @@
+import type { CapabilityChatMessage } from '../src/types';
+import type { ChatHistoryMessage } from './githubModels';
+
+type ChatHistoryItem = ChatHistoryMessage | CapabilityChatMessage;
+
+export type FollowUpBindingMode =
+  | 'none'
+  | 'latest-assistant-turn'
+  | 'active-work-scope';
+
+const EXPLICIT_FOLLOW_UP_PATTERNS = [
+  /^(yes|yeah|yep|yup|ok|okay|sure|please do|do it|do that|go ahead|continue|proceed|same)$/i,
+  /^(show me|retry|mark done|approve|reject|delegate)$/i,
+  /^(why|how so|what else|and then)$/i,
+];
+
+const hasExplicitReference = (value: string) =>
+  /\b(?:WI|RUN)-[A-Z0-9-]+\b/i.test(value) ||
+  /\b(work item|run|phase|stage|approval|blocker|operator|class|function|symbol|file|repo|repository)\b/i.test(
+    value,
+  );
+
+const summarizeTurn = (value: string, maxLength = 420) =>
+  String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+
+const buildScopeLabel = ({
+  sessionScope,
+  sessionScopeId,
+  workItemId,
+  runId,
+  workflowStepId,
+}: {
+  sessionScope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  sessionScopeId?: string;
+  workItemId?: string;
+  runId?: string;
+  workflowStepId?: string;
+}) => {
+  if (workItemId) {
+    return `work item ${workItemId}`;
+  }
+  if (runId) {
+    return `run ${runId}`;
+  }
+  if (workflowStepId) {
+    return `workflow step ${workflowStepId}`;
+  }
+  if (sessionScope === 'WORK_ITEM' && sessionScopeId) {
+    return `work item ${sessionScopeId}`;
+  }
+  if (sessionScope === 'TASK' && sessionScopeId) {
+    return `task ${sessionScopeId}`;
+  }
+  if (sessionScope === 'GENERAL_CHAT' && sessionScopeId) {
+    return `capability chat ${sessionScopeId}`;
+  }
+  return 'current thread';
+};
+
+export const normalizeChatHistory = ({
+  history,
+  latestMessage,
+}: {
+  history?: ChatHistoryItem[];
+  latestMessage?: string;
+}) => {
+  const trimmedLatestMessage = String(latestMessage || '').trim();
+  const normalizedHistory = (history || [])
+    .filter(item => String(item?.content || '').trim())
+    .map(item => ({
+      ...item,
+      content: String(item.content || '').trim(),
+    }));
+
+  if (!trimmedLatestMessage || normalizedHistory.length === 0) {
+    return normalizedHistory;
+  }
+
+  const last = normalizedHistory[normalizedHistory.length - 1];
+  if (
+    String(last.role || '').toLowerCase() === 'user' &&
+    String(last.content || '').trim().toLowerCase() === trimmedLatestMessage.toLowerCase()
+  ) {
+    return normalizedHistory.slice(0, -1);
+  }
+
+  return normalizedHistory;
+};
+
+export const resolveChatFollowUpContext = ({
+  history,
+  latestMessage,
+  sessionScope,
+  sessionScopeId,
+  workItemId,
+  runId,
+  workflowStepId,
+}: {
+  history?: ChatHistoryItem[];
+  latestMessage?: string;
+  sessionScope?: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  sessionScopeId?: string;
+  workItemId?: string;
+  runId?: string;
+  workflowStepId?: string;
+}) => {
+  const normalizedHistory = normalizeChatHistory({
+    history,
+    latestMessage,
+  });
+  const trimmedLatestMessage = String(latestMessage || '').trim();
+  if (!trimmedLatestMessage) {
+    return {
+      history: normalizedHistory,
+      contextMessage: '',
+      followUpContextPrompt: undefined,
+      followUpBindingMode: 'none' as FollowUpBindingMode,
+    };
+  }
+
+  const wordCount = trimmedLatestMessage.split(/\s+/).filter(Boolean).length;
+  const looksLikeFollowUp =
+    !hasExplicitReference(trimmedLatestMessage) &&
+    (trimmedLatestMessage.length <= 48 || wordCount <= 6) &&
+    EXPLICIT_FOLLOW_UP_PATTERNS.some(pattern => pattern.test(trimmedLatestMessage));
+
+  if (!looksLikeFollowUp) {
+    return {
+      history: normalizedHistory,
+      contextMessage: trimmedLatestMessage,
+      followUpContextPrompt: undefined,
+      followUpBindingMode: 'none' as FollowUpBindingMode,
+    };
+  }
+
+  const lastAssistantTurn = [...normalizedHistory]
+    .reverse()
+    .find(item => String(item.role || '').toLowerCase() === 'agent');
+  const scopeLabel = buildScopeLabel({
+    sessionScope,
+    sessionScopeId,
+    workItemId,
+    runId,
+    workflowStepId,
+  });
+
+  if (lastAssistantTurn?.content?.trim()) {
+    const assistantSummary = summarizeTurn(lastAssistantTurn.content);
+    return {
+      history: normalizedHistory,
+      contextMessage: [
+        `Follow-up reply in the same ${scopeLabel}.`,
+        `Previous assistant turn: ${assistantSummary}`,
+        `Operator reply: ${trimmedLatestMessage}`,
+      ].join('\n'),
+      followUpContextPrompt: [
+        'Follow-up continuity context:',
+        `Treat the latest user message as a direct follow-up inside the same ${scopeLabel}.`,
+        `Most recent assistant turn in this thread:\n${assistantSummary}`,
+        `Latest user follow-up reply:\n${trimmedLatestMessage}`,
+      ].join('\n\n'),
+      followUpBindingMode: 'latest-assistant-turn' as FollowUpBindingMode,
+    };
+  }
+
+  if (sessionScope === 'WORK_ITEM' || workItemId || runId || workflowStepId) {
+    return {
+      history: normalizedHistory,
+      contextMessage: [
+        `Follow-up reply in the same ${scopeLabel}.`,
+        `Operator reply: ${trimmedLatestMessage}`,
+      ].join('\n'),
+      followUpContextPrompt: [
+        'Follow-up continuity context:',
+        `Treat the latest user message as a continuation inside the same ${scopeLabel}.`,
+        `Latest user follow-up reply:\n${trimmedLatestMessage}`,
+      ].join('\n\n'),
+      followUpBindingMode: 'active-work-scope' as FollowUpBindingMode,
+    };
+  }
+
+  return {
+    history: normalizedHistory,
+    contextMessage: trimmedLatestMessage,
+    followUpContextPrompt: undefined,
+    followUpBindingMode: 'none' as FollowUpBindingMode,
+  };
+};
+
+export const buildUnifiedChatContextPrompt = ({
+  liveContext,
+  followUpContextPrompt,
+  evidencePrompt,
+}: {
+  liveContext?: string;
+  followUpContextPrompt?: string;
+  evidencePrompt?: string;
+}) =>
+  [
+    liveContext?.trim() ? `Live work context:\n${liveContext.trim()}` : null,
+    followUpContextPrompt?.trim() ? followUpContextPrompt.trim() : null,
+    evidencePrompt?.trim() ? evidencePrompt.trim() : null,
+  ]
+    .filter(Boolean)
+    .join('\n\n');

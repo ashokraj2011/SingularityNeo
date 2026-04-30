@@ -740,6 +740,7 @@ const resolveChatRuntimeContext = async ({
     liveBriefing,
     chatScope,
     chatScopeId,
+    workItem: hasReferencedWorkItem ? referencedWorkItem : undefined,
     memoryQueryText,
     astGroundingPrompt: astGrounding.prompt,
     astGroundingMode: astGrounding.astGroundingMode,

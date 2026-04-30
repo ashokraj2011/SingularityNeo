@@ -128,7 +128,7 @@ export const STANDARD_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
       'Milestone assumptions ready for business analysis',
     ],
     templatePath: '/out/steps/planning-step-template.md',
-    allowedToolIds: ['workspace_list', 'workspace_read', 'workspace_search'],
+    allowedToolIds: ['browse_code', 'workspace_list', 'workspace_read', 'workspace_search'],
     executionNotes:
       'Planning should gather capability metadata, stakeholder inputs, and upstream agent context without modifying source code.',
     artifactContract: createArtifactContract(
@@ -175,7 +175,7 @@ export const STANDARD_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
       'Story ready for solution design',
     ],
     templatePath: '/out/steps/analysis-step-template.md',
-    allowedToolIds: ['workspace_list', 'workspace_read', 'workspace_search'],
+    allowedToolIds: ['browse_code', 'workspace_list', 'workspace_read', 'workspace_search'],
     executionNotes:
       'Ground the analysis in capability documentation and repository context. Do not modify source code in this step.',
     artifactContract: createArtifactContract(
@@ -224,7 +224,7 @@ export const STANDARD_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
       'Engineering approach approved for build',
     ],
     templatePath: '/out/steps/design-step-template.md',
-    allowedToolIds: ['workspace_list', 'workspace_read', 'workspace_search', 'git_status'],
+    allowedToolIds: ['browse_code', 'workspace_list', 'workspace_read', 'workspace_search', 'git_status'],
     executionNotes:
       'Use repository inspection tools to understand the existing solution shape and produce design guidance before implementation.',
     artifactContract: createArtifactContract(
@@ -272,6 +272,7 @@ export const STANDARD_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
     ],
     templatePath: '/out/steps/development-step-template.md',
     allowedToolIds: [
+      'browse_code',
       'workspace_list',
       'workspace_read',
       'workspace_search',
@@ -327,6 +328,7 @@ export const STANDARD_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
     ],
     templatePath: '/out/steps/qa-step-template.md',
     allowedToolIds: [
+      'browse_code',
       'workspace_list',
       'workspace_read',
       'workspace_search',
@@ -382,7 +384,7 @@ export const STANDARD_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
       'Governance gate cleared for approval',
     ],
     templatePath: '/out/steps/governance-gate-template.md',
-    allowedToolIds: ['workspace_read', 'workspace_search', 'run_docs'],
+    allowedToolIds: ['browse_code', 'workspace_read', 'workspace_search', 'run_docs'],
     executionNotes:
       'Governance validation should review evidence and produce approval-ready documentation, but it should not perform deployments.',
     artifactContract: createArtifactContract(
@@ -564,7 +566,7 @@ export const BROKERAGE_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
       'Construction plan ready',
     ],
     templatePath: '/out/steps/brokerage-elaboration-template.md',
-    allowedToolIds: ['workspace_list', 'workspace_read', 'workspace_search', 'git_status'],
+    allowedToolIds: ['browse_code', 'workspace_list', 'workspace_read', 'workspace_search', 'git_status'],
     executionNotes:
       'Elaboration should inspect the codebase and architecture context, but it should not modify source code yet.',
     artifactContract: createArtifactContract(
@@ -602,6 +604,7 @@ export const BROKERAGE_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
     ],
     templatePath: '/out/steps/brokerage-construction-template.md',
     allowedToolIds: [
+      'browse_code',
       'workspace_list',
       'workspace_read',
       'workspace_search',
@@ -647,6 +650,7 @@ export const BROKERAGE_SDLC_STEP_TEMPLATES: SharedWorkflowStepTemplate[] = [
     ],
     templatePath: '/out/steps/brokerage-quality-template.md',
     allowedToolIds: [
+      'browse_code',
       'workspace_list',
       'workspace_read',
       'workspace_search',

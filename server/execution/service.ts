@@ -86,6 +86,7 @@ import {
   normalizeWorkItemPhaseStakeholders,
 } from "../../src/lib/workItemStakeholders";
 import { invokeScopedCapabilitySession } from "../githubModels";
+import { normalizeToolAdapterId } from "../toolIds";
 import { publishRunEvent } from "../eventBus";
 import { DEFAULT_PROVIDER_KEY, resolveAgentProviderKey } from "../providerRegistry";
 import { rollupToolHistory, type RollupCacheEntry } from "./historyRollup";
@@ -313,54 +314,6 @@ const formatToolLabel = (toolId: ToolAdapterId) =>
   String(toolId || "tool")
     .replace(/_/g, " ")
     .replace(/\b\w/g, (character) => character.toUpperCase());
-
-const TOOL_ID_ALIASES: Record<string, ToolAdapterId> = {
-  workspace_list: "workspace_list",
-  code_list: "workspace_list",
-  file_list: "workspace_list",
-  list_files: "workspace_list",
-  workspace_read: "workspace_read",
-  code_read: "workspace_read",
-  file_read: "workspace_read",
-  read_file: "workspace_read",
-  workspace_search: "workspace_search",
-  code_search: "workspace_search",
-  file_search: "workspace_search",
-  search_code: "workspace_search",
-  workspace_write: "workspace_write",
-  code_write: "workspace_write",
-  file_write: "workspace_write",
-  write_file: "workspace_write",
-  edit_file: "workspace_write",
-  workspace_replace_block: "workspace_replace_block",
-  replace_block: "workspace_replace_block",
-  replace_in_file: "workspace_replace_block",
-  workspace_apply_patch: "workspace_apply_patch",
-  apply_patch: "workspace_apply_patch",
-  patch_file: "workspace_apply_patch",
-  delegate_task: "delegate_task",
-  delegate: "delegate_task",
-  handoff_task: "delegate_task",
-  git_status: "git_status",
-  repo_status: "git_status",
-  run_build: "run_build",
-  build: "run_build",
-  run_test: "run_test",
-  test: "run_test",
-  run_docs: "run_docs",
-  docs: "run_docs",
-  run_deploy: "run_deploy",
-  deploy: "run_deploy",
-};
-
-const normalizeToolAdapterId = (value: unknown): ToolAdapterId | null => {
-  const normalized = normalizeString(value).toLowerCase();
-  if (!normalized) {
-    return null;
-  }
-
-  return TOOL_ID_ALIASES[normalized] || null;
-};
 
 const buildDecisionProgressMessage = (decision: ExecutionDecision) => {
   if (decision.action === "invoke_tool") {
@@ -2289,6 +2242,21 @@ const requestStepDecision = async ({
         )
         .join("\n\n")
     : "No uploaded work item input files were attached.";
+  const recentWorkItemConversationText = workspace.messages
+    .filter(
+      (message) =>
+        message.workItemId === workItem.id ||
+        message.runId === runId,
+    )
+    .slice(-6)
+    .map((message) => {
+      const speaker =
+        message.role === "user"
+          ? "Operator"
+          : message.agentName || message.role;
+      return `- ${speaker}: ${summarizeText(message.content, 220).replace(/\s+/g, " ").trim()}`;
+    })
+    .join("\n");
   const memoryContext = await buildMemoryContext({
     capabilityId: capability.id || workItem.capabilityId,
     agentId: agent.id,
@@ -2388,6 +2356,9 @@ const requestStepDecision = async ({
   ].join("\n\n");
 
   const memoryHitsText = `Attached work item input files:\n${workItemInputArtifactPrompt}`;
+  const conversationContextText = recentWorkItemConversationText
+    ? `Recent operator and stage conversation:\n${recentWorkItemConversationText}`
+    : '';
 
   const toolDescriptionsText = [
     `Allowed tools:\n${toolDescriptions}`,
@@ -2454,6 +2425,20 @@ const requestStepDecision = async ({
       text: memoryHitsText,
       estimatedTokens: tok(memoryHitsText, "prose"),
     },
+    ...(conversationContextText
+      ? [
+          {
+            source: "CONVERSATION_HISTORY" as const,
+            text: conversationContextText,
+            estimatedTokens: tok(conversationContextText, "prose"),
+            meta: {
+              conversationTurns: recentWorkItemConversationText.split("\n").length,
+              workItemId: workItem.id,
+              runId: runId || null,
+            },
+          } satisfies BudgetFragment,
+        ]
+      : []),
     ...(historyText
       ? [
           {
@@ -2585,6 +2570,8 @@ const requestStepDecision = async ({
               ? response.usageEstimated
               : executionRuntime.usageEstimated,
           toolingMode: "singularity-owned",
+          executionContextHydrated: true,
+          runContextSource: "live-run-state",
         } as Record<string, unknown>)
       : null,
     fragments: budgeted.receipt.included.map(entry => ({

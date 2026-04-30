@@ -200,7 +200,7 @@ export const StageControlModal = ({
       content: trimmed,
       timestamp: formatTimestamp(),
     };
-    const history = [...messages, userMessage].map(message => ({
+    const history = messages.map(message => ({
       id: message.id,
       capabilityId: capability.id,
       role: message.role,
