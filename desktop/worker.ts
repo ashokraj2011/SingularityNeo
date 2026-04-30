@@ -27,6 +27,7 @@ import type {
   WorkItemExplainDetail,
   ProviderKey,
   RuntimeProviderConfig,
+  ToolAdapterId,
 } from '../src/types';
 import type { RuntimeStatus } from '../src/lib/api';
 import {
@@ -37,7 +38,10 @@ import {
   githubModelsApiUrl,
   normalizeModel,
 } from '../server/githubModels';
-import { invokeCommonAgentRuntime } from '../server/agentRuntime';
+import {
+  invokeCommonAgentRuntime,
+  resolveReadOnlyToolIds,
+} from '../server/agentRuntime';
 import {
   clearPersistedRuntimeToken,
   clearPersistedLocalEmbeddingSettings,
@@ -77,7 +81,9 @@ import {
 import {
   buildUnifiedChatContextPrompt,
   resolveChatFollowUpContext,
+  type EffectiveMessageSource,
   type FollowUpBindingMode,
+  type FollowUpIntent,
 } from '../server/chatContinuity';
 import {
   buildAstGroundingSummary,
@@ -87,6 +93,11 @@ import { processWorkflowRun, reconcileWorkflowRunFailure } from '../server/execu
 import { getWorkflowRunDetail } from '../server/execution/repository';
 import { runWithExecutionClientContext } from '../server/execution/runtimeClient';
 import { buildWorkItemCheckoutPath } from '../server/workItemCheckouts';
+import {
+  getDefaultRepoAwareReadOnlyToolIds,
+  resolveRuntimeAgentForWorkspace,
+  type RuntimeResolvedAgentSource,
+} from '../server/runtimeAgents';
 
 const projectRoot = process.env.SINGULARITY_PROJECT_ROOT || process.cwd();
 const envLocalPath = resolveRuntimeEnvLocalPath(projectRoot);
@@ -772,6 +783,13 @@ const resolveDesktopRuntimeContext = async (
 ): Promise<{
   capability: Partial<Capability>;
   agent: Partial<CapabilityAgent>;
+  history: CapabilityChatMessage[];
+  rawMessage: string;
+  effectiveMessage: string;
+  effectiveMessageSource: EffectiveMessageSource;
+  followUpIntent: FollowUpIntent;
+  resolvedAgentSource: RuntimeResolvedAgentSource;
+  resolvedAllowedToolIds: ToolAdapterId[];
   bundle?: CapabilityBundleSnapshot;
   chatAction?: Awaited<ReturnType<typeof maybeHandleCapabilityChatAction>>;
   developerPrompt?: string;
@@ -779,6 +797,7 @@ const resolveDesktopRuntimeContext = async (
   memoryReferences: MemoryReference[];
   followUpBindingMode: FollowUpBindingMode;
   historyTurnCount: number;
+  isCodeQuestion: boolean;
   memoryTrustMode: 'standard' | 'repo-evidence-only';
   astGroundingMode?:
     | 'ast-grounded-local-clone'
@@ -797,10 +816,10 @@ const resolveDesktopRuntimeContext = async (
   scopeId?: string;
 }> => {
   const capability = withoutPersistentIdentity(payload.capability as Partial<Capability>);
-  const agent = withoutPersistentIdentity(payload.agent as Partial<CapabilityAgent>);
+  const payloadAgent = withoutPersistentIdentity(payload.agent as Partial<CapabilityAgent>);
   const actorContext = payload.actorContext;
   const capabilityId = capability.id || payload.capability?.id;
-  const agentId = payload.agent?.id;
+  const payloadAgentId = payload.agent?.id;
   const originalMessage = String(payload.message || '').trim();
   const followUpContext = resolveChatFollowUpContext({
     history: (payload.history as CapabilityChatMessage[] | undefined) || [],
@@ -811,12 +830,20 @@ const resolveDesktopRuntimeContext = async (
     runId: payload.runId as string | undefined,
     workflowStepId: payload.workflowStepId as string | undefined,
   });
+  const effectiveMessage = followUpContext.effectiveMessage || originalMessage;
 
   let liveBriefing = '';
   let memoryReferences: MemoryReference[] = [];
   let developerPrompt: string | undefined;
   let scope = (payload.sessionScope as 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK') || 'GENERAL_CHAT';
   let scopeId = payload.sessionScopeId as string | undefined;
+  const initialResolvedAgent = resolveRuntimeAgentForWorkspace({
+    payloadAgent,
+    payloadAgentId,
+  });
+  let agent = initialResolvedAgent.agent;
+  let resolvedAgentSource: RuntimeResolvedAgentSource = initialResolvedAgent.source;
+  let resolvedAllowedToolIds = resolveReadOnlyToolIds(initialResolvedAgent.agent);
 
   if (capabilityId) {
     const bundle = await controlPlaneRequest<CapabilityBundleSnapshot>(
@@ -825,6 +852,14 @@ const resolveDesktopRuntimeContext = async (
         actorContext,
       },
     );
+    const resolvedAgent = resolveRuntimeAgentForWorkspace({
+      workspace: bundle.workspace,
+      payloadAgent,
+      payloadAgentId,
+    });
+    agent = resolvedAgent.agent;
+    resolvedAgentSource = resolvedAgent.source;
+    resolvedAllowedToolIds = resolveReadOnlyToolIds(agent);
     const chatAction = await maybeHandleCapabilityChatAction({
       bundle,
       agent,
@@ -832,7 +867,7 @@ const resolveDesktopRuntimeContext = async (
     });
     const referencedRunId =
       (payload.runId as string | undefined) ||
-      extractChatWorkspaceReferenceId(followUpContext.contextMessage || originalMessage, 'RUN');
+      extractChatWorkspaceReferenceId(effectiveMessage, 'RUN');
     const requestedWorkItemId =
       (payload.workItemId as string | undefined) ||
       (scope === 'WORK_ITEM' ? scopeId : undefined);
@@ -840,7 +875,7 @@ const resolveDesktopRuntimeContext = async (
       ? bundle.workspace.workItems.find(item => item.id === requestedWorkItemId)
       : undefined;
     const mentionedWorkItem = !requestedWorkItem
-      ? resolveMentionedWorkItem(bundle, followUpContext.contextMessage || originalMessage)
+      ? resolveMentionedWorkItem(bundle, effectiveMessage)
       : undefined;
     const referencedWorkItem =
       requestedWorkItem ||
@@ -923,7 +958,7 @@ const resolveDesktopRuntimeContext = async (
     const queryText =
       payload.contextMode === 'WORK_ITEM_STAGE' && requestedWorkItem
         ? [
-            followUpContext.contextMessage || originalMessage,
+            effectiveMessage,
             requestedWorkItem.title,
             requestedWorkItem.description,
             requestedWorkflow?.steps.find(
@@ -934,7 +969,7 @@ const resolveDesktopRuntimeContext = async (
             .join('\n')
         : referencedWorkItem && !mentionedWorkItem?.ambiguous?.length
           ? [
-              followUpContext.contextMessage || originalMessage,
+              effectiveMessage,
               referencedWorkItem.id,
               referencedWorkItem.title,
               referencedWorkItem.description,
@@ -950,7 +985,7 @@ const resolveDesktopRuntimeContext = async (
             ]
               .filter(Boolean)
               .join('\n')
-        : followUpContext.contextMessage || originalMessage;
+        : effectiveMessage;
     const astRepository =
       (bundle.capability.repositories || []).find(
         repository =>
@@ -973,7 +1008,7 @@ const resolveDesktopRuntimeContext = async (
     const astGrounding: AstGroundingSummary = await buildAstGroundingSummary({
       capability: bundle.capability,
       workItem: referencedWorkItem,
-      message: followUpContext.contextMessage || originalMessage,
+      message: effectiveMessage,
       checkoutPath: astCheckoutPath,
       repositoryId: astRepository?.id,
       branchName: referencedWorkItem?.id,
@@ -988,11 +1023,24 @@ const resolveDesktopRuntimeContext = async (
       verifiedPaths: [],
       groundingEvidenceSource: 'none' as const,
     }));
+    if (
+      astGrounding.isCodeQuestion &&
+      !resolvedAllowedToolIds.some(
+        toolId => toolId === 'browse_code' || toolId === 'workspace_search',
+      )
+    ) {
+      resolvedAllowedToolIds = [
+        ...new Set([
+          ...resolvedAllowedToolIds,
+          ...getDefaultRepoAwareReadOnlyToolIds(),
+        ]),
+      ];
+    }
 
     if (queryText) {
       const rawMemoryResults = await controlPlaneRequest<MemorySearchResult[]>(
         `/api/capabilities/${encodeURIComponent(capabilityId)}/memory/search?q=${encodeURIComponent(queryText)}&limit=6${
-          agentId ? `&agentId=${encodeURIComponent(agentId)}` : ''
+          agent.id ? `&agentId=${encodeURIComponent(agent.id)}` : ''
         }`,
         {
           actorContext,
@@ -1025,6 +1073,13 @@ const resolveDesktopRuntimeContext = async (
       return {
         capability,
         agent,
+        history: followUpContext.history as CapabilityChatMessage[],
+        rawMessage: originalMessage,
+        effectiveMessage,
+        effectiveMessageSource: followUpContext.effectiveMessageSource,
+        followUpIntent: followUpContext.followUpIntent,
+        resolvedAgentSource,
+        resolvedAllowedToolIds,
         bundle,
         chatAction,
         developerPrompt,
@@ -1036,6 +1091,7 @@ const resolveDesktopRuntimeContext = async (
         memoryReferences,
         followUpBindingMode: followUpContext.followUpBindingMode,
         historyTurnCount: followUpContext.history.length,
+        isCodeQuestion: astGrounding.isCodeQuestion,
         memoryTrustMode,
         astGroundingMode: astGrounding.astGroundingMode,
         checkoutPath: astGrounding.checkoutPath,
@@ -1055,6 +1111,13 @@ const resolveDesktopRuntimeContext = async (
     return {
       capability,
       agent,
+      history: followUpContext.history as CapabilityChatMessage[],
+      rawMessage: originalMessage,
+      effectiveMessage,
+      effectiveMessageSource: followUpContext.effectiveMessageSource,
+      followUpIntent: followUpContext.followUpIntent,
+      resolvedAgentSource,
+      resolvedAllowedToolIds,
       bundle,
       chatAction,
       developerPrompt,
@@ -1082,6 +1145,7 @@ const resolveDesktopRuntimeContext = async (
       memoryReferences,
       followUpBindingMode: followUpContext.followUpBindingMode,
       historyTurnCount: followUpContext.history.length,
+      isCodeQuestion: astGrounding.isCodeQuestion,
       memoryTrustMode: astGrounding.isCodeQuestion ? 'repo-evidence-only' : 'standard',
       astGroundingMode: astGrounding.astGroundingMode,
       checkoutPath: astGrounding.checkoutPath,
@@ -1101,6 +1165,13 @@ const resolveDesktopRuntimeContext = async (
   return {
     capability,
     agent,
+    history: followUpContext.history as CapabilityChatMessage[],
+    rawMessage: originalMessage,
+    effectiveMessage,
+    effectiveMessageSource: followUpContext.effectiveMessageSource,
+    followUpIntent: followUpContext.followUpIntent,
+    resolvedAgentSource,
+    resolvedAllowedToolIds,
     developerPrompt,
     memoryPrompt:
       buildUnifiedChatContextPrompt({
@@ -1110,6 +1181,7 @@ const resolveDesktopRuntimeContext = async (
     memoryReferences,
     followUpBindingMode: followUpContext.followUpBindingMode,
     historyTurnCount: followUpContext.history.length,
+    isCodeQuestion: false,
     memoryTrustMode: 'standard',
     workContextHydrated: Boolean(liveBriefing.trim()),
     workContextSource: 'live-workspace',
@@ -1594,6 +1666,9 @@ reader.on('line', async line => {
             createdAt: new Date().toISOString(),
             sessionMode: (payload.sessionMode as 'resume' | 'fresh') || 'resume',
             memoryReferences: [],
+            effectiveMessage: context.effectiveMessage,
+            effectiveMessageSource: context.effectiveMessageSource,
+            followUpIntent: context.followUpIntent,
             historyTurnCount: context.historyTurnCount,
             historyRolledUp: false,
             workContextHydrated: context.workContextHydrated,
@@ -1619,8 +1694,8 @@ reader.on('line', async line => {
           invokeCommonAgentRuntime({
             capability: context.bundle?.capability || context.capability,
             agent: context.agent,
-            history: (payload.history as CapabilityChatMessage[]) || [],
-            message: String(payload.message),
+            history: context.history,
+            message: context.effectiveMessage,
             developerPrompt:
               context.developerPrompt || (payload.developerPrompt as string | undefined),
             memoryPrompt: context.memoryPrompt || (payload.memoryPrompt as string | undefined),
@@ -1628,7 +1703,9 @@ reader.on('line', async line => {
             scopeId: context.scopeId,
             resetSession: payload.sessionMode === 'fresh',
             workItem: context.workItem,
-            preferReadOnlyToolLoop: context.memoryTrustMode === 'repo-evidence-only',
+            preferReadOnlyToolLoop: context.isCodeQuestion,
+            allowedToolIds: context.resolvedAllowedToolIds,
+            resolvedAgentSource: context.resolvedAgentSource,
             runtimeLane: 'desktop-runtime-worker',
           }),
       );
@@ -1646,6 +1723,9 @@ reader.on('line', async line => {
           ...result,
           ...runtimeTarget,
           content: sanitizedResult.content,
+          effectiveMessage: context.effectiveMessage,
+          effectiveMessageSource: context.effectiveMessageSource,
+          followUpIntent: context.followUpIntent,
           astGroundingMode: context.astGroundingMode,
           checkoutPath: context.checkoutPath,
           branchName: context.branchName,
@@ -1661,8 +1741,15 @@ reader.on('line', async line => {
           workContextSource: context.workContextSource,
           followUpBindingMode: context.followUpBindingMode,
           chatRuntimeLane: 'desktop-runtime-worker',
+          toolLoopEnabled: result.toolLoopEnabled,
+          toolLoopReason: result.toolLoopReason,
           toolLoopUsed: result.toolLoopUsed,
           attemptedToolIds: result.attemptedToolIds,
+          resolvedAllowedToolIds: result.resolvedAllowedToolIds || context.resolvedAllowedToolIds,
+          resolvedAgentSource: result.resolvedAgentSource || context.resolvedAgentSource,
+          parsedToolIntent: result.parsedToolIntent,
+          toolIntentDisposition: result.toolIntentDisposition,
+          toolIntentRejectionReason: result.toolIntentRejectionReason,
           codeDiscoveryMode: result.codeDiscoveryMode,
           codeDiscoveryFallback: result.codeDiscoveryFallback,
           astSource: result.astSource,
@@ -1779,6 +1866,9 @@ reader.on('line', async line => {
           },
           sessionMode: (payload.sessionMode as 'resume' | 'fresh') || 'resume',
           memoryReferences: [],
+          effectiveMessage: context.effectiveMessage,
+          effectiveMessageSource: context.effectiveMessageSource,
+          followUpIntent: context.followUpIntent,
           historyTurnCount: context.historyTurnCount,
           historyRolledUp: false,
           workContextHydrated: context.workContextHydrated,
@@ -1802,6 +1892,9 @@ reader.on('line', async line => {
       sendStreamEvent(streamId, {
         type: 'memory',
         memoryReferences: context.memoryReferences,
+        effectiveMessage: context.effectiveMessage,
+        effectiveMessageSource: context.effectiveMessageSource,
+        followUpIntent: context.followUpIntent,
         groundingEvidenceSource: context.groundingEvidenceSource,
         memoryTrustMode: context.memoryTrustMode,
         historyTurnCount: context.historyTurnCount,
@@ -1810,14 +1903,24 @@ reader.on('line', async line => {
         workContextSource: context.workContextSource,
         followUpBindingMode: context.followUpBindingMode,
         chatRuntimeLane: 'desktop-runtime-worker',
+        toolLoopEnabled:
+          context.isCodeQuestion && context.resolvedAllowedToolIds.length > 0,
+        toolLoopReason: context.isCodeQuestion
+          ? context.resolvedAllowedToolIds.length > 0
+            ? 'repo-aware-code-question'
+            : 'no-read-only-tools'
+          : 'disabled-by-caller',
         toolLoopUsed: false,
         attemptedToolIds: [],
+        resolvedAllowedToolIds: context.resolvedAllowedToolIds,
+        resolvedAgentSource: context.resolvedAgentSource,
+        toolIntentDisposition: 'none',
         codeDiscoveryMode: 'prompt-only',
         codeDiscoveryFallback: 'none',
         astSource: 'none',
       });
       const shouldBufferValidatedStream =
-        context.memoryTrustMode === 'repo-evidence-only';
+        Boolean(context.isCodeQuestion);
 
       const streamed = await runWithExecutionClientContext(
         {
@@ -1829,8 +1932,8 @@ reader.on('line', async line => {
           invokeCommonAgentRuntime({
             capability: context.bundle?.capability || context.capability,
             agent: context.agent,
-            history: (payload.history as CapabilityChatMessage[]) || [],
-            message: String(payload.message),
+            history: context.history,
+            message: context.effectiveMessage,
             developerPrompt:
               context.developerPrompt || (payload.developerPrompt as string | undefined),
             memoryPrompt: context.memoryPrompt || (payload.memoryPrompt as string | undefined),
@@ -1838,7 +1941,9 @@ reader.on('line', async line => {
             scopeId: context.scopeId,
             resetSession: payload.sessionMode === 'fresh',
             workItem: context.workItem,
-            preferReadOnlyToolLoop: context.memoryTrustMode === 'repo-evidence-only',
+            preferReadOnlyToolLoop: context.isCodeQuestion,
+            allowedToolIds: context.resolvedAllowedToolIds,
+            resolvedAgentSource: context.resolvedAgentSource,
             runtimeLane: 'desktop-runtime-worker',
             onDelta: delta => {
               if (!shouldBufferValidatedStream) {
@@ -1873,6 +1978,9 @@ reader.on('line', async line => {
         isNewSession: streamed.isNewSession,
         sessionMode: (payload.sessionMode as 'resume' | 'fresh') || 'resume',
         memoryReferences: context.memoryReferences,
+        effectiveMessage: context.effectiveMessage,
+        effectiveMessageSource: context.effectiveMessageSource,
+        followUpIntent: context.followUpIntent,
         groundingEvidenceSource: context.groundingEvidenceSource,
         memoryTrustMode: context.memoryTrustMode,
         pathValidationState: sanitizedStream.pathValidationState,
@@ -1883,8 +1991,16 @@ reader.on('line', async line => {
         workContextSource: context.workContextSource,
         followUpBindingMode: context.followUpBindingMode,
         chatRuntimeLane: 'desktop-runtime-worker',
+        toolLoopEnabled: streamed.toolLoopEnabled,
+        toolLoopReason: streamed.toolLoopReason,
         toolLoopUsed: streamed.toolLoopUsed,
         attemptedToolIds: streamed.attemptedToolIds,
+        resolvedAllowedToolIds:
+          streamed.resolvedAllowedToolIds || context.resolvedAllowedToolIds,
+        resolvedAgentSource: streamed.resolvedAgentSource || context.resolvedAgentSource,
+        parsedToolIntent: streamed.parsedToolIntent,
+        toolIntentDisposition: streamed.toolIntentDisposition,
+        toolIntentRejectionReason: streamed.toolIntentRejectionReason,
         codeDiscoveryMode: streamed.codeDiscoveryMode,
         codeDiscoveryFallback: streamed.codeDiscoveryFallback,
         astSource: streamed.astSource,

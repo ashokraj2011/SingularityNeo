@@ -14,7 +14,7 @@ import type {
   LearningUpdate,
 } from '../src/types';
 import { buildAgentKnowledgeLens } from '../src/lib/agentKnowledge';
-import { getCapabilityBundle } from './repository';
+import { getCapabilityBundle } from './domains/self-service/repository';
 import {
   getAgentLearningDriftState,
   getAgentLearningProfileVersionHistory,

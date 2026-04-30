@@ -48,7 +48,7 @@ vi.mock('../swarmParticipants', () => ({
 }));
 
 import { assertCapabilityPermission } from '../access';
-import { getCapabilityBundle } from '../repository';
+import { getCapabilityBundle } from '../domains/self-service/repository';
 import {
   createSwarmSession,
   findOpenSwarmSessionForScope,

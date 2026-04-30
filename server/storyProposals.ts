@@ -23,7 +23,7 @@ import type {
 import { query, transaction } from './db';
 import { createWorkItemRecord, extractJsonObject } from './execution/service';
 import { invokeCapabilityChat } from './githubModels';
-import { getCapabilityBundle } from './repository';
+import { getCapabilityBundle } from './domains/self-service/repository';
 
 type CapabilityBundle = Awaited<ReturnType<typeof getCapabilityBundle>>;
 

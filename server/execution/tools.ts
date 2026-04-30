@@ -1299,11 +1299,17 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   browse_code: {
     id: "browse_code",
     description: toolDescription("browse_code"),
-    usageExample: '{"kind":"interface","limit":30}',
+    usageExample:
+      '{"query":"How many operators are there in the rule engine?","kind":"class","limit":30}',
     parameterSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
+        query: {
+          type: "string",
+          description:
+            "Optional natural-language code question or symbol query to resolve semantically before broad listing.",
+        },
         kind: {
           type: "string",
           description: "Optional symbol kind filter such as class, function, interface, method, type, enum, or variable.",
@@ -1325,6 +1331,7 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         throw new Error("browse_code requires a capability context.");
       }
 
+      const queryRaw = String(args.query || args.pattern || "").trim();
       const kindRaw = String(args.kind || "").trim().toLowerCase();
       const validKinds = new Set(["class", "function", "interface", "method", "type", "enum", "variable", "property"]);
       const kind = validKinds.has(kindRaw) ? (kindRaw as any) : undefined;
@@ -1356,9 +1363,155 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         ...baseClones,
       ];
 
+      const semanticSearch =
+        queryRaw.length > 0
+          ? buildCodeSearchCandidates(queryRaw)
+          : null;
+      const semanticCandidates =
+        semanticSearch?.candidates.length
+          ? semanticSearch.candidates
+          : queryRaw
+            ? [queryRaw]
+            : [];
+
+      if (semanticCandidates.length > 0) {
+        let localSemanticSymbols: Array<any & { _checkoutRoot: string }> = [];
+        let localSemanticFreshness: string | undefined;
+
+        for (const clone of [
+          ...localCloneCandidates.filter(e => e.isPrimary),
+          ...localCloneCandidates.filter(e => !e.isPrimary),
+        ]) {
+          const cloneRoot = clone.checkoutPath.replace(/\/+$/, "");
+          for (const candidateQuery of semanticCandidates) {
+            const result = await searchLocalCheckoutSymbols({
+              checkoutPath: clone.checkoutPath,
+              capabilityId: capability.id,
+              repositoryId: clone.repositoryId,
+              query: candidateQuery,
+              limit: Math.min(limit, 25),
+            }).catch(() => null);
+            if (result?.symbols?.length) {
+              localSemanticFreshness = result.builtAt || localSemanticFreshness;
+              localSemanticSymbols.push(
+                ...result.symbols.map(symbol => ({
+                  ...symbol,
+                  _checkoutRoot: cloneRoot,
+                })),
+              );
+            }
+            if (localSemanticSymbols.length >= limit) {
+              break;
+            }
+          }
+          if (localSemanticSymbols.length >= limit) {
+            break;
+          }
+        }
+
+        const filteredLocalSemanticSymbols = Array.from(
+          new Map(
+            localSemanticSymbols
+              .filter(symbol =>
+                filePathPrefix
+                  ? String(symbol.filePath || "").startsWith(
+                      filePathPrefix.replace(/^\/+/, ""),
+                    )
+                  : true,
+              )
+              .map(symbol => [`${symbol._checkoutRoot}:${symbol.symbolId}`, symbol]),
+          ).values(),
+        ).slice(0, limit);
+
+        if (filteredLocalSemanticSymbols.length > 0) {
+          const output = [
+            "NOTE: Paths below are absolute. Pass them directly to workspace_read.",
+            "Do NOT cd to or construct directory paths — only these paths exist on disk.",
+            "",
+            ...filteredLocalSemanticSymbols.map(symbol =>
+              `${symbol.qualifiedSymbolName || symbol.symbolName} (${symbol.kind}) ${symbol._checkoutRoot}/${String(symbol.filePath).replace(/^\/+/, "")}:${symbol.sliceStartLine ?? symbol.startLine}-${symbol.sliceEndLine ?? symbol.endLine}`,
+            ),
+          ].join("\n");
+          return {
+            summary: `Found ${filteredLocalSemanticSymbols.length} semantic symbol match${filteredLocalSemanticSymbols.length === 1 ? "" : "es"} for ${queryRaw}.`,
+            stdoutPreview: previewText(output),
+            details: {
+              query: queryRaw,
+              normalizedQueries: semanticCandidates,
+              symbols: filteredLocalSemanticSymbols.map(symbol => ({
+                symbolId: symbol.symbolId,
+                symbolName: symbol.symbolName,
+                qualifiedSymbolName: symbol.qualifiedSymbolName,
+                kind: symbol.kind,
+                filePath: `${symbol._checkoutRoot}/${String(symbol.filePath).replace(/^\/+/, "")}`,
+                startLine: symbol.sliceStartLine ?? symbol.startLine,
+                endLine: symbol.sliceEndLine ?? symbol.endLine,
+                signature: symbol.signature,
+                repositoryId: symbol.repositoryId,
+                checkoutRoot: symbol._checkoutRoot,
+              })),
+              source: "local-clone",
+              codeIndexSource: "local-checkout",
+              codeIndexFreshness: localSemanticFreshness,
+              codeDiscoveryMode: "ast-first",
+              mode: "symbol-search",
+            },
+          };
+        }
+
+        let indexedMatches: Awaited<ReturnType<typeof searchCodeSymbols>> = [];
+        for (const candidateQuery of semanticCandidates) {
+          indexedMatches = (await searchCodeSymbols(capability.id, candidateQuery, {
+            limit: Math.min(limit, 25),
+          }).catch(() => []))
+            .filter(symbol =>
+              filePathPrefix
+                ? symbol.filePath.startsWith(filePathPrefix.replace(/^\/+/, ""))
+                : true,
+            );
+          if (indexedMatches.length > 0) {
+            break;
+          }
+        }
+        if (indexedMatches.length > 0) {
+          const output = indexedMatches
+            .slice(0, limit)
+            .map(
+              symbol =>
+                `${symbol.qualifiedSymbolName || symbol.symbolName} (${symbol.kind}) ${symbol.filePath}:${symbol.sliceStartLine || symbol.startLine}-${symbol.sliceEndLine || symbol.endLine}`,
+            )
+            .join("\n");
+          return {
+            summary: `Found ${Math.min(indexedMatches.length, limit)} semantic symbol match${indexedMatches.length === 1 ? "" : "es"} for ${queryRaw}.`,
+            stdoutPreview: previewText(output),
+            details: {
+              query: queryRaw,
+              normalizedQueries: semanticCandidates,
+              symbols: indexedMatches.slice(0, limit),
+              source: "capability-index",
+              codeIndexSource: "capability-index",
+              codeDiscoveryMode: "ast-first",
+              mode: "symbol-search",
+            },
+          };
+        }
+      }
+
       if (localCloneCandidates.length === 0) {
         // Fall back to DB index.
-        const dbResults = await searchCodeSymbols(capability.id, kindRaw || "*", { limit: limit as any }).catch(() => []);
+        const dbResults = semanticCandidates.length
+          ? await (async () => {
+              for (const candidateQuery of semanticCandidates) {
+                const matches = await searchCodeSymbols(capability.id, candidateQuery, {
+                  limit: limit as any,
+                }).catch(() => []);
+                if (matches.length > 0) {
+                  return matches;
+                }
+              }
+              return [] as Awaited<ReturnType<typeof searchCodeSymbols>>;
+            })()
+          : await searchCodeSymbols(capability.id, kindRaw || "*", { limit: limit as any }).catch(() => []);
         if (dbResults.length === 0) {
           const workspacePath = await resolveWorkspacePath(
             capability,
@@ -1375,6 +1528,13 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               .split("\n")
               .filter(Boolean)
               .filter((filePath) => /\.(ts|tsx|js|jsx|mjs|cjs|java|py|pyw)$/i.test(filePath))
+              .filter((filePath) =>
+                semanticSearch?.searchTerms?.length
+                  ? semanticSearch.searchTerms.some(term =>
+                      filePath.toLowerCase().includes(term.toLowerCase()),
+                    )
+                  : true,
+              )
               .filter((filePath) =>
                 filePathPrefix ? filePath.startsWith(filePathPrefix.replace(/^\/+/, "")) : true,
               )

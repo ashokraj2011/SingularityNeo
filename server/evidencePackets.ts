@@ -10,7 +10,11 @@ import type {
 } from '../src/types';
 import { getLatestRunForWorkItem, getWorkflowRunDetail, listWorkflowRunEvents } from './execution/repository';
 import { getCompletedWorkOrderEvidence } from './ledger';
-import { getCapabilityBundle, getWorkspaceSettings, replaceCapabilityWorkspaceContentRecord } from './repository';
+import {
+  getCapabilityBundle,
+  getWorkspaceSettings,
+  replaceCapabilityWorkspaceContentRecord,
+} from './domains/self-service/repository';
 import { buildWorkItemExplainDetail } from './workItemExplain';
 import { summarizeCapabilityConnectorContext } from './connectors';
 import { query } from './db';

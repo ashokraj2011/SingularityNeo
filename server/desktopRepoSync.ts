@@ -14,16 +14,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { CapabilityRepository } from '../src/types';
 import {
   buildCapabilityBaseRepositoryPath,
-  buildCapabilityCheckoutSlug,
-  buildRepositoryCheckoutSlug,
 } from './workItemCheckouts';
 import { getDesktopExecutorRegistration } from './executionOwnership';
-import { getCapabilityRepositoriesRecord, getCapabilityBundle } from './repository';
+import {
+  getCapabilityBundle,
+} from './domains/self-service/repository';
 import { resolveDesktopWorkspace } from './desktopWorkspaces';
 import { refreshCapabilityCodeIndex } from './codeIndex/ingest';
 import {
@@ -48,6 +49,24 @@ export interface CapabilityBaseCloneEntry {
 }
 
 const baseCloneRegistry = new Map<string, CapabilityBaseCloneEntry[]>();
+
+interface CheckoutChangeFingerprint {
+  branch: string;
+  headSha: string;
+  workingTreeDigest: string;
+  dirty: boolean;
+  token: string;
+}
+
+interface BaseCloneRefreshState {
+  lastQueuedFingerprint?: CheckoutChangeFingerprint;
+  lastObservedAt?: string;
+  lastRefreshReason?: string;
+}
+
+const baseCloneRefreshState = new Map<string, BaseCloneRefreshState>();
+const capabilityCodeIndexRefreshes = new Map<string, Promise<void>>();
+const capabilityCodeIndexQueuedRoots = new Map<string, Record<string, string>>();
 
 /**
  * Returns the registered base clone entries for a capability, or an empty
@@ -139,6 +158,161 @@ const fetchRepository = async (checkoutPath: string): Promise<void> => {
   } catch {
     // Network unreachable — leave the existing clone as-is.
   }
+};
+
+const buildCheckoutChangeFingerprint = async (
+  checkoutPath: string,
+): Promise<CheckoutChangeFingerprint | null> => {
+  if (!(await isGitRepository(checkoutPath))) {
+    return null;
+  }
+
+  const [branch, headSha, statusOutput] = await Promise.all([
+    runGit(checkoutPath, ['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => ''),
+    runGit(checkoutPath, ['rev-parse', 'HEAD']).catch(() => ''),
+    runGit(checkoutPath, ['status', '--short', '--untracked-files=normal']).catch(() => ''),
+  ]);
+
+  const normalizedBranch = String(branch || '').trim();
+  const normalizedHeadSha = String(headSha || '').trim();
+  const normalizedStatus = String(statusOutput || '').trim();
+  if (!normalizedBranch && !normalizedHeadSha && !normalizedStatus) {
+    return null;
+  }
+
+  const workingTreeDigest = createHash('sha1')
+    .update(normalizedStatus)
+    .digest('hex');
+  const token = createHash('sha1')
+    .update([normalizedBranch, normalizedHeadSha, normalizedStatus].join('\n--\n'))
+    .digest('hex');
+
+  return {
+    branch: normalizedBranch,
+    headSha: normalizedHeadSha,
+    workingTreeDigest,
+    dirty: Boolean(normalizedStatus),
+    token,
+  };
+};
+
+const queueCapabilityCodeIndexRefresh = ({
+  capabilityId,
+  localRepositoryRoots,
+}: {
+  capabilityId: string;
+  localRepositoryRoots: Record<string, string>;
+}) => {
+  if (Object.keys(localRepositoryRoots).length === 0) {
+    return;
+  }
+
+  const mergedRoots = {
+    ...(capabilityCodeIndexQueuedRoots.get(capabilityId) ?? {}),
+    ...localRepositoryRoots,
+  };
+  capabilityCodeIndexQueuedRoots.set(capabilityId, mergedRoots);
+
+  if (capabilityCodeIndexRefreshes.has(capabilityId)) {
+    return;
+  }
+
+  const refresh = (async () => {
+    while (true) {
+      const nextRoots = capabilityCodeIndexQueuedRoots.get(capabilityId);
+      capabilityCodeIndexQueuedRoots.delete(capabilityId);
+      if (!nextRoots || Object.keys(nextRoots).length === 0) {
+        break;
+      }
+
+      try {
+        await refreshCapabilityCodeIndex(capabilityId, {
+          localRepositoryRoots: nextRoots,
+        });
+      } catch (err) {
+        console.error(
+          `[desktopRepoSync] capability code index refresh failed for ${capabilityId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  })().finally(() => {
+    capabilityCodeIndexRefreshes.delete(capabilityId);
+  });
+
+  capabilityCodeIndexRefreshes.set(capabilityId, refresh);
+};
+
+const resolveBaseCloneRefreshReason = ({
+  previous,
+  current,
+  freshness,
+  forcedReason,
+}: {
+  previous?: CheckoutChangeFingerprint;
+  current?: CheckoutChangeFingerprint | null;
+  freshness?: string;
+  forcedReason?: string;
+}) => {
+  if (forcedReason) {
+    return forcedReason;
+  }
+  if (!freshness) {
+    return 'ast-missing';
+  }
+  if (!current) {
+    return null;
+  }
+  if (!previous) {
+    return 'checkout-state-untracked';
+  }
+  if (previous.headSha !== current.headSha) {
+    return 'git-head-changed';
+  }
+  if (previous.branch !== current.branch) {
+    return 'git-branch-changed';
+  }
+  if (previous.workingTreeDigest !== current.workingTreeDigest) {
+    return current.dirty ? 'working-tree-changed' : 'working-tree-cleaned';
+  }
+  return null;
+};
+
+const queueBaseCloneAstRefresh = ({
+  capabilityId,
+  entry,
+  fingerprint,
+  reason,
+  includeCapabilityCodeIndexRefresh = true,
+}: {
+  capabilityId: string;
+  entry: CapabilityBaseCloneEntry;
+  fingerprint?: CheckoutChangeFingerprint | null;
+  reason: string;
+  includeCapabilityCodeIndexRefresh?: boolean;
+}) => {
+  queueLocalCheckoutAstRefresh({
+    checkoutPath: entry.checkoutPath,
+    capabilityId,
+    repositoryId: entry.repositoryId,
+  });
+  if (includeCapabilityCodeIndexRefresh) {
+    queueCapabilityCodeIndexRefresh({
+      capabilityId,
+      localRepositoryRoots: {
+        [entry.repositoryId]: entry.checkoutPath,
+      },
+    });
+  }
+  baseCloneRefreshState.set(entry.checkoutPath, {
+    lastQueuedFingerprint: fingerprint || undefined,
+    lastObservedAt: new Date().toISOString(),
+    lastRefreshReason: reason,
+  });
+  console.log(
+    `[desktopRepoSync] AST refresh queued for ${entry.repositoryLabel} (${capabilityId}) because ${reason}`,
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -310,12 +484,32 @@ export const syncCapabilityRepositoriesForDesktop = async ({
         );
       }
 
-      // 4. Queue AST refresh (non-blocking).
-      queueLocalCheckoutAstRefresh({
-        checkoutPath,
-        capabilityId,
-        repositoryId: repo.id,
+      // 4. Queue AST refresh when the clone is new or the local cache is missing.
+      const fingerprint = await buildCheckoutChangeFingerprint(checkoutPath).catch(() => null);
+      const freshness = getLocalCheckoutAstFreshness(checkoutPath);
+      const forcedReason = status === 'cloned' ? 'repo-cloned' : undefined;
+      const refreshReason = resolveBaseCloneRefreshReason({
+        previous: baseCloneRefreshState.get(checkoutPath)?.lastQueuedFingerprint,
+        current: fingerprint,
+        freshness,
+        forcedReason,
       });
+      if (refreshReason) {
+        queueBaseCloneAstRefresh({
+          capabilityId,
+          entry: {
+            repositoryId: repo.id,
+            repositoryLabel: repo.label || repo.url,
+            checkoutPath,
+            isPrimary: Boolean(repo.isPrimary),
+            syncedAt: new Date().toISOString(),
+            isGitRepo: true,
+          },
+          fingerprint,
+          reason: refreshReason,
+          includeCapabilityCodeIndexRefresh: false,
+        });
+      }
 
       // 5. Record in the local roots map for the capability code index.
       localRepositoryRoots[repo.id] = checkoutPath;
@@ -358,17 +552,10 @@ export const syncCapabilityRepositoriesForDesktop = async ({
 
   // 7. Refresh the capability code index using local clones where available.
   //    Run in the background — do not block the caller.
-  if (Object.keys(localRepositoryRoots).length > 0) {
-    refreshCapabilityCodeIndex(capabilityId, {
-      localRepositoryRoots,
-    }).catch(err => {
-      console.error(
-        `[desktopRepoSync] capability code index refresh failed for ${capabilityId}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    });
-  }
+  queueCapabilityCodeIndexRefresh({
+    capabilityId,
+    localRepositoryRoots,
+  });
 
   const report: CapabilityRepoSyncReport = {
     capabilityId,
@@ -401,15 +588,15 @@ export const syncCapabilityRepositoriesForDesktop = async ({
 // that:
 //   1. git-fetches each registered base clone (background, ignores network
 //      errors so an offline laptop never breaks the loop)
-//   2. Queues a non-blocking AST re-index for every clone whose index is
-//      older than AST_REFRESH_INTERVAL_MS
+//   2. Queues a non-blocking AST re-index only when the working tree/HEAD
+//      changed or the local AST cache is missing
 //
 // The loop uses setTimeout (not setInterval) so that if the work takes
 // longer than the interval it simply delays the next tick rather than
 // piling up concurrent refreshes.
 // ---------------------------------------------------------------------------
 
-/** How often each base clone's AST is refreshed (default 5 minutes). */
+/** How often each base clone is checked for AST-relevant repo changes. */
 const AST_REFRESH_INTERVAL_MS =
   Number(process.env.AST_REFRESH_INTERVAL_MS) || 5 * 60 * 1000;
 
@@ -417,7 +604,7 @@ const AST_REFRESH_INTERVAL_MS =
 // syncCapabilityRepositoriesForDesktop is called multiple times (e.g. re-claim).
 const periodicRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-const runPeriodicAstRefresh = async (capabilityId: string): Promise<void> => {
+export const runPeriodicAstRefreshPass = async (capabilityId: string): Promise<void> => {
   const entries = getCapabilityBaseClones(capabilityId).filter(e => e.isGitRepo);
   if (entries.length === 0) return;
 
@@ -426,19 +613,27 @@ const runPeriodicAstRefresh = async (capabilityId: string): Promise<void> => {
     //    fetchRepository already swallows network errors silently.
     await fetchRepository(entry.checkoutPath);
 
-    // 2. Re-index the checkout.  Check freshness first to skip a re-index that
-    //    was already kicked off by a work-item checkout or admin action.
+    // 2. Re-index only if the repo content actually changed or the AST cache is missing.
     const freshness = getLocalCheckoutAstFreshness(entry.checkoutPath);
-    const ageMs = freshness ? Date.now() - new Date(freshness).getTime() : Infinity;
-    if (ageMs >= AST_REFRESH_INTERVAL_MS) {
-      queueLocalCheckoutAstRefresh({
-        checkoutPath: entry.checkoutPath,
+    const previous = baseCloneRefreshState.get(entry.checkoutPath)?.lastQueuedFingerprint;
+    const current = await buildCheckoutChangeFingerprint(entry.checkoutPath).catch(() => null);
+    const refreshReason = resolveBaseCloneRefreshReason({
+      previous,
+      current,
+      freshness,
+    });
+    if (refreshReason) {
+      queueBaseCloneAstRefresh({
         capabilityId,
-        repositoryId: entry.repositoryId,
+        entry,
+        fingerprint: current,
+        reason: refreshReason,
       });
-      console.log(
-        `[desktopRepoSync] periodic AST refresh queued for ${entry.repositoryLabel} (${capabilityId})`,
-      );
+    } else {
+      baseCloneRefreshState.set(entry.checkoutPath, {
+        ...baseCloneRefreshState.get(entry.checkoutPath),
+        lastObservedAt: new Date().toISOString(),
+      });
     }
   }
 };
@@ -453,7 +648,7 @@ export const schedulePeriodicAstRefresh = (capabilityId: string): void => {
   if (existing !== undefined) clearTimeout(existing);
 
   const tick = () => {
-    runPeriodicAstRefresh(capabilityId)
+    runPeriodicAstRefreshPass(capabilityId)
       .catch(err =>
         console.warn(
           `[desktopRepoSync] periodic AST refresh error for ${capabilityId}:`,
@@ -481,5 +676,10 @@ export const cancelPeriodicAstRefresh = (capabilityId: string): void => {
   if (timer !== undefined) {
     clearTimeout(timer);
     periodicRefreshTimers.delete(capabilityId);
+  }
+  capabilityCodeIndexQueuedRoots.delete(capabilityId);
+  const entries = getCapabilityBaseClones(capabilityId);
+  for (const entry of entries) {
+    baseCloneRefreshState.delete(entry.checkoutPath);
   }
 };

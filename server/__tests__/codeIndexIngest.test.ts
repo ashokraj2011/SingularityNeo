@@ -25,7 +25,7 @@ vi.mock('../db', () => ({
   transaction: transactionMock,
 }));
 
-vi.mock('../repository', () => ({
+vi.mock('../domains/self-service/repository', () => ({
   getCapabilityRepositoriesRecord: getCapabilityRepositoriesRecordMock,
   getWorkspaceSettings: getWorkspaceSettingsMock,
 }));

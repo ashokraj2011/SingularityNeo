@@ -20,11 +20,11 @@ import type {
   WorkflowRunDetail,
   WorkflowRunStep,
 } from '../src/types';
+import { appendCapabilityMessageRecord } from './domains/context-fabric';
 import {
-  appendCapabilityMessageRecord,
   getCapabilityBundle,
   replaceCapabilityWorkspaceContentRecord,
-} from './repository';
+} from './domains/self-service';
 import {
   createApprovalDecision,
   createRunEvent,

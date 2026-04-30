@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getCapabilityBundle } from '../repository';
+import { getCapabilityBundle } from '../domains/self-service/repository';
 import { queueAgentLearningJob } from '../agentLearning/repository';
 
 vi.mock('../githubModels', () => ({

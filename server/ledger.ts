@@ -23,7 +23,11 @@ import {
   listWorkflowRunsByCapability,
   listWorkflowRunsForWorkItem,
 } from './execution/repository';
-import { getCapabilityArtifact, getCapabilityArtifactFileMeta, getCapabilityBundle } from './repository';
+import {
+  getCapabilityArtifact,
+  getCapabilityArtifactFileMeta,
+} from './domains/tool-plane';
+import { getCapabilityBundle } from './domains/self-service';
 
 const ACTIVE_RUN_STATUSES = new Set([
   'QUEUED',

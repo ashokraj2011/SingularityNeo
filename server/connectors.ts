@@ -14,7 +14,11 @@ import type {
   WorkspaceConnectorSettings,
 } from '../src/types';
 import { normalizeWorkspaceConnectorSettings } from '../src/lib/workspaceConnectors';
-import { getCapabilityBundle, getWorkspaceSettings, replaceCapabilityWorkspaceContentRecord } from './repository';
+import {
+  getCapabilityBundle,
+  getWorkspaceSettings,
+  replaceCapabilityWorkspaceContentRecord,
+} from './domains/self-service/repository';
 import { refreshCapabilityMemory } from './memory';
 
 const createArtifactId = () => `ART-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;

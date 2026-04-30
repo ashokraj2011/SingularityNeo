@@ -6,7 +6,7 @@ import {
   listRecentWorkflowRunEvents,
   listWorkflowRunEvents,
 } from './execution/repository';
-import { getCapabilityBundle } from './repository';
+import { getCapabilityBundle } from './domains/self-service/repository';
 
 export const buildCapabilityInteractionFeedSnapshot = async ({
   capabilityId,

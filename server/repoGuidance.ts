@@ -18,7 +18,7 @@
  *   the learning judge can include them in its rubric.
  */
 import { query } from './db';
-import { getCapabilityRepositoriesRecord } from './repository';
+import { getCapabilityRepositoriesRecord } from './domains/self-service/repository';
 import type {
   CapabilityCopilotGuidanceCategory,
   CapabilityCopilotGuidanceFetchStatus,

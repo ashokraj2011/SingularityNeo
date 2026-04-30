@@ -12,7 +12,7 @@
  * changing the call shape.
  */
 import { query } from '../db';
-import { getCapabilityRepositoriesRecord } from '../repository';
+import { getCapabilityRepositoriesRecord } from '../domains/self-service/repository';
 import { detectSourceLanguage } from './parse';
 import type {
   ArchLayer,

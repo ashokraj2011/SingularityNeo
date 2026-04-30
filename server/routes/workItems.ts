@@ -43,16 +43,18 @@ import { parseActorContext } from "../requestActor";
 import {
   acceptWorkItemHandoffPacketRecord,
   createWorkItemHandoffPacketRecord,
-  getCapabilityBundle,
   getWorkItemExecutionContextRecord,
   initializeWorkItemExecutionContextRecord,
   listWorkItemHandoffPacketsRecord,
   releaseWorkItemCodeClaimRecord,
-  replaceCapabilityWorkspaceContentRecord,
   updateWorkItemBranchRecord,
   upsertWorkItemCheckoutSessionRecord,
   upsertWorkItemCodeClaimRecord,
-} from "../repository";
+} from "../domains/tool-plane";
+import {
+  getCapabilityBundle,
+  replaceCapabilityWorkspaceContentRecord,
+} from "../domains/self-service";
 import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
 import { isPathInsideWorkspaceRoot } from "../workspacePaths";
 

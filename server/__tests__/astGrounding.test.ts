@@ -96,6 +96,46 @@ describe("buildAstGroundingSummary", () => {
     expect(summary.prompt).toContain("BillingService.charge");
   });
 
+  it("uses normalized candidate queries for plural inventory questions", async () => {
+    searchLocalCheckoutSymbolsMock.mockImplementation(
+      async ({ query }: { query: string }) => ({
+        source: "local-checkout",
+        builtAt: "2026-04-30T08:00:00.000Z",
+        symbols:
+          query === "operator"
+            ? [
+                {
+                  symbolId: "SYM-OP-ENUM",
+                  symbolName: "Operator",
+                  qualifiedSymbolName: "org.example.rules.Operator",
+                  kind: "ENUM",
+                  filePath: "src/main/java/org/example/rules/Operator.java",
+                  sliceStartLine: 1,
+                  sliceEndLine: 22,
+                },
+              ]
+            : [],
+      }),
+    );
+    getLocalCheckoutAstFreshnessMock.mockReturnValue("2026-04-30T08:00:00.000Z");
+
+    const summary = await buildAstGroundingSummary({
+      capability: { id: "CAP-OP", name: "Rule Engine" },
+      message: "What are the operators in the rule engine?",
+      checkoutPath: "/tmp/rule-engine",
+      repositoryId: "REPO-OP",
+    });
+
+    expect(summary.astGroundingMode).toBe("ast-grounded-local-clone");
+    expect(summary.prompt).toContain("Operator");
+    expect(
+      searchLocalCheckoutSymbolsMock.mock.calls.map(
+        ([input]: [{ query: string }]) => input.query,
+      ),
+    ).toEqual(expect.arrayContaining(["operators", "operator"]));
+    expect(searchCodeSymbolsMock).not.toHaveBeenCalled();
+  });
+
   it("uses local path-based fallback for broad code questions like operator counts", async () => {
     searchLocalCheckoutSymbolsMock.mockResolvedValue({
       source: "local-checkout",

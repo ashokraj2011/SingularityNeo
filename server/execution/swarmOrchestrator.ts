@@ -36,7 +36,10 @@ import {
   type SwarmVoteInput,
 } from '../llmTools/swarmVoteTool';
 import { buildMemoryContext } from '../memory';
-import { getCapabilityBundle, type CapabilityBundle } from '../repository';
+import {
+  getCapabilityBundle,
+  type CapabilityBundle,
+} from '../domains/self-service/repository';
 import {
   buildBudgetedPrompt,
   type BudgetFragment,

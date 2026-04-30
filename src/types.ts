@@ -4545,10 +4545,25 @@ export interface ChatStreamEvent {
   historyRolledUp?: boolean;
   workContextHydrated?: boolean;
   workContextSource?: "live-work-item" | "live-workspace";
+  effectiveMessage?: string;
+  effectiveMessageSource?: "raw-user" | "bound-follow-up" | "active-work-scope" | "tool-continuation";
+  followUpIntent?: "none" | "continue-thread" | "run-proposed-search" | "active-work-scope";
   followUpBindingMode?: "none" | "latest-assistant-turn" | "active-work-scope";
   chatRuntimeLane?: "server-runtime-route" | "desktop-runtime-worker";
+  toolLoopEnabled?: boolean;
+  toolLoopReason?: "repo-aware-code-question" | "disabled-by-caller" | "no-read-only-tools";
   toolLoopUsed?: boolean;
   attemptedToolIds?: ToolAdapterId[];
+  resolvedAllowedToolIds?: ToolAdapterId[];
+  resolvedAgentSource?: string;
+  parsedToolIntent?: {
+    action: "invoke_tool";
+    toolId?: ToolAdapterId;
+    requestedToolId?: string;
+    args: Record<string, unknown>;
+  };
+  toolIntentDisposition?: "none" | "executed" | "repaired" | "rejected" | "stripped";
+  toolIntentRejectionReason?: string;
   codeDiscoveryMode?: "prompt-only" | "ast-first-tool-loop";
   codeDiscoveryFallback?: "none" | "capability-index" | "text-search";
   astSource?: "none" | "local-checkout" | "capability-index" | "text-search";

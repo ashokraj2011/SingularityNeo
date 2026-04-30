@@ -163,8 +163,8 @@ export const buildAstGroundingSummary = async ({
     };
   }
 
-  const { queries, searchTerms } = buildCodeSearchCandidates(message);
-  if (queries.length === 0) {
+  const { queries, searchTerms, candidates } = buildCodeSearchCandidates(message);
+  if (candidates.length === 0) {
     return {
       astGroundingMode: "no-ast-grounding",
       isCodeQuestion,
@@ -201,7 +201,7 @@ export const buildAstGroundingSummary = async ({
     if (!firstValidCandidate) firstValidCandidate = candidate;
 
     const localResults = [];
-    for (const query of queries) {
+    for (const query of candidates) {
       const result = await searchLocalCheckoutSymbols({
         checkoutPath: candidate.checkoutPath,
         capabilityId: capability.id,
@@ -298,7 +298,7 @@ export const buildAstGroundingSummary = async ({
   }
 
   const remoteResults = [];
-  for (const query of queries) {
+  for (const query of candidates) {
     const result = await searchCodeSymbols(capability.id, query, {
       limit: 6,
     }).catch(() => []);

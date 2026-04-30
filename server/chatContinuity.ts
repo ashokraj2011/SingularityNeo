@@ -8,10 +8,39 @@ export type FollowUpBindingMode =
   | 'latest-assistant-turn'
   | 'active-work-scope';
 
+export type FollowUpIntent =
+  | 'none'
+  | 'continue-thread'
+  | 'run-proposed-search'
+  | 'active-work-scope';
+
+export type EffectiveMessageSource =
+  | 'raw-user'
+  | 'bound-follow-up'
+  | 'active-work-scope'
+  | 'tool-continuation';
+
+export interface ResolvedChatFollowUpContext {
+  history: ReturnType<typeof normalizeChatHistory>;
+  rawMessage: string;
+  contextMessage: string;
+  effectiveMessage: string;
+  effectiveMessageSource: EffectiveMessageSource;
+  followUpIntent: FollowUpIntent;
+  followUpContextPrompt?: string;
+  followUpBindingMode: FollowUpBindingMode;
+}
+
 const EXPLICIT_FOLLOW_UP_PATTERNS = [
   /^(yes|yeah|yep|yup|ok|okay|sure|please do|do it|do that|go ahead|continue|proceed|same)$/i,
   /^(show me|retry|mark done|approve|reject|delegate)$/i,
+  /^(search(?: and tell me)?|look it up|find it|check the repo|go ahead and search)$/i,
   /^(why|how so|what else|and then)$/i,
+];
+
+const SEARCH_ACCEPTANCE_PATTERNS = [
+  /^(yes|yeah|yep|yup|ok|okay|sure|please do|do it|do that|go ahead|continue|proceed|same)$/i,
+  /^(search(?: and tell me)?|look it up|find it|check the repo|go ahead and search)$/i,
 ];
 
 const hasExplicitReference = (value: string) =>
@@ -25,6 +54,54 @@ const summarizeTurn = (value: string, maxLength = 420) =>
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
+
+const didAssistantOfferRepoSearch = (value: string) => {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return false;
+  }
+  const hasRepoTarget =
+    /\b(?:repo|repository|workspace|codebase|source code|source|code)\b/i.test(
+      normalized,
+    ) || /\b(?:browse_code|workspace_search|workspace_read)\b/i.test(normalized);
+  const hasSearchVerb =
+    /\b(?:search|browse|inspect|scan|find|check|look(?:\s+up|\s+through)?)\b/i.test(
+      normalized,
+    );
+  const hasOfferFrame =
+    /\b(?:would you like me to|if you want, i can|i can assist in|next recommended action|the next safe step would be|we would need to|you would need to)\b/i.test(
+      normalized,
+    ) || /\?\s*$/.test(normalized);
+
+  return hasRepoTarget && hasSearchVerb && hasOfferFrame;
+};
+
+const buildFollowUpResponse = ({
+  history,
+  trimmedLatestMessage,
+  followUpBindingMode,
+  followUpIntent,
+  effectiveMessage,
+  effectiveMessageSource,
+  followUpContextPrompt,
+}: {
+  history: ReturnType<typeof normalizeChatHistory>;
+  trimmedLatestMessage: string;
+  followUpBindingMode: FollowUpBindingMode;
+  followUpIntent: FollowUpIntent;
+  effectiveMessage: string;
+  effectiveMessageSource: EffectiveMessageSource;
+  followUpContextPrompt?: string;
+}): ResolvedChatFollowUpContext => ({
+  history,
+  rawMessage: trimmedLatestMessage,
+  contextMessage: effectiveMessage,
+  effectiveMessage,
+  effectiveMessageSource,
+  followUpIntent,
+  followUpContextPrompt,
+  followUpBindingMode,
+});
 
 const buildScopeLabel = ({
   sessionScope,
@@ -106,19 +183,21 @@ export const resolveChatFollowUpContext = ({
   workItemId?: string;
   runId?: string;
   workflowStepId?: string;
-}) => {
+}): ResolvedChatFollowUpContext => {
   const normalizedHistory = normalizeChatHistory({
     history,
     latestMessage,
   });
   const trimmedLatestMessage = String(latestMessage || '').trim();
   if (!trimmedLatestMessage) {
-    return {
+    return buildFollowUpResponse({
       history: normalizedHistory,
-      contextMessage: '',
-      followUpContextPrompt: undefined,
-      followUpBindingMode: 'none' as FollowUpBindingMode,
-    };
+      trimmedLatestMessage,
+      effectiveMessage: '',
+      effectiveMessageSource: 'raw-user',
+      followUpIntent: 'none',
+      followUpBindingMode: 'none',
+    });
   }
 
   const wordCount = trimmedLatestMessage.split(/\s+/).filter(Boolean).length;
@@ -128,17 +207,21 @@ export const resolveChatFollowUpContext = ({
     EXPLICIT_FOLLOW_UP_PATTERNS.some(pattern => pattern.test(trimmedLatestMessage));
 
   if (!looksLikeFollowUp) {
-    return {
+    return buildFollowUpResponse({
       history: normalizedHistory,
-      contextMessage: trimmedLatestMessage,
-      followUpContextPrompt: undefined,
-      followUpBindingMode: 'none' as FollowUpBindingMode,
-    };
+      trimmedLatestMessage,
+      effectiveMessage: trimmedLatestMessage,
+      effectiveMessageSource: 'raw-user',
+      followUpIntent: 'none',
+      followUpBindingMode: 'none',
+    });
   }
 
   const lastAssistantTurn = [...normalizedHistory]
     .reverse()
-    .find(item => String(item.role || '').toLowerCase() === 'agent');
+    .find(item =>
+      ['agent', 'assistant'].includes(String(item.role || '').toLowerCase()),
+    );
   const scopeLabel = buildScopeLabel({
     sessionScope,
     sessionScopeId,
@@ -149,45 +232,79 @@ export const resolveChatFollowUpContext = ({
 
   if (lastAssistantTurn?.content?.trim()) {
     const assistantSummary = summarizeTurn(lastAssistantTurn.content);
-    return {
+    const isSearchAcceptance = SEARCH_ACCEPTANCE_PATTERNS.some(pattern =>
+      pattern.test(trimmedLatestMessage),
+    );
+    const followUpIntent: FollowUpIntent =
+      isSearchAcceptance && didAssistantOfferRepoSearch(lastAssistantTurn.content)
+        ? 'run-proposed-search'
+        : 'continue-thread';
+    const effectiveMessage =
+      followUpIntent === 'run-proposed-search'
+        ? [
+            `Continue the same ${scopeLabel}.`,
+            `Previous assistant turn: ${assistantSummary}`,
+            `Latest user follow-up reply: ${trimmedLatestMessage}`,
+            'The user accepted the previously proposed repository/code search. Execute that grounded search now, carry forward the existing thread target, and answer from verified evidence instead of asking what to search for again.',
+          ].join('\n')
+        : [
+            `Follow-up reply in the same ${scopeLabel}.`,
+            `Previous assistant turn: ${assistantSummary}`,
+            `Operator reply: ${trimmedLatestMessage}`,
+          ].join('\n');
+    const followUpContextPrompt =
+      followUpIntent === 'run-proposed-search'
+        ? [
+            'Follow-up continuity context:',
+            `Treat the latest user message as acceptance of the previously proposed repository/code search in the same ${scopeLabel}.`,
+            `Most recent assistant turn in this thread:\n${assistantSummary}`,
+            `Latest user follow-up reply:\n${trimmedLatestMessage}`,
+            'Do not ask the user what to search for again. Continue the established repo/code search target from the thread, execute the internal discovery flow, and answer from grounded evidence.',
+          ].join('\n\n')
+        : [
+            'Follow-up continuity context:',
+            `Treat the latest user message as a direct follow-up inside the same ${scopeLabel}.`,
+            `Most recent assistant turn in this thread:\n${assistantSummary}`,
+            `Latest user follow-up reply:\n${trimmedLatestMessage}`,
+          ].join('\n\n');
+    return buildFollowUpResponse({
       history: normalizedHistory,
-      contextMessage: [
-        `Follow-up reply in the same ${scopeLabel}.`,
-        `Previous assistant turn: ${assistantSummary}`,
-        `Operator reply: ${trimmedLatestMessage}`,
-      ].join('\n'),
-      followUpContextPrompt: [
-        'Follow-up continuity context:',
-        `Treat the latest user message as a direct follow-up inside the same ${scopeLabel}.`,
-        `Most recent assistant turn in this thread:\n${assistantSummary}`,
-        `Latest user follow-up reply:\n${trimmedLatestMessage}`,
-      ].join('\n\n'),
-      followUpBindingMode: 'latest-assistant-turn' as FollowUpBindingMode,
-    };
+      trimmedLatestMessage,
+      effectiveMessage,
+      effectiveMessageSource: 'bound-follow-up',
+      followUpIntent,
+      followUpContextPrompt,
+      followUpBindingMode: 'latest-assistant-turn',
+    });
   }
 
   if (sessionScope === 'WORK_ITEM' || workItemId || runId || workflowStepId) {
-    return {
+    return buildFollowUpResponse({
       history: normalizedHistory,
-      contextMessage: [
+      trimmedLatestMessage,
+      effectiveMessage: [
         `Follow-up reply in the same ${scopeLabel}.`,
         `Operator reply: ${trimmedLatestMessage}`,
       ].join('\n'),
+      effectiveMessageSource: 'active-work-scope',
+      followUpIntent: 'active-work-scope',
       followUpContextPrompt: [
         'Follow-up continuity context:',
         `Treat the latest user message as a continuation inside the same ${scopeLabel}.`,
         `Latest user follow-up reply:\n${trimmedLatestMessage}`,
       ].join('\n\n'),
-      followUpBindingMode: 'active-work-scope' as FollowUpBindingMode,
-    };
+      followUpBindingMode: 'active-work-scope',
+    });
   }
 
-  return {
+  return buildFollowUpResponse({
     history: normalizedHistory,
-    contextMessage: trimmedLatestMessage,
-    followUpContextPrompt: undefined,
-    followUpBindingMode: 'none' as FollowUpBindingMode,
-  };
+    trimmedLatestMessage,
+    effectiveMessage: trimmedLatestMessage,
+    effectiveMessageSource: 'raw-user',
+    followUpIntent: 'none',
+    followUpBindingMode: 'none',
+  });
 };
 
 export const buildUnifiedChatContextPrompt = ({

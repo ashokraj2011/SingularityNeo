@@ -7,7 +7,7 @@ import type {
 } from '../src/types';
 import { isTestingWorkflowStep } from '../src/lib/workflowStepSemantics';
 import { WORKSPACE_EVAL_SUITE_TEMPLATES } from '../src/lib/workspaceFoundations';
-import { getCapabilityBundle } from './repository';
+import { getCapabilityBundle } from './domains/self-service/repository';
 import { buildMemoryContext, refreshCapabilityMemory } from './memory';
 import { query } from './db';
 import { defaultModel, requestGitHubModel } from './githubModels';

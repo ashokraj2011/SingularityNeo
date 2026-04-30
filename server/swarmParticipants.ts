@@ -10,7 +10,7 @@ import { query } from './db';
 import {
   getCapabilityBundle,
   type CapabilityBundle,
-} from './repository';
+} from './domains/self-service/repository';
 
 type LinkedCapabilityBucket = keyof ChatParticipantDirectory;
 
@@ -244,4 +244,3 @@ export const resolveAuthorizedSwarmParticipants = async ({
 
   return output;
 };
-

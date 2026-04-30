@@ -42,7 +42,7 @@ vi.mock('../workspaceIndex', () => ({
 
 import { query } from '../db';
 import { getAgentLearningProfile } from '../agentLearning/repository';
-import { getCapabilityBundle } from '../repository';
+import { getCapabilityBundle } from '../domains/self-service/repository';
 import { requestLocalOpenAIEmbeddings } from '../localOpenAIProvider';
 import {
   buildMemoryEmbeddingRefreshSummary,

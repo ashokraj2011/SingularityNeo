@@ -13,7 +13,7 @@ import {
   resolveActiveWorkspaceDatabaseBootstrapProfileId,
   upsertWorkspaceDatabaseBootstrapProfile,
 } from '../databaseProfiles';
-import { getCapabilityBundle } from '../repository';
+import { getCapabilityBundle } from '../domains/self-service';
 import {
   getCapabilityWorkspaceRoots,
   isWorkspacePathApproved,

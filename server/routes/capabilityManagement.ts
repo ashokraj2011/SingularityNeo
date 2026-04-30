@@ -17,7 +17,6 @@ import { sendApiError } from '../api/errors';
 import {
   addCapabilityAgentRecord,
   addCapabilitySkillRecord,
-  appendCapabilityMessageRecord,
   clearCapabilityMessageHistoryRecord,
   createCapabilityRecord,
   getCapabilityAlmExportRecord,
@@ -34,8 +33,9 @@ import {
   getWorkflowVersions,
   lockWorkflow,
   unlockWorkflow,
-  getPolicyTemplates,
-} from '../repository';
+} from '../domains/self-service';
+import { appendCapabilityMessageRecord } from '../domains/context-fabric';
+import { getPolicyTemplates } from '../domains/model-policy';
 import { parseActorContext } from '../requestActor';
 import { refreshCapabilityMemory } from '../memory';
 import {

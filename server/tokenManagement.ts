@@ -25,7 +25,10 @@ import {
   mapPromptReceiptRow,
   type PromptReceiptRecord,
 } from './execution/promptReceipts';
-import { fetchAppState, getCapabilityBundle } from './repository';
+import {
+  fetchAppState,
+  getCapabilityBundle,
+} from './domains/self-service/repository';
 
 export const TOKEN_SAVING_STRATEGIES: TokenSavingStrategyKey[] = [
   'context-budgeting',

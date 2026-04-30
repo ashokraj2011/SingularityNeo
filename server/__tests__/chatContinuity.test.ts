@@ -35,8 +35,13 @@ describe('chat continuity helpers', () => {
     });
 
     expect(resolved.followUpBindingMode).toBe('latest-assistant-turn');
+    expect(resolved.followUpIntent).toBe('run-proposed-search');
+    expect(resolved.effectiveMessageSource).toBe('bound-follow-up');
     expect(resolved.followUpContextPrompt).toContain('Most recent assistant turn');
-    expect(resolved.contextMessage).toContain('Operator reply: yes');
+    expect(resolved.contextMessage).toContain('Latest user follow-up reply: yes');
+    expect(resolved.effectiveMessage).toContain(
+      'Execute that grounded search now',
+    );
   });
 
   it('binds short follow-up replies to the active work scope when no assistant turn exists', () => {
@@ -50,6 +55,51 @@ describe('chat continuity helpers', () => {
     });
 
     expect(resolved.followUpBindingMode).toBe('active-work-scope');
+    expect(resolved.followUpIntent).toBe('active-work-scope');
+    expect(resolved.effectiveMessageSource).toBe('active-work-scope');
     expect(resolved.followUpContextPrompt).toContain('same work item WI-123');
+  });
+
+  it('treats explicit repo-search follow-ups as acceptance of the previous search offer', () => {
+    const resolved = resolveChatFollowUpContext({
+      history: [
+        {
+          role: 'agent',
+          content:
+            'I can browse the repository and search the codebase for operator definitions. Would you like me to do that now?',
+        },
+      ],
+      latestMessage: 'search and tell me',
+      sessionScope: 'GENERAL_CHAT',
+      sessionScopeId: 'CAP-1',
+    });
+
+    expect(resolved.followUpBindingMode).toBe('latest-assistant-turn');
+    expect(resolved.followUpIntent).toBe('run-proposed-search');
+    expect(resolved.effectiveMessageSource).toBe('bound-follow-up');
+    expect(resolved.followUpContextPrompt).toContain(
+      'Do not ask the user what to search for again.',
+    );
+  });
+
+  it('passes through non-follow-up messages unchanged', () => {
+    const resolved = resolveChatFollowUpContext({
+      history: [
+        {
+          role: 'agent',
+          content: 'Would you like me to search the workspace?',
+        },
+      ],
+      latestMessage: 'List the operator classes and their package names.',
+      sessionScope: 'GENERAL_CHAT',
+      sessionScopeId: 'CAP-1',
+    });
+
+    expect(resolved.followUpBindingMode).toBe('none');
+    expect(resolved.followUpIntent).toBe('none');
+    expect(resolved.effectiveMessageSource).toBe('raw-user');
+    expect(resolved.effectiveMessage).toBe(
+      'List the operator classes and their package names.',
+    );
   });
 });

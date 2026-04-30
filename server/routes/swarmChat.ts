@@ -23,7 +23,7 @@ import type {
 } from '../../src/types';
 import { assertCapabilityPermission } from '../access';
 import { query } from '../db';
-import { getCapabilityBundle } from '../repository';
+import { getCapabilityBundle } from '../domains/self-service';
 import {
   createSwarmSession,
   findOpenSwarmSessionForScope,

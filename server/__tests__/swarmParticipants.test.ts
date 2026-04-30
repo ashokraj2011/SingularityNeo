@@ -15,7 +15,7 @@ vi.mock('../repository', () => ({
 
 import { assertCapabilityPermission } from '../access';
 import { query } from '../db';
-import { getCapabilityBundle } from '../repository';
+import { getCapabilityBundle } from '../domains/self-service/repository';
 import {
   buildAuthorizedParticipantDirectory,
   resolveAuthorizedSwarmParticipants,

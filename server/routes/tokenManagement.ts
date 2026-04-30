@@ -3,7 +3,10 @@ import type { ProviderKey, TokenManagementPolicy } from '../../src/types';
 import { assertCapabilityPermission, getAuthorizedAppState } from '../access';
 import { sendApiError } from '../api/errors';
 import { parseActorContext } from '../requestActor';
-import { getCapabilityBundle, updateCapabilityRecord } from '../repository';
+import {
+  getCapabilityBundle,
+  updateCapabilityRecord,
+} from '../domains/self-service';
 import {
   buildTokenManagementCapabilitySnapshot,
   buildTokenManagementSummary,

@@ -19,7 +19,10 @@ import {
   renderWorkItemFlightRecorderMarkdown,
 } from './flightRecorder';
 import { buildCapabilityConnectorContext } from './connectors';
-import { getCapabilityBundle, replaceCapabilityWorkspaceContentRecord } from './repository';
+import {
+  getCapabilityBundle,
+  replaceCapabilityWorkspaceContentRecord,
+} from './domains/self-service/repository';
 
 const createArtifactId = () => `ART-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 

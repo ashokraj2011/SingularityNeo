@@ -22,7 +22,7 @@ vi.mock('../repository', () => ({
 import { __storyProposalTestUtils } from '../storyProposals';
 import { transaction } from '../db';
 import { createWorkItemRecord } from '../execution/service';
-import { getCapabilityBundle } from '../repository';
+import { getCapabilityBundle } from '../domains/self-service/repository';
 import { promoteStoryProposalBatch } from '../storyProposals';
 
 const buildBundle = () =>

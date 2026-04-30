@@ -9,7 +9,7 @@ import {
   startAgentBranchSession,
 } from '../agentGit/service';
 import { parseActorContext } from '../requestActor';
-import { getCapabilityBundle } from '../repository';
+import { getCapabilityBundle } from '../domains/self-service';
 
 const mapAgentGitStatus = (
   status:

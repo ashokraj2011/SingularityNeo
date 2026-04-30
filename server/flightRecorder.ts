@@ -25,7 +25,7 @@ import {
 } from './execution/repository';
 import { getCompletedWorkOrderEvidence } from './ledger';
 import { listPolicyDecisions } from './policy';
-import { getCapabilityBundle } from './repository';
+import { getCapabilityBundle } from './domains/self-service/repository';
 
 type VerdictFacts = {
   hasCompletedRun: boolean;

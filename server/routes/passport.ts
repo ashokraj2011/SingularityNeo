@@ -12,7 +12,7 @@ import { assertCapabilityPermission } from '../access';
 import { sendApiError } from '../api/errors';
 import { parseActorContext } from '../requestActor';
 import { getWorkflowRunDetail, listWorkflowRunEvents } from '../execution/repository';
-import { listWorkItemCodePatchArtifacts } from '../repository';
+import { listWorkItemCodePatchArtifacts } from '../domains/tool-plane';
 import { query } from '../db';
 import type { Artifact, WorkItem } from '../../src/types';
 

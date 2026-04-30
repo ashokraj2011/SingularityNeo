@@ -90,6 +90,10 @@ import { normalizeToolAdapterId } from "../toolIds";
 import { publishRunEvent } from "../eventBus";
 import { DEFAULT_PROVIDER_KEY, resolveAgentProviderKey } from "../providerRegistry";
 import { rollupToolHistory, type RollupCacheEntry } from "./historyRollup";
+import {
+  buildExecutionLlmContinuitySections,
+  buildRecentWorkItemConversationText,
+} from "./llmContextEnvelope";
 import { resolveModelForTurn } from "./modelRouter";
 import {
   buildExecutionRuntimeAgent,
@@ -165,10 +169,12 @@ import {
 import { captureCodeDiffReviewArtifact } from "./codeDiff";
 import {
   createWorkItemHandoffPacketRecord,
-  getCapabilityBundle,
   releaseWorkItemCodeClaimRecord,
+} from "../domains/tool-plane";
+import {
+  getCapabilityBundle,
   replaceCapabilityWorkspaceContentRecord,
-} from "../repository";
+} from "../domains/self-service";
 import {
   createTraceId,
   finishTelemetrySpan,
@@ -1312,6 +1318,37 @@ const executeDelegatedTask = async ({
         .join("\n"),
       limit: 5,
     });
+    const parentRunStep =
+      detail.steps.find((item) => item.id === childTask.runStepId) ||
+      detail.steps.find((item) => item.status === "RUNNING") ||
+      null;
+    const delegatedContinuity = buildExecutionLlmContinuitySections({
+      mode: "delegated-subtask",
+      workItem: projection.workItem,
+      workflow: detail.run.workflowSnapshot,
+      step,
+      runStep: parentRunStep,
+      recentConversationText: buildRecentWorkItemConversationText({
+        messages: projection.workspace.messages,
+        workItemId: projection.workItem.id,
+        runId: detail.run.id,
+      }),
+      handoffContext: buildWorkflowHandoffContext({
+        detail,
+        workItem: projection.workItem,
+        artifacts: projection.workspace.artifacts,
+      }),
+      resolvedWaitContext: parentRunStep
+        ? buildResolvedWaitContext({
+            detail,
+            runStep: parentRunStep,
+          })
+        : undefined,
+      operatorGuidanceContext: buildOperatorGuidanceContext({
+        workItem: projection.workItem,
+        artifacts: projection.workspace.artifacts,
+      }),
+    });
 
     const initialPrompt = [
       `You are handling a delegated specialist subtask inside capability ${projection.capability.name}.`,
@@ -1326,6 +1363,8 @@ const executeDelegatedTask = async ({
       "2. Findings",
       "3. Recommended next step",
       "4. Open questions",
+      "",
+      delegatedContinuity.envelopeText,
       "",
       `Delegated prompt:\n${prompt}`,
     ].join("\n");
@@ -1885,6 +1924,11 @@ const repairMalformedExecutionDecision = async ({
   agent,
   malformedResponse,
   repairReason,
+  recentConversationText,
+  toolHistory,
+  handoffContext,
+  resolvedWaitContext,
+  operatorGuidanceContext,
 }: {
   capability: Capability;
   workItem: WorkItem;
@@ -1894,6 +1938,11 @@ const repairMalformedExecutionDecision = async ({
   agent: CapabilityAgent;
   malformedResponse: string;
   repairReason?: string;
+  recentConversationText?: string;
+  toolHistory?: Array<{ role: string; content: string }>;
+  handoffContext?: string;
+  resolvedWaitContext?: string;
+  operatorGuidanceContext?: string;
 }) => {
   const startedAt = Date.now();
   const runtimeSelection = resolveExecutionRuntimeForStep({
@@ -1906,6 +1955,18 @@ const repairMalformedExecutionDecision = async ({
   const runtimeAgent = buildExecutionRuntimeAgent({
     agent,
     selection: runtimeSelection,
+  });
+  const repairContinuity = buildExecutionLlmContinuitySections({
+    mode: "repair",
+    workItem,
+    workflow,
+    step,
+    runStep,
+    recentConversationText,
+    toolHistory,
+    handoffContext,
+    resolvedWaitContext,
+    operatorGuidanceContext,
   });
   const repaired = await invokeScopedCapabilitySession({
     capability,
@@ -1932,6 +1993,7 @@ const repairMalformedExecutionDecision = async ({
       '4. {"action":"pause_for_approval","reasoning":"...","wait":{"type":"APPROVAL","message":"..."}}',
       '5. {"action":"pause_for_conflict","reasoning":"...","wait":{"type":"CONFLICT_RESOLUTION","message":"..."}}',
       '6. {"action":"fail","reasoning":"...","summary":"..."}',
+      repairContinuity.envelopeText,
       `Malformed response:\n${malformedResponse}`,
     ].join("\n\n"),
     timeoutMs: 45_000,
@@ -1962,6 +2024,9 @@ const requestContrarianConflictReview = async ({
   reviewer,
   handoffContext,
   resolvedWaitContext,
+  recentConversationText,
+  toolHistory,
+  operatorGuidanceContext,
 }: {
   capability: Capability;
   workItem: WorkItem;
@@ -1972,6 +2037,9 @@ const requestContrarianConflictReview = async ({
   reviewer: CapabilityAgent;
   handoffContext?: string;
   resolvedWaitContext?: string;
+  recentConversationText?: string;
+  toolHistory?: Array<{ role: string; content: string }>;
+  operatorGuidanceContext?: string;
 }): Promise<{
   review: ContrarianConflictReview;
   usage: DecisionEnvelope["usage"];
@@ -1996,6 +2064,18 @@ const requestContrarianConflictReview = async ({
       .join("\n"),
     limit: 8,
   });
+  const reviewContinuity = buildExecutionLlmContinuitySections({
+    mode: "conflict-review",
+    workItem,
+    workflow,
+    step,
+    runStep,
+    recentConversationText,
+    toolHistory,
+    handoffContext,
+    resolvedWaitContext,
+    operatorGuidanceContext,
+  });
 
   const response = await invokeScopedCapabilitySession({
     capability,
@@ -2017,8 +2097,7 @@ const requestContrarianConflictReview = async ({
       `Step guidance: ${step.description || "None"}`,
       `Current run step attempt: ${runStep.attemptCount}`,
       `Conflict wait message:\n${wait.message}`,
-      `Prior hand-offs:\n${handoffContext || "None"}`,
-      `Resolved input/conflict context:\n${resolvedWaitContext || "None"}`,
+      reviewContinuity.envelopeText,
       "Challenge the proposed continuation path. Identify unsafe assumptions, missing evidence, contradictory handoffs, policy ambiguity, downstream risks, and alternative paths. Do not resolve the conflict yourself; advise the human operator.",
       "Return JSON with this exact shape:",
       '{"severity":"LOW|MEDIUM|HIGH|CRITICAL","recommendation":"CONTINUE|REVISE_RESOLUTION|ESCALATE|STOP","summary":"...","challengedAssumptions":["..."],"risks":["..."],"missingEvidence":["..."],"alternativePaths":["..."],"suggestedResolution":"optional operator-ready resolution text"}',
@@ -2248,21 +2327,11 @@ const requestStepDecision = async ({
         )
         .join("\n\n")
     : "No uploaded work item input files were attached.";
-  const recentWorkItemConversationText = workspace.messages
-    .filter(
-      (message) =>
-        message.workItemId === workItem.id ||
-        message.runId === runId,
-    )
-    .slice(-6)
-    .map((message) => {
-      const speaker =
-        message.role === "user"
-          ? "Operator"
-          : message.agentName || message.role;
-      return `- ${speaker}: ${summarizeText(message.content, 220).replace(/\s+/g, " ").trim()}`;
-    })
-    .join("\n");
+  const recentWorkItemConversationText = buildRecentWorkItemConversationText({
+    messages: workspace.messages,
+    workItemId: workItem.id,
+    runId: runId || null,
+  });
   const memoryContext = await buildMemoryContext({
     capabilityId: capability.id || workItem.capabilityId,
     agentId: agent.id,
@@ -2360,14 +2429,22 @@ const requestStepDecision = async ({
       kind,
     });
 
-  const historyText = effectiveToolHistory.length
-    ? `Prior tool loop transcript:\n${effectiveToolHistory
-        .map((item) => `${item.role.toUpperCase()}: ${item.content}`)
-        .join("\n\n")}`
-    : "";
   const historySource: ContextSource = rollupCacheRef?.current?.summary
     ? "HISTORY_ROLLUP"
     : "RAW_TAIL_TURNS";
+  const executionContinuity = buildExecutionLlmContinuitySections({
+    mode: "workflow-step",
+    workItem,
+    workflow,
+    step,
+    runStep,
+    recentConversationText: recentWorkItemConversationText,
+    toolHistory: effectiveToolHistory,
+    handoffContext: compiledStepContext.handoffContext,
+    resolvedWaitContext: compiledStepContext.resolvedWaitContext,
+    operatorGuidanceContext,
+  });
+  const historyText = executionContinuity.toolTranscriptText;
 
   const systemCoreText = [
     "Treat the compiled step contract as authoritative. Stay inside the execution boundary, use the required inputs and artifact checklist as the operating contract, and never invent orchestration outside this single step.",
@@ -2402,14 +2479,12 @@ const requestStepDecision = async ({
     `Step objective: ${compiledStepContext.objective}`,
     `Step guidance: ${compiledStepContext.description || "None"}`,
     `Execution notes: ${compiledStepContext.executionNotes || "None"}`,
-    `Workflow hand-off context from prior completed steps:\n${compiledStepContext.handoffContext || "None"}`,
-    `Resolved human input/conflict context for this step:\n${compiledStepContext.resolvedWaitContext || "None"}`,
+    executionContinuity.handoffText,
+    executionContinuity.resolvedWaitText,
   ].join("\n\n");
 
   const memoryHitsText = `Attached work item input files:\n${workItemInputArtifactPrompt}`;
-  const conversationContextText = recentWorkItemConversationText
-    ? `Recent operator and stage conversation:\n${recentWorkItemConversationText}`
-    : '';
+  const conversationContextText = executionContinuity.conversationText;
 
   const toolDescriptionsText = [
     `Allowed tools:\n${toolDescriptions}`,
@@ -2417,9 +2492,7 @@ const requestStepDecision = async ({
   ].join("\n\n");
 
   const planSummaryText = `Execution plan summary: ${compiledWorkItemPlan.planSummary}`;
-  const operatorGuidanceText = `Explicit operator guidance and override context:\n${
-    operatorGuidanceContext || "None"
-  }`;
+  const operatorGuidanceText = executionContinuity.operatorGuidanceText;
 
   // Load the step-level policy document from templatePath (non-blocking;
   // returns undefined when the file is absent so execution is never blocked).
@@ -2572,6 +2645,12 @@ const requestStepDecision = async ({
           selectedProviderKey: modelRoutingRecommendation.selectedProviderKey,
           selectedModel: modelRoutingRecommendation.selectedModel,
           routingReason: modelRoutingRecommendation.routingReason,
+          contextEnvelopeSource: executionContinuity.contextEnvelopeSource,
+          executionContextHydrated: executionContinuity.executionContextHydrated,
+          conversationTailCount: recentWorkItemConversationText
+            ? recentWorkItemConversationText.split("\n").length
+            : 0,
+          toolTranscriptIncluded: Boolean(effectiveToolHistory.length),
           usageEstimated:
             typeof response.usageEstimated === "boolean"
               ? response.usageEstimated
@@ -2659,6 +2738,11 @@ const requestStepDecision = async ({
         agent,
         malformedResponse: response.content,
         repairReason,
+        recentConversationText: recentWorkItemConversationText,
+        toolHistory: effectiveToolHistory,
+        handoffContext: compiledStepContext.handoffContext,
+        resolvedWaitContext: compiledStepContext.resolvedWaitContext,
+        operatorGuidanceContext,
       });
 
       return {
@@ -2695,6 +2779,11 @@ const requestStepDecision = async ({
       agent,
       malformedResponse: response.content,
       repairReason: "The response did not contain valid JSON.",
+      recentConversationText: recentWorkItemConversationText,
+      toolHistory: effectiveToolHistory,
+      handoffContext: compiledStepContext.handoffContext,
+      resolvedWaitContext: compiledStepContext.resolvedWaitContext,
+      operatorGuidanceContext,
     });
 
     return {
@@ -7380,6 +7469,10 @@ const completeRunWithWait = async ({
         detail: nextDetail,
         runStep: waitingRunStep,
       });
+      const operatorGuidanceContext = buildOperatorGuidanceContext({
+        workItem: projection.workItem,
+        artifacts: projection.workspace.artifacts,
+      });
       const reviewEnvelope = await requestContrarianConflictReview({
         capability: projection.capability,
         workItem: projection.workItem,
@@ -7390,6 +7483,12 @@ const completeRunWithWait = async ({
         reviewer: contrarianReviewer,
         handoffContext,
         resolvedWaitContext,
+        recentConversationText: buildRecentWorkItemConversationText({
+          messages: projection.workspace.messages,
+          workItemId: projection.workItem.id,
+          runId: nextDetail.run.id,
+        }),
+        operatorGuidanceContext,
       });
 
       review = reviewEnvelope.review;

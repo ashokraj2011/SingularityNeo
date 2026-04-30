@@ -12,7 +12,7 @@ import {
   evaluateWorkspacePermissions,
   hasPermission,
 } from '../src/lib/accessControl';
-import { fetchAppState } from './repository';
+import { fetchAppState } from './domains/self-service/repository';
 import {
   appendAccessAuditEvent,
   getWorkspaceOrganization,

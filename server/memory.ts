@@ -19,7 +19,7 @@ import {
   query,
   transaction,
 } from './db';
-import { getCapabilityBundle } from './repository';
+import { getCapabilityBundle } from './domains/self-service/repository';
 import { getAgentLearningProfile, queueAgentLearningJob } from './agentLearning/repository';
 import {
   executionRuntimeRpc,

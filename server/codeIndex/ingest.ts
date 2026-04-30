@@ -21,7 +21,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { PoolClient } from 'pg';
 import { query, transaction } from '../db';
-import { getCapabilityRepositoriesRecord, getWorkspaceSettings } from '../repository';
+import { getCapabilityRepositoriesRecord, getWorkspaceSettings } from '../domains/self-service/repository';
 import type {
   CapabilityCodeIndexRunStatus,
   CapabilityCodeIndexSnapshot,

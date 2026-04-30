@@ -26,7 +26,7 @@ import type {
 import {
   getCapabilityArtifact,
   listWorkItemCodePatchArtifacts,
-} from '../repository';
+} from '../domains/tool-plane';
 import {
   createOrReuseAgentBranchSession,
   getAgentBranchSessionById,

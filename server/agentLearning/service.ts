@@ -22,7 +22,7 @@ import {
   getCapabilityBundle,
   replaceCapabilityWorkspaceContentRecord,
   updateCapabilityAgentRecord,
-} from '../repository';
+} from '../domains/self-service/repository';
 import {
   executionRuntimeRpc,
   isRemoteExecutionClient,

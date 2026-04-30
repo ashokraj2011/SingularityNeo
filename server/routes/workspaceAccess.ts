@@ -16,14 +16,14 @@ import { buildCapabilityInteractionFeedSnapshot } from '../interactionFeed';
 import { listPolicyDecisions } from '../policy';
 import { parseActorContext } from '../requestActor';
 import {
-  getCapabilityBundle,
   getCapabilityTask,
   getWorkspaceCatalogSnapshot,
   getWorkspaceSettings,
   initializeWorkspaceFoundations,
   listCapabilityTasks,
   updateWorkspaceSettings,
-} from '../repository';
+  getCapabilityBundle,
+} from '../domains/self-service';
 import { buildRunConsoleSnapshot, listTelemetryMetrics, listTelemetrySpans } from '../telemetry';
 import { upsertUserPreference } from '../workspaceOrganization';
 

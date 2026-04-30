@@ -2,7 +2,8 @@ import type express from 'express';
 import type { Capability, CapabilityAgent, CapabilityWorkspace, WorkItem } from '../../src/types';
 import { assertCapabilityPermission } from '../access';
 import { GitHubProviderRateLimitError, type ChatHistoryMessage } from '../githubModels';
-import { auditRuntimeChatTurn, getCapabilityBundle } from '../repository';
+import { auditRuntimeChatTurn } from '../domains/context-fabric';
+import { getCapabilityBundle } from '../domains/self-service';
 import { parseActorContext } from '../requestActor';
 import { resolveAuthorizedSwarmParticipants } from '../swarmParticipants';
 import { wakeExecutionWorker } from '../execution/worker';
@@ -18,9 +19,15 @@ import {
 import {
   buildUnifiedChatContextPrompt,
   resolveChatFollowUpContext,
+  type EffectiveMessageSource,
   type FollowUpBindingMode,
+  type FollowUpIntent,
 } from '../chatContinuity';
-import { invokeCommonAgentRuntime } from '../agentRuntime';
+import { invokeCommonAgentRuntime, resolveReadOnlyToolIds } from '../agentRuntime';
+import {
+  getDefaultRepoAwareReadOnlyToolIds,
+  resolveRuntimeAgentForWorkspace,
+} from '../runtimeAgents';
 
 type ChatRequestBody = {
   capability?: Capability;
@@ -153,12 +160,22 @@ export const registerRuntimeChatRoutes = (
     memoryTrustMode,
     pathValidationState,
     unverifiedPathClaimsRemoved,
+    effectiveMessage,
+    effectiveMessageSource,
+    followUpIntent,
     followUpBindingMode,
     historyTurnCount,
     historyRolledUp,
     chatRuntimeLane,
+    toolLoopEnabled,
+    toolLoopReason,
     toolLoopUsed,
     attemptedToolIds,
+    resolvedAllowedToolIds,
+    resolvedAgentSource,
+    parsedToolIntent,
+    toolIntentDisposition,
+    toolIntentRejectionReason,
     codeDiscoveryMode,
     codeDiscoveryFallback,
     astSource,
@@ -167,12 +184,27 @@ export const registerRuntimeChatRoutes = (
     memoryTrustMode: MemoryTrustMode;
     pathValidationState?: PathValidationState;
     unverifiedPathClaimsRemoved?: string[];
+    effectiveMessage: string;
+    effectiveMessageSource: EffectiveMessageSource;
+    followUpIntent: FollowUpIntent;
     followUpBindingMode: FollowUpBindingMode;
     historyTurnCount: number;
     historyRolledUp?: boolean;
     chatRuntimeLane: 'server-runtime-route';
+    toolLoopEnabled?: boolean;
+    toolLoopReason?: 'repo-aware-code-question' | 'disabled-by-caller' | 'no-read-only-tools';
     toolLoopUsed?: boolean;
     attemptedToolIds?: string[];
+    resolvedAllowedToolIds?: string[];
+    resolvedAgentSource?: string;
+    parsedToolIntent?: {
+      action: 'invoke_tool';
+      toolId?: string;
+      requestedToolId?: string;
+      args: Record<string, unknown>;
+    };
+    toolIntentDisposition?: 'none' | 'executed' | 'repaired' | 'rejected' | 'stripped';
+    toolIntentRejectionReason?: string;
     codeDiscoveryMode?: 'prompt-only' | 'ast-first-tool-loop';
     codeDiscoveryFallback?: 'none' | 'capability-index' | 'text-search';
     astSource?: 'none' | 'local-checkout' | 'capability-index' | 'text-search';
@@ -186,13 +218,25 @@ export const registerRuntimeChatRoutes = (
     workContextHydrated: Boolean(chatContext.liveBriefing?.trim()),
     workContextSource:
       chatContext.chatScope === 'WORK_ITEM' ? 'live-work-item' : 'live-workspace',
+    effectiveMessage,
+    effectiveMessageSource,
+    followUpIntent,
     followUpBindingMode,
     chatRuntimeLane,
     memoryTrustMode,
     pathValidationState: pathValidationState || 'none',
     unverifiedPathClaimsRemoved: unverifiedPathClaimsRemoved || [],
+    toolLoopEnabled: Boolean(toolLoopEnabled),
+    toolLoopReason:
+      toolLoopReason ||
+      (chatContext.isCodeQuestion ? 'repo-aware-code-question' : 'disabled-by-caller'),
     toolLoopUsed: Boolean(toolLoopUsed),
     attemptedToolIds: attemptedToolIds || [],
+    resolvedAllowedToolIds: resolvedAllowedToolIds || [],
+    resolvedAgentSource: resolvedAgentSource || 'server-live-agent',
+    parsedToolIntent,
+    toolIntentDisposition: toolIntentDisposition || 'none',
+    toolIntentRejectionReason,
     codeDiscoveryMode: codeDiscoveryMode || 'prompt-only',
     codeDiscoveryFallback: codeDiscoveryFallback || 'none',
     astSource: astSource || 'none',
@@ -340,6 +384,7 @@ export const registerRuntimeChatRoutes = (
         runId: body.runId,
         workflowStepId: body.workflowStepId,
       });
+      const effectiveMessage = followUpContext.effectiveMessage || originalMessage;
       const chatAction = await maybeHandleCapabilityChatAction({
         bundle,
         agent: liveAgent,
@@ -390,18 +435,35 @@ export const registerRuntimeChatRoutes = (
         body: {
           ...body,
           history: followUpContext.history,
-          message: followUpContext.contextMessage || originalMessage,
+          message: effectiveMessage,
         },
         bundle,
         liveAgent,
       });
+      const runtimeResolvedAgent = resolveRuntimeAgentForWorkspace({
+        workspace: usingForeignAgent ? undefined : bundle.workspace,
+        payloadAgent: liveAgent,
+        payloadAgentId: taggedParticipant?.agentId || body.agent?.id,
+      });
+      const runtimeAgent = runtimeResolvedAgent.agent as CapabilityAgent;
+      const runtimeReadOnlyToolIds = resolveReadOnlyToolIds(runtimeAgent);
+      const runtimeAllowedToolIds =
+        chatContext.isCodeQuestion &&
+        !runtimeReadOnlyToolIds.some(
+          toolId => toolId === 'browse_code' || toolId === 'workspace_search',
+        )
+          ? getDefaultRepoAwareReadOnlyToolIds()
+          : undefined;
+      const runtimeAgentSource = runtimeAllowedToolIds?.length
+        ? 'fallback-read-only-profile'
+        : runtimeResolvedAgent.source;
       const memoryTrustMode: MemoryTrustMode = chatContext.isCodeQuestion
         ? 'repo-evidence-only'
         : 'standard';
       const anchorMemoryContext = await buildMemoryContext({
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
-        queryText: chatContext.memoryQueryText || followUpContext.contextMessage || originalMessage,
+        queryText: chatContext.memoryQueryText || effectiveMessage,
         excludeSourceTypes:
           memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
       });
@@ -413,8 +475,7 @@ export const registerRuntimeChatRoutes = (
           ? await buildMemoryContext({
               capabilityId: taggedParticipant.capabilityId,
               agentId: taggedParticipant.agentId,
-              queryText:
-                chatContext.memoryQueryText || followUpContext.contextMessage || originalMessage,
+              queryText: chatContext.memoryQueryText || effectiveMessage,
               excludeSourceTypes:
                 memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
             }).catch(() => null)
@@ -430,9 +491,9 @@ export const registerRuntimeChatRoutes = (
       });
       const chatResponse = await invokeCommonAgentRuntime({
         capability: liveCapability,
-        agent: liveAgent,
+        agent: runtimeAgent,
         history: followUpContext.history,
-        message: originalMessage,
+        message: effectiveMessage,
         resetSession: body.sessionMode === 'fresh',
         scope: chatContext.chatScope,
         scopeId: chatContext.chatScopeId,
@@ -444,6 +505,8 @@ export const registerRuntimeChatRoutes = (
         }),
         workItem: chatContext.workItem,
         preferReadOnlyToolLoop: Boolean(chatContext.isCodeQuestion),
+        allowedToolIds: runtimeAllowedToolIds,
+        resolvedAgentSource: runtimeAgentSource,
         runtimeLane: 'server-runtime-route',
       });
       const { promptReceipt, tokenPolicy, ...publicChatResponse } = chatResponse as typeof chatResponse & {
@@ -461,18 +524,32 @@ export const registerRuntimeChatRoutes = (
         memoryTrustMode,
         pathValidationState: sanitizedChat.pathValidationState,
         unverifiedPathClaimsRemoved: sanitizedChat.unverifiedPathClaimsRemoved,
+        effectiveMessage,
+        effectiveMessageSource: followUpContext.effectiveMessageSource,
+        followUpIntent: followUpContext.followUpIntent,
         followUpBindingMode: followUpContext.followUpBindingMode,
         historyTurnCount: chatResponse.historyTurnCount || followUpContext.history.length,
         historyRolledUp: chatResponse.historyRolledUp,
         chatRuntimeLane: 'server-runtime-route',
+        toolLoopEnabled: chatResponse.toolLoopEnabled,
+        toolLoopReason: chatResponse.toolLoopReason,
         toolLoopUsed: chatResponse.toolLoopUsed,
         attemptedToolIds: chatResponse.attemptedToolIds,
+        resolvedAllowedToolIds: chatResponse.resolvedAllowedToolIds,
+        resolvedAgentSource: chatResponse.resolvedAgentSource,
+        parsedToolIntent: chatResponse.parsedToolIntent,
+        toolIntentDisposition: chatResponse.toolIntentDisposition,
+        toolIntentRejectionReason: chatResponse.toolIntentRejectionReason,
         codeDiscoveryMode: chatResponse.codeDiscoveryMode,
         codeDiscoveryFallback: chatResponse.codeDiscoveryFallback,
         astSource: chatResponse.astSource,
       });
       const runtimeTarget = await resolveRuntimeTarget(
-        publicChatResponse.runtimeProviderKey || liveAgent.providerKey || liveAgent.provider,
+        publicChatResponse.runtimeProviderKey ||
+          runtimeAgent.providerKey ||
+          runtimeAgent.provider ||
+          liveAgent.providerKey ||
+          liveAgent.provider,
       );
       await finishTelemetrySpan({
         capabilityId: liveCapability.id,
@@ -653,6 +730,7 @@ export const registerRuntimeChatRoutes = (
         runId: body.runId,
         workflowStepId: body.workflowStepId,
       });
+      const effectiveMessage = followUpContext.effectiveMessage || originalMessage;
       const chatAction = await maybeHandleCapabilityChatAction({
         bundle,
         agent: liveAgent,
@@ -695,7 +773,7 @@ export const registerRuntimeChatRoutes = (
         body: {
           ...body,
           history: followUpContext.history,
-          message: followUpContext.contextMessage || originalMessage,
+          message: effectiveMessage,
         },
         bundle,
         liveAgent,
@@ -706,7 +784,7 @@ export const registerRuntimeChatRoutes = (
       const anchorMemoryContext = await buildMemoryContext({
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
-        queryText: chatContext.memoryQueryText || followUpContext.contextMessage || originalMessage,
+        queryText: chatContext.memoryQueryText || effectiveMessage,
         excludeSourceTypes:
           memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
       });
@@ -715,13 +793,29 @@ export const registerRuntimeChatRoutes = (
           ? await buildMemoryContext({
               capabilityId: foreignParticipant.capabilityId,
               agentId: foreignParticipant.agentId,
-              queryText:
-                chatContext.memoryQueryText || followUpContext.contextMessage || originalMessage,
+              queryText: chatContext.memoryQueryText || effectiveMessage,
               excludeSourceTypes:
                 memoryTrustMode === 'repo-evidence-only' ? ['CHAT_SESSION'] : [],
             }).catch(() => null)
           : null;
       const memoryContext = anchorMemoryContext;
+      const runtimeResolvedAgent = resolveRuntimeAgentForWorkspace({
+        workspace: usingForeignAgent ? undefined : bundle.workspace,
+        payloadAgent: liveAgent,
+        payloadAgentId: foreignParticipant?.agentId || body.agent?.id,
+      });
+      const runtimeAgent = runtimeResolvedAgent.agent as CapabilityAgent;
+      const runtimeReadOnlyToolIds = resolveReadOnlyToolIds(runtimeAgent);
+      const runtimeAllowedToolIds =
+        chatContext.isCodeQuestion &&
+        !runtimeReadOnlyToolIds.some(
+          toolId => toolId === 'browse_code' || toolId === 'workspace_search',
+        )
+          ? getDefaultRepoAwareReadOnlyToolIds()
+          : undefined;
+      const runtimeAgentSource = runtimeAllowedToolIds?.length
+        ? 'fallback-read-only-profile'
+        : runtimeResolvedAgent.source;
       const streamMergedMemoryPrompt = buildCodeEvidencePrompt({
         chatContext,
         advisoryMemory: anchorMemoryContext.prompt,
@@ -733,12 +827,22 @@ export const registerRuntimeChatRoutes = (
       const memoryDiagnostics = buildEvidenceDiagnostics({
         chatContext,
         memoryTrustMode,
+        effectiveMessage,
+        effectiveMessageSource: followUpContext.effectiveMessageSource,
+        followUpIntent: followUpContext.followUpIntent,
         followUpBindingMode: followUpContext.followUpBindingMode,
         historyTurnCount: followUpContext.history.length,
         historyRolledUp: false,
         chatRuntimeLane: 'server-runtime-route',
+        toolLoopEnabled: Boolean(chatContext.isCodeQuestion),
+        toolLoopReason: chatContext.isCodeQuestion
+          ? 'repo-aware-code-question'
+          : 'disabled-by-caller',
         toolLoopUsed: false,
         attemptedToolIds: [],
+        resolvedAllowedToolIds: runtimeAllowedToolIds || runtimeReadOnlyToolIds,
+        resolvedAgentSource: runtimeAgentSource,
+        toolIntentDisposition: 'none',
         codeDiscoveryMode: 'prompt-only',
         codeDiscoveryFallback: 'none',
         astSource: 'none',
@@ -771,9 +875,9 @@ export const registerRuntimeChatRoutes = (
       const shouldBufferValidatedStream = Boolean(chatContext.isCodeQuestion);
       const streamed = await invokeCommonAgentRuntime({
         capability: liveCapability,
-        agent: liveAgent,
+        agent: runtimeAgent,
         history: followUpContext.history,
-        message: originalMessage,
+        message: effectiveMessage,
         resetSession: body.sessionMode === 'fresh',
         scope: chatContext.chatScope,
         scopeId: chatContext.chatScopeId,
@@ -785,6 +889,8 @@ export const registerRuntimeChatRoutes = (
         }),
         workItem: chatContext.workItem,
         preferReadOnlyToolLoop: Boolean(chatContext.isCodeQuestion),
+        allowedToolIds: runtimeAllowedToolIds,
+        resolvedAgentSource: runtimeAgentSource,
         runtimeLane: 'server-runtime-route',
         onDelta: delta => {
           if (!shouldBufferValidatedStream) {
@@ -812,12 +918,22 @@ export const registerRuntimeChatRoutes = (
         memoryTrustMode,
         pathValidationState: sanitizedStream.pathValidationState,
         unverifiedPathClaimsRemoved: sanitizedStream.unverifiedPathClaimsRemoved,
+        effectiveMessage,
+        effectiveMessageSource: followUpContext.effectiveMessageSource,
+        followUpIntent: followUpContext.followUpIntent,
         followUpBindingMode: followUpContext.followUpBindingMode,
         historyTurnCount: streamed.historyTurnCount || followUpContext.history.length,
         historyRolledUp: streamed.historyRolledUp,
         chatRuntimeLane: 'server-runtime-route',
+        toolLoopEnabled: streamed.toolLoopEnabled,
+        toolLoopReason: streamed.toolLoopReason,
         toolLoopUsed: streamed.toolLoopUsed,
         attemptedToolIds: streamed.attemptedToolIds,
+        resolvedAllowedToolIds: streamed.resolvedAllowedToolIds,
+        resolvedAgentSource: streamed.resolvedAgentSource,
+        parsedToolIntent: streamed.parsedToolIntent,
+        toolIntentDisposition: streamed.toolIntentDisposition,
+        toolIntentRejectionReason: streamed.toolIntentRejectionReason,
         codeDiscoveryMode: streamed.codeDiscoveryMode,
         codeDiscoveryFallback: streamed.codeDiscoveryFallback,
         astSource: streamed.astSource,

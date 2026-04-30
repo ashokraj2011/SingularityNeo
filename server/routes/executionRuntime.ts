@@ -53,10 +53,12 @@ import {
   unregisterDesktopExecutor,
 } from "../executionOwnership";
 import {
-  getCapabilityBundle,
   releaseWorkItemCodeClaimRecord,
+} from "../domains/tool-plane";
+import {
+  getCapabilityBundle,
   replaceCapabilityWorkspaceContentRecord,
-} from "../repository";
+} from "../domains/self-service";
 import { buildMemoryContext, refreshCapabilityMemory } from "../memory";
 import { evaluateToolPolicy } from "../policy";
 import { queueSingleAgentLearningRefresh } from "../agentLearning/service";

@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { normalizeToolAdapterId } from './toolIds';
 
 export type MemoryTrustMode = 'standard' | 'repo-evidence-only';
 
@@ -124,6 +125,121 @@ const isVerifiedClaim = async ({
   return false;
 };
 
+const extractBalancedJsonCandidates = (value: string) => {
+  const candidates: string[] = [];
+  let startIndex = -1;
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+
+    if (startIndex === -1) {
+      if (character === '{') {
+        startIndex = index;
+        depth = 1;
+        inString = false;
+        escaping = false;
+      }
+      continue;
+    }
+
+    if (escaping) {
+      escaping = false;
+      continue;
+    }
+
+    if (character === '\\' && inString) {
+      escaping = true;
+      continue;
+    }
+
+    if (character === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (character === '{') {
+      depth += 1;
+      continue;
+    }
+
+    if (character === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        candidates.push(value.slice(startIndex, index + 1));
+        startIndex = -1;
+      }
+    }
+  }
+
+  return candidates;
+};
+
+const tryParseJsonObject = (value?: string | null) => {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const extractToolIntentPayload = (content: string) => {
+  const trimmed = String(content || '').trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const candidates = [
+    trimmed,
+    trimmed.match(/```json\s*([\s\S]*?)```/i)?.[1],
+    trimmed.match(/```\s*([\s\S]*?)```/i)?.[1],
+    ...extractBalancedJsonCandidates(trimmed),
+  ].filter(Boolean) as string[];
+
+  for (const candidate of candidates) {
+    const parsed = tryParseJsonObject(candidate);
+    if (!parsed) {
+      continue;
+    }
+    const action = String(parsed.action || '').trim().toLowerCase();
+    const directToolId = normalizeToolAdapterId(action);
+    const nestedToolId = normalizeToolAdapterId(
+      String(
+        (parsed.toolCall as { toolId?: string } | undefined)?.toolId ||
+          parsed.toolId ||
+          parsed.tool ||
+          parsed.name ||
+          parsed.functionName ||
+          parsed.function ||
+          '',
+      ),
+    );
+    const requestedToolId = directToolId || nestedToolId;
+    if (action === 'invoke_tool' || requestedToolId) {
+      return {
+        action,
+        requestedToolId,
+      };
+    }
+  }
+
+  return null;
+};
+
 export const buildStructuredChatEvidencePrompt = ({
   verifiedCodeGrounding,
   verifiedRepositoryEvidence,
@@ -164,6 +280,16 @@ export const sanitizeGroundedChatResponse = async ({
   pathValidationState: PathValidationState;
   unverifiedPathClaimsRemoved: string[];
 }> => {
+  const rawToolIntent = extractToolIntentPayload(content);
+  if (rawToolIntent) {
+    return {
+      content:
+        'I omitted an internal tool instruction instead of showing it directly. Please retry and I’ll rerun the grounded lookup.',
+      pathValidationState: 'none',
+      unverifiedPathClaimsRemoved: [],
+    };
+  }
+
   if (!enforceEvidenceOnly) {
     return {
       content,

@@ -218,4 +218,65 @@ describe("workspace_search AST-first fallback", () => {
     );
     expect(searchCodeSymbolsMock).not.toHaveBeenCalled();
   });
+
+  it("lets browse_code use a semantic query so inventory questions can resolve enums and related symbols", async () => {
+    const workspacePath = createWorkspace();
+    rpcState.workspaceRoot = workspacePath;
+
+    searchLocalCheckoutSymbolsMock.mockImplementation(
+      async ({ query }: { query: string }) => {
+        if (query === "operator") {
+          return {
+            source: "local-checkout",
+            builtAt: "2026-04-30T00:00:00.000Z",
+            symbols: [
+              {
+                symbolId: "SYM-OP-ENUM",
+                symbolName: "Operator",
+                qualifiedSymbolName: "org.example.rules.Operator",
+                kind: "ENUM",
+                filePath: "src/main/java/org/example/rules/Operator.java",
+                startLine: 1,
+                endLine: 24,
+                sliceStartLine: 1,
+                sliceEndLine: 24,
+              },
+            ],
+          };
+        }
+
+        return {
+          source: "local-checkout",
+          builtAt: "2026-04-30T00:00:00.000Z",
+          symbols: [],
+        };
+      },
+    );
+    searchCodeSymbolsMock.mockResolvedValue([]);
+
+    const result = await executeTool({
+      capability: buildCapability(workspacePath),
+      agent: buildAgent(),
+      workItem: buildWorkItem(),
+      toolId: "browse_code",
+      args: {
+        kind: "class",
+        query: "What are the operators in the rule engine?",
+      },
+    });
+
+    expect(result.summary).toContain("semantic symbol match");
+    expect(result.details).toMatchObject({
+      codeIndexSource: "local-checkout",
+      codeDiscoveryMode: "ast-first",
+      mode: "symbol-search",
+      query: "What are the operators in the rule engine?",
+    });
+    expect((result.details as { normalizedQueries?: string[] }).normalizedQueries).toEqual(
+      expect.arrayContaining(["operators", "operator"]),
+    );
+    expect(result.stdoutPreview).toContain(
+      `${workspacePath}/src/main/java/org/example/rules/Operator.java`,
+    );
+  });
 });

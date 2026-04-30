@@ -71,4 +71,16 @@ describe('chat evidence guardrails', () => {
     expect(sanitized.content).toContain(verifiedFile);
     expect(sanitized.unverifiedPathClaimsRemoved).toHaveLength(0);
   });
+
+  it('strips raw internal tool-intent payloads before they reach the UI', async () => {
+    const sanitized = await sanitizeGroundedChatResponse({
+      content:
+        '{"action":"browse_code","reasoning":"Need repo structure.","summary":"Browsing code.","toolCall":{"kind":"class"}}',
+      enforceEvidenceOnly: false,
+    });
+
+    expect(sanitized.content).toContain(
+      'I omitted an internal tool instruction instead of showing it directly.',
+    );
+  });
 });

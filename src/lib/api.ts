@@ -1,5 +1,4 @@
 import {
-  ActorContext,
   AgentTask,
   AgentLearningDriftState,
   AgentLearningProfileDetail,
@@ -147,11 +146,6 @@ import {
   SwarmSessionDetail,
   SwarmSessionSummary,
   ProviderKey,
-  RuntimeModelOption,
-  RuntimeProviderConfig,
-  RuntimeProviderProbeResult,
-  RuntimeProviderStatus,
-  RuntimeProviderValidationResult,
   RuntimeTransportMode,
   AgentMindSnapshot,
   ModelRoutingRecommendation,
@@ -159,72 +153,53 @@ import {
   PersistedPromptReceiptEviction,
   PersistedPromptReceipt,
   PromptReceiptReplayResponse,
-  TokenManagementCapabilitySnapshot,
-  TokenManagementPolicy,
-  TokenManagementRecommendation,
-  TokenManagementSummary,
-  TokenOptimizationReceipt,
-  TokenPromptEstimateResponse,
 } from "../types";
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from "./desktop";
-
-export interface RuntimeStatus {
-  configured: boolean;
-  provider: string;
-  providerKey?: ProviderKey;
-  readinessState?: RuntimeReadinessState;
-  checks?: RuntimeReadinessCheck[];
-  controlPlaneUrl?: string;
-  desktopExecutorId?: string;
-  /** Stable hash-based machine identity e.g. "DID-3A7F2B9C1D4E5F60" */
-  desktopId?: string;
-  /** OS hostname of the desktop machine */
-  desktopHostname?: string;
-  workingDirectorySource?: "mapping" | "env" | "project-root" | "missing";
-  embeddingProviderKey?: "local-openai" | "deterministic-hash";
-  embeddingConfigured?: boolean;
-  retrievalMode?: MemoryRetrievalMode;
-  fallbackReason?: string | null;
-  embeddingEndpoint?: string | null;
-  embeddingModel?: string | null;
-  embeddingApiKeyConfigured?: boolean;
-  availableProviders?: RuntimeProviderStatus[];
-  endpoint: string;
-  runtimeOwner?: "DESKTOP" | "SERVER";
-  executionRuntimeOwner?: "DESKTOP" | "SERVER";
-  tokenSource: string | null;
-  defaultModel: string;
-  modelCatalogSource?: "runtime" | "fallback";
-  runtimeAccessMode?: RuntimeTransportMode;
-  httpFallbackEnabled?: boolean;
-  databaseRuntime?: WorkspaceDatabaseRuntimeInfo;
-  activeDatabaseProfileId?: string | null;
-  activeDatabaseProfileLabel?: string | null;
-  executorId?: string;
-  executorHeartbeatAt?: string;
-  executorHeartbeatStatus?: "FRESH" | "STALE" | "OFFLINE";
-  actorUserId?: string;
-  actorDisplayName?: string;
-  ownedCapabilityIds?: string[];
-  /** User-level working directory for the active desktop executor (if set). */
-  workingDirectory?: string;
-  lastRuntimeError?: string | null;
-  streaming?: boolean;
-  githubIdentity?: {
-    id: number;
-    login: string;
-    name?: string;
-    avatarUrl?: string;
-    profileUrl?: string;
-    type?: string;
-  } | null;
-  githubIdentityError?: string | null;
-  platformFeatures?: {
-    pgvectorAvailable: boolean;
-    memoryEmbeddingDimensions: number;
-  };
-  availableModels: RuntimeModelOption[];
-}
+import {
+  getError,
+  getCurrentActorContext,
+  jsonHeaders,
+  requestJson,
+  requestText,
+  setCurrentActorContext,
+  withActorHeaders,
+} from "./api/shared";
+export { setCurrentActorContext } from "./api/shared";
+export {
+  clearLocalEmbeddingSettings,
+  clearRuntimeCredentials,
+  claimCapabilityExecution,
+  createDesktopWorkspaceMapping,
+  deleteDesktopWorkspaceMapping,
+  fetchDesktopPreferences,
+  fetchDesktopWorkspaceMappings,
+  fetchRuntimePreflight,
+  fetchRuntimeProviderModels,
+  fetchRuntimeProviders,
+  fetchRuntimeStatus,
+  fetchWorkspaceWriteLock,
+  probeRuntimeProvider,
+  releaseCapabilityExecution,
+  saveDesktopPreferences,
+  saveRuntimeProviderConfig,
+  syncCapabilityRepositories,
+  updateDesktopWorkspaceMapping,
+  updateLocalEmbeddingSettings,
+  updateRuntimeCredentials,
+  validateRuntimeProvider,
+  type CapabilityRepoSyncReport,
+  type RepoSyncResult,
+  type RuntimeStatus,
+} from "./api/runtime";
+export {
+  estimateTokenPrompt,
+  fetchTokenManagementCapability,
+  fetchTokenManagementRecommendations,
+  fetchTokenManagementSummary,
+  fetchTokenOptimizationReceipts,
+  recommendTokenManagementModel,
+  updateTokenManagementPolicy,
+} from "./api/tokenManagement";
 
 export interface RuntimeUsage {
   promptTokens: number;
@@ -256,10 +231,25 @@ export interface CapabilityChatResponse {
   historyRolledUp?: boolean;
   workContextHydrated?: boolean;
   workContextSource?: "live-work-item" | "live-workspace";
+  effectiveMessage?: string;
+  effectiveMessageSource?: "raw-user" | "bound-follow-up" | "active-work-scope" | "tool-continuation";
+  followUpIntent?: "none" | "continue-thread" | "run-proposed-search" | "active-work-scope";
   followUpBindingMode?: "none" | "latest-assistant-turn" | "active-work-scope";
   chatRuntimeLane?: "server-runtime-route" | "desktop-runtime-worker";
+  toolLoopEnabled?: boolean;
+  toolLoopReason?: "repo-aware-code-question" | "disabled-by-caller" | "no-read-only-tools";
   toolLoopUsed?: boolean;
   attemptedToolIds?: ToolAdapterId[];
+  resolvedAllowedToolIds?: ToolAdapterId[];
+  resolvedAgentSource?: string;
+  parsedToolIntent?: {
+    action: "invoke_tool";
+    toolId?: ToolAdapterId;
+    requestedToolId?: string;
+    args: Record<string, unknown>;
+  };
+  toolIntentDisposition?: "none" | "executed" | "repaired" | "rejected" | "stripped";
+  toolIntentRejectionReason?: string;
   codeDiscoveryMode?: "prompt-only" | "ast-first-tool-loop";
   codeDiscoveryFallback?: "none" | "capability-index" | "text-search";
   astSource?: "none" | "local-checkout" | "capability-index" | "text-search";
@@ -353,488 +343,6 @@ interface CapabilityChatRequest {
   participants?: Array<{ capabilityId: string; agentId: string }>;
 }
 
-const getError = async (response: Response) => {
-  try {
-    const payload = (await response.json()) as { error?: string };
-    return payload.error || `Request failed with status ${response.status}.`;
-  } catch {
-    return `Request failed with status ${response.status}.`;
-  }
-};
-
-const jsonHeaders = {
-  "Content-Type": "application/json",
-};
-
-let currentActorContext: ActorContext | null = null;
-
-const withActorHeaders = (headers?: HeadersInit): HeadersInit => {
-  const nextHeaders = new Headers(headers || {});
-
-  if (currentActorContext?.userId) {
-    nextHeaders.set("x-singularity-actor-user-id", currentActorContext.userId);
-  }
-  if (currentActorContext?.displayName) {
-    nextHeaders.set(
-      "x-singularity-actor-display-name",
-      currentActorContext.displayName,
-    );
-  }
-  if (currentActorContext?.teamIds?.length) {
-    nextHeaders.set(
-      "x-singularity-actor-team-ids",
-      JSON.stringify(currentActorContext.teamIds),
-    );
-  }
-  if (currentActorContext?.actedOnBehalfOfStakeholderIds?.length) {
-    nextHeaders.set(
-      "x-singularity-actor-stakeholder-ids",
-      JSON.stringify(currentActorContext.actedOnBehalfOfStakeholderIds),
-    );
-  }
-
-  return nextHeaders;
-};
-
-const requestJson = async <T>(
-  input: string,
-  init?: RequestInit,
-): Promise<T> => {
-  const response = await fetch(resolveApiUrl(input), {
-    ...init,
-    headers: withActorHeaders(init?.headers),
-  });
-  if (!response.ok) {
-    throw new Error(await getError(response));
-  }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return response.json() as Promise<T>;
-};
-
-const requestText = async (
-  input: string,
-  init?: RequestInit,
-): Promise<string> => {
-  const response = await fetch(resolveApiUrl(input), {
-    ...init,
-    headers: withActorHeaders(init?.headers),
-  });
-  if (!response.ok) {
-    throw new Error(await getError(response));
-  }
-  return response.text();
-};
-
-export const setCurrentActorContext = (actor: ActorContext | null) => {
-  currentActorContext = actor;
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop) {
-    void desktop.setActorContext(actor);
-  }
-};
-
-export const fetchRuntimeStatus = async (): Promise<RuntimeStatus> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop) {
-    return desktop.getRuntimeStatus() as Promise<RuntimeStatus>;
-  }
-
-  return requestJson<RuntimeStatus>("/api/runtime/status");
-};
-
-export const fetchRuntimePreflight = async (): Promise<RuntimePreflightSnapshot> => {
-  return requestJson<RuntimePreflightSnapshot>("/api/runtime/preflight");
-};
-
-export const fetchWorkspaceWriteLock = async (
-  capabilityId: string,
-): Promise<WorkspaceWriteLock | null> => {
-  const data = await requestJson<{ lock: WorkspaceWriteLock | null }>(
-    `/api/capabilities/${capabilityId}/workspace-lock`,
-  );
-  return data.lock;
-};
-
-export const updateRuntimeCredentials = async (
-  token: string,
-): Promise<RuntimeStatus> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop) {
-    return desktop.setRuntimeToken(token) as Promise<RuntimeStatus>;
-  }
-
-  return requestJson<RuntimeStatus>("/api/runtime/credentials", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify({ token }),
-  });
-};
-
-export const clearRuntimeCredentials = async (): Promise<RuntimeStatus> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop) {
-    return desktop.clearRuntimeToken() as Promise<RuntimeStatus>;
-  }
-
-  return requestJson<RuntimeStatus>("/api/runtime/credentials", {
-    method: "DELETE",
-  });
-};
-
-export const fetchRuntimeProviders = async (): Promise<RuntimeProviderStatus[]> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop && typeof desktop.listRuntimeProviders === 'function') {
-    return desktop.listRuntimeProviders() as Promise<RuntimeProviderStatus[]>;
-  }
-
-  const payload = await requestJson<{ providers: RuntimeProviderStatus[] }>(
-    '/api/runtime/providers',
-  );
-  return payload.providers || [];
-};
-
-export const saveRuntimeProviderConfig = async ({
-  providerKey,
-  config,
-  setDefault,
-  clearDefault,
-}: {
-  providerKey: ProviderKey;
-  config: RuntimeProviderConfig;
-  setDefault?: boolean;
-  clearDefault?: boolean;
-}): Promise<{
-  provider: RuntimeProviderStatus;
-  providers: RuntimeProviderStatus[];
-}> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop && typeof desktop.saveRuntimeProviderConfig === 'function') {
-    return desktop.saveRuntimeProviderConfig({
-      providerKey,
-      config,
-      setDefault,
-      clearDefault,
-    }) as Promise<{
-      provider: RuntimeProviderStatus;
-      providers: RuntimeProviderStatus[];
-    }>;
-  }
-
-  return requestJson<{
-    provider: RuntimeProviderStatus;
-    providers: RuntimeProviderStatus[];
-  }>(`/api/runtime/providers/${encodeURIComponent(providerKey)}/config`, {
-    method: 'PUT',
-    headers: jsonHeaders,
-    body: JSON.stringify({
-      config,
-      setDefault,
-      clearDefault,
-    }),
-  });
-};
-
-export const validateRuntimeProvider = async ({
-  providerKey,
-  config,
-}: {
-  providerKey: ProviderKey;
-  config?: RuntimeProviderConfig;
-}): Promise<RuntimeProviderValidationResult> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop && typeof desktop.validateRuntimeProvider === 'function') {
-    return desktop.validateRuntimeProvider({
-      providerKey,
-      config,
-    }) as Promise<RuntimeProviderValidationResult>;
-  }
-
-  return requestJson<RuntimeProviderValidationResult>(
-    `/api/runtime/providers/${encodeURIComponent(providerKey)}/validate`,
-    {
-      method: 'POST',
-      headers: jsonHeaders,
-      body: JSON.stringify({
-        config,
-      }),
-    },
-  );
-};
-
-export const probeRuntimeProvider = async ({
-  providerKey,
-  endpointHint,
-  commandHint,
-  modelHint,
-}: {
-  providerKey: ProviderKey;
-  endpointHint?: string;
-  commandHint?: string;
-  modelHint?: string;
-}): Promise<RuntimeProviderProbeResult> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop && typeof desktop.probeRuntimeProvider === 'function') {
-    return desktop.probeRuntimeProvider({
-      providerKey,
-      endpointHint,
-      commandHint,
-      modelHint,
-    }) as Promise<RuntimeProviderProbeResult>;
-  }
-
-  return requestJson<RuntimeProviderProbeResult>(
-    `/api/runtime/providers/${encodeURIComponent(providerKey)}/probe`,
-    {
-      method: 'POST',
-      headers: jsonHeaders,
-      body: JSON.stringify({
-        endpointHint,
-        commandHint,
-        modelHint,
-      }),
-    },
-  );
-};
-
-export const fetchRuntimeProviderModels = async (
-  providerKey: ProviderKey,
-): Promise<RuntimeModelOption[]> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop && typeof desktop.getRuntimeProviderModels === 'function') {
-    return desktop.getRuntimeProviderModels(providerKey) as Promise<RuntimeModelOption[]>;
-  }
-
-  const payload = await requestJson<{ models: RuntimeModelOption[] }>(
-    `/api/runtime/providers/${encodeURIComponent(providerKey)}/models`,
-  );
-  return payload.models || [];
-};
-
-export const updateLocalEmbeddingSettings = async ({
-  baseUrl,
-  apiKey,
-  model,
-}: {
-  baseUrl: string;
-  apiKey?: string;
-  model?: string;
-}): Promise<RuntimeStatus> => {
-  const desktop = getDesktopBridge();
-  if (!desktop?.isDesktop) {
-    throw new Error('Local embedding settings can only be configured from the desktop runtime.');
-  }
-
-  return desktop.setEmbeddingConfig({
-    baseUrl,
-    apiKey,
-    model,
-  }) as Promise<RuntimeStatus>;
-};
-
-export const clearLocalEmbeddingSettings = async (): Promise<RuntimeStatus> => {
-  const desktop = getDesktopBridge();
-  if (!desktop?.isDesktop) {
-    throw new Error('Local embedding settings can only be configured from the desktop runtime.');
-  }
-
-  return desktop.clearEmbeddingConfig() as Promise<RuntimeStatus>;
-};
-
-/**
- * Fetches stored non-secret desktop preferences from the control plane.
- * Passes the current machine hostname via a header so the server returns
- * the correct row without requiring auth.
- */
-export const fetchDesktopPreferences = async (): Promise<import('../types').DesktopPreferences | null> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop) {
-    return desktop.getDesktopPreferences() as Promise<import('../types').DesktopPreferences | null>;
-  }
-  return requestJson<import('../types').DesktopPreferences | null>(
-    '/api/runtime/desktop-preferences',
-  );
-};
-
-/**
- * Saves non-secret desktop preferences to the DB and applies them immediately.
- * Security tokens are not accepted here — use the credentials endpoints instead.
- */
-export const saveDesktopPreferences = async (
-  prefs: Partial<import('../types').DesktopPreferences>,
-): Promise<import('../types').DesktopPreferences> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop) {
-    return (desktop.setDesktopPreferences(prefs) as Promise<{ saved: import('../types').DesktopPreferences }>)
-      .then(r => r.saved);
-  }
-  return requestJson<import('../types').DesktopPreferences>(
-    '/api/runtime/desktop-preferences',
-    {
-      method: 'PUT',
-      headers: jsonHeaders,
-      body: JSON.stringify(prefs),
-    },
-  );
-};
-
-export const claimCapabilityExecution = async ({
-  capabilityId,
-  forceTakeover,
-}: {
-  capabilityId: string;
-  forceTakeover?: boolean;
-}): Promise<{
-  ownership: CapabilityExecutionOwnership;
-}> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop) {
-    return desktop.claimCapabilityExecution({
-      capabilityId,
-      forceTakeover,
-    }) as Promise<{
-      ownership: CapabilityExecutionOwnership;
-    }>;
-  }
-
-  throw new Error(
-    "A desktop runtime is required to claim capability execution.",
-  );
-};
-
-export const releaseCapabilityExecution = async ({
-  capabilityId,
-}: {
-  capabilityId: string;
-}): Promise<void> => {
-  const desktop = getDesktopBridge();
-  if (desktop?.isDesktop) {
-    await (desktop.releaseCapabilityExecution({
-      capabilityId,
-    }) as Promise<unknown>);
-    return;
-  }
-
-  throw new Error(
-    "A desktop runtime is required to release capability execution.",
-  );
-};
-
-export interface RepoSyncResult {
-  repositoryId: string;
-  repositoryLabel: string;
-  checkoutPath: string;
-  status: 'cloned' | 'updated' | 'already-current' | 'skipped' | 'error';
-  error?: string;
-}
-
-export interface CapabilityRepoSyncReport {
-  capabilityId: string;
-  executorId: string;
-  workingDirectory: string;
-  repos: RepoSyncResult[];
-  syncedAt: string;
-}
-
-/**
- * Explicitly triggers git clone + AST index build for all repositories
- * configured on a capability.  Pass `fetch: true` to also pull the latest
- * remote changes into existing clones.
- */
-export const syncCapabilityRepositories = async ({
-  capabilityId,
-  executorId,
-  fetch = false,
-}: {
-  capabilityId: string;
-  executorId: string;
-  fetch?: boolean;
-}): Promise<CapabilityRepoSyncReport> =>
-  requestJson<CapabilityRepoSyncReport>(
-    `/api/capabilities/${encodeURIComponent(capabilityId)}/execution/repo-sync`,
-    {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({ executorId, fetch }),
-    },
-  );
-
-export const fetchDesktopWorkspaceMappings = async ({
-  executorId,
-  userId,
-  capabilityId,
-}: {
-  executorId: string;
-  userId?: string;
-  capabilityId?: string;
-}): Promise<DesktopWorkspaceMapping[]> => {
-  const params = new URLSearchParams();
-  if (userId) {
-    params.set("userId", userId);
-  }
-  if (capabilityId) {
-    params.set("capabilityId", capabilityId);
-  }
-
-  const payload = await requestJson<{ mappings: DesktopWorkspaceMapping[] }>(
-    `/api/runtime/executors/${encodeURIComponent(executorId)}/workspace-mappings${
-      params.size ? `?${params.toString()}` : ""
-    }`,
-  );
-  return payload.mappings || [];
-};
-
-export const createDesktopWorkspaceMapping = async (
-  executorId: string,
-  payload: {
-    userId?: string;
-    capabilityId: string;
-    repositoryId?: string;
-    localRootPath?: string;
-    workingDirectoryPath?: string;
-  },
-): Promise<DesktopWorkspaceMapping> =>
-  requestJson<DesktopWorkspaceMapping>(
-    `/api/runtime/executors/${encodeURIComponent(executorId)}/workspace-mappings`,
-    {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify(payload),
-    },
-  );
-
-export const updateDesktopWorkspaceMapping = async (
-  executorId: string,
-  mappingId: string,
-  payload: Partial<{
-    capabilityId: string;
-    repositoryId?: string;
-    localRootPath?: string;
-    workingDirectoryPath?: string;
-  }>,
-): Promise<DesktopWorkspaceMapping> =>
-  requestJson<DesktopWorkspaceMapping>(
-    `/api/runtime/executors/${encodeURIComponent(executorId)}/workspace-mappings/${encodeURIComponent(mappingId)}`,
-    {
-      method: "PATCH",
-      headers: jsonHeaders,
-      body: JSON.stringify(payload),
-    },
-  );
-
-export const deleteDesktopWorkspaceMapping = async (
-  executorId: string,
-  mappingId: string,
-): Promise<void> =>
-  requestJson<void>(
-    `/api/runtime/executors/${encodeURIComponent(executorId)}/workspace-mappings/${encodeURIComponent(mappingId)}`,
-    {
-      method: "DELETE",
-    },
-  );
 
 export const sendCapabilityChat = async (
   payload: CapabilityChatRequest,
@@ -843,7 +351,7 @@ export const sendCapabilityChat = async (
   if (desktop?.isDesktop) {
     return desktop.sendRuntimeChat({
       ...payload,
-      actorContext: currentActorContext,
+      actorContext: getCurrentActorContext(),
     }) as Promise<CapabilityChatResponse>;
   }
 
@@ -3536,7 +3044,7 @@ export const streamCapabilityChat = async (
         {
           ...payload,
           streamId,
-          actorContext: currentActorContext,
+          actorContext: getCurrentActorContext(),
         },
         (event) => {
           if (aborted) {
@@ -3941,83 +3449,6 @@ export const replayPromptReceipt = async (
       body: JSON.stringify({ model: options?.model }),
     },
   );
-
-export const fetchTokenManagementSummary = async (): Promise<TokenManagementSummary> =>
-  requestJson<TokenManagementSummary>("/api/token-management/summary");
-
-export const fetchTokenManagementCapability = async (
-  capabilityId: string,
-): Promise<TokenManagementCapabilitySnapshot> =>
-  requestJson<TokenManagementCapabilitySnapshot>(
-    `/api/token-management/capabilities/${encodeURIComponent(capabilityId)}`,
-  );
-
-export const updateTokenManagementPolicy = async (
-  capabilityId: string,
-  policy: TokenManagementPolicy,
-): Promise<TokenManagementCapabilitySnapshot> =>
-  requestJson<TokenManagementCapabilitySnapshot>(
-    `/api/token-management/capabilities/${encodeURIComponent(capabilityId)}/policy`,
-    {
-      method: "PUT",
-      headers: jsonHeaders,
-      body: JSON.stringify({ policy }),
-    },
-  );
-
-export const recommendTokenManagementModel = async (payload: {
-  capabilityId: string;
-  selectedProviderKey?: ProviderKey | null;
-  selectedModel?: string | null;
-  phase?: string | null;
-  toolId?: string | null;
-  intent?: string | null;
-  writeMode?: boolean;
-  requiresApproval?: boolean;
-  governanceState?: string | null;
-  complexityTier?: ModelRoutingRecommendation["complexityTier"];
-}): Promise<ModelRoutingRecommendation> =>
-  requestJson<ModelRoutingRecommendation>("/api/token-management/recommend-model", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(payload),
-  });
-
-export const estimateTokenPrompt = async (payload: {
-  capabilityId?: string;
-  prompt: string;
-  providerKey?: ProviderKey | null;
-  model?: string | null;
-  kind?: "prose" | "code" | "json";
-}): Promise<TokenPromptEstimateResponse> =>
-  requestJson<TokenPromptEstimateResponse>("/api/token-management/estimate-prompt", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(payload),
-  });
-
-export const fetchTokenOptimizationReceipts = async (
-  params: { capabilityId?: string; limit?: number } = {},
-): Promise<TokenOptimizationReceipt[]> => {
-  const query = new URLSearchParams();
-  if (params.capabilityId) query.set("capabilityId", params.capabilityId);
-  if (params.limit) query.set("limit", String(params.limit));
-  const suffix = query.toString();
-  return requestJson<TokenOptimizationReceipt[]>(
-    `/api/token-management/receipts${suffix ? `?${suffix}` : ""}`,
-  );
-};
-
-export const fetchTokenManagementRecommendations = async (
-  params: { capabilityId?: string } = {},
-): Promise<TokenManagementRecommendation[]> => {
-  const query = new URLSearchParams();
-  if (params.capabilityId) query.set("capabilityId", params.capabilityId);
-  const suffix = query.toString();
-  return requestJson<TokenManagementRecommendation[]>(
-    `/api/token-management/recommendations${suffix ? `?${suffix}` : ""}`,
-  );
-};
 
 // ─── Agent Mind ───────────────────────────────────────────────────────────────
 

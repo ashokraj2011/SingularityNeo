@@ -27,12 +27,14 @@ import {
 import { refreshCapabilityMemory } from '../memory';
 import { parseActorContext } from '../requestActor';
 import {
+  getCapabilityBundle,
+  getWorkspaceSettings,
+} from '../domains/self-service';
+import {
   createCapabilityArtifactUploadRecord,
   getCapabilityArtifact,
   getCapabilityArtifactFileBytes,
-  getCapabilityBundle,
-  getWorkspaceSettings,
-} from '../repository';
+} from '../domains/tool-plane';
 
 type DeliveryAssetRouteDeps = {
   assertCapabilitySupportsExecution: (capability: Capability) => void;
