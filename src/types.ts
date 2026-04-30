@@ -23,6 +23,23 @@ export type ProviderKey =
   | "codex-cli"
   | "aider-cli";
 export type EmbeddingProviderKey = "local-openai" | "deterministic-hash";
+export type TokenPolicyMode = "advisor" | "auto" | "strict";
+export type TokenStrategyMode = "disabled" | "advisory" | "automatic";
+export type TokenSavingStrategyKey =
+  | "context-budgeting"
+  | "history-rollup"
+  | "semantic-code-hunks"
+  | "ast-first-discovery"
+  | "memory-budgeting"
+  | "diff-first-editing"
+  | "model-adaptive-routing"
+  | "receipt-auditing";
+export type ModelComplexityTier =
+  | "TRIVIAL"
+  | "STANDARD"
+  | "COMPLEX"
+  | "CRITICAL";
+export type TokenBudgetScope = "CAPABILITY" | "AGENT" | "WORK_ITEM" | "PHASE";
 export type RuntimeTransportMode =
   | "desktop-cli"
   | "sdk-session"
@@ -920,7 +937,8 @@ export interface WorkspaceToolTemplate {
     | "Build"
     | "Test"
     | "Docs"
-    | "Deploy";
+    | "Deploy"
+    | "Orchestration";
   requiresApproval: boolean;
 }
 
@@ -977,6 +995,35 @@ export interface CapabilityDeploymentTarget {
 
 export type ExecutionMode = "LIVE" | "SHADOW";
 
+export interface TokenBudgetLimit {
+  scope: TokenBudgetScope;
+  scopeId?: string;
+  tokenBudget?: number;
+  costBudgetUsd?: number;
+  phase?: string;
+  agentId?: string;
+  workItemId?: string;
+}
+
+export interface ModelAdaptivePolicy {
+  enabled?: boolean;
+  providerKey?: ProviderKey;
+  budgetModel?: string;
+  standardModel?: string;
+  complexModel?: string;
+  criticalModel?: string;
+}
+
+export interface TokenManagementPolicy {
+  mode?: TokenPolicyMode;
+  strategyModes?: Partial<Record<TokenSavingStrategyKey, TokenStrategyMode>>;
+  budgets?: TokenBudgetLimit[];
+  modelAdaptive?: ModelAdaptivePolicy;
+  strictBudgetEnforcement?: boolean;
+  diagnosticsOff?: boolean;
+  updatedAt?: string;
+}
+
 export interface CapabilityExecutionConfig {
   executionMode?: ExecutionMode;
   defaultWorkspacePath?: string;
@@ -1027,6 +1074,12 @@ export interface CapabilityExecutionConfig {
     /** Model for STANDARD tools. Default: agent.model. */
     standardModel?: string;
   };
+  /**
+   * First-class Token Intelligence policy. Legacy fields above remain as
+   * compatibility inputs, but resolved runtime behavior should read this
+   * policy through the token-management service.
+   */
+  tokenManagement?: TokenManagementPolicy;
   /**
    * Cross-capability (global) memory settings for this capability.
    * When `canWrite` is true, agents running under this capability are allowed
@@ -5441,6 +5494,111 @@ export interface RuntimeLanePolicy {
   executionLaneId: string;
   priority: number;
   createdAt: string;
+}
+
+// ─── Token Intelligence ─────────────────────────────────────────────────────
+
+export interface TokenUsageBreakdown {
+  scope: TokenBudgetScope | "WORKSPACE" | "CHAT" | "LEARNING" | "SWARM" | "EXECUTION";
+  scopeId?: string;
+  label: string;
+  estimatedInputTokens: number;
+  actualInputTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  usageEstimated: boolean;
+}
+
+export interface ModelRoutingRecommendation {
+  complexityTier: ModelComplexityTier;
+  recommendedProviderKey: ProviderKey | null;
+  recommendedModel: string | null;
+  selectedProviderKey: ProviderKey | null;
+  selectedModel: string | null;
+  appliedProviderKey: ProviderKey | null;
+  appliedModel: string | null;
+  applied: boolean;
+  strategyMode: TokenStrategyMode;
+  tokenPolicyMode: TokenPolicyMode;
+  routingReason: string;
+  budgetScope?: TokenBudgetScope;
+  budgetRemainingTokens?: number | null;
+  budgetRemainingUsd?: number | null;
+}
+
+export interface TokenOptimizationReceipt {
+  id: string;
+  capabilityId: string;
+  workItemId?: string | null;
+  agentId?: string | null;
+  source: "PROMPT_RECEIPT" | "RUNTIME" | "ESTIMATE";
+  createdAt: string;
+  tokenPolicyMode: TokenPolicyMode;
+  strategyModes: Record<TokenSavingStrategyKey, TokenStrategyMode>;
+  enabledStrategies: TokenSavingStrategyKey[];
+  disabledStrategies: TokenSavingStrategyKey[];
+  complexityTier?: ModelComplexityTier | null;
+  recommendedProviderKey?: ProviderKey | null;
+  recommendedModel?: string | null;
+  selectedProviderKey?: ProviderKey | null;
+  selectedModel?: string | null;
+  routingReason?: string | null;
+  estimatedInputTokens: number;
+  actualInputTokens?: number | null;
+  estimatedSavingsTokens: number;
+  estimatedSavingsUsd: number;
+  budgetScope?: TokenBudgetScope | null;
+  budgetRemainingTokens?: number | null;
+  budgetRemainingUsd?: number | null;
+}
+
+export interface TokenManagementRecommendation {
+  id: string;
+  capabilityId?: string;
+  strategyKey: TokenSavingStrategyKey;
+  title: string;
+  description: string;
+  mode: TokenStrategyMode;
+  estimatedSavingsTokens: number;
+  estimatedSavingsUsd: number;
+  severity: "INFO" | "OPPORTUNITY" | "WARNING";
+  source: "PROMPT_RECEIPT" | "POLICY" | "USAGE" | "MODEL_ROUTING";
+}
+
+export interface TokenManagementCapabilitySnapshot {
+  capabilityId: string;
+  capabilityName: string;
+  policy: TokenManagementPolicy;
+  effectiveStrategyModes: Record<TokenSavingStrategyKey, TokenStrategyMode>;
+  usage: TokenUsageBreakdown;
+  budgets: TokenBudgetLimit[];
+  recommendations: TokenManagementRecommendation[];
+  recentReceipts: PersistedPromptReceipt[];
+  modelRoutingPreview: ModelRoutingRecommendation[];
+}
+
+export interface TokenManagementSummary {
+  generatedAt: string;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  estimatedSavingsTokens: number;
+  estimatedSavingsUsd: number;
+  capabilityCount: number;
+  receiptCount: number;
+  topUsage: TokenUsageBreakdown[];
+  capabilities: TokenManagementCapabilitySnapshot[];
+  recommendations: TokenManagementRecommendation[];
+  recentReceipts: PersistedPromptReceipt[];
+}
+
+export interface TokenPromptEstimateResponse {
+  estimatedTokens: number;
+  estimatedCostUsd: number;
+  providerKey: ProviderKey | null;
+  model: string | null;
+  kind: "prose" | "code" | "json";
+  receipt: TokenOptimizationReceipt;
 }
 
 // ─── Prompt receipts (persisted LLM context debug records) ───────────────────

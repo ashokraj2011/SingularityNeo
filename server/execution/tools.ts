@@ -11,6 +11,12 @@ import {
   ToolAdapterId,
   WorkItem,
 } from "../../src/types";
+import {
+  TOOL_ADAPTER_IDS,
+  getProviderFunctionToolIds,
+  getReadOnlyToolIds,
+  getToolCatalogEntry,
+} from "../../src/lib/toolCatalog";
 import type { ProviderTool } from "../localOpenAIProvider";
 import { executionRuntimeRpc, isRemoteExecutionClient } from "./runtimeClient";
 import {
@@ -79,7 +85,7 @@ type ToolExecutionContext = {
   requireApprovedDeployment?: boolean;
 };
 
-type ToolAdapter = {
+export type ToolAdapter = {
   id: ToolAdapterId;
   description: string;
   usageExample?: string;
@@ -90,6 +96,9 @@ type ToolAdapter = {
     args: Record<string, any>,
   ) => Promise<ToolExecutionResult>;
 };
+
+const toolDescription = (toolId: ToolAdapterId) =>
+  getToolCatalogEntry(toolId).description;
 
 const previewText = (value: string, limit = 1600) =>
   value.replace(/\0/g, "").slice(0, limit);
@@ -693,10 +702,10 @@ const executeCommandTemplate = async (
   } satisfies ToolExecutionResult;
 };
 
-const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
+export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   workspace_list: {
     id: "workspace_list",
-    description: "List files inside the current desktop-user workspace path.",
+    description: toolDescription("workspace_list"),
     usageExample: '{"path":"src","limit":200,"cursor":"..."}',
     parameterSchema: {
       type: "object",
@@ -774,8 +783,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   workspace_read: {
     id: "workspace_read",
-    description:
-      "Read a text file. Prefer passing `symbol` (an exact function/class name from the code index) to get JUST that symbol body plus ~10 lines of context instead of the whole file — this saves 80-95% of input tokens. Pass `includeCallers` (0-3) and/or `includeCallees` (0-3) to additionally surface neighbor-file paths + their top exported signatures so cross-method invariants stay in scope for refactors. Only omit `symbol` when you truly need the full file.",
+    description: toolDescription("workspace_read"),
     usageExample:
       '{"path":"src/auth/token.ts","symbol":"validateToken","includeCallers":2} (semantic hunk + 2 dependents) OR {"path":"README.md"} (whole file fallback)',
     parameterSchema: {
@@ -1029,8 +1037,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   workspace_search: {
     id: "workspace_search",
-    description:
-      "Search within the current desktop-user workspace for a string or regex pattern.",
+    description: toolDescription("workspace_search"),
     usageExample:
       '{"pattern":"Operator","path":"src","limit":100,"cursor":"..."}',
     parameterSchema: {
@@ -1291,12 +1298,7 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   browse_code: {
     id: "browse_code",
-    description:
-      "Browse the AST symbol index for this capability's repositories. " +
-      "Use kind='class'|'function'|'interface'|'method'|'type'|'enum'|'variable' to filter. " +
-      "Returns symbol names, file paths, and line ranges from the local base clone. " +
-      "Does NOT require cloning — uses the pre-synced _repos/ directory. " +
-      "Use this to discover API endpoints, service contracts, interfaces, and top-level exports.",
+    description: toolDescription("browse_code"),
     usageExample: '{"kind":"interface","limit":30}',
     parameterSchema: {
       type: "object",
@@ -1330,12 +1332,31 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       const limitRaw = Number(args.limit);
       const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.floor(limitRaw), 100)) : 30;
 
-      // Try local base clones first.
-      const baseClones = isRemoteExecutionClient()
-        ? getCapabilityBaseClones(capability.id).filter(e => e.isGitRepo)
-        : [];
+      const workItemRepositoryId =
+        workItem?.executionContext?.primaryRepositoryId ||
+        workItem?.executionContext?.branch?.repositoryId ||
+        (capability.repositories || []).find(repository => repository.isPrimary)?.id ||
+        capability.repositories?.[0]?.id;
+      const workItemCheckoutPath =
+        workItem?.id && workItemRepositoryId
+          ? await resolveWorkspacePath(capability, workItem, args.workspacePath).catch(() => "")
+          : "";
+      const baseClones = getCapabilityBaseClones(capability.id).filter(e => e.isGitRepo);
+      const localCloneCandidates = [
+        ...(workItemCheckoutPath && workItemRepositoryId
+          ? [
+              {
+                repositoryId: workItemRepositoryId,
+                repositoryLabel: "work-item checkout",
+                checkoutPath: workItemCheckoutPath,
+                isPrimary: true,
+              },
+            ]
+          : []),
+        ...baseClones,
+      ];
 
-      if (baseClones.length === 0) {
+      if (localCloneCandidates.length === 0) {
         // Fall back to DB index.
         const dbResults = await searchCodeSymbols(capability.id, kindRaw || "*", { limit: limit as any }).catch(() => []);
         if (dbResults.length === 0) {
@@ -1365,11 +1386,12 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               return {
                 summary: `AST index unavailable. Returning ${files.length} source file candidate${files.length === 1 ? "" : "s"} from the workspace fallback.`,
                 stdoutPreview: previewText(output),
-                details: {
-                  files,
-                  source: "workspace-text-fallback",
-                  codeDiscoveryMode: "text-search-fallback",
-                },
+	                details: {
+	                  files,
+	                  source: "workspace-text-fallback",
+	                  mode: "text-search",
+	                  codeDiscoveryMode: "text-search-fallback",
+	                },
               };
             }
           }
@@ -1381,17 +1403,22 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         const output = dbResults
           .map(s => `${s.qualifiedSymbolName || s.symbolName} (${s.kind}) ${s.filePath}:${s.sliceStartLine}-${s.sliceEndLine}`)
           .join("\n");
-        return {
-          summary: `Found ${dbResults.length} symbol(s) from DB code index.`,
-          stdoutPreview: previewText(output),
-          details: { symbols: dbResults, source: "capability-index" },
-        };
-      }
+	        return {
+	          summary: `Found ${dbResults.length} symbol(s) from DB code index.`,
+	          stdoutPreview: previewText(output),
+	          details: {
+              symbols: dbResults,
+              source: "capability-index",
+              codeIndexSource: "capability-index",
+              codeDiscoveryMode: "ast-first",
+            },
+	        };
+	      }
 
       // Track symbols with their checkout root so we can emit absolute paths.
       const allSymbols: Array<any & { _checkoutRoot: string }> = [];
       const repoSummaries: string[] = [];
-      for (const clone of [...baseClones.filter(e => e.isPrimary), ...baseClones.filter(e => !e.isPrimary)]) {
+	      for (const clone of [...localCloneCandidates.filter(e => e.isPrimary), ...localCloneCandidates.filter(e => !e.isPrimary)]) {
         const cloneRoot = clone.checkoutPath.replace(/\/+$/, "");
         const { symbols, builtAt } = await listLocalCheckoutAllSymbols({
           checkoutPath: clone.checkoutPath,
@@ -1422,8 +1449,8 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         ),
       ].join("\n");
 
-      return {
-        summary: `Found ${sliced.length} ${kind ? kind + " " : ""}symbol(s) across ${baseClones.length} repo(s).`,
+	      return {
+	        summary: `Found ${sliced.length} ${kind ? kind + " " : ""}symbol(s) across ${localCloneCandidates.length} checkout(s).`,
         stdoutPreview: previewText(`Repositories:\n${repoSummaries.join("\n")}\n\nSymbols:\n${output}`),
         details: {
           symbols: sliced.map(s => ({
@@ -1437,16 +1464,18 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             isExported: s.isExported,
             repositoryId: s.repositoryId,
             checkoutRoot: s._checkoutRoot,
-          })),
-          source: "local-clone",
-          repositories: repoSummaries,
-        },
+	          })),
+	          source: "local-clone",
+	          codeIndexSource: "local-checkout",
+	          codeDiscoveryMode: "ast-first",
+	          repositories: repoSummaries,
+	        },
       };
     },
   },
   git_status: {
     id: "git_status",
-    description: "Inspect git status for the current desktop-user workspace repository.",
+    description: toolDescription("git_status"),
     usageExample: '{"workspacePath":"src"}',
     parameterSchema: {
       type: "object",
@@ -1485,9 +1514,24 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   workspace_write: {
     id: "workspace_write",
-    description:
-      "Create a NEW file at `path` with `content`. For edits to EXISTING files, use `workspace_apply_patch` (preferred) or `workspace_replace_block` instead — they are dramatically cheaper in output tokens and surface cleaner diffs to reviewers. Repeated `workspace_write` on an existing file will be REJECTED after the first attempt; use patch tools.",
+    description: toolDescription("workspace_write"),
     usageExample: '{"path":"src/main/java/App.java","content":"..."}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path", "content"],
+      properties: {
+        path: { type: "string", description: "Relative or absolute approved file path to create." },
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root or child directory override.",
+        },
+        content: {
+          type: "string",
+          description: "Full file contents to write to the new file.",
+        },
+      },
+    },
     retryable: false,
     execute: async ({ capability, workItem }, args) => {
       const workspacePath = await resolveWorkspacePath(
@@ -1553,10 +1597,37 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   workspace_replace_block: {
     id: "workspace_replace_block",
-    description:
-      "PREFERRED for targeted single-block edits to existing files. Provide `find` (must match the existing text exactly) and `replace`. Far cheaper than rewriting the whole file with `workspace_write` and safer than free-form patches. Use this for simple in-place changes to an existing function or block.",
+    description: toolDescription("workspace_replace_block"),
     usageExample:
       '{"path":"src/App.tsx","find":"const oldValue = 1;","replace":"const oldValue = 2;","expectedMatches":1}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path", "find"],
+      properties: {
+        path: { type: "string", description: "Relative or absolute approved file path to edit." },
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root or child directory override.",
+        },
+        find: {
+          type: "string",
+          description: "Exact anchored block to find in the existing file.",
+        },
+        replace: {
+          type: "string",
+          description: "Replacement text for the matched block.",
+        },
+        expectedMatches: {
+          type: "number",
+          description: "Expected number of matches for the anchored block.",
+        },
+        replaceAll: {
+          type: "boolean",
+          description: "Replace every exact match instead of only the first one.",
+        },
+      },
+    },
     retryable: false,
     execute: async ({ capability, workItem }, args) => {
       const workspacePath = await resolveWorkspacePath(
@@ -1612,10 +1683,24 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   workspace_apply_patch: {
     id: "workspace_apply_patch",
-    description:
-      "PREFERRED for editing existing files. Accepts a standard unified diff (git-style) and applies it in place. Output ONLY the diff hunks — never the full file. Strongly prefer this tool over `workspace_write` for any modification to code that already exists, since it uses a fraction of the output tokens and produces reviewable diffs.",
+    description: toolDescription("workspace_apply_patch"),
     usageExample:
       '{"patchText":"diff --git a/src/App.tsx b/src/App.tsx\\n--- a/src/App.tsx\\n+++ b/src/App.tsx\\n@@ ..."}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["patchText"],
+      properties: {
+        patchText: {
+          type: "string",
+          description: "Unified diff patch text to apply inside the approved workspace.",
+        },
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root or child directory override.",
+        },
+      },
+    },
     retryable: false,
     execute: async ({ capability, workItem }, args) => {
       const workspacePath = await resolveWorkspacePath(
@@ -1677,10 +1762,28 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   delegate_task: {
     id: "delegate_task",
-    description:
-      "Delegate a bounded specialist subtask to another agent inside the current capability execution.",
+    description: toolDescription("delegate_task"),
     usageExample:
       '{"delegatedAgentId":"AGENT-...","title":"Inspect failing tests","prompt":"Review the latest test failures and summarize the root cause."}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["delegatedAgentId", "prompt"],
+      properties: {
+        delegatedAgentId: {
+          type: "string",
+          description: "Target agent id that should receive the delegated subtask.",
+        },
+        title: {
+          type: "string",
+          description: "Short title for the delegated work item or handoff.",
+        },
+        prompt: {
+          type: "string",
+          description: "Detailed prompt or instructions for the delegated agent.",
+        },
+      },
+    },
     retryable: false,
     execute: async () => {
       throw new Error(
@@ -1690,8 +1793,22 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   run_build: {
     id: "run_build",
-    description: "Run the approved build command template.",
+    description: toolDescription("run_build"),
     usageExample: '{"templateId":"build"}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        templateId: {
+          type: "string",
+          description: "Optional build command template id. Defaults to build.",
+        },
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root or child directory override.",
+        },
+      },
+    },
     retryable: true,
     execute: async ({ capability, workItem }, args) =>
       executeCommandTemplate(
@@ -1704,8 +1821,22 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   run_test: {
     id: "run_test",
-    description: "Run the approved test command template.",
+    description: toolDescription("run_test"),
     usageExample: '{"templateId":"test"}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        templateId: {
+          type: "string",
+          description: "Optional test command template id. Defaults to test.",
+        },
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root or child directory override.",
+        },
+      },
+    },
     retryable: true,
     execute: async ({ capability, workItem }, args) =>
       executeCommandTemplate(
@@ -1718,8 +1849,22 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   run_docs: {
     id: "run_docs",
-    description: "Run the approved docs command template.",
+    description: toolDescription("run_docs"),
     usageExample: '{"templateId":"docs"}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        templateId: {
+          type: "string",
+          description: "Optional docs command template id. Defaults to docs.",
+        },
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root or child directory override.",
+        },
+      },
+    },
     retryable: true,
     execute: async ({ capability, workItem }, args) =>
       executeCommandTemplate(
@@ -1732,9 +1877,22 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   run_deploy: {
     id: "run_deploy",
-    description:
-      "Execute an approved deployment target using a named command template after approval.",
+    description: toolDescription("run_deploy"),
     usageExample: '{"targetId":"staging"}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        targetId: {
+          type: "string",
+          description: "Deployment target id or command template id to execute.",
+        },
+        workspacePath: {
+          type: "string",
+          description: "Optional approved workspace root override for the deployment target.",
+        },
+      },
+    },
     retryable: false,
     execute: async (
       { capability, workItem, requireApprovedDeployment },
@@ -1772,10 +1930,29 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   publish_bounty: {
     id: "publish_bounty",
-    description:
-      "Experimental: broadcast an in-process bounty request to other agents in the current desktop runtime.",
+    description: toolDescription("publish_bounty"),
     usageExample:
       '{"bountyId":"req-123","targetRole":"Backend","instructions":"..."}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["bountyId", "instructions"],
+      properties: {
+        bountyId: { type: "string", description: "Unique runtime-local bounty id." },
+        targetRole: {
+          type: "string",
+          description: "Optional target role that should resolve the bounty.",
+        },
+        instructions: {
+          type: "string",
+          description: "Instructions for the peer agent that will handle the bounty.",
+        },
+        timeoutMs: {
+          type: "number",
+          description: "Optional runtime-local timeout in milliseconds.",
+        },
+      },
+    },
     retryable: false,
     execute: async ({ capability, agent }, args) => {
       const bountyId = getRequiredStringArg(args, "bountyId", "publish_bounty");
@@ -1811,10 +1988,26 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   resolve_bounty: {
     id: "resolve_bounty",
-    description:
-      "Experimental: resolve an active in-process bounty published by another agent in the same runtime.",
+    description: toolDescription("resolve_bounty"),
     usageExample:
       '{"bountyId":"req-123","status":"RESOLVED","resultSummary":"Created route"}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["bountyId"],
+      properties: {
+        bountyId: { type: "string", description: "Active bounty id to resolve." },
+        status: {
+          type: "string",
+          enum: ["RESOLVED", "FAILED"],
+          description: "Resolution status to publish for the bounty.",
+        },
+        resultSummary: {
+          type: "string",
+          description: "Optional summary of the resolution outcome.",
+        },
+      },
+    },
     retryable: false,
     execute: async ({ capability, agent }, args) => {
       const bountyId = getRequiredStringArg(args, "bountyId", "resolve_bounty");
@@ -1859,9 +2052,23 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
   wait_for_signal: {
     id: "wait_for_signal",
-    description:
-      "Experimental: wait for an in-process bounty published by this same agent to be resolved.",
+    description: toolDescription("wait_for_signal"),
     usageExample: '{"bountyId":"req-123"}',
+    parameterSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["bountyId"],
+      properties: {
+        bountyId: {
+          type: "string",
+          description: "Previously published bounty id to wait on.",
+        },
+        timeoutMs: {
+          type: "number",
+          description: "Optional wait timeout in milliseconds.",
+        },
+      },
+    },
     retryable: false,
     execute: async ({ capability, agent }, args) => {
       const bountyId = getRequiredStringArg(
@@ -1908,6 +2115,22 @@ const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
   },
 };
 
+const assertToolRegistryCompleteness = () => {
+  const registryIds = Object.keys(TOOL_REGISTRY).sort();
+  const catalogIds = [...TOOL_ADAPTER_IDS].sort();
+  const missingFromRegistry = catalogIds.filter((toolId) => !(toolId in TOOL_REGISTRY));
+  const missingFromCatalog = registryIds.filter(
+    (toolId) => !TOOL_ADAPTER_IDS.includes(toolId as ToolAdapterId),
+  );
+  if (missingFromRegistry.length || missingFromCatalog.length) {
+    throw new Error(
+      `Tool registry/catalog drift detected. Missing registry adapters: ${missingFromRegistry.join(", ") || "none"}. Missing catalog entries: ${missingFromCatalog.join(", ") || "none"}.`,
+    );
+  }
+};
+
+assertToolRegistryCompleteness();
+
 export const getToolAdapter = (toolId: ToolAdapterId) => {
   const adapter = TOOL_REGISTRY[toolId];
   if (!adapter) {
@@ -1916,13 +2139,9 @@ export const getToolAdapter = (toolId: ToolAdapterId) => {
   return adapter;
 };
 
-export const READ_ONLY_AGENT_TOOL_IDS: ToolAdapterId[] = [
-  "browse_code",
-  "workspace_search",
-  "workspace_read",
-  "workspace_list",
-  "git_status",
-];
+export const listRegisteredToolIds = (): ToolAdapterId[] => [...TOOL_ADAPTER_IDS];
+
+export const READ_ONLY_AGENT_TOOL_IDS: ToolAdapterId[] = getReadOnlyToolIds();
 
 export const listToolDescriptions = (toolIds: ToolAdapterId[]) =>
   toolIds.map((toolId) => {
@@ -1936,7 +2155,10 @@ export const listToolDescriptions = (toolIds: ToolAdapterId[]) =>
 export const buildProviderToolDefinitions = (toolIds: ToolAdapterId[]): ProviderTool[] =>
   toolIds.flatMap((toolId) => {
     const adapter = getToolAdapter(toolId);
-    if (!adapter.parameterSchema) {
+    if (
+      !getProviderFunctionToolIds().includes(toolId) ||
+      !adapter.parameterSchema
+    ) {
       return [];
     }
     return [

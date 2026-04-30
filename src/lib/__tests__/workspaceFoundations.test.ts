@@ -9,6 +9,7 @@ import {
   WORKSPACE_AGENT_TEMPLATES,
   WORKSPACE_EVAL_SUITE_TEMPLATES,
 } from '../workspaceFoundations';
+import { TOOL_ADAPTER_IDS } from '../toolCatalog';
 import { getStandardAgentContract } from '../../constants';
 import { createDefaultCapabilityLifecycle } from '../capabilityLifecycle';
 import { getDefaultExecutionConfig } from '../executionConfig';
@@ -49,7 +50,9 @@ describe('workspace foundations', () => {
     expect(catalog.evalSuiteTemplates.length).toBe(WORKSPACE_EVAL_SUITE_TEMPLATES.length);
     expect(catalog.skillTemplates.length).toBeGreaterThan(0);
     expect(catalog.artifactTemplates.length).toBeGreaterThan(0);
-    expect(catalog.toolTemplates.length).toBeGreaterThan(0);
+    expect(catalog.toolTemplates.length).toBe(TOOL_ADAPTER_IDS.length);
+    expect(catalog.toolTemplates.some(template => template.toolId === 'publish_bounty')).toBe(true);
+    expect(catalog.toolTemplates.some(template => template.toolId === 'wait_for_signal')).toBe(true);
   });
 
   it('summarizes the shared workspace foundations for UI status', () => {

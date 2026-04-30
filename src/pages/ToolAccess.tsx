@@ -10,6 +10,10 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { useCapability } from '../context/CapabilityContext';
 import { formatEnumLabel } from '../lib/enterprise';
+import {
+  getHighImpactToolIds,
+  getToolCatalogEntry,
+} from '../lib/toolCatalog';
 import { deriveExecutionBoundary } from '../lib/workflowRuntime';
 import type { CapabilityAgent, ToolAdapterId, Workflow, WorkflowStep } from '../types';
 import {
@@ -31,31 +35,7 @@ type StepAccessRecord = {
   escalationTriggers: string[];
 };
 
-const TOOL_TONE: Record<ToolAdapterId, 'info' | 'warning' | 'danger'> = {
-  workspace_list: 'info',
-  workspace_read: 'info',
-  workspace_search: 'info',
-  browse_code: 'info',
-  git_status: 'info',
-  workspace_write: 'danger',
-  workspace_replace_block: 'danger',
-  workspace_apply_patch: 'danger',
-  delegate_task: 'warning',
-  publish_bounty: 'warning',
-  resolve_bounty: 'warning',
-  wait_for_signal: 'warning',
-  run_build: 'warning',
-  run_test: 'warning',
-  run_docs: 'warning',
-  run_deploy: 'danger',
-};
-
-const HIGH_IMPACT_TOOLS = new Set<ToolAdapterId>([
-  'workspace_write',
-  'workspace_replace_block',
-  'workspace_apply_patch',
-  'run_deploy',
-]);
+const HIGH_IMPACT_TOOLS = new Set<ToolAdapterId>(getHighImpactToolIds());
 
 const byLabel = <T extends { label: string }>(items: T[]) =>
   items.slice().sort((left, right) => left.label.localeCompare(right.label));
@@ -116,6 +96,7 @@ export default function ToolAccess() {
         record.agent?.name,
         record.agent?.role,
         ...record.allowedToolIds,
+        ...record.allowedToolIds.map(toolId => getToolCatalogEntry(toolId).label),
       ]
         .filter(Boolean)
         .join(' ')
@@ -161,6 +142,8 @@ export default function ToolAccess() {
         summary.agent.role,
         ...summary.uniqueTools,
         ...summary.preferredToolIds,
+        ...summary.uniqueTools.map(toolId => getToolCatalogEntry(toolId).label),
+        ...summary.preferredToolIds.map(toolId => getToolCatalogEntry(toolId).label),
       ]
         .join(' ')
         .toLowerCase();
@@ -420,8 +403,14 @@ export default function ToolAccess() {
                   <div className="flex flex-wrap gap-2">
                     {summary.preferredToolIds.length > 0 ? (
                       summary.preferredToolIds.map(toolId => (
-                        <StatusBadge key={`preferred-${toolId}`} tone={TOOL_TONE[toolId] || 'info'}>
-                          Preferred · {formatEnumLabel(toolId)}
+                        <StatusBadge
+                          key={`preferred-${toolId}`}
+                          tone={getToolCatalogEntry(toolId).tone}
+                        >
+                          Preferred ·
+                          {getToolCatalogEntry(toolId).experimental ? ' Experimental ·' : ''}
+                          {' '}
+                          {getToolCatalogEntry(toolId).label}
                         </StatusBadge>
                       ))
                     ) : (
@@ -433,9 +422,12 @@ export default function ToolAccess() {
                   <div className="flex flex-wrap gap-2">
                     {summary.uniqueTools.length > 0 ? (
                       summary.uniqueTools.map(toolId => (
-                      <StatusBadge key={toolId} tone={TOOL_TONE[toolId]}>
-                        Granted by workflow · {formatEnumLabel(toolId)}
-                      </StatusBadge>
+                        <StatusBadge key={toolId} tone={getToolCatalogEntry(toolId).tone}>
+                          Granted by workflow ·
+                          {getToolCatalogEntry(toolId).experimental ? ' Experimental ·' : ''}
+                          {' '}
+                          {getToolCatalogEntry(toolId).label}
+                        </StatusBadge>
                       ))
                     ) : (
                       <p className="text-sm leading-7 text-secondary">
@@ -530,8 +522,9 @@ export default function ToolAccess() {
                 <div className="mt-4 flex flex-wrap gap-2">
                   {record.allowedToolIds.length > 0 ? (
                     record.allowedToolIds.map(toolId => (
-                      <StatusBadge key={toolId} tone={TOOL_TONE[toolId]}>
-                        {formatEnumLabel(toolId)}
+                      <StatusBadge key={toolId} tone={getToolCatalogEntry(toolId).tone}>
+                        {getToolCatalogEntry(toolId).experimental ? 'Experimental · ' : ''}
+                        {getToolCatalogEntry(toolId).label}
                       </StatusBadge>
                     ))
                   ) : (

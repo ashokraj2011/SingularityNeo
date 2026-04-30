@@ -178,7 +178,7 @@ export const persistPromptReceipt = async (
   }
 };
 
-const mapRow = (row: Record<string, unknown>): PromptReceiptRecord => ({
+export const mapPromptReceiptRow = (row: Record<string, unknown>): PromptReceiptRecord => ({
   id: String(row.id),
   runStepId: String(row.run_step_id),
   runId: row.run_id == null ? null : String(row.run_id),
@@ -226,7 +226,7 @@ export const getPromptReceiptById = async (
     [id],
   );
   const row = result.rows[0];
-  return row ? mapRow(row) : null;
+  return row ? mapPromptReceiptRow(row) : null;
 };
 
 export const listPromptReceiptsForRunStep = async (
@@ -238,7 +238,7 @@ export const listPromptReceiptsForRunStep = async (
      ORDER BY created_at ASC`,
     [runStepId],
   );
-  return result.rows.map(mapRow);
+  return result.rows.map(mapPromptReceiptRow);
 };
 
 export const listPromptReceiptsForRun = async (
@@ -252,5 +252,5 @@ export const listPromptReceiptsForRun = async (
      LIMIT $2`,
     [runId, limit],
   );
-  return result.rows.map(mapRow);
+  return result.rows.map(mapPromptReceiptRow);
 };

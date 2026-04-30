@@ -61,6 +61,10 @@ import {
   createStandardCapabilityWorkflow,
 } from '../lib/standardWorkflow';
 import {
+  getToolCatalogEntry,
+  getWorkflowSelectableToolIds,
+} from '../lib/toolCatalog';
+import {
   createBrokerageCapabilityLifecycle,
   createDefaultCapabilityLifecycle,
   createLifecyclePhase,
@@ -150,17 +154,14 @@ const EDGE_CONDITION_OPTIONS: WorkflowEdge['conditionType'][] = [
   'CUSTOM',
 ];
 
-const TOOL_OPTIONS: ToolAdapterId[] = [
-  'workspace_list',
-  'workspace_read',
-  'workspace_search',
-  'git_status',
-  'workspace_write',
-  'run_build',
-  'run_test',
-  'run_docs',
-  'run_deploy',
-];
+const TOOL_OPTIONS: ToolAdapterId[] = getWorkflowSelectableToolIds();
+
+const formatToolOptionLabel = (toolId: ToolAdapterId) => {
+  const entry = getToolCatalogEntry(toolId);
+  return entry.experimental
+    ? `${entry.label} [Experimental] — ${toolId}`
+    : `${entry.label} — ${toolId}`;
+};
 
 const EXECUTION_RUNTIME_OPTIONS: Array<{
   key: ProviderKey | '';
@@ -4227,7 +4228,7 @@ export default function WorkflowStudio({
           >
             {TOOL_OPTIONS.map(toolId => (
               <option key={toolId} value={toolId}>
-                {toolId}
+                {formatToolOptionLabel(toolId)}
               </option>
             ))}
           </select>
@@ -8420,7 +8421,7 @@ export default function WorkflowStudio({
                     <label className="space-y-2 text-xs font-semibold uppercase tracking-[0.18em] text-outline">
                       <span>Allowed Tools</span>
                       <select multiple value={nodeDraft.allowedToolIds || []} onChange={e => setNodeDraft(c => c ? { ...c, allowedToolIds: Array.from(e.target.selectedOptions).map(o => o.value as ToolAdapterId) } : c)} className="enterprise-input min-h-[9rem]">
-                        {TOOL_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+                        {TOOL_OPTIONS.map(t => <option key={t} value={t}>{formatToolOptionLabel(t)}</option>)}
                       </select>
                       <p className="text-[0.72rem] font-medium normal-case tracking-normal text-secondary">This allowlist is the real execution gate. Agent preferred tools stay advisory and do not bypass these permissions.</p>
                     </label>

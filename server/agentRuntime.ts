@@ -191,14 +191,46 @@ const parseToolLoopDecision = (
   responseContent: string,
   allowedToolIds: ToolAdapterId[],
 ): ToolLoopDecision | null => {
-  const parsed = extractJsonObject(responseContent);
+  let parsed: Record<string, any>;
+  try {
+    parsed = extractJsonObject(responseContent);
+  } catch {
+    return null;
+  }
   const action = normalizeString(parsed.action).toLowerCase();
   const reasoning =
     normalizeString(parsed.reasoning) ||
     "No reasoning was returned by the runtime.";
 
-  if (action === "invoke_tool") {
-    const toolId = normalizeToolAdapterId(parsed.toolCall?.toolId);
+  const directActionToolId = normalizeToolAdapterId(action);
+  const explicitToolId = normalizeToolAdapterId(
+    parsed.toolCall?.toolId ||
+      parsed.toolId ||
+      parsed.tool ||
+      parsed.name ||
+      parsed.functionName ||
+      parsed.function,
+  );
+  const requestedToolId =
+    action === "invoke_tool" ? explicitToolId : directActionToolId || explicitToolId;
+
+  if (requestedToolId) {
+    const toolCall = parsed.toolCall && typeof parsed.toolCall === "object"
+      ? parsed.toolCall
+      : {};
+    const args =
+      toolCall.args && typeof toolCall.args === "object"
+        ? toolCall.args
+        : parsed.args && typeof parsed.args === "object"
+          ? parsed.args
+          : parsed.arguments && typeof parsed.arguments === "object"
+            ? parsed.arguments
+            : Object.keys(toolCall).some(key => key !== "toolId")
+              ? Object.fromEntries(
+                  Object.entries(toolCall).filter(([key]) => key !== "toolId"),
+                )
+              : {};
+    const toolId = requestedToolId;
     if (!toolId || !allowedToolIds.includes(toolId)) {
       return null;
     }
@@ -208,10 +240,7 @@ const parseToolLoopDecision = (
       summary: normalizeString(parsed.summary) || undefined,
       toolCall: {
         toolId,
-        args:
-          parsed.toolCall?.args && typeof parsed.toolCall.args === "object"
-            ? parsed.toolCall.args
-            : {},
+        args,
       },
     };
   }

@@ -113,4 +113,60 @@ describe("invokeCommonAgentRuntime", () => {
       }),
     );
   });
+
+  it("executes direct tool-action JSON instead of showing it to the user", async () => {
+    invokeCapabilityChatMock
+      .mockResolvedValueOnce({
+        content:
+          '{"action":"browse_code","reasoning":"Need actual operator symbols.","summary":"Browsing code.","toolCall":{"kind":"class"}}',
+        model: "test-model",
+        usage,
+        responseId: "resp-direct-tool",
+        createdAt: "2026-04-30T00:00:00.000Z",
+      })
+      .mockResolvedValueOnce({
+        content:
+          '{"action":"answer","reasoning":"Grounded in browse_code.","content":"The rule engine defines EqualsOperator and ContainsOperator."}',
+        model: "test-model",
+        usage,
+        responseId: "resp-answer",
+        createdAt: "2026-04-30T00:00:01.000Z",
+      });
+    executeToolMock.mockResolvedValue({
+      summary: "Found 2 operator classes from the local checkout index.",
+      details: {
+        codeIndexSource: "local-checkout",
+        mode: "symbol-search",
+      },
+      stdoutPreview:
+        "/tmp/rule-engine/src/main/java/org/example/rules/EqualsOperator.java\n/tmp/rule-engine/src/main/java/org/example/rules/ContainsOperator.java",
+    });
+
+    const result = await invokeCommonAgentRuntime({
+      capability: {
+        id: "CAP-RULES",
+        name: "Rule Engine",
+      },
+      agent: {
+        id: "AGENT-OWNER",
+        name: "Owner",
+        preferredToolIds: ["browse_code", "workspace_search"],
+      },
+      history: [],
+      message: "what all are the operators in this rule engine",
+      preferReadOnlyToolLoop: true,
+      runtimeLane: "desktop-runtime-worker",
+    });
+
+    expect(executeToolMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolId: "browse_code",
+        args: { kind: "class" },
+      }),
+    );
+    expect(result.content).toBe(
+      "The rule engine defines EqualsOperator and ContainsOperator.",
+    );
+    expect(result.content).not.toContain('"action":"browse_code"');
+  });
 });

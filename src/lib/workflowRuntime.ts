@@ -17,6 +17,7 @@ import type {
 import { getCapabilityBoardPhaseIds } from './capabilityLifecycle';
 import { compileStepOwnership } from './capabilityOwnership';
 import { BUILD_STEP_OUTPUT_LABEL, isBuildStep } from './buildStepContract';
+import { TOOL_ADAPTER_IDS, getToolCatalogEntry } from './toolCatalog';
 
 type CompileStepContextArgs = {
   capability: Capability;
@@ -29,22 +30,18 @@ type CompileStepContextArgs = {
   artifacts?: Artifact[];
 };
 
-const WRITE_CAPABLE_TOOLS = new Set<ToolAdapterId>([
-  'workspace_write',
-  'workspace_replace_block',
-  'workspace_apply_patch',
-  'run_build',
-  'run_test',
-  'run_docs',
-  'run_deploy',
-]);
+const WRITE_CAPABLE_TOOLS = new Set<ToolAdapterId>(
+  TOOL_ADAPTER_IDS.filter(toolId => {
+    const executionClass = getToolCatalogEntry(toolId).executionClass;
+    return executionClass === 'write' || executionClass === 'build-deploy';
+  }),
+);
 
-const READ_ONLY_TOOLS = new Set<ToolAdapterId>([
-  'workspace_list',
-  'workspace_read',
-  'workspace_search',
-  'git_status',
-]);
+const READ_ONLY_TOOLS = new Set<ToolAdapterId>(
+  TOOL_ADAPTER_IDS.filter(
+    toolId => getToolCatalogEntry(toolId).executionClass === 'read-only',
+  ),
+);
 
 const hasText = (value?: string | null) => Boolean(value && value.trim().length > 0);
 

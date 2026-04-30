@@ -16,6 +16,7 @@ import {
   STANDARD_SDLC_STEP_TEMPLATES,
   STANDARD_WORKFLOW_TEMPLATE_ID,
 } from './standardWorkflow';
+import { getToolCatalogEntry, getWorkflowSelectableToolIds } from './toolCatalog';
 import type {
   Artifact,
   Capability,
@@ -206,105 +207,18 @@ export const WORKSPACE_EVAL_SUITE_TEMPLATES: WorkspaceEvalSuiteTemplate[] = [
   },
 ];
 
-export const WORKSPACE_TOOL_TEMPLATES: WorkspaceToolTemplate[] = [
-  {
-    id: 'TOOL-TEMPLATE-WORKSPACE-LIST',
-    toolId: 'workspace_list',
-    label: 'Workspace List',
-    description: 'List files inside the current desktop-user workspace path.',
-    category: 'Workspace',
-    requiresApproval: false,
-  },
-  {
-    id: 'TOOL-TEMPLATE-WORKSPACE-READ',
-    toolId: 'workspace_read',
-    label: 'Workspace Read',
-    description: 'Read a text file from the current desktop-user workspace path.',
-    category: 'Workspace',
-    requiresApproval: false,
-  },
-  {
-    id: 'TOOL-TEMPLATE-WORKSPACE-SEARCH',
-    toolId: 'workspace_search',
-    label: 'Workspace Search',
-    description: 'Search within the current desktop-user workspace for a string or regex pattern.',
-    category: 'Search',
-    requiresApproval: false,
-  },
-  {
-    id: 'TOOL-TEMPLATE-GIT-STATUS',
-    toolId: 'git_status',
-    label: 'Git Status',
-    description: 'Inspect git status for the current desktop-user workspace repository.',
-    category: 'Git',
-    requiresApproval: false,
-  },
-  {
-    id: 'TOOL-TEMPLATE-WORKSPACE-WRITE',
-    toolId: 'workspace_write',
-    label: 'Workspace Write',
-    description: 'Write a text file inside the current desktop-user workspace path.',
-    category: 'Workspace',
-    requiresApproval: true,
-  },
-  {
-    id: 'TOOL-TEMPLATE-WORKSPACE-REPLACE-BLOCK',
-    toolId: 'workspace_replace_block',
-    label: 'Workspace Replace Block',
-    description: 'Safely replace a specific anchored block of text inside the current desktop-user workspace path.',
-    category: 'Workspace',
-    requiresApproval: true,
-  },
-  {
-    id: 'TOOL-TEMPLATE-WORKSPACE-APPLY-PATCH',
-    toolId: 'workspace_apply_patch',
-    label: 'Workspace Apply Patch',
-    description: 'Apply a unified diff patch inside the current desktop-user workspace path.',
-    category: 'Workspace',
-    requiresApproval: true,
-  },
-  {
-    id: 'TOOL-TEMPLATE-DELEGATE-TASK',
-    toolId: 'delegate_task',
-    label: 'Delegate Task',
-    description: 'Delegate a bounded specialist subtask and capture a durable handoff result.',
-    category: 'Workspace',
-    requiresApproval: false,
-  },
-  {
-    id: 'TOOL-TEMPLATE-RUN-BUILD',
-    toolId: 'run_build',
-    label: 'Run Build',
-    description: 'Run the approved build command template.',
-    category: 'Build',
-    requiresApproval: false,
-  },
-  {
-    id: 'TOOL-TEMPLATE-RUN-TEST',
-    toolId: 'run_test',
-    label: 'Run Test',
-    description: 'Run the approved test command template.',
-    category: 'Test',
-    requiresApproval: false,
-  },
-  {
-    id: 'TOOL-TEMPLATE-RUN-DOCS',
-    toolId: 'run_docs',
-    label: 'Run Docs',
-    description: 'Run the approved docs command template.',
-    category: 'Docs',
-    requiresApproval: false,
-  },
-  {
-    id: 'TOOL-TEMPLATE-RUN-DEPLOY',
-    toolId: 'run_deploy',
-    label: 'Run Deploy',
-    description:
-      'Execute an approved deployment target using a named command template after approval.',
-    category: 'Deploy',
-    requiresApproval: true,
-  },
-];
+export const WORKSPACE_TOOL_TEMPLATES: WorkspaceToolTemplate[] =
+  getWorkflowSelectableToolIds().map(toolId => {
+    const entry = getToolCatalogEntry(toolId);
+    return {
+      id: `TOOL-TEMPLATE-${toolId.toUpperCase().replace(/_/g, '-')}`,
+      toolId,
+      label: entry.label,
+      description: entry.description,
+      category: entry.workspaceTemplateCategory,
+      requiresApproval: entry.requiresApproval,
+    } satisfies WorkspaceToolTemplate;
+  });
 
 export const createWorkspaceWorkflowTemplates = (): WorkspaceWorkflowTemplate[] => {
   const standardWorkflow = createStandardCapabilityWorkflow(

@@ -96,6 +96,7 @@ export type AdvancedToolId =
   | 'architecture'
   | 'identity'
   | 'operations'
+  | 'token-intelligence'
   | 'desktop-connectors'
   | 'incidents'
   | 'mrm'
@@ -192,6 +193,16 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     shortName: 'Ops',
     path: '/operations',
     description: 'Monitor desktop executor ownership, heartbeats, and queued execution routing.',
+    audience: 'OPERATORS',
+    exposureMode: 'WHEN_RELEVANT',
+    contextTriggers: ['HAS_WORKFLOW'],
+  },
+  {
+    id: 'token-intelligence',
+    label: 'Token Intelligence',
+    shortName: 'Tokens',
+    path: '/token-intelligence',
+    description: 'Review token usage, prompt receipts, budget policy, and model-adaptive routing recommendations.',
     audience: 'OPERATORS',
     exposureMode: 'WHEN_RELEVANT',
     contextTriggers: ['HAS_WORKFLOW'],

@@ -240,7 +240,7 @@ describe('advanced workspace editing tools', () => {
         toolId: 'workspace_apply_patch',
         args: { patchText },
       }),
-    ).rejects.toThrow('escapes the approved workspace root');
+    ).rejects.toThrow('escapes the desktop workspace root');
   });
 
   it('fails patch application cleanly when the hunk is stale', async () => {

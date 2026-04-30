@@ -24,6 +24,7 @@ import {
   Sparkles,
   Workflow,
   Wrench,
+  Zap,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
@@ -76,6 +77,7 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   architecture: Building2,
   identity: KeyRound,
   operations: Gauge,
+  'token-intelligence': Zap,
   'desktop-connectors': KeyRound,
   access: ShieldCheck,
   databases: Database,

@@ -5,6 +5,11 @@ import type {
   PolicyDecisionResult,
   ToolAdapterId,
 } from '../src/types';
+import {
+  TOOL_CATALOG,
+  getHighImpactToolIds,
+  getToolActionType,
+} from '../src/lib/toolCatalog';
 import { query } from './db';
 import { listIncidents } from './incidents/repository';
 import { matchesPathGlob } from './incidents/correlation';
@@ -38,26 +43,11 @@ const decisionFromRow = (row: Record<string, any>): PolicyDecision => ({
     : undefined,
 });
 
-const HIGH_IMPACT_TOOLS = new Set<ToolAdapterId>([
-  'workspace_write',
-  'workspace_replace_block',
-  'workspace_apply_patch',
-  'run_deploy',
-]);
-
-const ACTION_TYPE_BY_TOOL_ID: Partial<Record<ToolAdapterId, PolicyActionType>> = {
-  workspace_write: 'workspace_write',
-  workspace_replace_block: 'workspace_write',
-  workspace_apply_patch: 'workspace_write',
-  run_build: 'run_build',
-  run_test: 'run_test',
-  run_docs: 'run_docs',
-  run_deploy: 'run_deploy',
-};
+const HIGH_IMPACT_TOOLS = new Set<ToolAdapterId>(getHighImpactToolIds());
 
 export const getPolicyActionTypeForToolId = (toolId?: ToolAdapterId | string | null) =>
-  toolId && toolId in ACTION_TYPE_BY_TOOL_ID
-    ? ACTION_TYPE_BY_TOOL_ID[toolId as ToolAdapterId] || 'custom'
+  toolId && toolId in TOOL_CATALOG
+    ? getToolActionType(toolId as ToolAdapterId)
     : 'custom';
 
 export const matchesPolicySelector = ({

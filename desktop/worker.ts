@@ -1353,19 +1353,36 @@ reader.on('line', async line => {
         (message.payload?.actor as ActorContext | null | undefined) || null;
 
       if (activeActorContext?.userId) {
-        // Load DB-stored preferences once on first sign-in so working directory,
-        // CLI URL, etc. come from the database rather than .env.local alone.
-        await loadPreferencesFromServer().catch(() => undefined);
-        await syncExecutorRegistration().catch(() => undefined);
-        ensureDesktopExecutorLoop();
+        // Actor context is called from the renderer during app/session setup.
+        // Keep the IPC response fast; provider probing, DB preferences, and
+        // executor registration can each touch the control plane or local CLIs.
+        void (async () => {
+          try {
+            await loadPreferencesFromServer().catch(() => undefined);
+            await syncExecutorRegistration().catch(() => undefined);
+            ensureDesktopExecutorLoop();
+          } catch (error) {
+            console.warn(
+              '[worker] background actor-context initialization failed:',
+              error instanceof Error ? error.message : error,
+            );
+          }
+        })();
       } else {
         executorHeartbeatStatus = 'OFFLINE';
+        executorHeartbeatAt = undefined;
         executorOwnedCapabilityIds = [];
       }
 
       respond({
         requestId,
-        payload: await buildDesktopRuntimeStatus(),
+        payload: {
+          ok: true,
+          actorUserId: activeActorContext?.userId,
+          actorDisplayName: activeActorContext?.displayName,
+          executorId,
+          executorHeartbeatStatus,
+        },
       });
       return;
     }
@@ -1592,21 +1609,29 @@ reader.on('line', async line => {
         throw new Error(getMissingRuntimeConfigurationMessage());
       }
 
-      const result = await invokeCommonAgentRuntime({
-        capability: context.bundle?.capability || context.capability,
-        agent: context.agent,
-        history: (payload.history as CapabilityChatMessage[]) || [],
-        message: String(payload.message),
-        developerPrompt:
-          context.developerPrompt || (payload.developerPrompt as string | undefined),
-        memoryPrompt: context.memoryPrompt || (payload.memoryPrompt as string | undefined),
-        scope: context.scope,
-        scopeId: context.scopeId,
-        resetSession: payload.sessionMode === 'fresh',
-        workItem: context.workItem,
-        preferReadOnlyToolLoop: context.memoryTrustMode === 'repo-evidence-only',
-        runtimeLane: 'desktop-runtime-worker',
-      });
+      const result = await runWithExecutionClientContext(
+        {
+          controlPlaneUrl,
+          executorId,
+          actor: activeActorContext,
+        },
+        () =>
+          invokeCommonAgentRuntime({
+            capability: context.bundle?.capability || context.capability,
+            agent: context.agent,
+            history: (payload.history as CapabilityChatMessage[]) || [],
+            message: String(payload.message),
+            developerPrompt:
+              context.developerPrompt || (payload.developerPrompt as string | undefined),
+            memoryPrompt: context.memoryPrompt || (payload.memoryPrompt as string | undefined),
+            scope: context.scope,
+            scopeId: context.scopeId,
+            resetSession: payload.sessionMode === 'fresh',
+            workItem: context.workItem,
+            preferReadOnlyToolLoop: context.memoryTrustMode === 'repo-evidence-only',
+            runtimeLane: 'desktop-runtime-worker',
+          }),
+      );
       const runtimeTarget = await resolveRuntimeProviderTarget(result.runtimeProviderKey);
       const sanitizedResult = await sanitizeGroundedChatResponse({
         content: result.content || '',
@@ -1794,29 +1819,37 @@ reader.on('line', async line => {
       const shouldBufferValidatedStream =
         context.memoryTrustMode === 'repo-evidence-only';
 
-      const streamed = await invokeCommonAgentRuntime({
-        capability: context.bundle?.capability || context.capability,
-        agent: context.agent,
-        history: (payload.history as CapabilityChatMessage[]) || [],
-        message: String(payload.message),
-        developerPrompt:
-          context.developerPrompt || (payload.developerPrompt as string | undefined),
-        memoryPrompt: context.memoryPrompt || (payload.memoryPrompt as string | undefined),
-        scope: context.scope,
-        scopeId: context.scopeId,
-        resetSession: payload.sessionMode === 'fresh',
-        workItem: context.workItem,
-        preferReadOnlyToolLoop: context.memoryTrustMode === 'repo-evidence-only',
-        runtimeLane: 'desktop-runtime-worker',
-        onDelta: delta => {
-          if (!shouldBufferValidatedStream) {
-            sendStreamEvent(streamId, {
-              type: 'delta',
-              content: delta,
-            });
-          }
+      const streamed = await runWithExecutionClientContext(
+        {
+          controlPlaneUrl,
+          executorId,
+          actor: activeActorContext,
         },
-      });
+        () =>
+          invokeCommonAgentRuntime({
+            capability: context.bundle?.capability || context.capability,
+            agent: context.agent,
+            history: (payload.history as CapabilityChatMessage[]) || [],
+            message: String(payload.message),
+            developerPrompt:
+              context.developerPrompt || (payload.developerPrompt as string | undefined),
+            memoryPrompt: context.memoryPrompt || (payload.memoryPrompt as string | undefined),
+            scope: context.scope,
+            scopeId: context.scopeId,
+            resetSession: payload.sessionMode === 'fresh',
+            workItem: context.workItem,
+            preferReadOnlyToolLoop: context.memoryTrustMode === 'repo-evidence-only',
+            runtimeLane: 'desktop-runtime-worker',
+            onDelta: delta => {
+              if (!shouldBufferValidatedStream) {
+                sendStreamEvent(streamId, {
+                  type: 'delta',
+                  content: delta,
+                });
+              }
+            },
+          }),
+      );
       const runtimeTarget = await resolveRuntimeProviderTarget(streamed.runtimeProviderKey);
       const sanitizedStream = await sanitizeGroundedChatResponse({
         content: streamed.content || '',

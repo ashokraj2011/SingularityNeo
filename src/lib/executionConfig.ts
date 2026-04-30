@@ -104,6 +104,22 @@ export const getDefaultExecutionConfig = (
       approvalSynthesisMaxInputTokens: 8_000,
       approvalExcerptMaxChars: 420,
     },
+    tokenManagement: {
+      mode: 'advisor',
+      strictBudgetEnforcement: false,
+      diagnosticsOff: false,
+      budgets: [],
+      strategyModes: {
+        'context-budgeting': 'advisory',
+        'history-rollup': 'advisory',
+        'semantic-code-hunks': 'advisory',
+        'ast-first-discovery': 'advisory',
+        'memory-budgeting': 'advisory',
+        'diff-first-editing': 'advisory',
+        'model-adaptive-routing': 'advisory',
+        'receipt-auditing': 'automatic',
+      },
+    },
   };
 };
 
@@ -134,5 +150,23 @@ export const normalizeExecutionConfig = (
       ...(defaults.tokenOptimization || {}),
       ...(config?.tokenOptimization || {}),
     },
+    historyRollup: config?.historyRollup,
+    agentModelRouting: config?.agentModelRouting,
+    tokenManagement: {
+      ...(defaults.tokenManagement || {}),
+      ...(config?.tokenManagement || {}),
+      strategyModes: {
+        ...(defaults.tokenManagement?.strategyModes || {}),
+        ...(config?.tokenManagement?.strategyModes || {}),
+      },
+      budgets: config?.tokenManagement?.budgets
+        ? config.tokenManagement.budgets.map(budget => ({ ...budget }))
+        : defaults.tokenManagement?.budgets || [],
+      modelAdaptive: config?.tokenManagement?.modelAdaptive
+        ? { ...config.tokenManagement.modelAdaptive }
+        : defaults.tokenManagement?.modelAdaptive,
+    },
+    globalMemory: config?.globalMemory,
+    executionMode: config?.executionMode,
   };
 };

@@ -10,6 +10,10 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { useCapability } from '../context/CapabilityContext';
 import { fetchCapabilityFlightRecorder } from '../lib/api';
+import {
+  TOOL_CATEGORY_TONES,
+  getToolCatalogEntry,
+} from '../lib/toolCatalog';
 import type {
   CapabilityAgent,
   CapabilityFlightRecorderSnapshot,
@@ -49,52 +53,7 @@ import {
  * and the existing /api/capabilities/:id/flight-recorder endpoint.
  */
 
-type ToolCategory = 'Read' | 'Write' | 'Orchestration' | 'Build & Deploy';
-
-const TOOL_CATEGORY: Record<ToolAdapterId, ToolCategory> = {
-  workspace_list: 'Read',
-  workspace_read: 'Read',
-  workspace_search: 'Read',
-  browse_code: 'Read',
-  git_status: 'Read',
-  workspace_write: 'Write',
-  workspace_replace_block: 'Write',
-  workspace_apply_patch: 'Write',
-  delegate_task: 'Orchestration',
-  publish_bounty: 'Orchestration',
-  resolve_bounty: 'Orchestration',
-  wait_for_signal: 'Orchestration',
-  run_build: 'Build & Deploy',
-  run_test: 'Build & Deploy',
-  run_docs: 'Build & Deploy',
-  run_deploy: 'Build & Deploy',
-};
-
-const TOOL_LABEL: Record<ToolAdapterId, string> = {
-  workspace_list: 'Workspace list',
-  workspace_read: 'Workspace read',
-  workspace_search: 'Workspace search',
-  browse_code: 'Browse code AST',
-  git_status: 'Git status',
-  workspace_write: 'Workspace write',
-  workspace_replace_block: 'Workspace replace block',
-  workspace_apply_patch: 'Workspace apply patch',
-  delegate_task: 'Delegate task',
-  publish_bounty: 'Publish bounty',
-  resolve_bounty: 'Resolve bounty',
-  wait_for_signal: 'Wait for signal',
-  run_build: 'Run build',
-  run_test: 'Run tests',
-  run_docs: 'Run docs',
-  run_deploy: 'Run deploy',
-};
-
-const CATEGORY_TONE: Record<ToolCategory, 'info' | 'warning' | 'danger' | 'brand'> = {
-  Read: 'info',
-  Orchestration: 'brand',
-  'Build & Deploy': 'warning',
-  Write: 'danger',
-};
+type ToolCategory = ReturnType<typeof getToolCatalogEntry>['category'];
 
 type UsageRef =
   | {
@@ -215,10 +174,11 @@ export default function ToolsLibrary() {
     const decisions: ToolInvocationPolicyDecision[] = allDecisions;
 
     const toolIds = Array.from(usageByTool.keys()).sort((a, b) =>
-      TOOL_LABEL[a].localeCompare(TOOL_LABEL[b]),
+      getToolCatalogEntry(a).label.localeCompare(getToolCatalogEntry(b).label),
     );
 
     return toolIds.map<ToolRow>(toolId => {
+      const catalogEntry = getToolCatalogEntry(toolId);
       const invocations = sortedInvocations.filter(item => item.toolId === toolId);
       const latestInvocation = invocations[0];
       const latestDecision = latestInvocation
@@ -226,8 +186,8 @@ export default function ToolsLibrary() {
         : undefined;
       return {
         toolId,
-        label: TOOL_LABEL[toolId] ?? toolId,
-        category: TOOL_CATEGORY[toolId] ?? 'Read',
+        label: catalogEntry.label,
+        category: catalogEntry.category,
         usage: usageByTool.get(toolId) || [],
         invocations,
         latestInvocation,
@@ -344,16 +304,21 @@ export default function ToolsLibrary() {
                   >
                     <td className="py-4 pr-4">
                       <div className="flex flex-col gap-1">
-                        <span className="text-sm font-bold text-on-surface">
-                          {row.label}
-                        </span>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-bold text-on-surface">
+                            {row.label}
+                          </span>
+                          {getToolCatalogEntry(row.toolId).experimental ? (
+                            <StatusBadge tone="warning">Experimental</StatusBadge>
+                          ) : null}
+                        </div>
                         <code className="text-[0.6875rem] font-mono text-outline">
                           {row.toolId}
                         </code>
                       </div>
                     </td>
                     <td className="py-4 pr-4">
-                      <StatusBadge tone={CATEGORY_TONE[row.category]}>
+                      <StatusBadge tone={TOOL_CATEGORY_TONES[row.category]}>
                         {row.category}
                       </StatusBadge>
                     </td>

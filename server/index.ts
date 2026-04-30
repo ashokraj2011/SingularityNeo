@@ -116,6 +116,7 @@ import { registerSentinelRoutes } from './routes/sentinel';
 import { registerWorkspaceAccessRoutes } from './routes/workspaceAccess';
 import { registerStepTemplateRoutes } from './routes/stepTemplates';
 import { registerRuntimeSettingsRoutes } from './routes/runtimeSettings';
+import { registerTokenManagementRoutes } from './routes/tokenManagement';
 import { isDesktopExecutionRuntime, reconcileDesktopExecutionOwnerships } from './executionOwnership';
 import { bindRequestActorContext, parseActorContext } from './requestActor';
 import { resolveCorsOriginHeader } from './http/originPolicy';
@@ -957,6 +958,7 @@ registerCodeWorkspaceRoutes(app, {
 
 registerRuntimeRoutes(app);
 registerRuntimeSettingsRoutes(app);
+registerTokenManagementRoutes(app);
 registerExecutionRuntimeRoutes(app);
 registerStepTemplateRoutes(app);
 registerIncidentRoutes(app, { parseActorContext });

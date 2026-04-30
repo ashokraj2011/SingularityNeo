@@ -26,6 +26,7 @@ const Studio = lazy(() => import('./pages/Studio'));
 const Chat = lazy(() => import('./pages/Chat'));
 const Orchestrator = lazy(() => import('./pages/Orchestrator'));
 const Operations = lazy(() => import('./pages/Operations'));
+const TokenIntelligence = lazy(() => import('./pages/TokenIntelligence'));
 const DesktopConnectors = lazy(() => import('./pages/DesktopConnectors'));
 const Incidents = lazy(() => import('./pages/Incidents'));
 const ModelRiskMonitoring = lazy(() => import('./pages/ModelRiskMonitoring'));
@@ -119,6 +120,7 @@ export default function App() {
                     element={<ApprovalWorkspace />}
                   />
                   <Route path="/operations" element={<Operations />} />
+                  <Route path="/token-intelligence" element={<TokenIntelligence />} />
                   <Route path="/desktop/connectors" element={<DesktopConnectors />} />
                   <Route path="/incidents" element={<Incidents />} />
                   <Route path="/mrm" element={<ModelRiskMonitoring />} />

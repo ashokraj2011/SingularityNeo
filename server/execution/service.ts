@@ -104,6 +104,12 @@ import {
 import { estimateTokens, normalizeProviderForEstimate } from "./tokenEstimate";
 import { persistPromptReceipt } from "./promptReceipts";
 import {
+  getDisabledTokenStrategies,
+  getEnabledTokenStrategies,
+  recommendModelForTurn,
+  resolveTokenManagementPolicy,
+} from "../tokenManagement";
+import {
   queueExperienceDistillationRefresh,
   queueSingleAgentLearningRefresh,
 } from "../agentLearning/service";
@@ -2292,6 +2298,51 @@ const requestStepDecision = async ({
     agent,
     selection: executionRuntime,
   });
+  const legacyRoutedModel = resolveModelForTurn(
+    executionRuntimeAgent,
+    lastToolName ?? null,
+    executionRuntime.providerKey === DEFAULT_PROVIDER_KEY
+      ? capability.executionConfig?.agentModelRouting ?? null
+      : null,
+  );
+  const legacyEffectiveRuntimeModel =
+    executionRuntime.providerKey === DEFAULT_PROVIDER_KEY &&
+    !normalizeString(step.runtimeModel)
+      ? legacyRoutedModel
+      : executionRuntime.model || executionRuntimeAgent.model;
+  const tokenPolicy = resolveTokenManagementPolicy(capability);
+  const modelRoutingRecommendation = recommendModelForTurn({
+    capability,
+    selectedProviderKey: executionRuntime.providerKey,
+    selectedModel: legacyEffectiveRuntimeModel,
+    phase: step.phase || workItem.phase,
+    toolId: lastToolName ?? null,
+    intent: `${step.name} ${step.action}`,
+    writeMode: compiledStepContext.executionBoundary.allowedToolIds.some(toolId =>
+      /write|patch|replace|deploy|delegate/i.test(toolId),
+    ),
+    requiresApproval:
+      compiledStepContext.executionBoundary.requiresHumanApproval === true,
+  });
+  const effectiveRuntimeProviderKey =
+    modelRoutingRecommendation.appliedProviderKey || executionRuntime.providerKey;
+  const effectiveRuntimeModel =
+    modelRoutingRecommendation.appliedModel ||
+    legacyEffectiveRuntimeModel ||
+    executionRuntimeAgent.model;
+  const effectiveRuntimeAgent =
+    modelRoutingRecommendation.applied &&
+    modelRoutingRecommendation.appliedProviderKey
+      ? {
+          ...executionRuntimeAgent,
+          providerKey: modelRoutingRecommendation.appliedProviderKey,
+          provider: modelRoutingRecommendation.appliedProviderKey,
+          model: effectiveRuntimeModel,
+        }
+      : {
+          ...executionRuntimeAgent,
+          model: effectiveRuntimeModel,
+        };
 
   // Context Budgeter (Phase 2 / Lever 5): assemble the prompt as
   // typed fragments with priorities + token estimates so we can evict
@@ -2299,13 +2350,13 @@ const requestStepDecision = async ({
   // Happy path (call fits under the budget) is identical to the old
   // flat .join('\n\n'): fragments emit in input order, nothing evicted.
   const providerForEstimate = normalizeProviderForEstimate(
-    executionRuntime.providerKey,
-    executionRuntime.model || executionRuntimeAgent.model,
+    effectiveRuntimeProviderKey,
+    effectiveRuntimeModel,
   );
   const tok = (text: string, kind: "prose" | "code" | "json" = "prose") =>
     estimateTokens(text, {
       provider: providerForEstimate,
-      model: executionRuntime.model || executionRuntimeAgent.model,
+      model: effectiveRuntimeModel,
       kind,
     });
 
@@ -2461,25 +2512,9 @@ const requestStepDecision = async ({
     reservedOutputTokens: phaseBudget.reservedOutputTokens,
   });
 
-  // Dynamic model routing (Fix 2): choose a cheaper model for trivial tool
-  // turns so the expensive primary model is reserved for decision turns and
-  // write operations. Falls back to agent.model when routing is disabled.
-  const routedModel = resolveModelForTurn(
-    executionRuntimeAgent,
-    lastToolName ?? null,
-    executionRuntime.providerKey === DEFAULT_PROVIDER_KEY
-      ? capability.executionConfig?.agentModelRouting ?? null
-      : null,
-  );
-  const effectiveRuntimeModel =
-    executionRuntime.providerKey === DEFAULT_PROVIDER_KEY &&
-    !normalizeString(step.runtimeModel)
-      ? routedModel
-      : executionRuntime.model || executionRuntimeAgent.model;
-
   const response = await invokeScopedCapabilitySession({
     capability,
-    agent: executionRuntimeAgent,
+    agent: effectiveRuntimeAgent,
     scope: workItem.id ? "WORK_ITEM" : "TASK",
     scopeId: workItem.id || runStep.id,
     workItemPhase: step.phase || workItem.phase,
@@ -2490,9 +2525,8 @@ const requestStepDecision = async ({
     // Real-time LLM token streaming (Fix 4): forward deltas to SSE so
     // operators see the agent reasoning as it happens.
     onDelta: onLlmDelta,
-    // Dynamic model routing (Fix 2): override model for this turn only on
-    // the internal Copilot lane. CLI/local providers stay on their selected
-    // execution model so provider-specific defaults are preserved.
+    // Token Intelligence can keep this advisory or apply the selected model
+    // when `model-adaptive-routing` is explicitly automatic.
     modelOverride: effectiveRuntimeModel || undefined,
   });
 
@@ -2522,12 +2556,22 @@ const requestStepDecision = async ({
           maxInputTokens: budgeted.receipt.maxInputTokens,
           reservedOutputTokens: budgeted.receipt.reservedOutputTokens,
           phase: step.phase || workItem.phase,
-          runtimeProviderKey: executionRuntime.providerKey,
+          runtimeProviderKey: effectiveRuntimeProviderKey,
           runtimeTransportMode: executionRuntime.transportMode,
           executionRuntimeSource: executionRuntime.source,
           toolingMode: "singularity-owned",
           model: response.model || null,
           actualUsage: response.usage || null,
+          tokenPolicyMode: tokenPolicy.mode,
+          strategyModes: tokenPolicy.strategyModes,
+          enabledStrategies: getEnabledTokenStrategies(tokenPolicy.strategyModes),
+          disabledStrategies: getDisabledTokenStrategies(tokenPolicy.strategyModes),
+          complexityTier: modelRoutingRecommendation.complexityTier,
+          recommendedProviderKey: modelRoutingRecommendation.recommendedProviderKey,
+          recommendedModel: modelRoutingRecommendation.recommendedModel,
+          selectedProviderKey: modelRoutingRecommendation.selectedProviderKey,
+          selectedModel: modelRoutingRecommendation.selectedModel,
+          routingReason: modelRoutingRecommendation.routingReason,
           usageEstimated:
             typeof response.usageEstimated === "boolean"
               ? response.usageEstimated
@@ -2550,30 +2594,43 @@ const requestStepDecision = async ({
     runId: runId ?? null,
     workItemId: workItem.id ?? null,
     capability,
-    agent,
+    agent: effectiveRuntimeAgent,
     scope: workItem.id ? "WORK_ITEM" : "TASK",
     scopeId: workItem.id || runStep.id,
     phase: step.phase || workItem.phase || null,
-    model: response.model || effectiveRuntimeModel || executionRuntimeAgent.model || null,
-    providerKey: executionRuntime.providerKey || null,
+    model: response.model || effectiveRuntimeModel || effectiveRuntimeAgent.model || null,
+    providerKey: effectiveRuntimeProviderKey || null,
     userPrompt: budgeted.assembled,
     memoryPrompt: memoryContext.prompt || null,
     developerPrompt:
       "You are an execution engine inside a capability workflow. Return JSON only with no markdown.",
     responseContent: response.content,
-    responseUsage: response.usage
-      ? ({
-          ...(response.usage as unknown as Record<string, unknown>),
-          runtimeTransportMode: executionRuntime.transportMode,
-          usageEstimated:
-            typeof response.usageEstimated === "boolean"
-              ? response.usageEstimated
-              : executionRuntime.usageEstimated,
-          toolingMode: "singularity-owned",
-          executionContextHydrated: true,
-          runContextSource: "live-run-state",
-        } as Record<string, unknown>)
-      : null,
+    responseUsage: {
+      ...((response.usage || {}) as unknown as Record<string, unknown>),
+      runtimeTransportMode: executionRuntime.transportMode,
+      usageEstimated:
+        typeof response.usageEstimated === "boolean"
+          ? response.usageEstimated
+          : executionRuntime.usageEstimated,
+      toolingMode: "singularity-owned",
+      executionContextHydrated: true,
+      runContextSource: "live-run-state",
+      tokenPolicyMode: tokenPolicy.mode,
+      strategyModes: tokenPolicy.strategyModes,
+      enabledStrategies: getEnabledTokenStrategies(tokenPolicy.strategyModes),
+      disabledStrategies: getDisabledTokenStrategies(tokenPolicy.strategyModes),
+      complexityTier: modelRoutingRecommendation.complexityTier,
+      recommendedProviderKey: modelRoutingRecommendation.recommendedProviderKey,
+      recommendedModel: modelRoutingRecommendation.recommendedModel,
+      selectedProviderKey: modelRoutingRecommendation.selectedProviderKey,
+      selectedModel: modelRoutingRecommendation.selectedModel,
+      routingReason: modelRoutingRecommendation.routingReason,
+      estimatedInputTokens: budgeted.receipt.totalEstimatedTokens,
+      estimatedSavingsTokens: budgeted.receipt.evicted.reduce(
+        (sum, entry) => sum + Number(entry.estimatedTokens || 0),
+        0,
+      ),
+    },
     fragments: budgeted.receipt.included.map(entry => ({
       source: String(entry.source),
       tokens: Number(entry.estimatedTokens || 0),
