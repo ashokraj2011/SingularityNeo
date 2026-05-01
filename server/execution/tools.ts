@@ -484,12 +484,27 @@ const resolveWorkspacePath = async (
     const workItemRepository = (capability.repositories || []).find(
       (repository) => repository.id === workItemRepositoryId,
     );
-    const baseClonePath =
+    const rawBaseClonePath =
       !workItem?.id && capability.id
         ? normalizeDirectoryPath(
             getPrimaryBaseClone(capability.id)?.checkoutPath || "",
           )
         : "";
+    // Only trust the base clone path if it lives under the operator's
+    // working directory. Stale clones under the SingularityNeo project
+    // root (from before the operator configured their working directory)
+    // must not shadow the correct resolution.
+    const baseClonePath =
+      rawBaseClonePath &&
+      resolution.workingDirectoryPath &&
+      rawBaseClonePath.startsWith(resolution.workingDirectoryPath)
+        ? rawBaseClonePath
+        : "";
+    if (rawBaseClonePath && !baseClonePath) {
+      console.warn(
+        `[resolveWorkspacePath] DISCARDED stale baseClonePath=${rawBaseClonePath} — not under workingDirectory=${resolution.workingDirectoryPath}`,
+      );
+    }
     const derivedWorkItemCheckoutPath =
       workItem?.id && workItemRepository
         ? buildWorkItemCheckoutPath({
@@ -500,15 +515,16 @@ const resolveWorkspacePath = async (
             repositoryCount: (capability.repositories || []).length,
           })
         : "";
+    // Priority: operator working directory first, base clone only if valid
     const defaultPath =
       derivedWorkItemCheckoutPath ||
-      baseClonePath ||
       resolution.workingDirectoryPath ||
+      baseClonePath ||
       resolution.localRootPath;
     const requestedPath = normalizeDirectoryPath(preferredPath || "");
     const candidate = requestedPath || defaultPath;
 
-    console.log(`[resolveWorkspacePath]   derivedCheckout=${derivedWorkItemCheckoutPath || 'EMPTY'} | baseClone=${baseClonePath || 'EMPTY'} | defaultPath=${defaultPath || 'EMPTY'} | candidate=${candidate || 'EMPTY'}`);
+    console.log(`[resolveWorkspacePath]   derivedCheckout=${derivedWorkItemCheckoutPath || 'EMPTY'} | baseClone=${baseClonePath || 'EMPTY'} | workingDir=${resolution.workingDirectoryPath || 'EMPTY'} | defaultPath=${defaultPath || 'EMPTY'} | candidate=${candidate || 'EMPTY'}`);
 
     if (!candidate) {
       throw new Error(
