@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import type {
   Capability,
   CapabilityAgent,
@@ -86,6 +87,13 @@ type SharedAgentRuntimeResult = Awaited<ReturnType<typeof invokeCapabilityChat>>
   codeDiscoveryMode?: "prompt-only" | "ast-first-tool-loop";
   codeDiscoveryFallback?: "none" | "capability-index" | "text-search";
   astSource?: "none" | "local-checkout" | "capability-index" | "text-search";
+  normalizedCodeQueries?: string[];
+  codeQuestionType?: string;
+  toolResultSymbolCount?: number;
+  toolResultFileCount?: number;
+  autoReadCandidateCount?: number;
+  autoReadSkippedReason?: string;
+  localSymbolDedupCount?: number;
   runtimeLane?: AgentRuntimeLane;
   /**
    * Tool-loop call/result narration accumulated across iterations.  When
@@ -129,10 +137,12 @@ type ToolLoopDecision =
     };
 
 // Maximum number of LLM tool-loop iterations before the runtime falls back to
-// the forced-answer recovery path.  Was 4 — reduced to 3 because the loop was
-// burning iterations on duplicate tool calls (see `attemptedToolSignatures`
-// dedup guard below).  After this many iterations, recovery still fires.
-const MAX_READ_ONLY_TOOL_LOOPS = 3;
+// Maximum iterations the chat-lane read-only tool loop can run before
+// the forced-answer recovery path.  Increased from 3 → 5 to support complex
+// code questions that chain browse_code → workspace_read × 2 → search
+// refinement → workspace_read.  The `attemptedToolSignatures` dedup guard
+// prevents infinite loops independently.
+const MAX_READ_ONLY_TOOL_LOOPS = 5;
 
 // Hard wall on duplicate tool calls within a single user turn.  After this
 // many duplicate (toolId, args) emissions, the loop breaks early so the
@@ -589,10 +599,32 @@ const buildAutomaticDiscoveryToolCall = ({
 };
 
 const INVENTORY_CODE_QUESTION_PATTERN =
-  /\b(what|which|list|show|how many|count|enumerate)\b.*\b(operator|operators|class|classes|interface|interfaces|enum|enums|function|functions|method|methods|file|files|rule engine)\b/i;
+  /\b(what|which|list|show|how many|count|enumerate)\b.*\b(operator|operators|class|classes|interface|interfaces|enum|enums|function|functions|method|methods|file|files)\b/i;
 
 const shouldAutoReadFromBrowseCode = (message: string) =>
   INVENTORY_CODE_QUESTION_PATTERN.test(String(message || ""));
+
+const extractPathFromSearchMatch = (
+  match: unknown,
+  workingDirectory?: string,
+): string => {
+  if (!match) return "";
+  if (typeof match === "object") {
+    const record = match as Record<string, unknown>;
+    return String(record.filePath || record.path || "").trim();
+  }
+  const text = String(match || "").trim();
+  const pathMatch =
+    text.match(/^((?:[A-Za-z]:)?\/[^:\n]+?\.(?:ts|tsx|js|jsx|mjs|cjs|java|py|pyw))(?::\d+)?/) ||
+    text.match(/^([^:\n]+?\.(?:ts|tsx|js|jsx|mjs|cjs|java|py|pyw))(?::\d+)?/i);
+  if (!pathMatch) return "";
+  const candidate = pathMatch[1] || "";
+  if (!candidate) return "";
+  if (path.isAbsolute(candidate) || !workingDirectory) {
+    return candidate;
+  }
+  return path.join(workingDirectory, candidate);
+};
 
 const buildAutomaticWorkspaceReadCalls = ({
   message,
@@ -617,6 +649,7 @@ const buildAutomaticWorkspaceReadCalls = ({
       kind?: string;
     }>;
     files?: string[];
+    matches?: unknown[];
   };
   const preferredKinds = new Set(["ENUM", "CLASS", "INTERFACE", "TYPE", "METHOD", "FUNCTION"]);
   const symbols = Array.isArray(details.symbols) ? details.symbols : [];
@@ -675,6 +708,27 @@ const buildAutomaticWorkspaceReadCalls = ({
     }
   }
 
+  const matches = Array.isArray(details.matches) ? details.matches : [];
+  for (const match of matches) {
+    const candidatePath = extractPathFromSearchMatch(match, browseResult.workingDirectory);
+    const trimmed = String(candidatePath || "").trim();
+    if (!trimmed || seenPaths.has(trimmed)) {
+      continue;
+    }
+    seenPaths.add(trimmed);
+    calls.push({
+      toolId: "workspace_read",
+      args: {
+        path: trimmed,
+        maxBytes: 12000,
+      },
+      reason: "auto-read-from-discovery-result",
+    });
+    if (calls.length >= 2) {
+      break;
+    }
+  }
+
   return calls;
 };
 
@@ -722,7 +776,7 @@ const executeReadOnlyToolChain = async ({
     },
   ];
 
-  if (toolId === "browse_code") {
+  if (toolId === "browse_code" || toolId === "workspace_search") {
     const followUpCalls = buildAutomaticWorkspaceReadCalls({
       message,
       browseResult: primaryResult,
@@ -742,9 +796,10 @@ const executeReadOnlyToolChain = async ({
         result: followUpResult,
         reason: followUp.reason,
       });
-      console.warn("[agentRuntime] auto-ran workspace_read after browse_code", {
+      console.warn("[agentRuntime] auto-ran workspace_read after discovery tool", {
         runtimeLane,
         reason: followUp.reason,
+        sourceToolId: toolId,
         path: followUp.args.path,
         symbol: followUp.args.symbol,
       });
@@ -787,12 +842,47 @@ const deriveDiscoveryMetadata = (
 ) => {
   let astSource: SharedAgentRuntimeResult["astSource"] = "none";
   let codeDiscoveryFallback: SharedAgentRuntimeResult["codeDiscoveryFallback"] = "none";
+  let toolResultSymbolCount = 0;
+  let toolResultFileCount = 0;
+  let localSymbolDedupCount = 0;
+  const normalizedCodeQueries = new Set<string>();
+  let codeQuestionType: string | undefined;
+  const candidatePaths = new Set<string>();
 
   for (const result of toolResults) {
     const details = (result.details || {}) as {
       codeIndexSource?: "local-checkout" | "capability-index";
       mode?: string;
+      symbols?: Array<{ filePath?: string }>;
+      files?: string[];
+      matches?: unknown[];
+      normalizedCodeQueries?: string[];
+      normalizedQueries?: string[];
+      codeQuestionType?: string;
+      localSymbolDedupCount?: number;
     };
+    const symbols = Array.isArray(details.symbols) ? details.symbols : [];
+    const files = Array.isArray(details.files) ? details.files : [];
+    toolResultSymbolCount += symbols.length;
+    toolResultFileCount += files.length;
+    localSymbolDedupCount += Number(details.localSymbolDedupCount || 0);
+    for (const query of details.normalizedCodeQueries || details.normalizedQueries || []) {
+      const normalized = String(query || "").trim();
+      if (normalized) normalizedCodeQueries.add(normalized);
+    }
+    codeQuestionType = codeQuestionType || details.codeQuestionType;
+    for (const symbol of symbols) {
+      const filePath = String(symbol.filePath || "").trim();
+      if (filePath) candidatePaths.add(filePath);
+    }
+    for (const filePath of files) {
+      const normalized = String(filePath || "").trim();
+      if (normalized) candidatePaths.add(normalized);
+    }
+    for (const match of Array.isArray(details.matches) ? details.matches : []) {
+      const filePath = extractPathFromSearchMatch(match, result.workingDirectory);
+      if (filePath) candidatePaths.add(filePath);
+    }
     if (details.codeIndexSource === "local-checkout") {
       astSource = "local-checkout";
       codeDiscoveryFallback = "none";
@@ -815,6 +905,18 @@ const deriveDiscoveryMetadata = (
       attemptedToolIds.length > 0 ? ("ast-first-tool-loop" as const) : ("prompt-only" as const),
     codeDiscoveryFallback,
     astSource,
+    normalizedCodeQueries: [...normalizedCodeQueries],
+    codeQuestionType,
+    toolResultSymbolCount,
+    toolResultFileCount,
+    autoReadCandidateCount: candidatePaths.size,
+    autoReadSkippedReason:
+      attemptedToolIds.some(toolId => toolId === "browse_code" || toolId === "workspace_search") &&
+      !attemptedToolIds.includes("workspace_read") &&
+      candidatePaths.size === 0
+        ? "no-candidate-files"
+        : undefined,
+    localSymbolDedupCount,
   };
 };
 
@@ -836,13 +938,32 @@ export const invokeCommonAgentRuntime = async ({
   runtimeLane,
 }: InvokeCommonAgentRuntimeArgs): Promise<SharedAgentRuntimeResult> => {
   const agentReadOnlyToolIds = resolveReadOnlyToolIds(agent);
-  const readOnlyToolIds = resolveReadOnlyToolIds(agent, allowedToolIds);
+  // When the caller wants a tool loop but the agent has no tools explicitly
+  // configured, fall back to every read-only tool in the catalog rather than
+  // silently disabling code grounding. READ_ONLY_AGENT_TOOL_IDS is derived
+  // dynamically from the tool catalog (readOnly: true) — no hardcoded IDs.
+  const resolvedAllowedToolIds = resolveReadOnlyToolIds(agent, allowedToolIds);
+  const readOnlyToolIds =
+    resolvedAllowedToolIds.length > 0 || !preferReadOnlyToolLoop
+      ? resolvedAllowedToolIds
+      : READ_ONLY_AGENT_TOOL_IDS;
   const toolLoopEnabled = preferReadOnlyToolLoop && readOnlyToolIds.length > 0;
   const toolLoopReason = resolveToolLoopReason(preferReadOnlyToolLoop, readOnlyToolIds);
   const automaticDiscoveryToolCall = buildAutomaticDiscoveryToolCall({
     message,
     allowedToolIds: readOnlyToolIds,
   });
+
+  // ── DEBUG: Log runtime entry config ───────────────────────────
+  console.log(`\n[agentRuntime:debug] ══════ invokeCommonAgentRuntime ══════`);
+  console.log(`[agentRuntime:debug]   runtimeLane: ${runtimeLane}`);
+  console.log(`[agentRuntime:debug]   toolLoopEnabled: ${toolLoopEnabled}`);
+  console.log(`[agentRuntime:debug]   toolLoopReason: ${toolLoopReason}`);
+  console.log(`[agentRuntime:debug]   readOnlyToolIds: ${readOnlyToolIds.join(', ') || 'NONE'}`);
+  console.log(`[agentRuntime:debug]   autoDiscovery: ${automaticDiscoveryToolCall ? `${automaticDiscoveryToolCall.toolId}(${JSON.stringify(automaticDiscoveryToolCall.args)})` : 'NONE'}`);
+  console.log(`[agentRuntime:debug]   message: ${message.slice(0, 200)}`);
+  console.log(`[agentRuntime:debug]   capabilityId: ${capability.id}`);
+  // ──────────────────────────────────────────────────────────────
 
   const recoverToolIntentToAnswer = async ({
     toolId,
@@ -1104,6 +1225,20 @@ export const invokeCommonAgentRuntime = async ({
         ? combineUsage(aggregatedUsage, loopResponse.usage)
         : loopResponse.usage;
 
+      // ── DEBUG: Log what we sent and received ──────────────────────
+      console.log(`\n[agentRuntime:debug] ══════ TOOL LOOP iteration=${iteration} ══════`);
+      console.log(`[agentRuntime:debug] → SENT TO LLM:`);
+      console.log(`[agentRuntime:debug]   message: ${currentMessage.slice(0, 300)}${currentMessage.length > 300 ? '...' : ''}`);
+      console.log(`[agentRuntime:debug]   toolHistory entries: ${toolHistory.length}`);
+      if (toolHistory.length > 0) {
+        const lastToolEntry = toolHistory[toolHistory.length - 1];
+        console.log(`[agentRuntime:debug]   last toolHistory role=${lastToolEntry.role} content: ${String(lastToolEntry.content || '').slice(0, 500)}${String(lastToolEntry.content || '').length > 500 ? '...' : ''}`);
+      }
+      console.log(`[agentRuntime:debug] ← RECEIVED FROM LLM:`);
+      console.log(`[agentRuntime:debug]   raw content: ${String(loopResponse.content || '').slice(0, 800)}`);
+      console.log(`[agentRuntime:debug]   usage: prompt=${loopResponse.usage?.promptTokens || 0} completion=${loopResponse.usage?.completionTokens || 0}`);
+      // ──────────────────────────────────────────────────────────────
+
       const decision = parseToolLoopDecision(loopResponse.content || "");
       if (!decision) {
         if (
@@ -1143,6 +1278,17 @@ export const invokeCommonAgentRuntime = async ({
             ),
           });
           currentMessage = `Continue answering the original request directly using the gathered tool evidence: ${message}`;
+          // ── DEBUG: Log auto-discovery results ──────────────────────
+          console.log(`[agentRuntime:debug] AUTO-DISCOVERY executed ${executedToolCalls.length} tool(s)`);
+          for (const call of executedToolCalls) {
+            console.log(`[agentRuntime:debug]   tool=${call.toolId} summary: ${call.result.summary}`);
+            console.log(`[agentRuntime:debug]   tool=${call.toolId} details: ${JSON.stringify(call.result.details || {}, null, 0).slice(0, 600)}`);
+            if (call.result.stdoutPreview) {
+              console.log(`[agentRuntime:debug]   tool=${call.toolId} stdout: ${String(call.result.stdoutPreview).slice(0, 600)}`);
+            }
+          }
+          console.log(`[agentRuntime:debug]   evidence injected into toolHistory: ${String(toolHistory[toolHistory.length - 1]?.content || '').slice(0, 600)}`);
+          // ──────────────────────────────────────────────────────────
           console.warn("[agentRuntime] auto-ran read-only discovery after non-tool response", {
             runtimeLane,
             toolId: automaticDiscoveryToolCall.toolId,
@@ -1211,6 +1357,16 @@ export const invokeCommonAgentRuntime = async ({
             ),
           });
           currentMessage = `Continue answering the original request directly using the gathered tool evidence: ${message}`;
+          // ── DEBUG: Log auto-discovery before direct answer ────────
+          console.log(`[agentRuntime:debug] AUTO-DISCOVERY (before accepting direct answer) executed ${executedToolCalls.length} tool(s)`);
+          for (const call of executedToolCalls) {
+            console.log(`[agentRuntime:debug]   tool=${call.toolId} summary: ${call.result.summary}`);
+            console.log(`[agentRuntime:debug]   tool=${call.toolId} details: ${JSON.stringify(call.result.details || {}, null, 0).slice(0, 600)}`);
+            if (call.result.stdoutPreview) {
+              console.log(`[agentRuntime:debug]   tool=${call.toolId} stdout: ${String(call.result.stdoutPreview).slice(0, 600)}`);
+            }
+          }
+          // ──────────────────────────────────────────────────────────
           console.warn("[agentRuntime] auto-ran read-only discovery before accepting direct answer", {
             runtimeLane,
             toolId: automaticDiscoveryToolCall.toolId,
@@ -1397,6 +1553,17 @@ export const invokeCommonAgentRuntime = async ({
           ),
         },
       );
+      // ── DEBUG: Log tool execution results ──────────────────────────
+      console.log(`[agentRuntime:debug] TOOL EXECUTED: ${decision.toolCall.toolId}`);
+      for (const call of executedToolCalls) {
+        console.log(`[agentRuntime:debug]   tool=${call.toolId} summary: ${call.result.summary}`);
+        console.log(`[agentRuntime:debug]   tool=${call.toolId} details: ${JSON.stringify(call.result.details || {}, null, 0).slice(0, 600)}`);
+        if (call.result.stdoutPreview) {
+          console.log(`[agentRuntime:debug]   tool=${call.toolId} stdout: ${String(call.result.stdoutPreview).slice(0, 600)}`);
+        }
+      }
+      console.log(`[agentRuntime:debug]   evidence fed to LLM: ${String(toolHistory[toolHistory.length - 1]?.content || '').slice(0, 600)}`);
+      // ──────────────────────────────────────────────────────────────
       currentMessage = `Continue answering the original request: ${message}`;
     }
 
@@ -1442,6 +1609,13 @@ export const invokeCommonAgentRuntime = async ({
           preserveAllHistory: preserveAllHistoryForToolLoop,
         });
         const forcedAnswerContent = extractUserFacingContent(forcedAnswer.content || "");
+        // ── DEBUG: Log forced-answer result ──────────────────────────
+        console.log(`\n[agentRuntime:debug] ══════ FORCED ANSWER RECOVERY ══════`);
+        console.log(`[agentRuntime:debug]   toolHistory entries: ${toolHistory.length}`);
+        console.log(`[agentRuntime:debug]   attemptedToolIds: ${attemptedToolIds.join(', ')}`);
+        console.log(`[agentRuntime:debug]   raw forced answer: ${String(forcedAnswer.content || '').slice(0, 500)}`);
+        console.log(`[agentRuntime:debug]   extracted content: ${String(forcedAnswerContent || '').slice(0, 500)}`);
+        // ──────────────────────────────────────────────────────────────
         if (forcedAnswerContent) {
           if (onDelta) {
             onDelta(forcedAnswerContent);

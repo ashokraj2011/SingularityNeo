@@ -182,6 +182,7 @@ export const resolveChatRuntimeContext = async ({
     verifiedPaths: astGrounding.verifiedPaths,
     isCodeQuestion: astGrounding.isCodeQuestion,
     groundingEvidenceSource: astGrounding.groundingEvidenceSource,
+    shouldBootstrapIndex: astGrounding.shouldBootstrapIndex,
     developerPrompt: isStageControlRequest
       ? buildStageControlDeveloperPrompt({
           agentName: liveAgent.name || liveAgent.role || 'the current stage agent',

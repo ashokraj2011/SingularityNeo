@@ -1104,19 +1104,13 @@ export const refreshCapabilityMemory = async (
     });
   });
 
+  // ── Agent learning re-queue DISABLED ────────────────────────
+  // Learning is operator-initiated only. Memory refresh no longer
+  // automatically enqueues LLM-based learning jobs.
   if (options?.requeueAgents !== false) {
-    const ownerAgent =
-      bundle.workspace.agents.find(agent => agent.isOwner) ||
-      bundle.workspace.agents.find(agent => agent.roleStarterKey === 'OWNER') ||
-      bundle.workspace.agents[0];
-    if (ownerAgent) {
-      await queueAgentLearningJob({
-        capabilityId,
-        agentId: ownerAgent.id,
-        requestReason: options?.requestReason || 'memory-refresh',
-        makeStale: true,
-      }).catch(() => undefined);
-    }
+    console.log(
+      `[memory] requeueAgents requested for ${capabilityId} (reason: ${options?.requestReason || 'memory-refresh'}) — SKIPPED (learning is operator-initiated only)`,
+    );
   }
 
   return listMemoryDocuments(capabilityId);

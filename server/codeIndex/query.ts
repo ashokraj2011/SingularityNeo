@@ -11,6 +11,7 @@
  * provisioned. A later phase can swap in pg_trgm or embeddings without
  * changing the call shape.
  */
+import { createHash } from 'node:crypto';
 import { query } from '../db';
 import { getCapabilityRepositoriesRecord } from '../domains/self-service/repository';
 import { detectSourceLanguage } from './parse';
@@ -176,12 +177,11 @@ const buildFallbackSymbolId = ({
   startLine: number;
   endLine: number;
 }) =>
-  `LEGACY-${Buffer.from(
-    `${capabilityId}:${repositoryId}:${filePath}:${qualifiedSymbolName}:${kind}:${startLine}:${endLine}`,
-  )
-    .toString('base64')
-    .replace(/[^A-Za-z0-9]/g, '')
-    .slice(0, 20)}`;
+  `LEGACY-${createHash('sha1')
+    .update(`${capabilityId}:${repositoryId}:${filePath}:${qualifiedSymbolName}:${kind}:${startLine}:${endLine}`)
+    .digest('hex')
+    .slice(0, 16)
+    .toUpperCase()}`;
 
 const mapCapabilitySymbol = ({
   capabilityId,
@@ -273,14 +273,17 @@ export const searchCodeSymbols = async (
     params.push(options.kind);
   }
 
-  let repositoryRankClause = '0';
+  // Bare `ORDER BY 0` is parsed by Postgres as an invalid ordinal reference.
+  // Use `NULL` for the "no ranking preference" case so the clause becomes a
+  // harmless no-op when repository/path hints are absent.
+  let repositoryRankClause = 'NULL';
   if (options.repositoryId) {
     parameterIndex += 1;
     params.push(options.repositoryId);
     repositoryRankClause = `CASE WHEN repository_id = $${parameterIndex} THEN 0 ELSE 1 END`;
   }
 
-  let pathRankClause = '0';
+  let pathRankClause = 'NULL';
   if (options.nearFilePath) {
     parameterIndex += 1;
     params.push(options.nearFilePath);

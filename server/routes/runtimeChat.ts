@@ -5,6 +5,8 @@ import { GitHubProviderRateLimitError, type ChatHistoryMessage } from '../github
 import {
   auditRuntimeChatTurn,
   appendCapabilityMessageRecord,
+  buildAgentSessionMemoryPrompt,
+  getAgentSessionMemory,
 } from '../domains/context-fabric';
 import { getCapabilityBundle } from '../domains/self-service';
 import { parseActorContext } from '../requestActor';
@@ -22,6 +24,7 @@ import {
 import {
   buildUnifiedChatContextPrompt,
   resolveChatFollowUpContext,
+  shouldPreferFollowUpContinuation,
   type EffectiveMessageSource,
   type FollowUpBindingMode,
   type FollowUpIntent,
@@ -31,6 +34,7 @@ import {
   getDefaultRepoAwareReadOnlyToolIds,
   resolveRuntimeAgentForWorkspace,
 } from '../runtimeAgents';
+import { syncCapabilityRepositoriesForDesktop } from '../desktopRepoSync';
 
 type ChatRequestBody = {
   capability?: Capability;
@@ -102,6 +106,11 @@ type ChatContext = {
   isCodeQuestion?: boolean;
   groundingEvidenceSource?: 'local-checkout' | 'capability-index' | 'none';
   developerPrompt?: string;
+  sessionMemoryPrompt?: string;
+  sessionMemoryUsed?: boolean;
+  sessionMemorySource?: 'durable-agent-session' | 'legacy-chat-session' | 'none';
+  /** Forwarded from AstGroundingSummary — triggers background index bootstrap. */
+  shouldBootstrapIndex?: boolean;
 };
 
 type RuntimeChatRouteDeps = {
@@ -170,6 +179,8 @@ export const registerRuntimeChatRoutes = (
     historyTurnCount,
     historyRolledUp,
     chatRuntimeLane,
+    sessionMemoryUsed,
+    sessionMemorySource,
     toolLoopEnabled,
     toolLoopReason,
     toolLoopUsed,
@@ -194,6 +205,8 @@ export const registerRuntimeChatRoutes = (
     historyTurnCount: number;
     historyRolledUp?: boolean;
     chatRuntimeLane: 'server-runtime-route';
+    sessionMemoryUsed?: boolean;
+    sessionMemorySource?: 'durable-agent-session' | 'legacy-chat-session' | 'none';
     toolLoopEnabled?: boolean;
     toolLoopReason?: 'repo-aware-code-question' | 'disabled-by-caller' | 'no-read-only-tools';
     toolLoopUsed?: boolean;
@@ -221,11 +234,14 @@ export const registerRuntimeChatRoutes = (
     workContextHydrated: Boolean(chatContext.liveBriefing?.trim()),
     workContextSource:
       chatContext.chatScope === 'WORK_ITEM' ? 'live-work-item' : 'live-workspace',
+    sessionMemoryUsed: Boolean(sessionMemoryUsed),
+    sessionMemorySource: sessionMemorySource || 'none',
     effectiveMessage,
     effectiveMessageSource,
     followUpIntent,
     followUpBindingMode,
     chatRuntimeLane,
+    contextEnvelopeSource: 'shared-chat-envelope' as const,
     memoryTrustMode,
     pathValidationState: pathValidationState || 'none',
     unverifiedPathClaimsRemoved: unverifiedPathClaimsRemoved || [],
@@ -282,21 +298,28 @@ export const registerRuntimeChatRoutes = (
     chatContext,
     evidencePrompt,
     followUpContextPrompt,
+    sessionMemoryPrompt,
   }: {
     chatContext: ChatContext;
     evidencePrompt?: string;
     followUpContextPrompt?: string;
+    sessionMemoryPrompt?: string;
   }) =>
     buildChatMemoryPrompt({
       liveBriefing: '',
       memoryPrompt: buildUnifiedChatContextPrompt({
         liveContext: chatContext.liveBriefing,
+        sessionMemoryPrompt,
         followUpContextPrompt,
         evidencePrompt,
       }),
     });
 
-  const maybeRefreshCodeGroundingMemory = (capabilityId: string, shouldRefresh: boolean) => {
+  const maybeRefreshCodeGroundingMemory = (
+    capabilityId: string,
+    shouldRefresh: boolean,
+    chatContext?: ChatContext,
+  ) => {
     if (!shouldRefresh) {
       return;
     }
@@ -304,6 +327,35 @@ export const registerRuntimeChatRoutes = (
       requeueAgents: false,
       requestReason: 'repo-grounding-chat-refresh',
     }).catch(() => undefined);
+
+    // When the AST grounding had no hits (no local clone, no remote index),
+    // schedule a background desktop repo sync so the NEXT chat turn is grounded.
+    // Fire-and-forget — never block the response.
+    if (chatContext?.shouldBootstrapIndex) {
+      void (async () => {
+        try {
+          const bundle = await import('../domains/self-service').then(m =>
+            m.getCapabilityBundle(capabilityId),
+          );
+          const executorId = bundle.workspace.executionOwnership?.executorId;
+          if (executorId) {
+            await syncCapabilityRepositoriesForDesktop({
+              capabilityId,
+              executorId,
+              fetch: false,
+            });
+            console.log(
+              `[runtimeChat] bootstrapped code index for ${capabilityId} after first code question`,
+            );
+          }
+        } catch (err) {
+          console.warn(
+            `[runtimeChat] background index bootstrap failed for ${capabilityId}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      })();
+    }
   };
 
   app.post('/api/runtime/chat', async (request, response) => {
@@ -386,13 +438,32 @@ export const registerRuntimeChatRoutes = (
         workItemId: body.workItemId,
         runId: body.runId,
         workflowStepId: body.workflowStepId,
+        sessionMemory: liveAgent.id
+          ? await getAgentSessionMemory({
+              capabilityId: body.capability.id,
+              agentId: liveAgent.id,
+              scope:
+                body.sessionScope ||
+                (body.workItemId ? 'WORK_ITEM' : 'GENERAL_CHAT'),
+              scopeId:
+                body.sessionScopeId ||
+                body.workItemId ||
+                body.capability.id,
+            }).catch(() => null)
+          : null,
       });
       const effectiveMessage = followUpContext.effectiveMessage || originalMessage;
-      const chatAction = await maybeHandleCapabilityChatAction({
-        bundle,
-        agent: liveAgent,
-        message: originalMessage,
-      });
+      const chatAction =
+        shouldPreferFollowUpContinuation({
+          latestMessage: originalMessage,
+          followUpBindingMode: followUpContext.followUpBindingMode,
+        })
+          ? { handled: false, wakeWorker: false, content: undefined }
+          : await maybeHandleCapabilityChatAction({
+              bundle,
+              agent: liveAgent,
+              message: originalMessage,
+            });
       if (chatAction.handled) {
         if (chatAction.wakeWorker) {
           wakeExecutionWorker();
@@ -463,6 +534,15 @@ export const registerRuntimeChatRoutes = (
       const memoryTrustMode: MemoryTrustMode = chatContext.isCodeQuestion
         ? 'repo-evidence-only'
         : 'standard';
+      const sessionMemory =
+        runtimeAgent.id
+          ? await getAgentSessionMemory({
+              capabilityId: liveCapability.id,
+              agentId: runtimeAgent.id,
+              scope: chatContext.chatScope,
+              scopeId: chatContext.chatScopeId,
+            }).catch(() => null)
+          : null;
       const anchorMemoryContext = await buildMemoryContext({
         capabilityId: liveCapability.id,
         agentId: liveAgent.id,
@@ -503,6 +583,7 @@ export const registerRuntimeChatRoutes = (
         developerPrompt: chatContext.developerPrompt,
         memoryPrompt: buildTurnMemoryPrompt({
           chatContext,
+          sessionMemoryPrompt: buildAgentSessionMemoryPrompt(sessionMemory),
           evidencePrompt: mergedMemoryPrompt,
           followUpContextPrompt: followUpContext.followUpContextPrompt,
         }),
@@ -534,6 +615,8 @@ export const registerRuntimeChatRoutes = (
         historyTurnCount: chatResponse.historyTurnCount || followUpContext.history.length,
         historyRolledUp: chatResponse.historyRolledUp,
         chatRuntimeLane: 'server-runtime-route',
+        sessionMemoryUsed: Boolean(sessionMemory),
+        sessionMemorySource: sessionMemory ? 'durable-agent-session' : 'none',
         toolLoopEnabled: chatResponse.toolLoopEnabled,
         toolLoopReason: chatResponse.toolLoopReason,
         toolLoopUsed: chatResponse.toolLoopUsed,
@@ -669,6 +752,7 @@ export const registerRuntimeChatRoutes = (
       maybeRefreshCodeGroundingMemory(
         liveCapability.id,
         Boolean(chatContext.isCodeQuestion),
+        chatContext,
       );
     } catch (error) {
       sendApiError(response, error);
@@ -768,13 +852,32 @@ export const registerRuntimeChatRoutes = (
         workItemId: body.workItemId,
         runId: body.runId,
         workflowStepId: body.workflowStepId,
+        sessionMemory: liveAgent.id
+          ? await getAgentSessionMemory({
+              capabilityId: body.capability.id,
+              agentId: liveAgent.id,
+              scope:
+                body.sessionScope ||
+                (body.workItemId ? 'WORK_ITEM' : 'GENERAL_CHAT'),
+              scopeId:
+                body.sessionScopeId ||
+                body.workItemId ||
+                body.capability.id,
+            }).catch(() => null)
+          : null,
       });
       const effectiveMessage = followUpContext.effectiveMessage || originalMessage;
-      const chatAction = await maybeHandleCapabilityChatAction({
-        bundle,
-        agent: liveAgent,
-        message: originalMessage,
-      });
+      const chatAction =
+        shouldPreferFollowUpContinuation({
+          latestMessage: originalMessage,
+          followUpBindingMode: followUpContext.followUpBindingMode,
+        })
+          ? { handled: false, wakeWorker: false, content: undefined }
+          : await maybeHandleCapabilityChatAction({
+              bundle,
+              agent: liveAgent,
+              message: originalMessage,
+            });
 
       if (chatAction.handled) {
         if (chatAction.wakeWorker) {
@@ -844,6 +947,15 @@ export const registerRuntimeChatRoutes = (
         payloadAgentId: foreignParticipant?.agentId || body.agent?.id,
       });
       const runtimeAgent = runtimeResolvedAgent.agent as CapabilityAgent;
+      const sessionMemory =
+        runtimeAgent.id
+          ? await getAgentSessionMemory({
+              capabilityId: liveCapability.id,
+              agentId: runtimeAgent.id,
+              scope: chatContext.chatScope,
+              scopeId: chatContext.chatScopeId,
+            }).catch(() => null)
+          : null;
       const runtimeReadOnlyToolIds = resolveReadOnlyToolIds(runtimeAgent);
       const runtimeAllowedToolIds =
         chatContext.isCodeQuestion &&
@@ -873,6 +985,8 @@ export const registerRuntimeChatRoutes = (
         historyTurnCount: followUpContext.history.length,
         historyRolledUp: false,
         chatRuntimeLane: 'server-runtime-route',
+        sessionMemoryUsed: Boolean(sessionMemory),
+        sessionMemorySource: sessionMemory ? 'durable-agent-session' : 'none',
         toolLoopEnabled: Boolean(chatContext.isCodeQuestion),
         toolLoopReason: chatContext.isCodeQuestion
           ? 'repo-aware-code-question'
@@ -923,6 +1037,7 @@ export const registerRuntimeChatRoutes = (
         developerPrompt: chatContext.developerPrompt,
         memoryPrompt: buildTurnMemoryPrompt({
           chatContext,
+          sessionMemoryPrompt: buildAgentSessionMemoryPrompt(sessionMemory),
           evidencePrompt: streamMergedMemoryPrompt,
           followUpContextPrompt: followUpContext.followUpContextPrompt,
         }),
@@ -964,6 +1079,8 @@ export const registerRuntimeChatRoutes = (
         historyTurnCount: streamed.historyTurnCount || followUpContext.history.length,
         historyRolledUp: streamed.historyRolledUp,
         chatRuntimeLane: 'server-runtime-route',
+        sessionMemoryUsed: Boolean(sessionMemory),
+        sessionMemorySource: sessionMemory ? 'durable-agent-session' : 'none',
         toolLoopEnabled: streamed.toolLoopEnabled,
         toolLoopReason: streamed.toolLoopReason,
         toolLoopUsed: streamed.toolLoopUsed,
@@ -1107,6 +1224,7 @@ export const registerRuntimeChatRoutes = (
       maybeRefreshCodeGroundingMemory(
         liveCapability.id,
         Boolean(chatContext.isCodeQuestion),
+        chatContext,
       );
     } catch (error) {
       writeSseEvent(response, 'error', {

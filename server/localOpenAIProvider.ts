@@ -317,6 +317,17 @@ export const requestOpenAICompatModel = async ({
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      // ── LLM Request logging ───────────────────────────────────────
+      const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+      console.log(
+        `[LLM REQUEST] provider=${providerLabel} | model=${model} | messages=${messages.length} | chars=${totalChars} | tools=${tools?.length ?? 0} | attempt=${attempt + 1} | url=${baseUrl}/chat/completions`,
+      );
+      for (const m of messages) {
+        const preview = m.content.length > 300 ? m.content.slice(0, 300) + '…' : m.content;
+        console.log(`[LLM REQUEST]   [${m.role}] (${m.content.length} chars): ${preview}`);
+      }
+      // ──────────────────────────────────────────────────────────────
+
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -336,6 +347,7 @@ export const requestOpenAICompatModel = async ({
 
       if (!response.ok) {
         const errorMsg = await getLocalProviderError(response);
+        console.error(`[LLM ERROR] provider=${providerLabel} | status=${response.status} | error=${errorMsg}`);
         if (response.status === 429 && attempt < maxRetries) {
           attempt++;
           let delayMs = 5000;
@@ -392,6 +404,13 @@ export const requestOpenAICompatModel = async ({
           }
         : estimateUsage(promptText, content);
 
+      // ── LLM Response logging ──────────────────────────────────────
+      console.log(
+        `[LLM RESPONSE] provider=${providerLabel} | model=${payload.model || model} | promptTokens=${usage.promptTokens} | completionTokens=${usage.completionTokens} | totalTokens=${usage.totalTokens} | cost=$${usage.estimatedCostUsd} | responseId=${payload.id || 'n/a'}`,
+      );
+      console.log(`[LLM RESPONSE] content (${content.length} chars):\n${content}`);
+      // ──────────────────────────────────────────────────────────────
+
       return {
         content,
         model:      String(payload.model || model),
@@ -403,6 +422,7 @@ export const requestOpenAICompatModel = async ({
       };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
+        console.error(`[LLM TIMEOUT] provider=${providerLabel} | model=${model} | timeoutMs=${timeoutMs}`);
         throw new Error(`${providerLabel} timed out.`);
       }
       throw error;

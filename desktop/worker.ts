@@ -10,6 +10,7 @@ import {
 } from '../src/lib/capabilityBriefing';
 import type {
   ActorContext,
+  AgentSessionMemory,
   Capability,
   CapabilityAgent,
   CapabilityChatMessage,
@@ -70,10 +71,11 @@ import { probeRuntimeProvider } from '../server/runtimeProbe';
 import { getLifecyclePhaseLabel } from '../src/lib/capabilityLifecycle';
 import {
   buildFocusedWorkItemDeveloperPrompt,
+  buildAgentSessionMemoryPrompt,
   extractChatWorkspaceReferenceId,
   maybeHandleCapabilityChatAction,
   resolveMentionedWorkItem,
-} from '../server/chatWorkspace';
+} from '../server/domains/context-fabric';
 import {
   buildStructuredChatEvidencePrompt,
   sanitizeGroundedChatResponse,
@@ -81,6 +83,7 @@ import {
 import {
   buildUnifiedChatContextPrompt,
   resolveChatFollowUpContext,
+  shouldPreferFollowUpContinuation,
   type EffectiveMessageSource,
   type FollowUpBindingMode,
   type FollowUpIntent,
@@ -778,6 +781,37 @@ const buildMemoryPrompt = (results: MemorySearchResult[]) =>
     )
     .join('\n\n');
 
+const fetchAgentSessionMemory = async ({
+  capabilityId,
+  agentId,
+  scope,
+  scopeId,
+  actorContext,
+}: {
+  capabilityId: string;
+  agentId?: string;
+  scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
+  scopeId?: string;
+  actorContext?: ActorContext | null;
+}): Promise<AgentSessionMemory | null> => {
+  if (!capabilityId || !agentId) {
+    return null;
+  }
+
+  const params = new URLSearchParams({
+    agentId,
+    scope,
+    scopeId: scopeId || '',
+  });
+
+  return controlPlaneRequest<AgentSessionMemory | null>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/session-memory?${params.toString()}`,
+    {
+      actorContext,
+    },
+  ).catch(() => null);
+};
+
 const resolveDesktopRuntimeContext = async (
   payload: DesktopRuntimePayload,
 ): Promise<{
@@ -811,6 +845,8 @@ const resolveDesktopRuntimeContext = async (
   groundingEvidenceSource?: 'local-checkout' | 'capability-index' | 'none';
   workContextHydrated: boolean;
   workContextSource: 'live-work-item' | 'live-workspace';
+  sessionMemoryUsed: boolean;
+  sessionMemorySource: 'durable-agent-session' | 'legacy-chat-session' | 'none';
   workItem?: WorkItem;
   scope: 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK';
   scopeId?: string;
@@ -821,7 +857,7 @@ const resolveDesktopRuntimeContext = async (
   const capabilityId = capability.id || payload.capability?.id;
   const payloadAgentId = payload.agent?.id;
   const originalMessage = String(payload.message || '').trim();
-  const followUpContext = resolveChatFollowUpContext({
+  let followUpContext = resolveChatFollowUpContext({
     history: (payload.history as CapabilityChatMessage[] | undefined) || [],
     latestMessage: originalMessage,
     sessionScope: payload.sessionScope as 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK' | undefined,
@@ -830,13 +866,15 @@ const resolveDesktopRuntimeContext = async (
     runId: payload.runId as string | undefined,
     workflowStepId: payload.workflowStepId as string | undefined,
   });
-  const effectiveMessage = followUpContext.effectiveMessage || originalMessage;
+  let effectiveMessage = followUpContext.effectiveMessage || originalMessage;
 
   let liveBriefing = '';
   let memoryReferences: MemoryReference[] = [];
   let developerPrompt: string | undefined;
   let scope = (payload.sessionScope as 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK') || 'GENERAL_CHAT';
   let scopeId = payload.sessionScopeId as string | undefined;
+  let sessionMemoryUsed = false;
+  let sessionMemorySource: 'durable-agent-session' | 'legacy-chat-session' | 'none' = 'none';
   const initialResolvedAgent = resolveRuntimeAgentForWorkspace({
     payloadAgent,
     payloadAgentId,
@@ -860,11 +898,35 @@ const resolveDesktopRuntimeContext = async (
     agent = resolvedAgent.agent;
     resolvedAgentSource = resolvedAgent.source;
     resolvedAllowedToolIds = resolveReadOnlyToolIds(agent);
-    const chatAction = await maybeHandleCapabilityChatAction({
-      bundle,
-      agent,
-      message: originalMessage,
+    const initialSessionMemory = await fetchAgentSessionMemory({
+      capabilityId,
+      agentId: agent.id,
+      scope,
+      scopeId: scopeId || (scope === 'GENERAL_CHAT' ? capabilityId : undefined),
+      actorContext,
     });
+    followUpContext = resolveChatFollowUpContext({
+      history: (payload.history as CapabilityChatMessage[] | undefined) || [],
+      latestMessage: originalMessage,
+      sessionScope: payload.sessionScope as 'GENERAL_CHAT' | 'WORK_ITEM' | 'TASK' | undefined,
+      sessionScopeId: payload.sessionScopeId as string | undefined,
+      workItemId: payload.workItemId as string | undefined,
+      runId: payload.runId as string | undefined,
+      workflowStepId: payload.workflowStepId as string | undefined,
+      sessionMemory: initialSessionMemory,
+    });
+    effectiveMessage = followUpContext.effectiveMessage || originalMessage;
+    const chatAction =
+      shouldPreferFollowUpContinuation({
+        latestMessage: originalMessage,
+        followUpBindingMode: followUpContext.followUpBindingMode,
+      })
+        ? { handled: false, wakeWorker: false, content: undefined }
+        : await maybeHandleCapabilityChatAction({
+            bundle,
+            agent,
+            message: originalMessage,
+          });
     const referencedRunId =
       (payload.runId as string | undefined) ||
       extractChatWorkspaceReferenceId(effectiveMessage, 'RUN');
@@ -1036,6 +1098,16 @@ const resolveDesktopRuntimeContext = async (
         ]),
       ];
     }
+    const sessionMemory = await fetchAgentSessionMemory({
+      capabilityId,
+      agentId: agent.id,
+      scope,
+      scopeId,
+      actorContext,
+    });
+    sessionMemoryUsed = Boolean(sessionMemory);
+    sessionMemorySource = sessionMemory ? 'durable-agent-session' : 'none';
+    const sessionMemoryPrompt = buildAgentSessionMemoryPrompt(sessionMemory);
 
     if (queryText) {
       const rawMemoryResults = await controlPlaneRequest<MemorySearchResult[]>(
@@ -1085,6 +1157,7 @@ const resolveDesktopRuntimeContext = async (
         developerPrompt,
         memoryPrompt: buildUnifiedChatContextPrompt({
           liveContext: liveBriefing,
+          sessionMemoryPrompt,
           followUpContextPrompt: followUpContext.followUpContextPrompt,
           evidencePrompt,
         }) || undefined,
@@ -1102,6 +1175,8 @@ const resolveDesktopRuntimeContext = async (
         groundingEvidenceSource: astGrounding.groundingEvidenceSource,
         workContextHydrated: Boolean(liveBriefing.trim()),
         workContextSource: scope === 'WORK_ITEM' ? 'live-work-item' : 'live-workspace',
+        sessionMemoryUsed,
+        sessionMemorySource,
         workItem: referencedWorkItem,
         scope,
         scopeId,
@@ -1124,6 +1199,7 @@ const resolveDesktopRuntimeContext = async (
       memoryPrompt:
         buildUnifiedChatContextPrompt({
           liveContext: liveBriefing,
+          sessionMemoryPrompt,
           followUpContextPrompt: followUpContext.followUpContextPrompt,
           evidencePrompt: buildStructuredChatEvidencePrompt({
             verifiedCodeGrounding: astGrounding.prompt,
@@ -1156,6 +1232,8 @@ const resolveDesktopRuntimeContext = async (
       groundingEvidenceSource: astGrounding.groundingEvidenceSource,
       workContextHydrated: Boolean(liveBriefing.trim()),
       workContextSource: scope === 'WORK_ITEM' ? 'live-work-item' : 'live-workspace',
+      sessionMemoryUsed,
+      sessionMemorySource,
       workItem: referencedWorkItem,
       scope,
       scopeId,
@@ -1176,6 +1254,7 @@ const resolveDesktopRuntimeContext = async (
     memoryPrompt:
       buildUnifiedChatContextPrompt({
         liveContext: liveBriefing,
+        sessionMemoryPrompt: '',
         followUpContextPrompt: followUpContext.followUpContextPrompt,
       }) || undefined,
     memoryReferences,
@@ -1185,6 +1264,8 @@ const resolveDesktopRuntimeContext = async (
     memoryTrustMode: 'standard',
     workContextHydrated: Boolean(liveBriefing.trim()),
     workContextSource: 'live-workspace',
+    sessionMemoryUsed,
+    sessionMemorySource,
     scope,
     scopeId,
   };
@@ -1673,8 +1754,11 @@ reader.on('line', async line => {
             historyRolledUp: false,
             workContextHydrated: context.workContextHydrated,
             workContextSource: context.workContextSource,
+            sessionMemoryUsed: context.sessionMemoryUsed,
+            sessionMemorySource: context.sessionMemorySource,
             followUpBindingMode: context.followUpBindingMode,
             chatRuntimeLane: 'desktop-runtime-worker',
+            contextEnvelopeSource: 'shared-chat-envelope',
           },
         });
         return;
@@ -1739,8 +1823,11 @@ reader.on('line', async line => {
           historyRolledUp: Boolean(result.historyRolledUp),
           workContextHydrated: context.workContextHydrated,
           workContextSource: context.workContextSource,
+          sessionMemoryUsed: context.sessionMemoryUsed,
+          sessionMemorySource: context.sessionMemorySource,
           followUpBindingMode: context.followUpBindingMode,
           chatRuntimeLane: 'desktop-runtime-worker',
+          contextEnvelopeSource: 'shared-chat-envelope',
           toolLoopEnabled: result.toolLoopEnabled,
           toolLoopReason: result.toolLoopReason,
           toolLoopUsed: result.toolLoopUsed,
@@ -1873,8 +1960,11 @@ reader.on('line', async line => {
           historyRolledUp: false,
           workContextHydrated: context.workContextHydrated,
           workContextSource: context.workContextSource,
+          sessionMemoryUsed: context.sessionMemoryUsed,
+          sessionMemorySource: context.sessionMemorySource,
           followUpBindingMode: context.followUpBindingMode,
           chatRuntimeLane: 'desktop-runtime-worker',
+          contextEnvelopeSource: 'shared-chat-envelope',
         });
         respond({
           requestId,
@@ -1901,8 +1991,11 @@ reader.on('line', async line => {
         historyRolledUp: false,
         workContextHydrated: context.workContextHydrated,
         workContextSource: context.workContextSource,
+        sessionMemoryUsed: context.sessionMemoryUsed,
+        sessionMemorySource: context.sessionMemorySource,
         followUpBindingMode: context.followUpBindingMode,
         chatRuntimeLane: 'desktop-runtime-worker',
+        contextEnvelopeSource: 'shared-chat-envelope',
         toolLoopEnabled:
           context.isCodeQuestion && context.resolvedAllowedToolIds.length > 0,
         toolLoopReason: context.isCodeQuestion
@@ -1989,8 +2082,11 @@ reader.on('line', async line => {
         historyRolledUp: Boolean(streamed.historyRolledUp),
         workContextHydrated: context.workContextHydrated,
         workContextSource: context.workContextSource,
+        sessionMemoryUsed: context.sessionMemoryUsed,
+        sessionMemorySource: context.sessionMemorySource,
         followUpBindingMode: context.followUpBindingMode,
         chatRuntimeLane: 'desktop-runtime-worker',
+        contextEnvelopeSource: 'shared-chat-envelope',
         toolLoopEnabled: streamed.toolLoopEnabled,
         toolLoopReason: streamed.toolLoopReason,
         toolLoopUsed: streamed.toolLoopUsed,

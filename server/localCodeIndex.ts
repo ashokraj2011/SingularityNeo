@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type {
   CapabilityCodeSymbol,
   CapabilityCodeSymbolKind,
@@ -119,12 +120,11 @@ const buildLocalSymbolId = ({
   startLine: number;
   endLine: number;
 }) =>
-  `LOCAL-${Buffer.from(
-    `${repositoryId}:${filePath}:${qualifiedSymbolName}:${kind}:${startLine}:${endLine}`,
-  )
-    .toString("base64")
-    .replace(/[^A-Za-z0-9]/g, "")
-    .slice(0, 20)}`;
+  `LOCAL-${createHash("sha1")
+    .update(`${repositoryId}:${filePath}:${qualifiedSymbolName}:${kind}:${startLine}:${endLine}`)
+    .digest("hex")
+    .slice(0, 16)
+    .toUpperCase()}`;
 
 const toCapabilityCodeSymbol = ({
   capabilityId,
@@ -316,6 +316,10 @@ const scoreLocalSymbolMatch = (
   else if (normalizedName.startsWith(normalizedQuery)) score += 650;
   else if (normalizedQualified.includes(normalizedQuery)) score += 500;
   else if (normalizedName.includes(normalizedQuery)) score += 450;
+
+  if (score === 0) {
+    return 0;
+  }
 
   if (symbol.isExported) score += 40;
   score -= Math.min(symbol.filePath.length, 120);

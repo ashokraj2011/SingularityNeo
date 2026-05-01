@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   normalizeChatHistory,
   resolveChatFollowUpContext,
+  shouldPreferFollowUpContinuation,
 } from '../chatContinuity';
 
 describe('chat continuity helpers', () => {
@@ -80,6 +81,59 @@ describe('chat continuity helpers', () => {
     expect(resolved.followUpContextPrompt).toContain(
       'Do not ask the user what to search for again.',
     );
+  });
+
+  it('binds "yes do that" to a prior repo inspection recommendation', () => {
+    const resolved = resolveChatFollowUpContext({
+      history: [
+        {
+          role: 'agent',
+          content:
+            'The exact operator list is not yet available. Further code inspection or documentation review would be needed to determine this.',
+        },
+      ],
+      latestMessage: 'yes do that',
+      sessionScope: 'GENERAL_CHAT',
+      sessionScopeId: 'CAP-1',
+    });
+
+    expect(resolved.followUpBindingMode).toBe('latest-assistant-turn');
+    expect(resolved.followUpIntent).toBe('run-proposed-search');
+    expect(resolved.effectiveMessage).toContain('Execute that grounded search now');
+  });
+
+  it('falls back to durable session memory when transcript tail is missing', () => {
+    const resolved = resolveChatFollowUpContext({
+      history: [],
+      latestMessage: 'search and tell me',
+      sessionScope: 'GENERAL_CHAT',
+      sessionScopeId: 'CAP-1',
+      sessionMemory: {
+        rollingSummary: 'The agent previously proposed searching the repo.',
+        lastAssistantActionableOffer:
+          'I can browse the repository and inspect the codebase for operator definitions.',
+        recentRepoCodeTarget: 'operators in the rule engine',
+      },
+    });
+
+    expect(resolved.followUpBindingMode).toBe('latest-assistant-turn');
+    expect(resolved.followUpIntent).toBe('run-proposed-search');
+  });
+
+  it('prefers follow-up continuation over workspace control when the reply is ambiguous', () => {
+    expect(
+      shouldPreferFollowUpContinuation({
+        latestMessage: 'yes do that',
+        followUpBindingMode: 'latest-assistant-turn',
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldPreferFollowUpContinuation({
+        latestMessage: 'approve work item WI-123',
+        followUpBindingMode: 'latest-assistant-turn',
+      }),
+    ).toBe(false);
   });
 
   it('passes through non-follow-up messages unchanged', () => {

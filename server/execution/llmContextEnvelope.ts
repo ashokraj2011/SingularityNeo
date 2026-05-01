@@ -1,4 +1,5 @@
 import type {
+  LlmContextEnvelope,
   Workflow,
   WorkflowRunStep,
   WorkflowStep,
@@ -59,6 +60,7 @@ export const buildExecutionLlmContinuitySections = ({
   step,
   runStep,
   recentConversationText,
+  sessionMemoryPrompt,
   toolHistory,
   handoffContext,
   resolvedWaitContext,
@@ -74,6 +76,7 @@ export const buildExecutionLlmContinuitySections = ({
   step: Pick<WorkflowStep, 'name' | 'phase' | 'action' | 'description'>;
   runStep?: Pick<WorkflowRunStep, 'attemptCount'> | null;
   recentConversationText?: string;
+  sessionMemoryPrompt?: string;
   toolHistory?: ToolTranscriptTurn[];
   handoffContext?: string;
   resolvedWaitContext?: string;
@@ -81,6 +84,9 @@ export const buildExecutionLlmContinuitySections = ({
 }) => {
   const conversationText = recentConversationText
     ? `Recent operator and stage conversation:\n${recentConversationText}`
+    : '';
+  const sessionMemoryText = sessionMemoryPrompt?.trim()
+    ? sessionMemoryPrompt.trim()
     : '';
   const toolTranscriptText = buildToolTranscriptText(toolHistory);
   const handoffText = `Workflow hand-off context from prior completed steps:\n${
@@ -100,6 +106,7 @@ export const buildExecutionLlmContinuitySections = ({
     `Step objective: ${step.action}`,
     runStep ? `Current step attempt: ${runStep.attemptCount}` : null,
     conversationText || null,
+    sessionMemoryText || null,
     toolTranscriptText || null,
     handoffText,
     resolvedWaitText,
@@ -108,15 +115,30 @@ export const buildExecutionLlmContinuitySections = ({
     .filter(Boolean)
     .join('\n\n');
 
+  const envelope: LlmContextEnvelope = {
+    rawMessage: '',
+    effectiveMessage: '',
+    conversationHistory: conversationText || undefined,
+    sessionMemorySummary: sessionMemoryText || undefined,
+    liveContext: undefined,
+    toolTranscript: toolTranscriptText || undefined,
+    verifiedCodeEvidence: undefined,
+    advisoryMemory: undefined,
+    contextEnvelopeSource: 'shared-execution-envelope',
+  };
+
   return {
     conversationText,
+    sessionMemoryText,
     toolTranscriptText,
     handoffText,
     resolvedWaitText,
     operatorGuidanceText,
     envelopeText,
+    envelope,
     executionContextHydrated: Boolean(
       recentConversationText ||
+        sessionMemoryText ||
         toolHistory?.length ||
         handoffContext ||
         resolvedWaitContext ||

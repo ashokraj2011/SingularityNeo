@@ -498,6 +498,79 @@ describe("invokeCommonAgentRuntime", () => {
     );
   });
 
+  it("auto-runs workspace_read after workspace_search returns candidate paths", async () => {
+    invokeCapabilityChatMock
+      .mockResolvedValueOnce({
+        content:
+          '{"action":"workspace_search","reasoning":"Need to find operator files.","summary":"Searching code.","toolCall":{"pattern":"operator"}}',
+        model: "test-model",
+        usage,
+        responseId: "resp-search-read-1",
+        createdAt: "2026-04-30T00:00:00.000Z",
+      })
+      .mockResolvedValueOnce({
+        content:
+          '{"action":"answer","reasoning":"Grounded after reading the file.","content":"The rule engine defines 14 condition operators in Operator.java."}',
+        model: "test-model",
+        usage,
+        responseId: "resp-search-read-2",
+        createdAt: "2026-04-30T00:00:01.000Z",
+      });
+    executeToolMock
+      .mockResolvedValueOnce({
+        summary: "Search completed for pattern operator.",
+        workingDirectory: "/tmp/rule-engine",
+        details: {
+          mode: "text-search",
+          matches: ["src/main/java/org/example/rules/Operator.java:3:public enum Operator {"],
+          normalizedCodeQueries: ["operator"],
+          codeQuestionType: "count",
+        },
+        stdoutPreview:
+          "src/main/java/org/example/rules/Operator.java:3:public enum Operator {",
+      })
+      .mockResolvedValueOnce({
+        summary: "Read Operator enum.",
+        details: {
+          path: "/tmp/rule-engine/src/main/java/org/example/rules/Operator.java",
+          mode: "whole-file",
+          codeIndexSource: "local-checkout",
+        },
+        stdoutPreview: "enum Operator { eq, ne, lt, lte, gt, gte }",
+      });
+
+    const result = await invokeCommonAgentRuntime({
+      capability: {
+        id: "CAP-RULES",
+        name: "Rule Engine",
+      },
+      agent: {
+        id: "AGENT-OWNER",
+        name: "Owner",
+        preferredToolIds: ["browse_code", "workspace_search", "workspace_read"],
+      },
+      history: [],
+      message: "How many operators are there in the rule engine?",
+      preferReadOnlyToolLoop: true,
+      runtimeLane: "desktop-runtime-worker",
+    });
+
+    expect(executeToolMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        toolId: "workspace_read",
+        args: {
+          path: "/tmp/rule-engine/src/main/java/org/example/rules/Operator.java",
+          maxBytes: 12000,
+        },
+      }),
+    );
+    expect(result.attemptedToolIds).toEqual(["workspace_search", "workspace_read"]);
+    expect(result.content).toBe(
+      "The rule engine defines 14 condition operators in Operator.java.",
+    );
+  });
+
   it("forces a final answer after repeated tool calls instead of leaking the last tool intent", async () => {
     // New flow with the dedup guard:
     //   - Iter 1: LLM emits browse_code(class) → executed (mock #1).

@@ -535,6 +535,30 @@ export const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS capability_agent_session_memories (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      scope_id TEXT NOT NULL DEFAULT '',
+      session_id TEXT NOT NULL,
+      rolling_summary TEXT NOT NULL DEFAULT '',
+      salient_turns JSONB NOT NULL DEFAULT '[]'::jsonb,
+      last_user_intent TEXT,
+      last_assistant_actionable_offer TEXT,
+      recent_repo_code_target TEXT,
+      request_count INTEGER NOT NULL DEFAULT 0,
+      last_message_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, agent_id)
+        REFERENCES capability_agents(capability_id, id)
+        ON DELETE CASCADE,
+      UNIQUE (capability_id, agent_id, scope, scope_id, session_id)
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS capability_workflows (
       capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
       id TEXT NOT NULL,
@@ -2743,6 +2767,17 @@ export const migrationStatements = [
   `
     CREATE INDEX IF NOT EXISTS capability_agent_sessions_agent_idx
     ON capability_agent_sessions (capability_id, agent_id, last_used_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_agent_session_memories_scope_idx
+    ON capability_agent_session_memories (
+      capability_id,
+      agent_id,
+      scope,
+      scope_id,
+      last_message_at DESC,
+      updated_at DESC
+    )
   `,
   `
     CREATE INDEX IF NOT EXISTS capability_evidence_packets_created_idx

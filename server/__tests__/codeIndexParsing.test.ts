@@ -118,6 +118,38 @@ describe('code index stage 1 upgrades', () => {
     });
   });
 
+  it('does not emit ORDER BY 0 when repository and path hints are absent', async () => {
+    queryMock.mockResolvedValueOnce({
+      rows: [
+        {
+          repository_id: 'repo-1',
+          file_path: 'src/AuthService.ts',
+          symbol_id: 'SYM-AUTH',
+          container_symbol_id: null,
+          symbol_name: 'AuthService',
+          qualified_symbol_name: 'AuthService',
+          kind: 'class',
+          language: 'ts',
+          parent_symbol: null,
+          start_line: 1,
+          end_line: 20,
+          slice_start_line: 1,
+          slice_end_line: 20,
+          signature: 'export class AuthService { ... }',
+          is_exported: true,
+          sha: 'abc123',
+          indexed_at: '2026-04-22T00:00:00.000Z',
+        },
+      ],
+    });
+
+    await searchCodeSymbols('CAP-1', 'AuthService');
+
+    const [sql] = queryMock.mock.calls[0] || [];
+    expect(String(sql)).not.toContain('ORDER BY 0');
+    expect(String(sql)).toContain('NULL');
+  });
+
   it('resolves qualified symbol reads even for legacy rows without slice columns', async () => {
     queryMock.mockResolvedValueOnce({
       rows: [

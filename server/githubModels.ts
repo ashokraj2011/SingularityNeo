@@ -1659,6 +1659,18 @@ const requestGitHubModelsHttp = async ({
     const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      // ── LLM Request logging ───────────────────────────────────────
+      const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+      console.log(
+        `[LLM REQUEST] provider=GitHub-Models-HTTP | model=${normalizeHttpModel(model)} | messages=${messages.length} | chars=${totalChars} | tools=${tools?.length ?? 0} | attempt=${attempt + 1}`,
+      );
+      for (const m of messages) {
+        const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        const preview = text.length > 300 ? text.slice(0, 300) + '…' : text;
+        console.log(`[LLM REQUEST]   [${m.role}] (${text.length} chars): ${preview}`);
+      }
+      // ──────────────────────────────────────────────────────────────
+
       const response = await fetch(`${githubModelsHttpApiUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -1725,6 +1737,14 @@ const requestGitHubModelsHttp = async ({
       if (!content) {
         throw new Error('GitHub Models HTTP fallback returned an empty response.');
       }
+
+      // ── LLM Response logging ──────────────────────────────────────
+      const resUsage = toUsage(result.usage);
+      console.log(
+        `[LLM RESPONSE] provider=GitHub-Models-HTTP | model=${normalizeModel(result.model || model)} | promptTokens=${resUsage.promptTokens} | completionTokens=${resUsage.completionTokens} | totalTokens=${resUsage.totalTokens} | responseId=${result.id || 'n/a'}`,
+      );
+      console.log(`[LLM RESPONSE] content (${content.length} chars):\n${content}`);
+      // ──────────────────────────────────────────────────────────────
 
       return {
         content,
@@ -1837,6 +1857,14 @@ const runSessionExchange = async ({
       rejectPending = reject;
       armWatchdog(RESPONSE_TIMEOUT_MESSAGE);
 
+      // ── LLM Request logging (Copilot SDK) ────────────────────────
+      console.log(
+        `[LLM REQUEST] provider=Copilot-SDK | model=${model || 'default'} | promptLength=${prompt.length} | timeoutMs=${timeoutMs}`,
+      );
+      const promptPreview = prompt.length > 400 ? prompt.slice(0, 400) + '…' : prompt;
+      console.log(`[LLM REQUEST]   [user] (${prompt.length} chars): ${promptPreview}`);
+      // ──────────────────────────────────────────────────────────────
+
       session
         .sendAndWait(
           {
@@ -1863,6 +1891,17 @@ const runSessionExchange = async ({
     if (!content) {
       throw new Error('GitHub Copilot SDK session returned an empty response.');
     }
+
+    // ── LLM Response logging (Copilot SDK) ────────────────────────
+    const sdkUsage = toUsageFromCopilot(
+      usageEvent,
+      Number(finalAssistantMessage?.data.outputTokens || 0),
+    );
+    console.log(
+      `[LLM RESPONSE] provider=Copilot-SDK | model=${usageEvent?.data.model || normalizeModel(model)} | promptTokens=${sdkUsage.promptTokens} | completionTokens=${sdkUsage.completionTokens} | totalTokens=${sdkUsage.totalTokens} | responseId=${usageEvent?.data.apiCallId || finalAssistantMessage?.data.messageId || 'n/a'}`,
+    );
+    console.log(`[LLM RESPONSE] content (${content.length} chars):\n${content}`);
+    // ──────────────────────────────────────────────────────────────
 
     return {
       content,
@@ -3327,6 +3366,11 @@ export const requestGitHubModel = async ({
   // resolveModelForProvider substitutes the provider's own default in that case.
   const resolvedModel = resolveModelForProvider(normalizedProviderKey, model);
 
+  // ── DEBUG: Log outbound LLM request ────────────────────────────
+  console.log(`[llm:debug] requestGitHubModel → provider=${normalizedProviderKey} model=${resolvedModel}`);
+  console.log(`[llm:debug]   messages: ${messages.map(m => `${m.role}(${m.content.length} chars)`).join(', ')}`);
+  // ────────────────────────────────────────────────────────────────
+
   if (normalizedProviderKey === LOCAL_OPENAI_PROVIDER_KEY) {
     return requestLocalOpenAIModel({ model: resolvedModel, messages, timeoutMs });
   }
@@ -3575,6 +3619,23 @@ export const invokeCapabilityChat = async ({
     preserveAllHistory,
   });
 
+  // ── DEBUG: Log the full prompt plan sent to LLM ─────────────────
+  console.log(`\n[llm:debug] ══════ invokeCapabilityChat ══════`);
+  console.log(`[llm:debug]   scope: ${scope} | scopeId: ${resolvedScopeId || 'none'}`);
+  console.log(`[llm:debug]   model: ${agent.model || 'default'} | provider: ${resolveAgentProviderKey(agent)}`);
+  console.log(`[llm:debug]   history turns sent: ${normalizedHistory.length}`);
+  if (normalizedHistory.length > 0) {
+    for (const turn of normalizedHistory.slice(-4)) {
+      console.log(`[llm:debug]     ${turn.role}: ${turn.content.slice(0, 200)}${turn.content.length > 200 ? '...' : ''}`);
+    }
+  }
+  console.log(`[llm:debug]   user message: ${message.trim().slice(0, 300)}`);
+  console.log(`[llm:debug]   prompt (current): ${String(promptPlan.prompt || '').slice(0, 400)}${String(promptPlan.prompt || '').length > 400 ? '...' : ''}`);
+  if (developerPrompt) {
+    console.log(`[llm:debug]   developerPrompt: ${developerPrompt.slice(0, 400)}${developerPrompt.length > 400 ? '...' : ''}`);
+  }
+  // ────────────────────────────────────────────────────────────────
+
   const result = await invokeScopedCapabilitySession({
     capability,
     agent,
@@ -3596,6 +3657,15 @@ export const invokeCapabilityChat = async ({
     tools,
     tool_choice,
   });
+
+  // ── DEBUG: Log the LLM response ────────────────────────────────
+  console.log(`[llm:debug] ← LLM RESPONSE:`);
+  console.log(`[llm:debug]   model used: ${result.model || 'unknown'}`);
+  console.log(`[llm:debug]   transport: ${result.runtimeTransportMode || 'unknown'}`);
+  console.log(`[llm:debug]   usage: prompt=${result.usage?.promptTokens || 0} completion=${result.usage?.completionTokens || 0} total=${result.usage?.totalTokens || 0}`);
+  console.log(`[llm:debug]   content:\n${result.content || ''}`);
+  console.log(`[llm:debug] ══════ END invokeCapabilityChat ══════\n`);
+  // ────────────────────────────────────────────────────────────────
 
   return {
     ...result,

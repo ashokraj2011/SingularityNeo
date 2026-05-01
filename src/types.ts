@@ -1639,6 +1639,75 @@ export interface AgentSessionSummary {
   totalTokens: number;
 }
 
+export interface AgentSessionMemoryTurn {
+  role: "user" | "agent";
+  content: string;
+  timestamp?: string;
+  kind?: "TRANSCRIPT" | "TOOL" | "SUMMARY";
+}
+
+export interface AgentSessionMemorySummary {
+  sessionId: string;
+  scope: AgentSessionScope;
+  scopeId?: string;
+  rollingSummary: string;
+  lastUserIntent?: string;
+  lastAssistantActionableOffer?: string;
+  recentRepoCodeTarget?: string;
+  requestCount: number;
+  lastUpdatedAt: string;
+}
+
+export interface AgentSessionMemory extends AgentSessionMemorySummary {
+  id: string;
+  capabilityId: string;
+  agentId: string;
+  salientTurns: AgentSessionMemoryTurn[];
+  createdAt: string;
+}
+
+export interface SessionMemoryUpdate {
+  rawMessage: string;
+  effectiveMessage?: string;
+  effectiveMessageSource?:
+    | "raw-user"
+    | "bound-follow-up"
+    | "active-work-scope"
+    | "tool-continuation";
+  followUpIntent?:
+    | "none"
+    | "continue-thread"
+    | "run-proposed-search"
+    | "active-work-scope";
+  assistantMessage?: string;
+  recentRepoCodeTarget?: string;
+  toolTranscript?: AgentSessionMemoryTurn[];
+}
+
+export interface LlmContextEnvelope {
+  rawMessage: string;
+  effectiveMessage: string;
+  effectiveMessageSource?:
+    | "raw-user"
+    | "bound-follow-up"
+    | "active-work-scope"
+    | "tool-continuation";
+  followUpIntent?:
+    | "none"
+    | "continue-thread"
+    | "run-proposed-search"
+    | "active-work-scope";
+  conversationHistory?: string;
+  sessionMemorySummary?: string;
+  liveContext?: string;
+  toolTranscript?: string;
+  verifiedCodeEvidence?: string;
+  advisoryMemory?: string;
+  contextEnvelopeSource:
+    | "shared-chat-envelope"
+    | "shared-execution-envelope";
+}
+
 export interface CopilotSessionMonitorEntry {
   sessionId: string;
   agentId?: string;
@@ -4565,11 +4634,14 @@ export interface ChatStreamEvent {
   historyRolledUp?: boolean;
   workContextHydrated?: boolean;
   workContextSource?: "live-work-item" | "live-workspace";
+  sessionMemoryUsed?: boolean;
+  sessionMemorySource?: "durable-agent-session" | "legacy-chat-session" | "none";
   effectiveMessage?: string;
   effectiveMessageSource?: "raw-user" | "bound-follow-up" | "active-work-scope" | "tool-continuation";
   followUpIntent?: "none" | "continue-thread" | "run-proposed-search" | "active-work-scope";
   followUpBindingMode?: "none" | "latest-assistant-turn" | "active-work-scope";
   chatRuntimeLane?: "server-runtime-route" | "desktop-runtime-worker";
+  contextEnvelopeSource?: "shared-chat-envelope" | "shared-execution-envelope";
   toolLoopEnabled?: boolean;
   toolLoopReason?: "repo-aware-code-question" | "disabled-by-caller" | "no-read-only-tools";
   toolLoopUsed?: boolean;
@@ -4587,6 +4659,13 @@ export interface ChatStreamEvent {
   codeDiscoveryMode?: "prompt-only" | "ast-first-tool-loop";
   codeDiscoveryFallback?: "none" | "capability-index" | "text-search";
   astSource?: "none" | "local-checkout" | "capability-index" | "text-search";
+  normalizedCodeQueries?: string[];
+  codeQuestionType?: string;
+  toolResultSymbolCount?: number;
+  toolResultFileCount?: number;
+  autoReadCandidateCount?: number;
+  autoReadSkippedReason?: string;
+  localSymbolDedupCount?: number;
   error?: string;
   retryAfterMs?: number;
 }

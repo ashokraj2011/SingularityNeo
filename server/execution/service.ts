@@ -191,6 +191,10 @@ import {
   getDesktopExecutorRegistration,
 } from "../executionOwnership";
 import { isRemoteExecutionClient } from "./runtimeClient";
+import {
+  loadExecutionSessionMemoryPrompt,
+  persistExecutionSessionMemory,
+} from "./sessionMemory";
 
 /**
  * Try to load a step policy/template document from `step.templatePath`.
@@ -1322,6 +1326,12 @@ const executeDelegatedTask = async ({
       detail.steps.find((item) => item.id === childTask.runStepId) ||
       detail.steps.find((item) => item.status === "RUNNING") ||
       null;
+    const delegatedSessionMemoryPrompt = await loadExecutionSessionMemoryPrompt({
+      capabilityId: projection.capability.id,
+      agentId: delegatedAgent.id,
+      scope: "TASK",
+      scopeId: childTask.id,
+    });
     const delegatedContinuity = buildExecutionLlmContinuitySections({
       mode: "delegated-subtask",
       workItem: projection.workItem,
@@ -1333,6 +1343,7 @@ const executeDelegatedTask = async ({
         workItemId: projection.workItem.id,
         runId: detail.run.id,
       }),
+      sessionMemoryPrompt: delegatedSessionMemoryPrompt,
       handoffContext: buildWorkflowHandoffContext({
         detail,
         workItem: projection.workItem,
@@ -1392,6 +1403,16 @@ const executeDelegatedTask = async ({
       timeoutMs: 90_000,
       resetSession: true,
       modelOverride: delegatedRuntime.model || undefined,
+    });
+    await persistExecutionSessionMemory({
+      capability: projection.capability,
+      agent: delegatedRuntimeAgent,
+      scope: "TASK",
+      scopeId: childTask.id,
+      sessionId: response.sessionId,
+      prompt,
+      assistantMessage: response.content,
+      recentRepoCodeTarget: projection.workItem.title,
     });
 
     const artifact: Artifact = {
@@ -1956,6 +1977,12 @@ const repairMalformedExecutionDecision = async ({
     agent,
     selection: runtimeSelection,
   });
+  const repairSessionMemoryPrompt = await loadExecutionSessionMemoryPrompt({
+    capabilityId: capability.id,
+    agentId: runtimeAgent.id,
+    scope: workItem.id ? "WORK_ITEM" : "TASK",
+    scopeId: workItem.id || runStep.id,
+  });
   const repairContinuity = buildExecutionLlmContinuitySections({
     mode: "repair",
     workItem,
@@ -1963,6 +1990,7 @@ const repairMalformedExecutionDecision = async ({
     step,
     runStep,
     recentConversationText,
+    sessionMemoryPrompt: repairSessionMemoryPrompt,
     toolHistory,
     handoffContext,
     resolvedWaitContext,
@@ -2005,6 +2033,17 @@ const repairMalformedExecutionDecision = async ({
     string,
     any
   >;
+  await persistExecutionSessionMemory({
+    capability,
+    agent: runtimeAgent,
+    scope: workItem.id ? "WORK_ITEM" : "TASK",
+    scopeId: workItem.id || runStep.id,
+    sessionId: repaired.sessionId,
+    prompt: malformedResponse,
+    assistantMessage: repaired.content,
+    recentRepoCodeTarget: workItem.title,
+    toolHistory,
+  });
 
   return {
     decision: normalizeExecutionDecision(repairedObject),
@@ -2071,6 +2110,12 @@ const requestContrarianConflictReview = async ({
     step,
     runStep,
     recentConversationText,
+    sessionMemoryPrompt: await loadExecutionSessionMemoryPrompt({
+      capabilityId: capability.id,
+      agentId: reviewer.id,
+      scope: "WORK_ITEM",
+      scopeId: workItem.id,
+    }),
     toolHistory,
     handoffContext,
     resolvedWaitContext,
@@ -2102,6 +2147,17 @@ const requestContrarianConflictReview = async ({
       "Return JSON with this exact shape:",
       '{"severity":"LOW|MEDIUM|HIGH|CRITICAL","recommendation":"CONTINUE|REVISE_RESOLUTION|ESCALATE|STOP","summary":"...","challengedAssumptions":["..."],"risks":["..."],"missingEvidence":["..."],"alternativePaths":["..."],"suggestedResolution":"optional operator-ready resolution text"}',
     ].join("\n\n"),
+  });
+  await persistExecutionSessionMemory({
+    capability,
+    agent: reviewer,
+    scope: "WORK_ITEM",
+    scopeId: workItem.id,
+    sessionId: response.sessionId,
+    prompt: wait.message,
+    assistantMessage: response.content,
+    recentRepoCodeTarget: workItem.title,
+    toolHistory,
   });
 
   const parsed = extractJsonObject(response.content);
@@ -2432,6 +2488,12 @@ const requestStepDecision = async ({
   const historySource: ContextSource = rollupCacheRef?.current?.summary
     ? "HISTORY_ROLLUP"
     : "RAW_TAIL_TURNS";
+  const executionSessionMemoryPrompt = await loadExecutionSessionMemoryPrompt({
+    capabilityId: capability.id || workItem.capabilityId,
+    agentId: effectiveRuntimeAgent.id,
+    scope: workItem.id ? "WORK_ITEM" : "TASK",
+    scopeId: workItem.id || runStep.id,
+  });
   const executionContinuity = buildExecutionLlmContinuitySections({
     mode: "workflow-step",
     workItem,
@@ -2439,6 +2501,7 @@ const requestStepDecision = async ({
     step,
     runStep,
     recentConversationText: recentWorkItemConversationText,
+    sessionMemoryPrompt: executionSessionMemoryPrompt,
     toolHistory: effectiveToolHistory,
     handoffContext: compiledStepContext.handoffContext,
     resolvedWaitContext: compiledStepContext.resolvedWaitContext,
@@ -2601,6 +2664,17 @@ const requestStepDecision = async ({
     // Token Intelligence can keep this advisory or apply the selected model
     // when `model-adaptive-routing` is explicitly automatic.
     modelOverride: effectiveRuntimeModel || undefined,
+  });
+  await persistExecutionSessionMemory({
+    capability,
+    agent: effectiveRuntimeAgent,
+    scope: workItem.id ? "WORK_ITEM" : "TASK",
+    scopeId: workItem.id || runStep.id,
+    sessionId: response.sessionId,
+    prompt: budgeted.assembled,
+    assistantMessage: response.content,
+    recentRepoCodeTarget: workItem.title,
+    toolHistory: effectiveToolHistory,
   });
 
   // Emit a Prompt Receipt (Phase 2 / Lever 7): per-call record of which

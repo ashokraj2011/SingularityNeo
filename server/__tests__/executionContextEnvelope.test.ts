@@ -53,6 +53,8 @@ describe("execution LLM context envelope helpers", () => {
       } as any,
       recentConversationText:
         "- Operator: search and tell me\n- Execution Agent: I will inspect the repo",
+      sessionMemoryPrompt:
+        "Session memory (short-term continuity only):\nLast user intent: inspect operators.",
       toolHistory: [
         {
           role: "assistant",
@@ -67,6 +69,7 @@ describe("execution LLM context envelope helpers", () => {
 
     expect(sections.envelopeText).toContain("Execution continuity envelope (repair)");
     expect(sections.envelopeText).toContain("Recent operator and stage conversation");
+    expect(sections.envelopeText).toContain("Session memory (short-term continuity only)");
     expect(sections.envelopeText).toContain("Prior tool loop transcript");
     expect(sections.envelopeText).toContain("Workflow hand-off context");
     expect(sections.envelopeText).toContain("Operator guidance: answer from code evidence only.");

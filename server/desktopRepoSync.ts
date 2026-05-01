@@ -13,6 +13,7 @@
  */
 
 import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -36,6 +37,11 @@ import { normalizeDirectoryPath } from './workspacePaths';
 // ---------------------------------------------------------------------------
 // In-memory registry — maps capabilityId → list of base clone entries.
 // Written by syncCapabilityRepositoriesForDesktop(); read by astGrounding.ts.
+//
+// Persisted to disk so the registry survives server restarts.  On startup,
+// restoreBaseCloneRegistryFromDisk() loads the last-known entries and
+// validates that each checkout path still exists, so chat / code discovery
+// works immediately without waiting for a full re-sync.
 // ---------------------------------------------------------------------------
 
 export interface CapabilityBaseCloneEntry {
@@ -68,6 +74,133 @@ const baseCloneRefreshState = new Map<string, BaseCloneRefreshState>();
 const capabilityCodeIndexRefreshes = new Map<string, Promise<void>>();
 const capabilityCodeIndexQueuedRoots = new Map<string, Record<string, string>>();
 
+// ---------------------------------------------------------------------------
+// Disk-backed clone registry persistence
+// ---------------------------------------------------------------------------
+
+const CLONE_REGISTRY_FILENAME = '.singularity-clone-registry.json';
+
+const resolveRegistryFilePath = (): string | null => {
+  const workingDir =
+    process.env.SINGULARITY_WORKING_DIRECTORY ||
+    process.env.HOME ||
+    process.env.USERPROFILE;
+  if (!workingDir) return null;
+  return path.join(workingDir, CLONE_REGISTRY_FILENAME);
+};
+
+type PersistedCloneRegistryEntry = {
+  capabilityId: string;
+  entries: CapabilityBaseCloneEntry[];
+};
+
+const persistCloneRegistryToDisk = () => {
+  const filePath = resolveRegistryFilePath();
+  if (!filePath) return;
+
+  const data: PersistedCloneRegistryEntry[] = [];
+  baseCloneRegistry.forEach((entries, capabilityId) => {
+    if (entries.length > 0) {
+      data.push({ capabilityId, entries });
+    }
+  });
+
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+  } catch (err) {
+    console.warn(
+      '[desktopRepoSync] could not persist clone registry:',
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+};
+
+/**
+ * Loads the clone registry from disk and restores entries whose checkout
+ * paths still exist on the filesystem.  Call once during server startup,
+ * after `process.env` has been populated.
+ *
+ * Returns the number of capabilities restored.
+ */
+export const restoreBaseCloneRegistryFromDisk = async (): Promise<number> => {
+  const filePath = resolveRegistryFilePath();
+  if (!filePath) return 0;
+
+  let raw: string;
+  try {
+    raw = await fsPromises.readFile(filePath, 'utf8');
+  } catch {
+    // File doesn't exist yet — first run or manual cleanup.  Not an error.
+    return 0;
+  }
+
+  let data: PersistedCloneRegistryEntry[];
+  try {
+    data = JSON.parse(raw);
+    if (!Array.isArray(data)) return 0;
+  } catch {
+    console.warn('[desktopRepoSync] corrupt clone registry file; ignoring');
+    return 0;
+  }
+
+  let restoredCount = 0;
+  for (const record of data) {
+    if (!record.capabilityId || !Array.isArray(record.entries)) continue;
+
+    // Only restore entries whose checkout paths still exist on disk
+    // AND are under the operator's configured working directory.
+    const validEntries: CapabilityBaseCloneEntry[] = [];
+    const operatorWorkDir = await resolveOperatorWorkingDirectory();
+    for (const entry of record.entries) {
+      if (!entry.checkoutPath) continue;
+      try {
+        await fsPromises.access(entry.checkoutPath);
+        // If an operator working directory is configured, only restore
+        // entries that live under it — stale entries from a previous
+        // project root should not shadow the correct location.
+        if (operatorWorkDir && !entry.checkoutPath.startsWith(operatorWorkDir)) {
+          console.warn(
+            `[desktopRepoSync] skipping restored clone ${entry.checkoutPath} — ` +
+            `not under operator working directory ${operatorWorkDir}`,
+          );
+          continue;
+        }
+        validEntries.push(entry);
+      } catch {
+        // Checkout directory was deleted — skip this entry.
+      }
+    }
+
+    if (validEntries.length > 0 && !baseCloneRegistry.has(record.capabilityId)) {
+      baseCloneRegistry.set(record.capabilityId, validEntries);
+      restoredCount += 1;
+
+      // Queue a background AST index build for each restored clone so
+      // browse_code has symbols available on the first chat turn.
+      for (const entry of validEntries) {
+        if (entry.isGitRepo !== false) {
+          queueLocalCheckoutAstRefresh({
+            checkoutPath: entry.checkoutPath,
+            capabilityId: record.capabilityId,
+            repositoryId: entry.repositoryId,
+          });
+        }
+      }
+
+      // Re-arm the periodic refresh loop.
+      schedulePeriodicAstRefresh(record.capabilityId);
+    }
+  }
+
+  if (restoredCount > 0) {
+    console.log(
+      `[desktopRepoSync] restored clone registry for ${restoredCount} capability(ies) from disk`,
+    );
+  }
+  return restoredCount;
+};
+
 /**
  * Returns the registered base clone entries for a capability, or an empty
  * array if the capability has not been synced yet.
@@ -85,6 +218,59 @@ export const getPrimaryBaseClone = (
 ): CapabilityBaseCloneEntry | undefined => {
   const entries = getCapabilityBaseClones(capabilityId);
   return entries.find(e => e.isPrimary && e.isGitRepo) ?? entries.find(e => e.isGitRepo);
+};
+
+/**
+ * Resolves the operator's working directory from the desktop executor
+ * registration.  This is the **single source of truth** for where code
+ * clones live — all AST indexing, browse_code searches, and workspace
+ * reads should resolve from this path, NOT from capability.localDirectories.
+ *
+ * Falls back to SINGULARITY_WORKING_DIRECTORY env var when no executor
+ * registration exists (e.g. running in bare-server mode).
+ */
+export const resolveOperatorWorkingDirectory = async (): Promise<string> => {
+  // Try the most recent executor registration.
+  try {
+    const { rows } = await (await import('./db')).query<{ working_directory: string | null }>(
+      `SELECT working_directory
+         FROM desktop_executor_registrations
+        WHERE working_directory IS NOT NULL AND working_directory != ''
+        ORDER BY updated_at DESC NULLS LAST
+        LIMIT 1`,
+    );
+    const raw = rows[0]?.working_directory?.trim();
+    if (raw) return normalizeDirectoryPath(raw);
+  } catch {
+    // DB not available — fall through.
+  }
+
+  // Env var fallback.
+  const envDir = process.env.SINGULARITY_WORKING_DIRECTORY || '';
+  if (envDir) return normalizeDirectoryPath(envDir);
+
+  return '';
+};
+
+/**
+ * Scans `{workingDirectory}/_repos/{capabilitySlug}/` for existing cloned
+ * repositories. Returns paths suitable for use as search roots in browse_code.
+ * This enables code search even when the base clone registry hasn't been
+ * populated yet (first boot, restart before sync completes).
+ */
+export const discoverExistingClonePaths = async (
+  workingDirectory: string,
+  capabilitySlug: string,
+): Promise<string[]> => {
+  const reposDir = path.join(workingDirectory, '_repos', capabilitySlug);
+  try {
+    const entries = await fsPromises.readdir(reposDir, { withFileTypes: true });
+    return entries
+      .filter(e => e.isDirectory())
+      .map(e => path.join(reposDir, e.name));
+  } catch {
+    return [];
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -549,6 +735,9 @@ export const syncCapabilityRepositoriesForDesktop = async ({
 
   // 6. Update in-memory registry so astGrounding can resolve base clone paths.
   baseCloneRegistry.set(capabilityId, registryEntries);
+
+  // 6b. Persist to disk so the registry survives server restarts.
+  persistCloneRegistryToDisk();
 
   // 7. Refresh the capability code index using local clones where available.
   //    Run in the background — do not block the caller.

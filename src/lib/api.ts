@@ -253,6 +253,13 @@ export interface CapabilityChatResponse {
   codeDiscoveryMode?: "prompt-only" | "ast-first-tool-loop";
   codeDiscoveryFallback?: "none" | "capability-index" | "text-search";
   astSource?: "none" | "local-checkout" | "capability-index" | "text-search";
+  normalizedCodeQueries?: string[];
+  codeQuestionType?: string;
+  toolResultSymbolCount?: number;
+  toolResultFileCount?: number;
+  autoReadCandidateCount?: number;
+  autoReadSkippedReason?: string;
+  localSymbolDedupCount?: number;
 }
 
 export interface CapabilityChatStreamResult {

@@ -1216,6 +1216,17 @@ export const queueCapabilityAgentLearningRefresh = async (
   capabilityId: string,
   requestReason: string,
 ) => {
+  // ── Human-initiated only ──────────────────────────────────────
+  // Learning refresh is expensive (LLM call per agent). Only proceed
+  // when explicitly initiated by the operator (requestReason starts
+  // with 'user:'). All automatic triggers are suppressed.
+  if (!requestReason.startsWith('user:')) {
+    console.log(
+      `[agentLearning] SKIPPED auto-refresh for ${capabilityId} (reason: ${requestReason}). Learning is operator-initiated only.`,
+    );
+    return;
+  }
+
   const bundle = await getCapabilityBundle(capabilityId);
   const ownerAgent = findOwnerAgent(bundle.workspace.agents);
   if (!ownerAgent) {
@@ -1233,8 +1244,16 @@ export const queueSingleAgentLearningRefresh = async (
   capabilityId: string,
   agentId: string,
   requestReason: string,
-) =>
-  isRemoteExecutionClient()
+) => {
+  // ── Human-initiated only ──────────────────────────────────────
+  if (!requestReason.startsWith('user:')) {
+    console.log(
+      `[agentLearning] SKIPPED auto-refresh for ${capabilityId}/${agentId} (reason: ${requestReason}). Learning is operator-initiated only.`,
+    );
+    return;
+  }
+
+  return isRemoteExecutionClient()
     ? executionRuntimeRpc<void>('queueSingleAgentLearningRefresh', {
         capabilityId,
         agentId,
@@ -1247,6 +1266,7 @@ export const queueSingleAgentLearningRefresh = async (
     requestReason,
     makeStale: true,
   });
+};
 
 export const queueExperienceDistillationRefresh = async ({
   capabilityId,

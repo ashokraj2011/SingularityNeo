@@ -57,13 +57,19 @@ import {
   findLocalCheckoutSymbolRange,
   getLocalCheckoutAstFreshness,
   listLocalCheckoutAllSymbols,
+  queueLocalCheckoutAstRefresh,
   searchLocalCheckoutSymbols,
 } from "../localCodeIndex";
 import {
   getCapabilityBaseClones,
   getPrimaryBaseClone,
+  resolveOperatorWorkingDirectory,
+  discoverExistingClonePaths,
 } from "../desktopRepoSync";
-import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
+import {
+  buildWorkItemCheckoutPath,
+  buildCapabilityCheckoutSlug,
+} from "../workItemCheckouts";
 import { buildCodeSearchCandidates, looksLikeSymbolPattern } from "../codeDiscovery";
 
 const execFileAsync = promisify(execFile);
@@ -133,6 +139,76 @@ const clampLimit = (value: unknown, fallback: number, max: number) => {
     return fallback;
   }
   return Math.max(1, Math.min(Math.floor(parsed), max));
+};
+
+const TOP_LEVEL_SYMBOL_KINDS = new Set(["class", "interface", "enum", "type"]);
+const INVENTORY_CODE_QUESTION_TYPES = new Set(["inventory", "count"]);
+
+const isTopLevelSymbol = (symbol: { kind?: string; parentSymbol?: string }) =>
+  TOP_LEVEL_SYMBOL_KINDS.has(String(symbol.kind || "").toLowerCase()) &&
+  !String(symbol.parentSymbol || "").trim();
+
+const promoteParentSymbols = <T extends {
+  filePath?: string;
+  symbolId?: string;
+  symbolName?: string;
+  qualifiedSymbolName?: string;
+  parentSymbol?: string;
+  kind?: string;
+}>(
+  symbols: T[],
+  questionType?: string,
+) => {
+  if (!INVENTORY_CODE_QUESTION_TYPES.has(String(questionType || ""))) {
+    return symbols;
+  }
+
+  const byFile = new Map<string, T[]>();
+  for (const symbol of symbols) {
+    const filePath = String(symbol.filePath || "").trim();
+    if (!filePath) continue;
+    const current = byFile.get(filePath) || [];
+    current.push(symbol);
+    byFile.set(filePath, current);
+  }
+
+  const promoted: T[] = [];
+  const seen = new Set<string>();
+  const add = (symbol: T) => {
+    const key =
+      String(symbol.symbolId || "").trim() ||
+      `${String(symbol.filePath || "")}:${String(symbol.qualifiedSymbolName || symbol.symbolName || "")}:${String(symbol.kind || "")}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    promoted.push(symbol);
+  };
+
+  for (const symbol of symbols) {
+    const fileSymbols = byFile.get(String(symbol.filePath || "").trim()) || [];
+    const parentName =
+      String(symbol.parentSymbol || "").trim() ||
+      String(symbol.qualifiedSymbolName || "")
+        .split(".")
+        .slice(0, -1)
+        .join(".");
+    const parentSimpleName = parentName.split(".").filter(Boolean).pop();
+    const matchingParent = fileSymbols.find(candidate => {
+      if (!isTopLevelSymbol(candidate)) return false;
+      const candidateName = String(candidate.symbolName || "").trim();
+      const candidateQualifiedName = String(candidate.qualifiedSymbolName || "").trim();
+      return (
+        candidateName === parentName ||
+        candidateQualifiedName === parentName ||
+        Boolean(parentSimpleName && candidateName === parentSimpleName)
+      );
+    });
+    if (matchingParent) {
+      add(matchingParent);
+    }
+    add(symbol);
+  }
+
+  return promoted;
 };
 
 const paginateValues = ({
@@ -392,6 +468,15 @@ const resolveWorkspacePath = async (
         },
       ),
     );
+
+    // ── Workspace resolution diagnostics ────────────────────────
+    console.log(`[resolveWorkspacePath] REMOTE branch | cap=${capability.name} | capId=${capability.id}`);
+    console.log(`[resolveWorkspacePath]   resolution.localRootPath=${resolution.localRootPath || 'EMPTY'}`);
+    console.log(`[resolveWorkspacePath]   resolution.workingDirectoryPath=${resolution.workingDirectoryPath || 'EMPTY'}`);
+    console.log(`[resolveWorkspacePath]   resolution.approvedWorkspaceRoots=${JSON.stringify(resolution.approvedWorkspaceRoots)}`);
+    console.log(`[resolveWorkspacePath]   resolution.validation=${JSON.stringify(resolution.validation)}`);
+    // ────────────────────────────────────────────────────────────
+
     const allowed =
       resolution.approvedWorkspaceRoots.length > 0
         ? resolution.approvedWorkspaceRoots
@@ -423,6 +508,8 @@ const resolveWorkspacePath = async (
     const requestedPath = normalizeDirectoryPath(preferredPath || "");
     const candidate = requestedPath || defaultPath;
 
+    console.log(`[resolveWorkspacePath]   derivedCheckout=${derivedWorkItemCheckoutPath || 'EMPTY'} | baseClone=${baseClonePath || 'EMPTY'} | defaultPath=${defaultPath || 'EMPTY'} | candidate=${candidate || 'EMPTY'}`);
+
     if (!candidate) {
       throw new Error(
         `Capability ${capability.name} does not have a valid desktop workspace mapping for the current operator on this desktop.`,
@@ -431,6 +518,7 @@ const resolveWorkspacePath = async (
 
     if (!findApprovedWorkspaceRoot(candidate, allowed)) {
       if (requestedPath && allowed.length === 1) {
+        console.log(`[resolveWorkspacePath]   FALLBACK to defaultPath=${defaultPath || allowed[0]}`);
         return defaultPath || allowed[0];
       }
 
@@ -439,6 +527,7 @@ const resolveWorkspacePath = async (
       );
     }
 
+    console.log(`[resolveWorkspacePath]   RESOLVED → ${candidate}`);
     return candidate;
   }
 
@@ -456,6 +545,8 @@ const resolveWorkspacePath = async (
   const requestedPath = normalizeDirectoryPath(preferredPath || "");
   const candidate = requestedPath || defaultPath;
 
+  console.log(`[resolveWorkspacePath] LOCAL branch | cap=${capability.name} | allowed=${JSON.stringify(allowed)} | candidate=${candidate || 'EMPTY'}`);
+
   if (!candidate) {
     throw new Error(
       `Capability ${capability.name} does not have a desktop-user workspace path available for this run.`,
@@ -472,6 +563,7 @@ const resolveWorkspacePath = async (
     );
   }
 
+  console.log(`[resolveWorkspacePath]   RESOLVED → ${candidate}`);
   return candidate;
 };
 
@@ -482,6 +574,8 @@ const resolvePathWithinWorkspace = (
   const nextPath = path.isAbsolute(filePath)
     ? path.resolve(filePath)
     : path.resolve(workspacePath, filePath);
+
+  console.log(`[resolvePathWithinWorkspace] workspace=${workspacePath} | file=${filePath} | resolved=${nextPath}`);
 
   const relative = path.relative(workspacePath, nextPath);
   if (
@@ -827,10 +921,53 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         "path",
         "workspace_read",
       );
-      const targetPath = resolvePathWithinWorkspace(
+      let targetPath = resolvePathWithinWorkspace(
         workspacePath,
         requestedPath,
       );
+
+      // ── Operator working-directory fallback ─────────────────────
+      // When the resolved target doesn't exist (common when the LLM
+      // passes a relative path from browse_code/workspace_search and
+      // the workspace root doesn't contain the repo), try the
+      // operator's working directory _repos/ clones as a fallback.
+      if (!await fs.access(targetPath).then(() => true, () => false)) {
+        console.warn(
+          `[workspace_read] ENOENT fallback: ${targetPath} does not exist. Scanning operator working directory for match…`,
+        );
+        const { resolveOperatorWorkingDirectory } = await import("../desktopRepoSync");
+        const operatorWorkDir = await resolveOperatorWorkingDirectory();
+        if (operatorWorkDir) {
+          const reposDir = path.join(operatorWorkDir, "_repos");
+          try {
+            const entries = await fs.readdir(reposDir);
+            for (const entry of entries) {
+              const entryDir = path.join(reposDir, entry);
+              const candidatePath = path.join(entryDir, requestedPath);
+              if (await fs.access(candidatePath).then(() => true, () => false)) {
+                console.log(
+                  `[workspace_read] ENOENT fallback HIT: found file at ${candidatePath}`,
+                );
+                targetPath = candidatePath;
+                break;
+              }
+            }
+          } catch {
+            // _repos/ doesn't exist — continue with original path
+          }
+          // Also try the working directory root directly
+          if (!await fs.access(targetPath).then(() => true, () => false)) {
+            const directPath = path.join(operatorWorkDir, requestedPath);
+            if (await fs.access(directPath).then(() => true, () => false)) {
+              console.log(
+                `[workspace_read] ENOENT fallback HIT: found file at ${directPath}`,
+              );
+              targetPath = directPath;
+            }
+          }
+        }
+      }
+
       const maxBytes = Math.max(
         256,
         Math.min(Number(args.maxBytes || 8000), 20000),
@@ -1082,7 +1219,15 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
 
       const codeSearch = capability.id
         ? buildCodeSearchCandidates(pattern)
-        : { isCodeQuestion: false, candidates: [] as string[] };
+        : {
+            isCodeQuestion: false,
+            queries: [] as string[],
+            searchTerms: [] as string[],
+            candidates: [] as string[],
+            textSearchTerms: [] as string[],
+            weightedCandidates: [],
+            questionType: "unknown" as const,
+          };
 
       if (
         capability.id &&
@@ -1226,16 +1371,30 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         }
       }
 
-      const result = await runProcess(
-        "rg",
-        ["-n", pattern, scopePath],
-        workspacePath,
-      );
+      const textFallbackPatterns =
+        codeSearch.isCodeQuestion && Array.isArray(codeSearch.textSearchTerms)
+          ? [...new Set([...codeSearch.textSearchTerms, pattern])]
+          : [pattern];
+      let result = { exitCode: 1, stdout: "", stderr: "" };
+      let effectivePattern = pattern;
+      for (const candidatePattern of textFallbackPatterns) {
+        const trimmedPattern = String(candidatePattern || "").trim();
+        if (!trimmedPattern) continue;
+        result = await runProcess(
+          "rg",
+          ["-n", "-i", trimmedPattern, scopePath],
+          workspacePath,
+        );
+        effectivePattern = trimmedPattern;
+        if (result.exitCode === 0 && String(result.stdout || "").trim()) {
+          break;
+        }
+      }
       const paged = isCommandMissing(result)
         ? await searchIndexedWorkspaceFiles({
             workspacePath,
             scopePath,
-            pattern,
+            pattern: effectivePattern,
             cursor,
             limit,
           })
@@ -1281,6 +1440,10 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         stdoutPreview: previewText(output),
         details: {
           pattern,
+          effectivePattern,
+          normalizedCodeQueries: codeSearch.candidates,
+          textSearchTerms: codeSearch.textSearchTerms,
+          codeQuestionType: codeSearch.questionType,
           scopePath,
           normalizedQueries: codeSearch.candidates,
           matches: paged.matches,
@@ -1363,6 +1526,44 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         ...baseClones,
       ];
 
+      // ── Operator working directory fallback ─────────────────────
+      // When no base clones are registered (first run, restart before
+      // sync, or no repos configured), resolve the operator's working
+      // directory and scan {workDir}/_repos/{capability-slug}/ for
+      // existing clones.  The operator's working directory is the
+      // single source of truth — NOT capability.localDirectories.
+      if (localCloneCandidates.length === 0) {
+        const operatorWorkDir = await resolveOperatorWorkingDirectory();
+        if (operatorWorkDir) {
+          const capSlug = buildCapabilityCheckoutSlug(capability);
+          const clonePaths = await discoverExistingClonePaths(operatorWorkDir, capSlug);
+          for (const clonePath of clonePaths) {
+            localCloneCandidates.push({
+              repositoryId: capability.id,
+              repositoryLabel: "operator-workdir-clone",
+              checkoutPath: clonePath,
+              isPrimary: localCloneCandidates.length === 0,
+            });
+          }
+          // If no clones found under _repos/, use the working directory
+          // itself as a last-resort search root.
+          if (localCloneCandidates.length === 0) {
+            localCloneCandidates.push({
+              repositoryId: capability.id,
+              repositoryLabel: "operator-workdir-root",
+              checkoutPath: operatorWorkDir,
+              isPrimary: true,
+            });
+          }
+        }
+      }
+
+      if (localCloneCandidates.length > 0) {
+        console.log(`[browse_code] ${localCloneCandidates.length} search root(s): ${localCloneCandidates.map(c => `${c.repositoryLabel}=${c.checkoutPath}`).join(', ')}`);
+      } else {
+        console.warn(`[browse_code] no search roots available for capability ${capability.id} — browse_code will return empty`);
+      }
+
       const semanticSearch =
         queryRaw.length > 0
           ? buildCodeSearchCandidates(queryRaw)
@@ -1409,19 +1610,28 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
           }
         }
 
-        const filteredLocalSemanticSymbols = Array.from(
-          new Map(
-            localSemanticSymbols
-              .filter(symbol =>
-                filePathPrefix
-                  ? String(symbol.filePath || "").startsWith(
-                      filePathPrefix.replace(/^\/+/, ""),
-                    )
-                  : true,
+        const promotedLocalSemanticSymbols = promoteParentSymbols(
+          localSemanticSymbols,
+          semanticSearch?.questionType,
+        );
+        const filteredForPrefix = promotedLocalSemanticSymbols.filter(symbol =>
+          filePathPrefix
+            ? String(symbol.filePath || "").startsWith(
+                filePathPrefix.replace(/^\/+/, ""),
               )
-              .map(symbol => [`${symbol._checkoutRoot}:${symbol.symbolId}`, symbol]),
+            : true,
+        );
+        const dedupedLocalSemanticSymbols = Array.from(
+          new Map(
+            filteredForPrefix.map(symbol => [
+              `${symbol._checkoutRoot}:${symbol.symbolId || symbol.filePath}:${symbol.qualifiedSymbolName || symbol.symbolName}:${symbol.kind}`,
+              symbol,
+            ]),
           ).values(),
-        ).slice(0, limit);
+        );
+        const localSymbolDedupCount =
+          Math.max(0, filteredForPrefix.length - dedupedLocalSemanticSymbols.length);
+        const filteredLocalSemanticSymbols = dedupedLocalSemanticSymbols.slice(0, limit);
 
         if (filteredLocalSemanticSymbols.length > 0) {
           const output = [
@@ -1438,6 +1648,10 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             details: {
               query: queryRaw,
               normalizedQueries: semanticCandidates,
+              normalizedCodeQueries: semanticSearch?.candidates || semanticCandidates,
+              textSearchTerms: semanticSearch?.textSearchTerms || semanticCandidates,
+              codeQuestionType: semanticSearch?.questionType,
+              localSymbolDedupCount,
               symbols: filteredLocalSemanticSymbols.map(symbol => ({
                 symbolId: symbol.symbolId,
                 symbolName: symbol.symbolName,
@@ -1487,6 +1701,9 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             details: {
               query: queryRaw,
               normalizedQueries: semanticCandidates,
+              normalizedCodeQueries: semanticSearch?.candidates || semanticCandidates,
+              textSearchTerms: semanticSearch?.textSearchTerms || semanticCandidates,
+              codeQuestionType: semanticSearch?.questionType,
               symbols: indexedMatches.slice(0, limit),
               source: "capability-index",
               codeIndexSource: "capability-index",
@@ -1494,6 +1711,114 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               mode: "symbol-search",
             },
           };
+        }
+      }
+
+      // Both local AST search and DB capability index returned zero results.
+      // This typically means the AST index hasn't been built yet (first use).
+      // Fall back to ripgrep — run TWO passes:
+      //   Pass 1: line-level match on the user's search terms (vocabulary match).
+      //           Returns file:line:content so the LLM can distinguish a
+      //           *definition* (e.g. "public enum Operator") from a *reference*.
+      //   Pass 2: structural search for top-level type declarations in the repo
+      //           (enum|class|interface|type keyword), intersected with any file
+      //           that contains the search term. Catches vocabulary mismatches
+      //           where the user says "operator" but the code says "Comparator".
+      if (localCloneCandidates.length > 0) {
+        for (const clone of [
+          ...localCloneCandidates.filter(e => e.isPrimary),
+          ...localCloneCandidates.filter(e => !e.isPrimary),
+        ]) {
+          const cloneRoot = clone.checkoutPath.replace(/\/+$/, "");
+          const termsToSearch = semanticSearch?.searchTerms?.length
+            ? semanticSearch.searchTerms
+            : semanticCandidates;
+
+          // --- Pass 1: line-level matches for the user's terms ---
+          const lineMatches: string[] = [];
+          const matchedFileSet = new Set<string>();
+          for (const term of termsToSearch) {
+            const rgResult = await runProcess(
+              "rg",
+              // -n line numbers, --max-count=5 per file, -i case-insensitive
+              ["-n", "--max-count=5", "--ignore-case",
+               "--type-add", "code:*.{ts,tsx,js,jsx,mjs,cjs,java,py,go,rb,cs,cpp,c,h,rs,kt,swift}",
+               "--type", "code",
+               term, cloneRoot],
+              cloneRoot,
+            ).catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+            (rgResult.stdout || "").split("\n").filter(Boolean).forEach(line => {
+              if (filePathPrefix && !line.includes(filePathPrefix.replace(/^\/+/, ""))) return;
+              lineMatches.push(line);
+              // extract the file path (rg format: path:line:content)
+              const filePath = line.split(":")[0];
+              if (filePath) matchedFileSet.add(filePath);
+            });
+          }
+
+          // --- Pass 2: structural search for type definitions ---
+          // Finds enum/class/interface/type declarations in any file that
+          // already matched Pass 1, or — if Pass 1 had no hits — scans the
+          // whole repo for top-level definitions.
+          const structuralMatches: string[] = [];
+          const structPattern =
+            "^\\s*(public\\s+)?(enum|class|interface|type|struct|abstract class|sealed class)\\s+";
+          const structScope =
+            matchedFileSet.size > 0
+              ? [...matchedFileSet]          // only in already-matched files
+              : [cloneRoot];                 // whole repo if pass 1 was empty
+
+          for (const scope of structScope.slice(0, 20)) {
+            const sgResult = await runProcess(
+              "rg",
+              ["-n", "--max-count=3", "--ignore-case", structPattern, scope],
+              cloneRoot,
+            ).catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+            (sgResult.stdout || "").split("\n").filter(Boolean).forEach(line => {
+              if (filePathPrefix && !line.includes(filePathPrefix.replace(/^\/+/, ""))) return;
+              structuralMatches.push(line);
+            });
+          }
+
+          const hasResults = lineMatches.length > 0 || structuralMatches.length > 0;
+          if (hasResults) {
+            const sections: string[] = [
+              "NOTE: AST index is building in the background. Results below are raw text matches.",
+              "Read the most relevant file(s) with workspace_read to get the full source.",
+              "If these files do not contain the answer, use workspace_search with a broader",
+              "pattern (e.g. workspace_search 'enum|interface' to find type definitions).",
+              "",
+            ];
+            if (lineMatches.length > 0) {
+              sections.push("=== Files / lines matching your query terms ===");
+              sections.push(...lineMatches.slice(0, limit * 3));
+            }
+            if (structuralMatches.length > 0) {
+              sections.push("");
+              sections.push("=== Top-level type definitions in matching files ===");
+              sections.push(...structuralMatches.slice(0, limit));
+            }
+            const output = sections.join("\n");
+            const uniqueFiles = [...matchedFileSet].slice(0, limit);
+            return {
+              summary: `AST index not yet built. Found ${uniqueFiles.length} file(s) via text search in ${clone.repositoryLabel}. Line-level matches and type definitions shown — read the relevant file with workspace_read.`,
+              stdoutPreview: previewText(output),
+              details: {
+                files: uniqueFiles,
+                lineMatches: lineMatches.slice(0, limit * 3),
+                structuralMatches: structuralMatches.slice(0, limit),
+                query: queryRaw,
+                searchTerms: termsToSearch,
+                normalizedCodeQueries: semanticSearch?.candidates || semanticCandidates,
+                textSearchTerms: semanticSearch?.searchTerms || semanticCandidates,
+                codeQuestionType: semanticSearch?.questionType,
+                source: "local-clone-text-fallback",
+                codeDiscoveryMode: "text-search-fallback",
+                mode: "text-search",
+                cloneRoot,
+              },
+            };
+          }
         }
       }
 
@@ -1519,39 +1844,83 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             args.workspacePath,
           ).catch(() => "");
           if (workspacePath) {
-            const fileListing = await runProcess(
-              "rg",
-              ["--files", workspacePath],
-              workspacePath,
-            ).catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
-            const files = (fileListing.stdout || "")
-              .split("\n")
-              .filter(Boolean)
-              .filter((filePath) => /\.(ts|tsx|js|jsx|mjs|cjs|java|py|pyw)$/i.test(filePath))
-              .filter((filePath) =>
-                semanticSearch?.searchTerms?.length
-                  ? semanticSearch.searchTerms.some(term =>
-                      filePath.toLowerCase().includes(term.toLowerCase()),
-                    )
-                  : true,
-              )
-              .filter((filePath) =>
-                filePathPrefix ? filePath.startsWith(filePathPrefix.replace(/^\/+/, "")) : true,
-              )
-              .slice(0, limit);
-            if (files.length > 0) {
-              const output = files
-                .map((filePath) => `${workspacePath.replace(/\/+$/, "")}/${filePath.replace(/^\/+/, "")}`)
-                .join("\n");
+            // Two-pass content search — same strategy as the local-clone fallback above.
+            // Pass 1: line-level content match on user's search terms.
+            // Pass 2: type-definition search in matched files (catches vocab mismatch).
+            const termsToSearch = semanticSearch?.searchTerms?.length
+              ? semanticSearch.searchTerms
+              : semanticCandidates;
+
+            const lineMatches: string[] = [];
+            const matchedFileSet = new Set<string>();
+            for (const term of termsToSearch) {
+              const rgResult = await runProcess(
+                "rg",
+                ["-n", "--max-count=5", "--ignore-case",
+                 "--type-add", "code:*.{ts,tsx,js,jsx,mjs,cjs,java,py,go,rb,cs,cpp,c,h,rs,kt,swift}",
+                 "--type", "code",
+                 term, workspacePath],
+                workspacePath,
+              ).catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+              (rgResult.stdout || "").split("\n").filter(Boolean).forEach(line => {
+                if (filePathPrefix && !line.includes(filePathPrefix.replace(/^\/+/, ""))) return;
+                lineMatches.push(line);
+                const filePath = line.split(":")[0];
+                if (filePath) matchedFileSet.add(filePath);
+              });
+            }
+
+            const structuralMatches: string[] = [];
+            const structPattern =
+              "^\\s*(public\\s+)?(enum|class|interface|type|struct|abstract class|sealed class)\\s+";
+            const structScope = matchedFileSet.size > 0 ? [...matchedFileSet] : [workspacePath];
+            for (const scope of structScope.slice(0, 20)) {
+              const sgResult = await runProcess(
+                "rg",
+                ["-n", "--max-count=3", "--ignore-case", structPattern, scope],
+                workspacePath,
+              ).catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+              (sgResult.stdout || "").split("\n").filter(Boolean).forEach(line => {
+                if (filePathPrefix && !line.includes(filePathPrefix.replace(/^\/+/, ""))) return;
+                structuralMatches.push(line);
+              });
+            }
+
+            const hasResults = lineMatches.length > 0 || structuralMatches.length > 0;
+            if (hasResults) {
+              const sections: string[] = [
+                "NOTE: AST index not yet built. Results below are raw text matches from the workspace.",
+                "Read the most relevant file(s) with workspace_read to get the full source.",
+                "If these files do not contain the answer, use workspace_search with a broader pattern.",
+                "",
+              ];
+              if (lineMatches.length > 0) {
+                sections.push("=== Files / lines matching your query terms ===");
+                sections.push(...lineMatches.slice(0, limit * 3));
+              }
+              if (structuralMatches.length > 0) {
+                sections.push("");
+                sections.push("=== Top-level type definitions in matching files ===");
+                sections.push(...structuralMatches.slice(0, limit));
+              }
+              const uniqueFiles = [...matchedFileSet].slice(0, limit);
               return {
-                summary: `AST index unavailable. Returning ${files.length} source file candidate${files.length === 1 ? "" : "s"} from the workspace fallback.`,
-                stdoutPreview: previewText(output),
-	                details: {
-	                  files,
-	                  source: "workspace-text-fallback",
-	                  mode: "text-search",
-	                  codeDiscoveryMode: "text-search-fallback",
-	                },
+                summary: `AST index not yet built. Found ${uniqueFiles.length} file(s) via workspace text search. Line-level matches and type definitions shown — read the relevant file with workspace_read.`,
+                stdoutPreview: previewText(sections.join("\n")),
+                details: {
+                  files: uniqueFiles,
+                  lineMatches: lineMatches.slice(0, limit * 3),
+                  structuralMatches: structuralMatches.slice(0, limit),
+                  query: queryRaw,
+                  searchTerms: termsToSearch,
+                  normalizedCodeQueries: semanticSearch?.candidates || semanticCandidates,
+                  textSearchTerms: semanticSearch?.searchTerms || semanticCandidates,
+                  codeQuestionType: semanticSearch?.questionType,
+                  source: "workspace-text-fallback",
+                  codeDiscoveryMode: "text-search-fallback",
+                  mode: "text-search",
+                  workspacePath,
+                },
               };
             }
           }
@@ -1579,13 +1948,17 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       // Track symbols with their checkout root so we can emit absolute paths.
       const allSymbols: Array<any & { _checkoutRoot: string }> = [];
       const repoSummaries: string[] = [];
+      const effectiveKind =
+        semanticSearch && INVENTORY_CODE_QUESTION_TYPES.has(String(semanticSearch.questionType || ""))
+          ? undefined
+          : kind;
 	      for (const clone of [...localCloneCandidates.filter(e => e.isPrimary), ...localCloneCandidates.filter(e => !e.isPrimary)]) {
         const cloneRoot = clone.checkoutPath.replace(/\/+$/, "");
         const { symbols, builtAt } = await listLocalCheckoutAllSymbols({
           checkoutPath: clone.checkoutPath,
           capabilityId: capability.id,
           repositoryId: clone.repositoryId,
-          kind,
+          kind: effectiveKind,
           filePathPrefix,
           limit,
         }).catch(() => ({ symbols: [] as any[], builtAt: undefined }));
@@ -1613,7 +1986,10 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
 	      return {
 	        summary: `Found ${sliced.length} ${kind ? kind + " " : ""}symbol(s) across ${localCloneCandidates.length} checkout(s).`,
         stdoutPreview: previewText(`Repositories:\n${repoSummaries.join("\n")}\n\nSymbols:\n${output}`),
-        details: {
+	        details: {
+          normalizedCodeQueries: semanticSearch?.candidates || semanticCandidates,
+          textSearchTerms: semanticSearch?.textSearchTerms || semanticCandidates,
+          codeQuestionType: semanticSearch?.questionType,
           symbols: sliced.map(s => ({
             symbolName: s.symbolName,
             qualifiedSymbolName: s.qualifiedSymbolName,
@@ -1741,6 +2117,13 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, content, "utf8");
 
+      // Invalidate the in-memory AST index so browse_code sees the new content.
+      queueLocalCheckoutAstRefresh({
+        checkoutPath: workspacePath,
+        capabilityId: capability.id,
+        repositoryId: capability.id,
+      });
+
       return {
         summary: diffWarning
           ? `Wrote ${path.relative(workspacePath, targetPath)} (${diffWarning})`
@@ -1830,6 +2213,13 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         : current.replace(find, replace);
       await fs.writeFile(targetPath, nextContent, "utf8");
 
+      // Invalidate the in-memory AST index so browse_code sees the updated content.
+      queueLocalCheckoutAstRefresh({
+        checkoutPath: workspacePath,
+        capabilityId: capability.id,
+        repositoryId: capability.id,
+      });
+
       return {
         summary: `Replaced ${matchCount} block match(es) in ${path.relative(workspacePath, targetPath)}.`,
         workingDirectory: workspacePath,
@@ -1909,6 +2299,13 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
           `Unable to apply patch in ${workspacePath}: ${previewText(result.stderr || result.stdout)}`,
         );
       }
+
+      // Invalidate the in-memory AST index so browse_code sees patched content.
+      queueLocalCheckoutAstRefresh({
+        checkoutPath: workspacePath,
+        capabilityId: capability.id,
+        repositoryId: capability.id,
+      });
 
       return {
         summary: `Applied patch touching ${touchedRelativePaths.length} file(s).`,

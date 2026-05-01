@@ -1,5 +1,6 @@
-import type { CapabilityChatMessage } from '../src/types';
+import type { AgentSessionMemorySummary, CapabilityChatMessage } from '../src/types';
 import type { ChatHistoryMessage } from './githubModels';
+import { didAssistantOfferRepoSearch } from './domains/context-fabric/sessionMemory';
 
 type ChatHistoryItem = ChatHistoryMessage | CapabilityChatMessage;
 
@@ -32,14 +33,14 @@ export interface ResolvedChatFollowUpContext {
 }
 
 const EXPLICIT_FOLLOW_UP_PATTERNS = [
-  /^(yes|yeah|yep|yup|ok|okay|sure|please do|do it|do that|go ahead|continue|proceed|same)$/i,
+  /^(yes(?:\s+do\s+that)?|yeah|yep|yup|ok|okay|sure|please do|do it|do that|go ahead|continue|proceed|same)$/i,
   /^(show me|retry|mark done|approve|reject|delegate)$/i,
   /^(search(?: and tell me)?|look it up|find it|check the repo|go ahead and search)$/i,
   /^(why|how so|what else|and then)$/i,
 ];
 
 const SEARCH_ACCEPTANCE_PATTERNS = [
-  /^(yes|yeah|yep|yup|ok|okay|sure|please do|do it|do that|go ahead|continue|proceed|same)$/i,
+  /^(yes(?:\s+do\s+that)?|yeah|yep|yup|ok|okay|sure|please do|do it|do that|go ahead|continue|proceed|same)$/i,
   /^(search(?: and tell me)?|look it up|find it|check the repo|go ahead and search)$/i,
 ];
 
@@ -54,27 +55,6 @@ const summarizeTurn = (value: string, maxLength = 420) =>
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
-
-const didAssistantOfferRepoSearch = (value: string) => {
-  const normalized = String(value || '').trim();
-  if (!normalized) {
-    return false;
-  }
-  const hasRepoTarget =
-    /\b(?:repo|repository|workspace|codebase|source code|source|code)\b/i.test(
-      normalized,
-    ) || /\b(?:browse_code|workspace_search|workspace_read)\b/i.test(normalized);
-  const hasSearchVerb =
-    /\b(?:search|browse|inspect|scan|find|check|look(?:\s+up|\s+through)?)\b/i.test(
-      normalized,
-    );
-  const hasOfferFrame =
-    /\b(?:would you like me to|if you want, i can|i can assist in|next recommended action|the next safe step would be|we would need to|you would need to)\b/i.test(
-      normalized,
-    ) || /\?\s*$/.test(normalized);
-
-  return hasRepoTarget && hasSearchVerb && hasOfferFrame;
-};
 
 const buildFollowUpResponse = ({
   history,
@@ -175,6 +155,7 @@ export const resolveChatFollowUpContext = ({
   workItemId,
   runId,
   workflowStepId,
+  sessionMemory,
 }: {
   history?: ChatHistoryItem[];
   latestMessage?: string;
@@ -183,6 +164,10 @@ export const resolveChatFollowUpContext = ({
   workItemId?: string;
   runId?: string;
   workflowStepId?: string;
+  sessionMemory?: Pick<
+    AgentSessionMemorySummary,
+    'lastAssistantActionableOffer' | 'recentRepoCodeTarget' | 'rollingSummary'
+  > | null;
 }): ResolvedChatFollowUpContext => {
   const normalizedHistory = normalizeChatHistory({
     history,
@@ -222,6 +207,9 @@ export const resolveChatFollowUpContext = ({
     .find(item =>
       ['agent', 'assistant'].includes(String(item.role || '').toLowerCase()),
     );
+  const sessionAssistantOffer = String(
+    sessionMemory?.lastAssistantActionableOffer || '',
+  ).trim();
   const scopeLabel = buildScopeLabel({
     sessionScope,
     sessionScopeId,
@@ -230,13 +218,16 @@ export const resolveChatFollowUpContext = ({
     workflowStepId,
   });
 
-  if (lastAssistantTurn?.content?.trim()) {
-    const assistantSummary = summarizeTurn(lastAssistantTurn.content);
+  if (lastAssistantTurn?.content?.trim() || sessionAssistantOffer) {
+    const assistantSummary = summarizeTurn(
+      lastAssistantTurn?.content?.trim() || sessionAssistantOffer,
+    );
     const isSearchAcceptance = SEARCH_ACCEPTANCE_PATTERNS.some(pattern =>
       pattern.test(trimmedLatestMessage),
     );
     const followUpIntent: FollowUpIntent =
-      isSearchAcceptance && didAssistantOfferRepoSearch(lastAssistantTurn.content)
+      isSearchAcceptance &&
+      didAssistantOfferRepoSearch(lastAssistantTurn?.content || sessionAssistantOffer)
         ? 'run-proposed-search'
         : 'continue-thread';
     const effectiveMessage =
@@ -307,16 +298,43 @@ export const resolveChatFollowUpContext = ({
   });
 };
 
+export const shouldPreferFollowUpContinuation = ({
+  latestMessage,
+  followUpBindingMode,
+}: {
+  latestMessage?: string;
+  followUpBindingMode: FollowUpBindingMode;
+}) => {
+  if (followUpBindingMode === 'none') {
+    return false;
+  }
+  const trimmed = String(latestMessage || '').trim();
+  if (!trimmed) {
+    return false;
+  }
+  const hasExplicitTarget =
+    /\b(?:WI|RUN)-[A-Z0-9-]+\b/i.test(trimmed) ||
+    /\b(?:work item|run|stage|step|approval|blocker|conflict)\b/i.test(trimmed);
+  const hasExplicitControlVerb =
+    /\b(?:approve|reject|delegate|restart|retry|unblock|block|cancel|resume|pause|mark done|mark complete|change state|set state|move|assign)\b/i.test(
+      trimmed,
+    );
+  return !(hasExplicitTarget && hasExplicitControlVerb);
+};
+
 export const buildUnifiedChatContextPrompt = ({
   liveContext,
+  sessionMemoryPrompt,
   followUpContextPrompt,
   evidencePrompt,
 }: {
   liveContext?: string;
+  sessionMemoryPrompt?: string;
   followUpContextPrompt?: string;
   evidencePrompt?: string;
 }) =>
   [
+    sessionMemoryPrompt?.trim() ? sessionMemoryPrompt.trim() : null,
     liveContext?.trim() ? `Live work context:\n${liveContext.trim()}` : null,
     followUpContextPrompt?.trim() ? followUpContextPrompt.trim() : null,
     evidencePrompt?.trim() ? evidencePrompt.trim() : null,

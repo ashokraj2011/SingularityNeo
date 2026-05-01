@@ -6,7 +6,12 @@ import {
   listLocalCheckoutAllSymbols,
   searchLocalCheckoutSymbols,
 } from "./localCodeIndex";
-import { getCapabilityBaseClones } from "./desktopRepoSync";
+import {
+  getCapabilityBaseClones,
+  resolveOperatorWorkingDirectory,
+  discoverExistingClonePaths,
+} from "./desktopRepoSync";
+import { buildCapabilityCheckoutSlug } from "./workItemCheckouts";
 
 export type AstGroundingSummary = {
   prompt?: string;
@@ -21,6 +26,12 @@ export type AstGroundingSummary = {
   codeIndexFreshness?: string;
   verifiedPaths?: string[];
   groundingEvidenceSource?: "local-checkout" | "capability-index" | "none";
+  /**
+   * True when a code question was detected but neither a local clone nor a
+   * remote capability code index was available. The caller should schedule an
+   * on-demand index bootstrap so the NEXT chat turn gets grounding.
+   */
+  shouldBootstrapIndex?: boolean;
 };
 
 
@@ -170,6 +181,7 @@ export const buildAstGroundingSummary = async ({
       isCodeQuestion,
       verifiedPaths: [],
       groundingEvidenceSource: "none",
+      // No candidates means the query was too vague — not a missing index.
     };
   }
 
@@ -191,6 +203,22 @@ export const buildAstGroundingSummary = async ({
     ];
     for (const clone of sorted) {
       localCloneCandidates.push({ checkoutPath: clone.checkoutPath, repositoryId: clone.repositoryId });
+    }
+
+    // Operator working directory fallback — same strategy as browse_code.
+    // Resolve from operator's working directory, NOT capability.localDirectories.
+    if (localCloneCandidates.length === 0) {
+      const operatorWorkDir = await resolveOperatorWorkingDirectory();
+      if (operatorWorkDir) {
+        const capSlug = buildCapabilityCheckoutSlug(capability);
+        const clonePaths = await discoverExistingClonePaths(operatorWorkDir, capSlug);
+        for (const clonePath of clonePaths) {
+          localCloneCandidates.push({
+            checkoutPath: clonePath,
+            repositoryId: capability.id,
+          });
+        }
+      }
     }
   }
 
@@ -294,6 +322,8 @@ export const buildAstGroundingSummary = async ({
       codeIndexSource: "local-checkout",
       verifiedPaths: [],
       groundingEvidenceSource: "local-checkout",
+      // Clone exists but AST index had no hits — queue a refresh automatically.
+      shouldBootstrapIndex: true,
     };
   }
 
@@ -310,6 +340,8 @@ export const buildAstGroundingSummary = async ({
 
   if (remoteResults.length === 0) {
     // Even with no symbol hits, tell the agent to use structured tools.
+    // Also signal that the index needs bootstrapping — the chat route will
+    // schedule a background sync so the next query gets grounding.
     return {
       prompt: [
         `Code grounding: no symbols matched your query in the capability code index.`,
@@ -323,6 +355,7 @@ export const buildAstGroundingSummary = async ({
       branchName,
       verifiedPaths: [],
       groundingEvidenceSource: "none",
+      shouldBootstrapIndex: true,
     };
   }
 

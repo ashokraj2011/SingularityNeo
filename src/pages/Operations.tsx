@@ -4,6 +4,7 @@ import {
   ArrowRight,
   Bot,
   ExternalLink,
+  FileCode,
   GitBranch,
   Laptop2,
   LoaderCircle,
@@ -51,11 +52,17 @@ import {
   updateRuntimeCredentials,
   validateRuntimeProvider,
   updateDesktopWorkspaceMapping,
+  fetchCapabilityCodeIndex,
+  fetchCapabilityCopilotGuidance,
+  refreshCapabilityCodeIndex,
+  refreshCapabilityCopilotGuidance,
   type LLMProviderConfig,
   type LLMProviderEntry,
   type RuntimeStatus,
 } from "../lib/api";
 import type {
+  CapabilityCodeIndexSnapshot,
+  CapabilityCopilotGuidancePack,
   DesktopPreferences,
   DesktopWorkspaceMapping,
   ExecutorRegistrySummary,
@@ -133,6 +140,315 @@ const stringifyProviderEnv = (env?: Record<string, unknown> | null) =>
         .filter(line => !line.endsWith("="))
         .join("\n")
     : "";
+
+// ────────────────────────────────────────────────────────────────────────────
+// Copilot guidance pack — self-contained card moved from CapabilityMetadata
+// ────────────────────────────────────────────────────────────────────────────
+const CopilotGuidanceCard = ({
+  capabilityId,
+  workingDirectory,
+}: {
+  capabilityId: string;
+  workingDirectory?: string;
+}) => {
+  const { success, error: showError } = useToast();
+  const [guidance, setGuidance] =
+    useState<CapabilityCopilotGuidancePack | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+
+  useEffect(() => {
+    if (!capabilityId) {
+      setGuidance(null);
+      return undefined;
+    }
+    let mounted = true;
+    setLoading(true);
+    setErrorMsg("");
+    fetchCapabilityCopilotGuidance(capabilityId)
+      .then(pack => { if (mounted) setGuidance(pack); })
+      .catch(err => { if (mounted) setErrorMsg(err instanceof Error ? err.message : "Unable to load guidance."); })
+      .finally(() => { if (mounted) setLoading(false); });
+    return () => { mounted = false; };
+  }, [capabilityId]);
+
+  const handleRefresh = async () => {
+    if (!capabilityId || refreshing) return;
+    setRefreshing(true);
+    setErrorMsg("");
+    try {
+      const pack = await refreshCapabilityCopilotGuidance(capabilityId);
+      setGuidance(pack);
+      const fileCount = pack.files.length;
+      if (pack.lastFetchStatus === "OK") {
+        success(
+          "Copilot guidance refreshed",
+          fileCount
+            ? `Ingested ${fileCount} file${fileCount === 1 ? "" : "s"} from the operator's working directory clones.`
+            : "No guidance files were found.",
+        );
+      } else {
+        showError(
+          "Copilot guidance refresh issue",
+          pack.lastFetchMessage || "Check server logs for details.",
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unable to refresh.";
+      setErrorMsg(msg);
+      showError("Copilot guidance refresh failed", msg);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  return (
+    <SectionCard
+      title="Copilot guidance pack"
+      description={`CLAUDE.md, AGENTS.md, .github/copilot-instructions.md, and .cursor/rules — ingested from clones under the operator's working directory${workingDirectory ? ` (${workingDirectory})` : ""}.`}
+      icon={FileCode}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs leading-relaxed text-secondary">
+          Every agent reads this bundle on session init. Testing docs also feed
+          the learning-quality judge.
+        </p>
+        <button
+          type="button"
+          onClick={() => void handleRefresh()}
+          disabled={refreshing || !capabilityId}
+          className="enterprise-button enterprise-button-secondary"
+          title="Re-fetch guidance files from the operator's working directory clones."
+        >
+          {refreshing ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+
+      {errorMsg ? (
+        <p className="mt-3 text-xs font-medium text-rose-600">{errorMsg}</p>
+      ) : null}
+
+      {guidance?.lastFetchedAt ? (
+        <p className="mt-3 text-[0.6875rem] uppercase tracking-[0.2em] text-outline">
+          Last fetched{" "}
+          <span className="font-semibold text-secondary normal-case tracking-normal">
+            {new Date(guidance.lastFetchedAt).toLocaleString()}
+          </span>
+          {guidance.lastFetchStatus ? ` · ${guidance.lastFetchStatus}` : ""}
+        </p>
+      ) : null}
+
+      <div className="mt-3">
+        {loading && !guidance ? (
+          <p className="text-xs text-secondary">Loading…</p>
+        ) : guidance && guidance.files.length ? (
+          <ul className="divide-y divide-slate-100 rounded-2xl border border-slate-100 bg-slate-50/60">
+            {guidance.files.map(file => (
+              <li
+                key={`${file.repositoryId}:${file.filePath}`}
+                className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-mono text-[0.75rem] text-slate-800">
+                    {file.filePath}
+                  </p>
+                  <p className="truncate text-[0.6875rem] text-secondary">
+                    {file.repositoryLabel || file.repositoryId}
+                    {" · "}
+                    {file.category}
+                    {file.sha ? ` · ${file.sha.slice(0, 7)}` : ""}
+                  </p>
+                </div>
+                <div className="text-right text-[0.6875rem] text-secondary">
+                  <p>{(file.sizeBytes / 1024).toFixed(1)} KB</p>
+                  {file.fetchedAt ? (
+                    <p>{new Date(file.fetchedAt).toLocaleDateString()}</p>
+                  ) : null}
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs text-secondary">
+            No guidance files ingested yet. Click{" "}
+            <span className="font-medium">Refresh</span> to pull guidance files
+            from the operator&apos;s working directory clones.
+          </p>
+        )}
+      </div>
+    </SectionCard>
+  );
+};
+
+// ────────────────────────────────────────────────────────────────────────────
+// Code understanding index — self-contained card moved from CapabilityMetadata
+// ────────────────────────────────────────────────────────────────────────────
+const CodeUnderstandingCard = ({
+  capabilityId,
+  workingDirectory,
+}: {
+  capabilityId: string;
+  workingDirectory?: string;
+}) => {
+  const { success, error: showError } = useToast();
+  const [codeIndex, setCodeIndex] =
+    useState<CapabilityCodeIndexSnapshot | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+
+  useEffect(() => {
+    if (!capabilityId) {
+      setCodeIndex(null);
+      return undefined;
+    }
+    let mounted = true;
+    setLoading(true);
+    setErrorMsg("");
+    fetchCapabilityCodeIndex(capabilityId)
+      .then(snap => { if (mounted) setCodeIndex(snap); })
+      .catch(err => { if (mounted) setErrorMsg(err instanceof Error ? err.message : "Unable to load code index."); })
+      .finally(() => { if (mounted) setLoading(false); });
+    return () => { mounted = false; };
+  }, [capabilityId]);
+
+  const handleRefresh = async () => {
+    if (!capabilityId || refreshing) return;
+    setRefreshing(true);
+    setErrorMsg("");
+    try {
+      const snap = await refreshCapabilityCodeIndex(capabilityId);
+      setCodeIndex(snap);
+      const repoCount = snap.repositories.length;
+      if (snap.lastRunStatus === "OK") {
+        success(
+          "Code index refreshed",
+          repoCount
+            ? `Parsed ${snap.totalSymbols.toLocaleString()} symbols across ${snap.totalFiles.toLocaleString()} files in ${repoCount} repositor${repoCount === 1 ? "y" : "ies"}.`
+            : "No source files found to index.",
+        );
+      } else {
+        showError(
+          "Code index issue",
+          snap.lastRunMessage || "Check server logs for details.",
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unable to refresh.";
+      setErrorMsg(msg);
+      showError("Code index refresh failed", msg);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  return (
+    <SectionCard
+      title="Code understanding index"
+      description={`AST-parsed symbol + reference graph for every source file in the operator's working directory clones${workingDirectory ? ` (${workingDirectory})` : ""}. Agents use this to answer "where does capability X define Y?" without shipping the whole repo.`}
+      icon={FileCode}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs leading-relaxed text-secondary">
+          TypeScript / JavaScript, Java, and Python sources are indexed. The
+          index is refreshed from local clones under the operator&apos;s
+          working directory.
+        </p>
+        <button
+          type="button"
+          onClick={() => void handleRefresh()}
+          disabled={refreshing || !capabilityId}
+          className="enterprise-button enterprise-button-secondary"
+          title="Walk operator working directory clones and re-parse symbols."
+        >
+          {refreshing ? "Indexing…" : "Refresh index"}
+        </button>
+      </div>
+
+      {errorMsg ? (
+        <p className="mt-3 text-xs font-medium text-rose-600">{errorMsg}</p>
+      ) : null}
+
+      {codeIndex?.lastRunAt ? (
+        <p className="mt-3 text-[0.6875rem] uppercase tracking-[0.2em] text-outline">
+          Last run{" "}
+          <span className="font-semibold text-secondary normal-case tracking-normal">
+            {new Date(codeIndex.lastRunAt).toLocaleString()}
+          </span>
+          {codeIndex.lastRunStatus ? ` · ${codeIndex.lastRunStatus}` : ""}
+          {codeIndex.totalSymbols ? (
+            <>
+              {" · "}
+              <span className="font-semibold text-secondary normal-case tracking-normal">
+                {codeIndex.totalSymbols.toLocaleString()} symbols
+              </span>
+              {" across "}
+              <span className="font-semibold text-secondary normal-case tracking-normal">
+                {codeIndex.totalFiles.toLocaleString()} files
+              </span>
+            </>
+          ) : null}
+        </p>
+      ) : null}
+
+      <div className="mt-3">
+        {loading && !codeIndex ? (
+          <p className="text-xs text-secondary">Loading…</p>
+        ) : codeIndex && codeIndex.repositories.length ? (
+          <ul className="divide-y divide-slate-100 rounded-2xl border border-slate-100 bg-slate-50/60">
+            {codeIndex.repositories.map(repo => (
+              <li
+                key={repo.repositoryId}
+                className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-mono text-[0.75rem] text-slate-800">
+                    {repo.repositoryLabel || repo.repositoryId}
+                  </p>
+                  <p className="truncate text-[0.6875rem] text-secondary">
+                    {repo.filesIndexed.toLocaleString()} file
+                    {repo.filesIndexed === 1 ? "" : "s"}
+                    {" · "}
+                    {repo.symbolsIndexed.toLocaleString()} symbol
+                    {repo.symbolsIndexed === 1 ? "" : "s"}
+                    {" · "}
+                    {repo.referencesIndexed.toLocaleString()} ref
+                    {repo.referencesIndexed === 1 ? "" : "s"}
+                  </p>
+                </div>
+                <div className="text-right text-[0.6875rem] text-secondary">
+                  {repo.filesIndexed > 0 ? (
+                    <p>
+                      {(
+                        repo.symbolsIndexed / Math.max(repo.filesIndexed, 1)
+                      ).toFixed(1)}{" "}
+                      sym/file
+                    </p>
+                  ) : (
+                    <p className="italic text-outline">not indexed</p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs text-secondary">
+            Code index is empty. Click{" "}
+            <span className="font-medium">Refresh index</span> to walk
+            the operator&apos;s working directory clones and parse source files.
+          </p>
+        )}
+      </div>
+
+      {codeIndex?.lastRunMessage ? (
+        <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-[0.6875rem] text-secondary">
+          {codeIndex.lastRunMessage}
+        </p>
+      ) : null}
+    </SectionCard>
+  );
+};
 
 const Operations = () => {
   const navigate = useNavigate();
@@ -1931,6 +2247,18 @@ const Operations = () => {
           )}
         </div>
       </SectionCard>
+
+      {/* ── Copilot guidance pack + Code understanding index ────────── */}
+      {/* Moved from CapabilityMetadata — these now live in operator scope */}
+      {/* and always read from the operator's working directory / clones. */}
+      <CopilotGuidanceCard
+        capabilityId={activeCapability.id}
+        workingDirectory={runtimeStatus?.workingDirectory}
+      />
+      <CodeUnderstandingCard
+        capabilityId={activeCapability.id}
+        workingDirectory={runtimeStatus?.workingDirectory}
+      />
 
       {/* ── Desktop Identity & Preferences ─────────────────────────────── */}
       <SectionCard

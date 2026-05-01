@@ -123,6 +123,7 @@ import {
 } from './execution/runtimeClient';
 import { buildCapabilityReadinessContract } from './readinessContract';
 import { getCapabilityWorkspaceRoots } from './workspacePaths';
+import { syncAgentSessionMemoryFromTranscriptTx } from './domains/context-fabric/repository';
 
 export type CapabilityBundle = {
   capability: Capability;
@@ -3934,6 +3935,9 @@ export const appendCapabilityMessageRecord = async (
       ...message,
       capabilityId,
     });
+    await syncAgentSessionMemoryFromTranscriptTx(client, capabilityId, message).catch(
+      () => null,
+    );
 
     return getCapabilityWorkspaceTx(client, capability);
   });
@@ -3953,80 +3957,32 @@ export const clearCapabilityMessageHistoryRecord = async (
     const sessionScopeId = String(options?.sessionScopeId || '').trim();
 
     if (workItemId) {
-      await client.query(
-        `
-          DELETE FROM capability_messages
-          WHERE capability_id = $1
-            AND work_item_id = $2
-        `,
-        [capabilityId, workItemId],
-      );
-      await client.query(
-        `
-          DELETE FROM capability_agent_sessions
-          WHERE capability_id = $1
-            AND scope = 'WORK_ITEM'
-            AND scope_id = $2
-        `,
-        [capabilityId, workItemId],
-      );
+      await client.query('DELETE FROM capability_messages WHERE capability_id = $1 AND work_item_id = $2', [capabilityId, workItemId]);
+      await client.query("DELETE FROM capability_agent_sessions WHERE capability_id = $1 AND scope = 'WORK_ITEM' AND scope_id = $2", [capabilityId, workItemId]);
+      await client.query("DELETE FROM capability_agent_session_memories WHERE capability_id = $1 AND scope = 'WORK_ITEM' AND scope_id = $2", [capabilityId, workItemId]);
       return getCapabilityWorkspaceTx(client, capability);
     }
 
     if (sessionScope === 'GENERAL_CHAT') {
       await client.query(
-        `
-          DELETE FROM capability_messages
-          WHERE capability_id = $1
-            AND work_item_id IS NULL
-            AND (
-              session_scope = 'GENERAL_CHAT'
-              OR session_scope IS NULL
-            )
-            AND (
-              $2::text = ''
-              OR session_scope_id = $2
-              OR session_scope_id IS NULL
-            )
-        `,
+        "DELETE FROM capability_messages WHERE capability_id = $1 AND work_item_id IS NULL AND (session_scope = 'GENERAL_CHAT' OR session_scope IS NULL) AND ($2::text = '' OR session_scope_id = $2 OR session_scope_id IS NULL)",
         [capabilityId, sessionScopeId],
       );
-      await client.query(
-        `
-          DELETE FROM capability_agent_sessions
-          WHERE capability_id = $1
-            AND scope = 'GENERAL_CHAT'
-            AND ($2::text = '' OR scope_id = $2 OR scope_id IS NULL)
-        `,
-        [capabilityId, sessionScopeId],
-      );
+      await client.query("DELETE FROM capability_agent_sessions WHERE capability_id = $1 AND scope = 'GENERAL_CHAT' AND ($2::text = '' OR scope_id = $2 OR scope_id IS NULL)", [capabilityId, sessionScopeId]);
+      await client.query("DELETE FROM capability_agent_session_memories WHERE capability_id = $1 AND scope = 'GENERAL_CHAT' AND ($2::text = '' OR scope_id = $2 OR scope_id IS NULL)", [capabilityId, sessionScopeId]);
       return getCapabilityWorkspaceTx(client, capability);
     }
 
     if (sessionScope) {
-      await client.query(
-        `
-          DELETE FROM capability_messages
-          WHERE capability_id = $1
-            AND session_scope = $2
-            AND ($3::text = '' OR session_scope_id = $3)
-        `,
-        [capabilityId, sessionScope, sessionScopeId],
-      );
-      await client.query(
-        `
-          DELETE FROM capability_agent_sessions
-          WHERE capability_id = $1
-            AND scope = $2
-            AND ($3::text = '' OR scope_id = $3)
-        `,
-        [capabilityId, sessionScope, sessionScopeId],
-      );
+      await client.query('DELETE FROM capability_messages WHERE capability_id = $1 AND session_scope = $2 AND ($3::text = \'\' OR session_scope_id = $3)', [capabilityId, sessionScope, sessionScopeId]);
+      await client.query('DELETE FROM capability_agent_sessions WHERE capability_id = $1 AND scope = $2 AND ($3::text = \'\' OR scope_id = $3)', [capabilityId, sessionScope, sessionScopeId]);
+      await client.query('DELETE FROM capability_agent_session_memories WHERE capability_id = $1 AND scope = $2 AND ($3::text = \'\' OR scope_id = $3)', [capabilityId, sessionScope, sessionScopeId]);
       return getCapabilityWorkspaceTx(client, capability);
     }
 
     await client.query('DELETE FROM capability_messages WHERE capability_id = $1', [capabilityId]);
     await client.query('DELETE FROM capability_agent_sessions WHERE capability_id = $1', [capabilityId]);
+    await client.query('DELETE FROM capability_agent_session_memories WHERE capability_id = $1', [capabilityId]);
     return getCapabilityWorkspaceTx(client, capability);
   });
 

@@ -15,6 +15,21 @@ describe("code discovery helpers", () => {
     expect(result.isCodeQuestion).toBe(true);
     expect(result.candidates).toContain("operators");
     expect(result.candidates).toContain("operator");
+    expect(result.questionType).toBe("count");
+    expect(result.textSearchTerms).toEqual(
+      expect.arrayContaining(["enum Operator", "field op", "switch op"]),
+    );
+  });
+
+  it("normalizes common operator typos and aliases", () => {
+    const typo = buildCodeSearchCandidates("operaotrs in rule engine");
+    const aliases = buildCodeSearchCandidates("condition comparators");
+
+    expect(typo.candidates).toEqual(expect.arrayContaining(["operators", "operator"]));
+    expect(aliases.candidates).toEqual(
+      expect.arrayContaining(["condition", "comparator", "operator", "evalCondition"]),
+    );
+    expect(aliases.textSearchTerms).toContain("switch op");
   });
 
   it("keeps symbol-shaped queries available as direct candidates", () => {

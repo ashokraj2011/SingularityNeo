@@ -34,7 +34,10 @@ import {
   lockWorkflow,
   unlockWorkflow,
 } from '../domains/self-service';
-import { appendCapabilityMessageRecord } from '../domains/context-fabric';
+import {
+  appendCapabilityMessageRecord,
+  getAgentSessionMemory,
+} from '../domains/context-fabric';
 import { getPolicyTemplates } from '../domains/model-policy';
 import { parseActorContext } from '../requestActor';
 import { refreshCapabilityMemory } from '../memory';
@@ -826,6 +829,41 @@ export const registerCapabilityManagementRoutes = (
       });
       response.status(201).json(
         await appendCapabilityMessageRecord(request.params.capabilityId, message),
+      );
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
+  app.get('/api/capabilities/:capabilityId/session-memory', async (request, response) => {
+    const agentId = String(request.query?.agentId || '').trim();
+    const scope =
+      request.query?.scope === 'WORK_ITEM' || request.query?.scope === 'TASK'
+        ? request.query.scope
+        : 'GENERAL_CHAT';
+    const scopeId = String(request.query?.scopeId || '').trim();
+    const sessionId = String(request.query?.sessionId || '').trim();
+
+    if (!agentId) {
+      response.status(400).json({ error: 'An agentId query parameter is required.' });
+      return;
+    }
+
+    try {
+      await assertCapabilityPermission({
+        capabilityId: request.params.capabilityId,
+        actor: parseActorContext(request, 'Workspace Operator'),
+        action: 'chat.read',
+      });
+      response.json(
+        await getAgentSessionMemory({
+          capabilityId: request.params.capabilityId,
+          agentId,
+          scope,
+          scopeId:
+            scopeId || (scope === 'GENERAL_CHAT' ? request.params.capabilityId : undefined),
+          sessionId: sessionId || undefined,
+        }),
       );
     } catch (error) {
       sendApiError(response, error);
