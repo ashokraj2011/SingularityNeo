@@ -61,16 +61,17 @@ import {
   searchLocalCheckoutSymbols,
 } from "../localCodeIndex";
 import {
-  getCapabilityBaseClones,
   getPrimaryBaseClone,
-  resolveOperatorWorkingDirectory,
-  discoverExistingClonePaths,
 } from "../desktopRepoSync";
-import {
-  buildWorkItemCheckoutPath,
-  buildCapabilityCheckoutSlug,
-} from "../workItemCheckouts";
+import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
 import { buildCodeSearchCandidates, looksLikeSymbolPattern } from "../codeDiscovery";
+import {
+  canonicalizeRepoBackedPath,
+  findContainingCodeRoot,
+  resolveCapabilityCodeRoots,
+  type RequestedPathKind,
+  type ResolvedCodeRoot,
+} from "../codeRoots";
 
 const execFileAsync = promisify(execFile);
 
@@ -448,11 +449,18 @@ const summarizeSchemaArguments = (schema?: Record<string, unknown>) => {
     .join(", ");
 };
 
-const resolveWorkspacePath = async (
+type ResolvedWorkspaceContext = {
+  workspacePath: string;
+  approvedRoots: string[];
+  workingDirectoryPath?: string;
+  localRootPath?: string;
+};
+
+const resolveWorkspaceContext = async (
   capability: Capability,
   workItem?: WorkItem,
   preferredPath?: string,
-) => {
+) : Promise<ResolvedWorkspaceContext> => {
   const workItemRepositoryId =
     workItem?.executionContext?.primaryRepositoryId ||
     workItem?.executionContext?.branch?.repositoryId;
@@ -515,11 +523,12 @@ const resolveWorkspacePath = async (
             repositoryCount: (capability.repositories || []).length,
           })
         : "";
-    // Priority: operator working directory first, base clone only if valid
+    // Generic workspace tools still anchor to the desktop workspace, but
+    // repo-backed code tools resolve against discovered code roots separately.
     const defaultPath =
       derivedWorkItemCheckoutPath ||
-      resolution.workingDirectoryPath ||
       baseClonePath ||
+      resolution.workingDirectoryPath ||
       resolution.localRootPath;
     const requestedPath = normalizeDirectoryPath(preferredPath || "");
     const candidate = requestedPath || defaultPath;
@@ -535,7 +544,12 @@ const resolveWorkspacePath = async (
     if (!findApprovedWorkspaceRoot(candidate, allowed)) {
       if (requestedPath && allowed.length === 1) {
         console.log(`[resolveWorkspacePath]   FALLBACK to defaultPath=${defaultPath || allowed[0]}`);
-        return defaultPath || allowed[0];
+        return {
+          workspacePath: defaultPath || allowed[0],
+          approvedRoots: allowed,
+          workingDirectoryPath: resolution.workingDirectoryPath,
+          localRootPath: resolution.localRootPath,
+        };
       }
 
       throw new Error(
@@ -544,7 +558,12 @@ const resolveWorkspacePath = async (
     }
 
     console.log(`[resolveWorkspacePath]   RESOLVED → ${candidate}`);
-    return candidate;
+    return {
+      workspacePath: candidate,
+      approvedRoots: allowed,
+      workingDirectoryPath: resolution.workingDirectoryPath,
+      localRootPath: resolution.localRootPath,
+    };
   }
 
   const allowed = getCapabilityWorkspaceRoots(capability);
@@ -571,7 +590,10 @@ const resolveWorkspacePath = async (
 
   if (!findApprovedWorkspaceRoot(candidate, allowed)) {
     if (requestedPath && allowed.length === 1) {
-      return allowed[0];
+      return {
+        workspacePath: allowed[0],
+        approvedRoots: allowed,
+      };
     }
 
     throw new Error(
@@ -580,8 +602,17 @@ const resolveWorkspacePath = async (
   }
 
   console.log(`[resolveWorkspacePath]   RESOLVED → ${candidate}`);
-  return candidate;
+  return {
+    workspacePath: candidate,
+    approvedRoots: allowed,
+  };
 };
+
+const resolveWorkspacePath = async (
+  capability: Capability,
+  workItem?: WorkItem,
+  preferredPath?: string,
+) => (await resolveWorkspaceContext(capability, workItem, preferredPath)).workspacePath;
 
 const resolvePathWithinWorkspace = (
   workspacePath: string,
@@ -603,6 +634,63 @@ const resolvePathWithinWorkspace = (
   }
 
   return nextPath;
+};
+
+const isPathWithinApprovedRoots = (
+  candidatePath: string,
+  approvedRoots: string[],
+) =>
+  approvedRoots.some((root) => {
+    if (!root) return false;
+    return findApprovedWorkspaceRoot(candidatePath, [root]) === root;
+  });
+
+const summarizeResolvedCodeRoots = (codeRoots: ResolvedCodeRoot[]) =>
+  codeRoots.map((root) => `${root.source}:${root.checkoutPath}`);
+
+const resolveRepoToolContext = async ({
+  capability,
+  workItem,
+  preferredWorkspacePath,
+  explicitCheckoutPath,
+  explicitRepositoryId,
+  includeWorkspaceFallbackRoot = false,
+}: {
+  capability: Capability;
+  workItem?: WorkItem;
+  preferredWorkspacePath?: string;
+  explicitCheckoutPath?: string;
+  explicitRepositoryId?: string;
+  includeWorkspaceFallbackRoot?: boolean;
+}) => {
+  const workspaceContext = await resolveWorkspaceContext(
+    capability,
+    workItem,
+    preferredWorkspacePath,
+  );
+  const workItemRepositoryId =
+    explicitRepositoryId ||
+    workItem?.executionContext?.primaryRepositoryId ||
+    workItem?.executionContext?.branch?.repositoryId;
+  const effectiveExplicitCheckoutPath =
+    explicitCheckoutPath ||
+    (workItem?.id && workItemRepositoryId
+      ? workspaceContext.workspacePath
+      : undefined);
+  const codeRoots = await resolveCapabilityCodeRoots({
+    capability,
+    workItem,
+    explicitCheckoutPath: effectiveExplicitCheckoutPath,
+    explicitRepositoryId: workItemRepositoryId,
+    workingDirectoryPath: workspaceContext.workingDirectoryPath,
+    includeWorkspaceFallbackRoot,
+    workspaceFallbackPath: workspaceContext.workspacePath,
+  });
+  return {
+    workspaceContext,
+    workItemRepositoryId,
+    codeRoots,
+  };
 };
 
 export const classifyToolExecutionError = ({
@@ -927,61 +1015,37 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     },
     retryable: true,
     execute: async ({ capability, workItem }, args) => {
-      const workspacePath = await resolveWorkspacePath(
-        capability,
-        workItem,
-        args.workspacePath,
-      );
+      const { workspaceContext, workItemRepositoryId, codeRoots } =
+        await resolveRepoToolContext({
+          capability,
+          workItem,
+          preferredWorkspacePath: args.workspacePath,
+          includeWorkspaceFallbackRoot: true,
+        });
+      const workspacePath = workspaceContext.workspacePath;
       const requestedPath = getRequiredStringArg(
         args,
         "path",
         "workspace_read",
       );
-      let targetPath = resolvePathWithinWorkspace(
-        workspacePath,
+      const pathResolution = await canonicalizeRepoBackedPath({
         requestedPath,
-      );
+        codeRoots,
+        workspaceFallbackPath: workspacePath,
+      });
+      let targetPath = pathResolution.resolvedPath;
 
-      // ── Operator working-directory fallback ─────────────────────
-      // When the resolved target doesn't exist (common when the LLM
-      // passes a relative path from browse_code/workspace_search and
-      // the workspace root doesn't contain the repo), try the
-      // operator's working directory _repos/ clones as a fallback.
-      if (!await fs.access(targetPath).then(() => true, () => false)) {
-        console.warn(
-          `[workspace_read] ENOENT fallback: ${targetPath} does not exist. Scanning operator working directory for match…`,
+      if (
+        !path.isAbsolute(requestedPath) &&
+        pathResolution.pathResolutionMode === "workspace-fallback"
+      ) {
+        targetPath = resolvePathWithinWorkspace(workspacePath, requestedPath);
+      }
+
+      if (!isPathWithinApprovedRoots(targetPath, workspaceContext.approvedRoots)) {
+        throw new Error(
+          `Path ${requestedPath} is outside the approved workspace roots for capability ${capability.name}.`,
         );
-        const { resolveOperatorWorkingDirectory } = await import("../desktopRepoSync");
-        const operatorWorkDir = await resolveOperatorWorkingDirectory();
-        if (operatorWorkDir) {
-          const reposDir = path.join(operatorWorkDir, "_repos");
-          try {
-            const entries = await fs.readdir(reposDir);
-            for (const entry of entries) {
-              const entryDir = path.join(reposDir, entry);
-              const candidatePath = path.join(entryDir, requestedPath);
-              if (await fs.access(candidatePath).then(() => true, () => false)) {
-                console.log(
-                  `[workspace_read] ENOENT fallback HIT: found file at ${candidatePath}`,
-                );
-                targetPath = candidatePath;
-                break;
-              }
-            }
-          } catch {
-            // _repos/ doesn't exist — continue with original path
-          }
-          // Also try the working directory root directly
-          if (!await fs.access(targetPath).then(() => true, () => false)) {
-            const directPath = path.join(operatorWorkDir, requestedPath);
-            if (await fs.access(directPath).then(() => true, () => false)) {
-              console.log(
-                `[workspace_read] ENOENT fallback HIT: found file at ${directPath}`,
-              );
-              targetPath = directPath;
-            }
-          }
-        }
       }
 
       const maxBytes = Math.max(
@@ -1005,12 +1069,19 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         Math.min(Number(args.includeCallees ?? 0), 3),
       );
       const content = await fs.readFile(targetPath, "utf8");
+      const codeRootForPath =
+        pathResolution.repoRoot || findContainingCodeRoot(targetPath, codeRoots);
       const relativePath = path
-        .relative(workspacePath, targetPath)
+        .relative(codeRootForPath?.checkoutPath || workspacePath, targetPath)
         .replace(/\\/g, "/");
-      const workItemRepositoryId =
-        workItem?.executionContext?.primaryRepositoryId ||
-        workItem?.executionContext?.branch?.repositoryId;
+      const readDiagnostics = {
+        resolvedCodeRoots: summarizeResolvedCodeRoots(codeRoots),
+        codeRootSource: codeRootForPath?.source,
+        toolWorkingRoot: codeRootForPath?.checkoutPath || workspacePath,
+        pathResolutionMode: pathResolution.pathResolutionMode,
+        requestedPathKind: pathResolution.requestedPathKind,
+        pathResolutionFallbackUsed: pathResolution.pathResolutionFallbackUsed,
+      };
 
       // Retrieval Bundle (Phase 2 / Lever 6): when the agent asks for
       // a symbol with callers/callees, surface neighbor-file paths + up
@@ -1136,6 +1207,7 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               mode: "semantic-hunk",
               compression: "none",
               truncated: preview.length > maxBytes,
+              ...readDiagnostics,
             },
           };
         }
@@ -1156,12 +1228,13 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             mode: "whole-file-fallback",
             compression,
             codeIndexSource:
-              isRemoteExecutionClient() && workItem?.id && workItemRepositoryId
+              codeRootForPath
                 ? "local-checkout"
                 : "capability-index",
             symbolLookupMissed: true,
             hasNeighbors: neighborNote.length > 0,
             truncated: output.length > maxBytes,
+            ...readDiagnostics,
           },
         };
       }
@@ -1180,10 +1253,13 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         stdoutPreview: previewText(output, maxBytes),
         details: {
           path: targetPath,
+          relativePath,
           mode: "whole-file",
           compression,
+          codeIndexSource: codeRootForPath ? "local-checkout" : undefined,
           hasNeighbors: neighborNote.length > 0,
           truncated: output.length > maxBytes,
+          ...readDiagnostics,
         },
       };
     },
@@ -1215,20 +1291,24 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
     execute: async ({ capability, workItem }, args) => {
       const pattern = getRequiredStringArg(args, "pattern", "workspace_search");
 
-      const workspacePath = await resolveWorkspacePath(
-        capability,
-        workItem,
-        args.workspacePath,
-      );
+      const { workspaceContext, workItemRepositoryId, codeRoots } =
+        await resolveRepoToolContext({
+          capability,
+          workItem,
+          preferredWorkspacePath: args.workspacePath,
+        });
+      const workspacePath = workspaceContext.workspacePath;
       const scopePath = args.path
         ? resolvePathWithinWorkspace(workspacePath, String(args.path))
         : workspacePath;
       const limit = clampLimit(args.limit, 100, 500);
       const cursor =
         typeof args.cursor === "string" ? args.cursor.trim() : undefined;
-      const workItemRepositoryId =
-        workItem?.executionContext?.primaryRepositoryId ||
-        workItem?.executionContext?.branch?.repositoryId;
+      const scopePrefix = String(args.path || "")
+        .trim()
+        .replace(/\\/g, "/")
+        .replace(/^\/+/, "")
+        .replace(/\/+$/, "");
       const relativeScopePath = path
         .relative(workspacePath, scopePath)
         .replace(/\\/g, "/");
@@ -1249,26 +1329,10 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         capability.id &&
         (looksLikeSymbolPattern(pattern) || codeSearch.isCodeQuestion)
       ) {
-        // Determine which checkout paths to search.
-        // Priority 1: explicit work-item checkout (remote executor mode).
-        // Priority 2: base clones registered at desktop claim time (chat / no workItem).
-        const localCheckoutCandidates: Array<{ checkoutPath: string; repositoryId: string }> = [];
-
-        if (isRemoteExecutionClient() && workItem?.id && workItemRepositoryId) {
-          localCheckoutCandidates.push({ checkoutPath: workspacePath, repositoryId: workItemRepositoryId });
-        }
-
-        if (isRemoteExecutionClient() && capability.id && localCheckoutCandidates.length === 0) {
-          const baseClones = getCapabilityBaseClones(capability.id).filter(e => e.isGitRepo);
-          // Primary clone first.
-          [...baseClones.filter(e => e.isPrimary), ...baseClones.filter(e => !e.isPrimary)].forEach(c =>
-            localCheckoutCandidates.push({ checkoutPath: c.checkoutPath, repositoryId: c.repositoryId }),
-          );
-        }
-
         let localSymbolResults: Awaited<ReturnType<typeof searchLocalCheckoutSymbols>> | null = null;
         let localSymbolCheckoutRoot = "";
-        for (const candidate of localCheckoutCandidates) {
+        let localSymbolRootSource: ResolvedCodeRoot["source"] | undefined;
+        for (const candidate of codeRoots) {
           for (const candidateQuery of codeSearch.candidates) {
             const result = await searchLocalCheckoutSymbols({
               checkoutPath: candidate.checkoutPath,
@@ -1280,6 +1344,7 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             if (result && result.symbols.length > 0) {
               localSymbolResults = result;
               localSymbolCheckoutRoot = candidate.checkoutPath.replace(/\/+$/, "");
+              localSymbolRootSource = candidate.source;
               break;
             }
           }
@@ -1290,11 +1355,11 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
 
         const filteredLocalSymbols =
           localSymbolResults?.symbols.filter((symbol) =>
-            !relativeScopePath || relativeScopePath === "."
+            !scopePrefix
               ? true
               : symbol.filePath.startsWith(
-                  `${relativeScopePath.replace(/\/+$/, "")}/`,
-                ) || symbol.filePath === relativeScopePath,
+                  `${scopePrefix}/`,
+                ) || symbol.filePath === scopePrefix,
           ) || [];
         if (filteredLocalSymbols.length > 0) {
           // Emit absolute paths so the agent never needs to guess directory layout.
@@ -1333,6 +1398,11 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               codeIndexSource: "local-checkout",
               codeIndexFreshness: localSymbolResults?.builtAt,
               codeDiscoveryMode: "ast-first",
+              astSearchAttempted: true,
+              astSearchSource: "local-checkout",
+              resolvedCodeRoots: summarizeResolvedCodeRoots(codeRoots),
+              codeRootSource: localSymbolRootSource,
+              toolWorkingRoot: localSymbolCheckoutRoot || workspacePath,
             },
           };
         }
@@ -1343,11 +1413,11 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             limit: Math.min(limit, 25),
           }).catch(() => []))
             .filter((symbol) =>
-              !relativeScopePath || relativeScopePath === "."
+              !scopePrefix
                 ? true
                 : symbol.filePath.startsWith(
-                    `${relativeScopePath.replace(/\/+$/, "")}/`,
-                  ) || symbol.filePath === relativeScopePath,
+                    `${scopePrefix}/`,
+                  ) || symbol.filePath === scopePrefix,
             );
           if (indexedMatches.length > 0) {
             break;
@@ -1382,6 +1452,10 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               mode: "symbol-search",
               codeIndexSource: "capability-index",
               codeDiscoveryMode: "ast-first",
+              astSearchAttempted: true,
+              astSearchSource: "capability-index",
+              resolvedCodeRoots: summarizeResolvedCodeRoots(codeRoots),
+              toolWorkingRoot: workspacePath,
             },
           };
         }
@@ -1391,6 +1465,68 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         codeSearch.isCodeQuestion && Array.isArray(codeSearch.textSearchTerms)
           ? [...new Set([...codeSearch.textSearchTerms, pattern])]
           : [pattern];
+
+      if (codeSearch.isCodeQuestion && codeRoots.length > 0) {
+        for (const codeRoot of codeRoots) {
+          const scopedCodeRoot = scopePrefix
+            ? path.resolve(codeRoot.checkoutPath, scopePrefix)
+            : codeRoot.checkoutPath;
+          if (
+            scopePrefix &&
+            !findContainingCodeRoot(scopedCodeRoot, [codeRoot]) &&
+            !scopedCodeRoot.startsWith(codeRoot.checkoutPath)
+          ) {
+            continue;
+          }
+          for (const candidatePattern of textFallbackPatterns) {
+            const trimmedPattern = String(candidatePattern || "").trim();
+            if (!trimmedPattern) continue;
+            const codeRootResult = await runProcess(
+              "rg",
+              ["-n", "-i", trimmedPattern, scopedCodeRoot],
+              codeRoot.checkoutPath,
+            );
+            const lines = (codeRootResult.stdout || codeRootResult.stderr)
+              .split("\n")
+              .filter(Boolean);
+            if (codeRootResult.exitCode === 0 && lines.length > 0) {
+              const paged = paginateValues({
+                values: lines,
+                cursor,
+                limit,
+              });
+              const output = paged.page.join("\n");
+              return {
+                summary: `Search completed for pattern ${pattern}.`,
+                workingDirectory: codeRoot.checkoutPath,
+                exitCode: 0,
+                stdoutPreview: previewText(output),
+                details: {
+                  pattern,
+                  effectivePattern: trimmedPattern,
+                  normalizedCodeQueries: codeSearch.candidates,
+                  textSearchTerms: codeSearch.textSearchTerms,
+                  codeQuestionType: codeSearch.questionType,
+                  scopePath: scopedCodeRoot,
+                  normalizedQueries: codeSearch.candidates,
+                  matches: paged.page,
+                  nextCursor: paged.nextCursor,
+                  totalScanned: lines.length,
+                  truncated: paged.nextCursor !== undefined,
+                  mode: "text-search",
+                  codeDiscoveryMode: "text-search-fallback",
+                  astSearchAttempted: true,
+                  astSearchSource: "local-checkout",
+                  resolvedCodeRoots: summarizeResolvedCodeRoots(codeRoots),
+                  codeRootSource: codeRoot.source,
+                  toolWorkingRoot: codeRoot.checkoutPath,
+                },
+              };
+            }
+          }
+        }
+      }
+
       let result = { exitCode: 1, stdout: "", stderr: "" };
       let effectivePattern = pattern;
       for (const candidatePattern of textFallbackPatterns) {
@@ -1471,6 +1607,15 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             ? "text-search-fallback"
             : "text-search",
           fallback: isCommandMissing(result) ? "node-filesystem" : undefined,
+          astSearchAttempted: Boolean(codeSearch.isCodeQuestion),
+          astSearchSource:
+            codeSearch.isCodeQuestion && codeRoots.length > 0
+              ? "local-checkout"
+              : codeSearch.isCodeQuestion
+                ? "capability-index"
+                : undefined,
+          resolvedCodeRoots: summarizeResolvedCodeRoots(codeRoots),
+          toolWorkingRoot: workspacePath,
         },
       };
     },
@@ -1523,56 +1668,22 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         workItem?.executionContext?.branch?.repositoryId ||
         (capability.repositories || []).find(repository => repository.isPrimary)?.id ||
         capability.repositories?.[0]?.id;
+      const workspaceContext = await resolveWorkspaceContext(
+        capability,
+        workItem,
+        args.workspacePath,
+      );
       const workItemCheckoutPath =
         workItem?.id && workItemRepositoryId
-          ? await resolveWorkspacePath(capability, workItem, args.workspacePath).catch(() => "")
+          ? workspaceContext.workspacePath
           : "";
-      const baseClones = getCapabilityBaseClones(capability.id).filter(e => e.isGitRepo);
-      const localCloneCandidates = [
-        ...(workItemCheckoutPath && workItemRepositoryId
-          ? [
-              {
-                repositoryId: workItemRepositoryId,
-                repositoryLabel: "work-item checkout",
-                checkoutPath: workItemCheckoutPath,
-                isPrimary: true,
-              },
-            ]
-          : []),
-        ...baseClones,
-      ];
-
-      // ── Operator working directory fallback ─────────────────────
-      // When no base clones are registered (first run, restart before
-      // sync, or no repos configured), resolve the operator's working
-      // directory and scan {workDir}/_repos/{capability-slug}/ for
-      // existing clones.  The operator's working directory is the
-      // single source of truth — NOT capability.localDirectories.
-      if (localCloneCandidates.length === 0) {
-        const operatorWorkDir = await resolveOperatorWorkingDirectory();
-        if (operatorWorkDir) {
-          const capSlug = buildCapabilityCheckoutSlug(capability);
-          const clonePaths = await discoverExistingClonePaths(operatorWorkDir, capSlug);
-          for (const clonePath of clonePaths) {
-            localCloneCandidates.push({
-              repositoryId: capability.id,
-              repositoryLabel: "operator-workdir-clone",
-              checkoutPath: clonePath,
-              isPrimary: localCloneCandidates.length === 0,
-            });
-          }
-          // If no clones found under _repos/, use the working directory
-          // itself as a last-resort search root.
-          if (localCloneCandidates.length === 0) {
-            localCloneCandidates.push({
-              repositoryId: capability.id,
-              repositoryLabel: "operator-workdir-root",
-              checkoutPath: operatorWorkDir,
-              isPrimary: true,
-            });
-          }
-        }
-      }
+      const localCloneCandidates = await resolveCapabilityCodeRoots({
+        capability,
+        workItem,
+        explicitCheckoutPath: workItemCheckoutPath || undefined,
+        explicitRepositoryId: workItemRepositoryId,
+        workingDirectoryPath: workspaceContext.workingDirectoryPath,
+      });
 
       if (localCloneCandidates.length > 0) {
         console.log(`[browse_code] ${localCloneCandidates.length} search root(s): ${localCloneCandidates.map(c => `${c.repositoryLabel}=${c.checkoutPath}`).join(', ')}`);
@@ -1592,7 +1703,9 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
             : [];
 
       if (semanticCandidates.length > 0) {
-        let localSemanticSymbols: Array<any & { _checkoutRoot: string }> = [];
+        let localSemanticSymbols: Array<
+          any & { _checkoutRoot: string; _rootSource: ResolvedCodeRoot["source"] }
+        > = [];
         let localSemanticFreshness: string | undefined;
 
         for (const clone of [
@@ -1614,6 +1727,7 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
                 ...result.symbols.map(symbol => ({
                   ...symbol,
                   _checkoutRoot: cloneRoot,
+                  _rootSource: clone.source,
                 })),
               );
             }
@@ -1684,6 +1798,12 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               codeIndexSource: "local-checkout",
               codeIndexFreshness: localSemanticFreshness,
               codeDiscoveryMode: "ast-first",
+              astSearchAttempted: true,
+              astSearchSource: "local-checkout",
+              resolvedCodeRoots: summarizeResolvedCodeRoots(localCloneCandidates),
+              codeRootSource: filteredLocalSemanticSymbols[0]?._rootSource,
+              toolWorkingRoot:
+                filteredLocalSemanticSymbols[0]?._checkoutRoot || workspaceContext.workspacePath,
               mode: "symbol-search",
             },
           };
@@ -1724,6 +1844,10 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
               source: "capability-index",
               codeIndexSource: "capability-index",
               codeDiscoveryMode: "ast-first",
+              astSearchAttempted: true,
+              astSearchSource: "capability-index",
+              resolvedCodeRoots: summarizeResolvedCodeRoots(localCloneCandidates),
+              toolWorkingRoot: workspaceContext.workspacePath,
               mode: "symbol-search",
             },
           };

@@ -92,6 +92,7 @@ import {
   buildAstGroundingSummary,
   type AstGroundingSummary,
 } from '../server/astGrounding';
+import { syncCapabilityRepositoriesForDesktop } from '../server/desktopRepoSync';
 import { processWorkflowRun, reconcileWorkflowRunFailure } from '../server/execution/service';
 import { getWorkflowRunDetail } from '../server/execution/repository';
 import { runWithExecutionClientContext } from '../server/execution/runtimeClient';
@@ -242,6 +243,23 @@ let executorOwnedCapabilityIds: string[] = [];
 let executorApprovedWorkspaceRoots: Record<string, string[]> = {};
 let executorLoopTimer: NodeJS.Timeout | null = null;
 let executorTickInFlight = false;
+let readOnlyRepoBootstrapInFlight = new Map<string, Promise<void>>();
+const cancelledRuntimeStreamIds = new Set<string>();
+
+const createAbortError = (message = 'Desktop runtime stream was cancelled.') => {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+};
+
+const isRuntimeStreamCancelled = (streamId: string) =>
+  Boolean(streamId) && cancelledRuntimeStreamIds.has(streamId);
+
+const throwIfRuntimeStreamCancelled = (streamId: string) => {
+  if (isRuntimeStreamCancelled(streamId)) {
+    throw createAbortError();
+  }
+};
 
 const respond = ({
   requestId,
@@ -264,6 +282,9 @@ const respond = ({
 };
 
 const sendStreamEvent = (streamId: string, event: ChatStreamEvent) => {
+  if (isRuntimeStreamCancelled(streamId)) {
+    return;
+  }
   writeMessage({
     type: 'worker:stream-event',
     streamId,
@@ -843,6 +864,7 @@ const resolveDesktopRuntimeContext = async (
   codeIndexFreshness?: string;
   verifiedPaths?: string[];
   groundingEvidenceSource?: 'local-checkout' | 'capability-index' | 'none';
+  shouldBootstrapIndex?: boolean;
   workContextHydrated: boolean;
   workContextSource: 'live-work-item' | 'live-workspace';
   sessionMemoryUsed: boolean;
@@ -1173,6 +1195,7 @@ const resolveDesktopRuntimeContext = async (
         codeIndexFreshness: astGrounding.codeIndexFreshness,
         verifiedPaths: astGrounding.verifiedPaths,
         groundingEvidenceSource: astGrounding.groundingEvidenceSource,
+        shouldBootstrapIndex: astGrounding.shouldBootstrapIndex,
         workContextHydrated: Boolean(liveBriefing.trim()),
         workContextSource: scope === 'WORK_ITEM' ? 'live-work-item' : 'live-workspace',
         sessionMemoryUsed,
@@ -1230,6 +1253,7 @@ const resolveDesktopRuntimeContext = async (
       codeIndexFreshness: astGrounding.codeIndexFreshness,
       verifiedPaths: astGrounding.verifiedPaths,
       groundingEvidenceSource: astGrounding.groundingEvidenceSource,
+      shouldBootstrapIndex: astGrounding.shouldBootstrapIndex,
       workContextHydrated: Boolean(liveBriefing.trim()),
       workContextSource: scope === 'WORK_ITEM' ? 'live-work-item' : 'live-workspace',
       sessionMemoryUsed,
@@ -1266,9 +1290,68 @@ const resolveDesktopRuntimeContext = async (
     workContextSource: 'live-workspace',
     sessionMemoryUsed,
     sessionMemorySource,
+    shouldBootstrapIndex: false,
     scope,
     scopeId,
   };
+};
+
+type DesktopRuntimeContext = Awaited<ReturnType<typeof resolveDesktopRuntimeContext>>;
+
+const ensureReadOnlyRepoBootstrap = async (capabilityId: string) => {
+  if (!capabilityId || !activeActorContext?.userId) {
+    return;
+  }
+  const existing = readOnlyRepoBootstrapInFlight.get(capabilityId);
+  if (existing) {
+    await existing;
+    return;
+  }
+  const bootstrapPromise = (async () => {
+    console.log(
+      `[desktop-runtime-worker] bootstrapping read-only repo grounding for ${capabilityId} via executor ${executorId}`,
+    );
+    await syncExecutorRegistration().catch(() => undefined);
+    await syncCapabilityRepositoriesForDesktop({
+      capabilityId,
+      executorId,
+      actorUserId: activeActorContext?.userId,
+      fetch: false,
+    });
+  })()
+    .catch((error) => {
+      console.warn(
+        `[desktop-runtime-worker] read-only repo bootstrap failed for ${capabilityId}:`,
+        error instanceof Error ? error.message : error,
+      );
+    })
+    .finally(() => {
+      readOnlyRepoBootstrapInFlight.delete(capabilityId);
+    });
+  readOnlyRepoBootstrapInFlight.set(capabilityId, bootstrapPromise);
+  await bootstrapPromise;
+};
+
+const maybeBootstrapReadOnlyRuntimeContext = async (
+  payload: DesktopRuntimePayload,
+  context: DesktopRuntimeContext,
+): Promise<DesktopRuntimeContext> => {
+  const capabilityId = String(
+    context.bundle?.capability?.id ||
+      context.capability?.id ||
+      payload.capability?.id ||
+      '',
+  ).trim();
+  if (
+    !capabilityId ||
+    !context.isCodeQuestion ||
+    !context.shouldBootstrapIndex ||
+    !activeActorContext?.userId
+  ) {
+    return context;
+  }
+  await ensureReadOnlyRepoBootstrap(capabilityId);
+  return resolveDesktopRuntimeContext(payload).catch(() => context);
 };
 
 const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
@@ -1488,6 +1571,21 @@ reader.on('line', async line => {
           versions: {
             node: process.versions.node,
           },
+        },
+      });
+      return;
+    }
+
+    if (message.type === 'runtime:chat-stream:cancel') {
+      const streamId = String(message.payload?.streamId || '').trim();
+      if (streamId) {
+        cancelledRuntimeStreamIds.add(streamId);
+      }
+      respond({
+        requestId,
+        streamId: streamId || undefined,
+        payload: {
+          cancelled: Boolean(streamId),
         },
       });
       return;
@@ -1724,7 +1822,7 @@ reader.on('line', async line => {
         throw new Error('Capability, agent, and message are required.');
       }
 
-      const context = await resolveDesktopRuntimeContext(payload as DesktopRuntimePayload);
+      let context = await resolveDesktopRuntimeContext(payload as DesktopRuntimePayload);
       if (context.chatAction?.handled) {
         if (context.chatAction.wakeWorker && activeActorContext?.userId) {
           await syncExecutorRegistration().catch(() => undefined);
@@ -1763,6 +1861,10 @@ reader.on('line', async line => {
         });
         return;
       }
+      context = await maybeBootstrapReadOnlyRuntimeContext(
+        payload as DesktopRuntimePayload,
+        context,
+      );
       const runtimeStatus = await buildDesktopRuntimeStatus();
       if (!runtimeStatus.configured) {
         throw new Error(getMissingRuntimeConfigurationMessage());
@@ -1921,11 +2023,13 @@ reader.on('line', async line => {
     if (message.type === 'runtime:chat-stream') {
       const payload = message.payload || {};
       const streamId = String(payload.streamId || randomUUID());
+      cancelledRuntimeStreamIds.delete(streamId);
       if (!payload.message || !payload.capability || !payload.agent) {
         throw new Error('Capability, agent, and message are required.');
       }
 
-      const context = await resolveDesktopRuntimeContext(payload as DesktopRuntimePayload);
+      let context = await resolveDesktopRuntimeContext(payload as DesktopRuntimePayload);
+      throwIfRuntimeStreamCancelled(streamId);
 
       sendStreamEvent(streamId, {
         type: 'start',
@@ -1934,6 +2038,7 @@ reader.on('line', async line => {
         sessionMode: (payload.sessionMode as 'resume' | 'fresh') || 'resume',
       });
       if (context.chatAction?.handled) {
+        throwIfRuntimeStreamCancelled(streamId);
         if (context.chatAction.wakeWorker && activeActorContext?.userId) {
           await syncExecutorRegistration().catch(() => undefined);
           ensureDesktopExecutorLoop();
@@ -1975,10 +2080,16 @@ reader.on('line', async line => {
         });
         return;
       }
+      context = await maybeBootstrapReadOnlyRuntimeContext(
+        payload as DesktopRuntimePayload,
+        context,
+      );
+      throwIfRuntimeStreamCancelled(streamId);
       const runtimeStatus = await buildDesktopRuntimeStatus();
       if (!runtimeStatus.configured) {
         throw new Error(getMissingRuntimeConfigurationMessage());
       }
+      throwIfRuntimeStreamCancelled(streamId);
       sendStreamEvent(streamId, {
         type: 'memory',
         memoryReferences: context.memoryReferences,
@@ -2038,7 +2149,11 @@ reader.on('line', async line => {
             allowedToolIds: context.resolvedAllowedToolIds,
             resolvedAgentSource: context.resolvedAgentSource,
             runtimeLane: 'desktop-runtime-worker',
+            shouldCancel: () => isRuntimeStreamCancelled(streamId),
             onDelta: delta => {
+              if (isRuntimeStreamCancelled(streamId)) {
+                return;
+              }
               if (!shouldBufferValidatedStream) {
                 sendStreamEvent(streamId, {
                   type: 'delta',
@@ -2048,6 +2163,7 @@ reader.on('line', async line => {
             },
           }),
       );
+      throwIfRuntimeStreamCancelled(streamId);
       const runtimeTarget = await resolveRuntimeProviderTarget(streamed.runtimeProviderKey);
       const sanitizedStream = await sanitizeGroundedChatResponse({
         content: streamed.content || '',
@@ -2055,6 +2171,7 @@ reader.on('line', async line => {
         verifiedPaths: context.verifiedPaths,
         enforceEvidenceOnly: context.memoryTrustMode === 'repo-evidence-only',
       });
+      throwIfRuntimeStreamCancelled(streamId);
 
       const completeEvent: ChatStreamEvent = {
         type: 'complete',
@@ -2116,6 +2233,7 @@ reader.on('line', async line => {
           ok: true,
         },
       });
+      cancelledRuntimeStreamIds.delete(streamId);
       return;
     }
 
@@ -2126,6 +2244,17 @@ reader.on('line', async line => {
   } catch (error) {
     if (message.type === 'runtime:chat-stream') {
       const streamId = String(message.payload?.streamId || randomUUID());
+      if (error instanceof Error && error.name === 'AbortError') {
+        cancelledRuntimeStreamIds.delete(streamId);
+        respond({
+          requestId,
+          streamId,
+          payload: {
+            cancelled: true,
+          },
+        });
+        return;
+      }
       sendStreamEvent(streamId, {
         type: 'error',
         error:
@@ -2141,6 +2270,7 @@ reader.on('line', async line => {
             ? error.message
             : 'The desktop runtime could not complete this stream.',
       });
+      cancelledRuntimeStreamIds.delete(streamId);
       return;
     }
 

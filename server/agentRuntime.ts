@@ -94,6 +94,12 @@ type SharedAgentRuntimeResult = Awaited<ReturnType<typeof invokeCapabilityChat>>
   autoReadCandidateCount?: number;
   autoReadSkippedReason?: string;
   localSymbolDedupCount?: number;
+  astSearchAttempted?: boolean;
+  resolvedCodeRoots?: string[];
+  codeRootSource?: string;
+  pathResolutionMode?: string;
+  requestedPathKind?: string;
+  toolWorkingRoot?: string;
   runtimeLane?: AgentRuntimeLane;
   /**
    * Tool-loop call/result narration accumulated across iterations.  When
@@ -121,6 +127,7 @@ type InvokeCommonAgentRuntimeArgs = {
   allowedToolIds?: ToolAdapterId[];
   resolvedAgentSource?: string;
   runtimeLane: AgentRuntimeLane;
+  shouldCancel?: () => boolean;
 };
 
 type ToolLoopDecision =
@@ -153,6 +160,12 @@ const normalizeString = (value: unknown) => String(value || "").trim();
 
 const SAFE_TOOL_INTENT_MESSAGE =
   "I omitted an internal tool instruction instead of showing it directly. Please retry and I’ll rerun the grounded code lookup.";
+
+const createAbortError = (message = "Agent runtime request was cancelled.") => {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+};
 
 const combineUsage = (left: AgentRuntimeUsage, right: AgentRuntimeUsage): AgentRuntimeUsage => ({
   promptTokens: left.promptTokens + right.promptTokens,
@@ -846,7 +859,13 @@ const deriveDiscoveryMetadata = (
   let toolResultFileCount = 0;
   let localSymbolDedupCount = 0;
   const normalizedCodeQueries = new Set<string>();
+  const resolvedCodeRoots = new Set<string>();
   let codeQuestionType: string | undefined;
+  let astSearchAttempted = false;
+  let codeRootSource: string | undefined;
+  let pathResolutionMode: string | undefined;
+  let requestedPathKind: string | undefined;
+  let toolWorkingRoot: string | undefined;
   const candidatePaths = new Set<string>();
 
   for (const result of toolResults) {
@@ -860,6 +879,12 @@ const deriveDiscoveryMetadata = (
       normalizedQueries?: string[];
       codeQuestionType?: string;
       localSymbolDedupCount?: number;
+      astSearchAttempted?: boolean;
+      resolvedCodeRoots?: string[];
+      codeRootSource?: string;
+      pathResolutionMode?: string;
+      requestedPathKind?: string;
+      toolWorkingRoot?: string;
     };
     const symbols = Array.isArray(details.symbols) ? details.symbols : [];
     const files = Array.isArray(details.files) ? details.files : [];
@@ -871,6 +896,15 @@ const deriveDiscoveryMetadata = (
       if (normalized) normalizedCodeQueries.add(normalized);
     }
     codeQuestionType = codeQuestionType || details.codeQuestionType;
+    astSearchAttempted = astSearchAttempted || Boolean(details.astSearchAttempted);
+    codeRootSource = codeRootSource || details.codeRootSource;
+    pathResolutionMode = pathResolutionMode || details.pathResolutionMode;
+    requestedPathKind = requestedPathKind || details.requestedPathKind;
+    toolWorkingRoot = toolWorkingRoot || details.toolWorkingRoot || result.workingDirectory;
+    for (const resolvedCodeRoot of details.resolvedCodeRoots || []) {
+      const normalized = String(resolvedCodeRoot || "").trim();
+      if (normalized) resolvedCodeRoots.add(normalized);
+    }
     for (const symbol of symbols) {
       const filePath = String(symbol.filePath || "").trim();
       if (filePath) candidatePaths.add(filePath);
@@ -917,6 +951,12 @@ const deriveDiscoveryMetadata = (
         ? "no-candidate-files"
         : undefined,
     localSymbolDedupCount,
+    astSearchAttempted,
+    resolvedCodeRoots: [...resolvedCodeRoots],
+    codeRootSource,
+    pathResolutionMode,
+    requestedPathKind,
+    toolWorkingRoot,
   };
 };
 
@@ -936,7 +976,15 @@ export const invokeCommonAgentRuntime = async ({
   allowedToolIds,
   resolvedAgentSource,
   runtimeLane,
+  shouldCancel,
 }: InvokeCommonAgentRuntimeArgs): Promise<SharedAgentRuntimeResult> => {
+  const throwIfCancelled = () => {
+    if (shouldCancel?.()) {
+      throw createAbortError();
+    }
+  };
+
+  throwIfCancelled();
   const agentReadOnlyToolIds = resolveReadOnlyToolIds(agent);
   // When the caller wants a tool loop but the agent has no tools explicitly
   // configured, fall back to every read-only tool in the catalog rather than
@@ -982,6 +1030,7 @@ export const invokeCommonAgentRuntime = async ({
     recoveryAllowedToolIds: ToolAdapterId[];
     disposition: ToolIntentDisposition;
   }) => {
+    throwIfCancelled();
     const recoveryScopeId = `tool-recovery-${randomUUID()}`;
     try {
       const executedToolCalls = await executeReadOnlyToolChain({
@@ -1025,6 +1074,7 @@ export const invokeCommonAgentRuntime = async ({
         resetSession: false,
       });
       const forcedAnswerContent = extractUserFacingContent(forcedAnswer.content || "");
+      throwIfCancelled();
       if (!forcedAnswerContent) {
         return null;
       }
@@ -1072,6 +1122,7 @@ export const invokeCommonAgentRuntime = async ({
   };
 
   if (!toolLoopEnabled) {
+    throwIfCancelled();
     const directResult = onDelta
       ? await invokeCapabilityChatStream({
           capability,
@@ -1096,6 +1147,7 @@ export const invokeCommonAgentRuntime = async ({
           scopeId,
           resetSession,
         });
+    throwIfCancelled();
     const directDecision = parseToolLoopDecision(directResult.content || "");
     const directToolIntent =
       directDecision?.action === "invoke_tool"
@@ -1205,6 +1257,7 @@ export const invokeCommonAgentRuntime = async ({
 
   try {
     for (let iteration = 0; iteration < MAX_READ_ONLY_TOOL_LOOPS; iteration += 1) {
+      throwIfCancelled();
       const loopResponse = await invokeCapabilityChat({
         capability,
         agent,
@@ -1221,6 +1274,7 @@ export const invokeCommonAgentRuntime = async ({
       });
 
       lastResult = loopResponse;
+      throwIfCancelled();
       aggregatedUsage = aggregatedUsage
         ? combineUsage(aggregatedUsage, loopResponse.usage)
         : loopResponse.usage;
@@ -1297,6 +1351,7 @@ export const invokeCommonAgentRuntime = async ({
           continue;
         }
         if (onDelta && loopResponse.content) {
+          throwIfCancelled();
           onDelta(loopResponse.content);
         }
         return {
@@ -1375,6 +1430,7 @@ export const invokeCommonAgentRuntime = async ({
           continue;
         }
         if (onDelta && decision.content) {
+          throwIfCancelled();
           onDelta(decision.content);
         }
         return {
@@ -1400,6 +1456,7 @@ export const invokeCommonAgentRuntime = async ({
 
       if (decision.action === "clarify") {
         if (onDelta && decision.message) {
+          throwIfCancelled();
           onDelta(decision.message);
         }
         return {
@@ -1567,6 +1624,7 @@ export const invokeCommonAgentRuntime = async ({
       currentMessage = `Continue answering the original request: ${message}`;
     }
 
+    throwIfCancelled();
     const fallbackResponse =
       lastResult ||
       (await invokeCapabilityChat({
@@ -1594,6 +1652,7 @@ export const invokeCommonAgentRuntime = async ({
     if (shouldForceAnswer) {
       const forcedAnswerScopeId = `tool-final-answer-${randomUUID()}`;
       try {
+        throwIfCancelled();
         const forcedAnswer = await invokeCapabilityChat({
           capability,
           agent,
@@ -1609,6 +1668,7 @@ export const invokeCommonAgentRuntime = async ({
           preserveAllHistory: preserveAllHistoryForToolLoop,
         });
         const forcedAnswerContent = extractUserFacingContent(forcedAnswer.content || "");
+        throwIfCancelled();
         // ── DEBUG: Log forced-answer result ──────────────────────────
         console.log(`\n[agentRuntime:debug] ══════ FORCED ANSWER RECOVERY ══════`);
         console.log(`[agentRuntime:debug]   toolHistory entries: ${toolHistory.length}`);
@@ -1618,6 +1678,7 @@ export const invokeCommonAgentRuntime = async ({
         // ──────────────────────────────────────────────────────────────
         if (forcedAnswerContent) {
           if (onDelta) {
+            throwIfCancelled();
             onDelta(forcedAnswerContent);
           }
           console.warn("[agentRuntime] recovered final answer after tool-loop exhaustion", {
@@ -1671,6 +1732,7 @@ export const invokeCommonAgentRuntime = async ({
         )
       : fallbackResponse.content;
     if (onDelta && fallbackContent) {
+      throwIfCancelled();
       onDelta(fallbackContent);
     }
     if (fallbackToolIntent) {

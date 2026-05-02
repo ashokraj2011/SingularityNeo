@@ -441,7 +441,10 @@ let localWorker = null;
 const pendingWorkerRequests = new Map();
 const cancelledStreamIds = new Set();
 
-const DEFAULT_WORKER_TIMEOUT_MS = 45_000;
+const DEFAULT_WORKER_TIMEOUT_MS = 90_000;
+const RUNTIME_STATUS_WORKER_TIMEOUT_MS = 3 * 60_000;
+const RUNTIME_ACTOR_CONTEXT_TIMEOUT_MS = 2 * 60_000;
+const STREAM_CANCEL_GRACE_MS = 5 * 60_000;
 const STREAM_WORKER_IDLE_TIMEOUT_MS = 5 * 60_000;
 
 const detectDesktopRendererIssue = () => {
@@ -509,6 +512,43 @@ const sendWorkerMessage = message => {
   }
 
   localWorker.stdin.write(`${JSON.stringify(message)}\n`);
+};
+
+const createAbortError = (message = 'Worker request was cancelled.') => {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+};
+
+const markStreamCancelled = streamId => {
+  if (!streamId) {
+    return;
+  }
+  cancelledStreamIds.add(streamId);
+  const cleanup = setTimeout(() => {
+    cancelledStreamIds.delete(streamId);
+  }, STREAM_CANCEL_GRACE_MS);
+  if (typeof cleanup.unref === 'function') {
+    cleanup.unref();
+  }
+};
+
+const cancelPendingStreamRequest = streamId => {
+  if (!streamId) {
+    return false;
+  }
+
+  let cancelled = false;
+  pendingWorkerRequests.forEach((pending, requestId) => {
+    if (pending.streamId !== streamId) {
+      return;
+    }
+    cancelled = true;
+    clearTimeout(pending.timeout);
+    pendingWorkerRequests.delete(requestId);
+    pending.reject(createAbortError(`Worker request cancelled: ${streamId}`));
+  });
+  return cancelled;
 };
 
 const requestWorker = (type, payload = {}, options = {}) =>
@@ -608,6 +648,10 @@ const startLocalWorker = () => {
     }
 
     if (message.type === 'worker:response' && typeof message.requestId === 'string') {
+      if (message.streamId) {
+        cancelledStreamIds.delete(message.streamId);
+      }
+
       const pending = pendingWorkerRequests.get(message.requestId);
       if (!pending) {
         return;
@@ -615,10 +659,6 @@ const startLocalWorker = () => {
 
       clearTimeout(pending.timeout);
       pendingWorkerRequests.delete(message.requestId);
-
-      if (message.streamId) {
-        cancelledStreamIds.delete(message.streamId);
-      }
 
       if (message.error) {
         pending.reject(new Error(message.error));
@@ -721,9 +761,15 @@ ipcMain.handle('desktop:worker:ping', async () =>
     requestedAt: new Date().toISOString(),
   }),
 );
-ipcMain.handle('desktop:runtime:status', async () => requestWorker('runtime:status'));
+ipcMain.handle('desktop:runtime:status', async () =>
+  requestWorker('runtime:status', {}, {
+    timeoutMs: RUNTIME_STATUS_WORKER_TIMEOUT_MS,
+  }),
+);
 ipcMain.handle('desktop:runtime:actor-context', async (_event, payload) =>
-  requestWorker('runtime:actor-context', payload || {}),
+  requestWorker('runtime:actor-context', payload || {}, {
+    timeoutMs: RUNTIME_ACTOR_CONTEXT_TIMEOUT_MS,
+  }),
 );
 ipcMain.handle('desktop:runtime:set-token', async (_event, payload) =>
   requestWorker('runtime:set-token', payload || {}),
@@ -778,10 +824,25 @@ ipcMain.handle('desktop:runtime:chat-stream', async (_event, payload) => {
   });
 });
 ipcMain.handle('desktop:runtime:chat-stream:cancel', async (_event, payload) => {
-  if (payload?.streamId) {
-    cancelledStreamIds.add(payload.streamId);
+  const streamId =
+    typeof payload?.streamId === 'string' && payload.streamId.trim()
+      ? payload.streamId.trim()
+      : '';
+  if (streamId) {
+    markStreamCancelled(streamId);
+    cancelPendingStreamRequest(streamId);
+    try {
+      sendWorkerMessage({
+        type: 'runtime:chat-stream:cancel',
+        requestId: randomUUID(),
+        payload: { streamId },
+      });
+    } catch {
+      // The local worker may already be gone; cancelling the renderer-side
+      // request is still enough to unblock the chat UI immediately.
+    }
   }
-  return { cancelled: true };
+  return { cancelled: Boolean(streamId) };
 });
 ipcMain.handle('desktop:local-connectors:list', async () => listLocalConnectors());
 ipcMain.handle('desktop:local-connectors:save', async (_event, payload) =>

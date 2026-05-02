@@ -6,12 +6,7 @@ import {
   listLocalCheckoutAllSymbols,
   searchLocalCheckoutSymbols,
 } from "./localCodeIndex";
-import {
-  getCapabilityBaseClones,
-  resolveOperatorWorkingDirectory,
-  discoverExistingClonePaths,
-} from "./desktopRepoSync";
-import { buildCapabilityCheckoutSlug } from "./workItemCheckouts";
+import { resolveCapabilityCodeRoots } from "./codeRoots";
 
 export type AstGroundingSummary = {
   prompt?: string;
@@ -185,42 +180,16 @@ export const buildAstGroundingSummary = async ({
     };
   }
 
-  // Build a list of (checkoutPath, repositoryId) pairs to try for local grounding.
-  // Priority: explicit work-item clone → base clones registered at desktop claim time.
-  const localCloneCandidates: Array<{ checkoutPath: string; repositoryId: string }> = [];
-
-  if (checkoutPath && repositoryId) {
-    localCloneCandidates.push({ checkoutPath, repositoryId });
-  }
-
-  // Fall back to base clones seeded by desktop claim when no work-item checkout is given.
-  if (!checkoutPath) {
-    const baseClones = getCapabilityBaseClones(capability.id).filter(e => e.isGitRepo);
-    // Primary repo first.
-    const sorted = [
-      ...baseClones.filter(e => e.isPrimary),
-      ...baseClones.filter(e => !e.isPrimary),
-    ];
-    for (const clone of sorted) {
-      localCloneCandidates.push({ checkoutPath: clone.checkoutPath, repositoryId: clone.repositoryId });
-    }
-
-    // Operator working directory fallback — same strategy as browse_code.
-    // Resolve from operator's working directory, NOT capability.localDirectories.
-    if (localCloneCandidates.length === 0) {
-      const operatorWorkDir = await resolveOperatorWorkingDirectory();
-      if (operatorWorkDir) {
-        const capSlug = buildCapabilityCheckoutSlug(capability);
-        const clonePaths = await discoverExistingClonePaths(operatorWorkDir, capSlug);
-        for (const clonePath of clonePaths) {
-          localCloneCandidates.push({
-            checkoutPath: clonePath,
-            repositoryId: capability.id,
-          });
-        }
-      }
-    }
-  }
+  const localCloneCandidates = await resolveCapabilityCodeRoots({
+    capability: {
+      id: capability.id,
+      name: capability.name,
+      repositories: [],
+    },
+    workItem,
+    explicitCheckoutPath: checkoutPath,
+    explicitRepositoryId: repositoryId,
+  });
 
   // Track the first valid candidate for fallback (even if no symbols match).
   let firstValidCandidate: { checkoutPath: string; repositoryId: string } | null = null;
