@@ -243,6 +243,12 @@ let executorOwnedCapabilityIds: string[] = [];
 let executorApprovedWorkspaceRoots: Record<string, string[]> = {};
 let executorLoopTimer: NodeJS.Timeout | null = null;
 let executorTickInFlight = false;
+let lastExecutorDispatchOutcome: {
+  state: "idle" | "skipped" | "claimed" | "error";
+  reason: string;
+  at: string;
+} | null = null;
+let lastExecutorDispatchSignature: string | null = null;
 let readOnlyRepoBootstrapInFlight = new Map<string, Promise<void>>();
 const cancelledRuntimeStreamIds = new Set<string>();
 
@@ -252,6 +258,41 @@ const createAbortError = (message = 'Desktop runtime stream was cancelled.') => 
   return error;
 };
 
+const recordExecutorDispatchOutcome = ({
+  state,
+  reason,
+  details,
+  level = 'info',
+}: {
+  state: "idle" | "skipped" | "claimed" | "error";
+  reason: string;
+  details?: Record<string, unknown>;
+  level?: 'info' | 'warn' | 'error';
+}) => {
+  const at = new Date().toISOString();
+  lastExecutorDispatchOutcome = { state, reason, at };
+  const signature = `${state}:${reason}`;
+  if (signature === lastExecutorDispatchSignature) {
+    return;
+  }
+  lastExecutorDispatchSignature = signature;
+  const payload = {
+    state,
+    reason,
+    at,
+    ...(details || {}),
+  };
+  if (level === 'error') {
+    console.error('[desktop-executor]', payload);
+    return;
+  }
+  if (level === 'warn') {
+    console.warn('[desktop-executor]', payload);
+    return;
+  }
+  console.info('[desktop-executor]', payload);
+};
+
 const isRuntimeStreamCancelled = (streamId: string) =>
   Boolean(streamId) && cancelledRuntimeStreamIds.has(streamId);
 
@@ -259,6 +300,66 @@ const throwIfRuntimeStreamCancelled = (streamId: string) => {
   if (isRuntimeStreamCancelled(streamId)) {
     throw createAbortError();
   }
+};
+
+const adoptActorContext = (
+  actorContext?: ActorContext | null,
+  options?: {
+    source?: string;
+    syncExecutor?: boolean;
+  },
+) => {
+  const nextActor =
+    actorContext && typeof actorContext === 'object'
+      ? (actorContext as ActorContext)
+      : null;
+  if (!nextActor?.userId?.trim()) {
+    return false;
+  }
+
+  const nextSignature = JSON.stringify({
+    userId: nextActor.userId,
+    displayName: nextActor.displayName || '',
+    teamIds: nextActor.teamIds || [],
+    actedOnBehalfOfStakeholderIds: nextActor.actedOnBehalfOfStakeholderIds || [],
+  });
+  const currentSignature = activeActorContext
+    ? JSON.stringify({
+        userId: activeActorContext.userId,
+        displayName: activeActorContext.displayName || '',
+        teamIds: activeActorContext.teamIds || [],
+        actedOnBehalfOfStakeholderIds:
+          activeActorContext.actedOnBehalfOfStakeholderIds || [],
+      })
+    : '';
+
+  activeActorContext = nextActor;
+  if (nextSignature !== currentSignature) {
+    console.info('[desktop-runtime-worker] adopted actor context', {
+      source: options?.source || 'unknown',
+      actorUserId: nextActor.userId,
+      actorDisplayName: nextActor.displayName || null,
+    });
+  }
+
+  if (options?.syncExecutor !== false) {
+    void (async () => {
+      try {
+        await loadPreferencesFromServer().catch(() => undefined);
+        await syncExecutorRegistration().catch(() => undefined);
+        ensureDesktopExecutorLoop();
+      } catch (error) {
+        console.warn(
+          `[desktop-runtime-worker] failed to sync actor context from ${
+            options?.source || 'unknown'
+          }:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    })();
+  }
+
+  return true;
 };
 
 const respond = ({
@@ -511,7 +612,19 @@ const executeClaimedRun = async (run: WorkflowRun) => {
 };
 
 const tickDesktopExecutor = async () => {
-  if (executorTickInFlight || !activeActorContext?.userId) {
+  if (executorTickInFlight) {
+    recordExecutorDispatchOutcome({
+      state: 'skipped',
+      reason: 'Desktop executor tick skipped because a prior poll is still running.',
+    });
+    return;
+  }
+
+  if (!activeActorContext?.userId) {
+    recordExecutorDispatchOutcome({
+      state: 'skipped',
+      reason: 'Desktop executor is waiting for the active workspace operator to be selected.',
+    });
     return;
   }
 
@@ -521,10 +634,15 @@ const tickDesktopExecutor = async () => {
 
     const runtimeStatus = await buildDesktopRuntimeStatus();
     if (!runtimeStatus.configured) {
-      return;
-    }
-
-    if (executorOwnedCapabilityIds.length === 0) {
+      recordExecutorDispatchOutcome({
+        state: 'skipped',
+        reason:
+          runtimeStatus.availableProviders?.find(provider => provider.defaultSelected)?.validation
+            ?.message ||
+          runtimeStatus.lastRuntimeError ||
+          'Desktop runtime is not configured.',
+        level: 'warn',
+      });
       return;
     }
 
@@ -543,10 +661,36 @@ const tickDesktopExecutor = async () => {
 
     executorOwnedCapabilityIds = claimResult.ownedCapabilityIds || executorOwnedCapabilityIds;
     if (!claimResult.run) {
+      recordExecutorDispatchOutcome({
+        state: 'idle',
+        reason:
+          executorOwnedCapabilityIds.length === 0
+            ? 'Desktop executor owns no capabilities yet, so there is nothing to claim.'
+            : 'No queued run was available for this desktop executor.',
+      });
       return;
     }
 
+    recordExecutorDispatchOutcome({
+      state: 'claimed',
+      reason: `Claimed run ${claimResult.run.id} for execution.`,
+      details: {
+        runId: claimResult.run.id,
+        capabilityId: claimResult.run.capabilityId,
+        queueReason: claimResult.run.queueReason || null,
+      },
+    });
     await executeClaimedRun(claimResult.run);
+  } catch (error) {
+    recordExecutorDispatchOutcome({
+      state: 'error',
+      reason:
+        error instanceof Error
+          ? error.message
+          : 'Desktop executor polling failed unexpectedly.',
+      level: 'error',
+    });
+    throw error;
   } finally {
     executorTickInFlight = false;
   }
@@ -558,9 +702,13 @@ const ensureDesktopExecutorLoop = () => {
   }
 
   executorLoopTimer = setInterval(() => {
-    void tickDesktopExecutor().catch(() => undefined);
+    void tickDesktopExecutor().catch(error => {
+      console.error('[desktop-executor] unhandled poll failure', error);
+    });
   }, EXECUTOR_POLL_MS);
-  void tickDesktopExecutor().catch(() => undefined);
+  void tickDesktopExecutor().catch(error => {
+    console.error('[desktop-executor] initial poll failure', error);
+  });
 };
 
 const withoutPersistentIdentity = <T extends Partial<Capability> | Partial<CapabilityAgent>>(
@@ -1533,6 +1681,9 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
       String(process.env.LOCAL_OPENAI_API_KEY || process.env.OPENAI_COMPAT_API_KEY || '').trim(),
     ),
     lastRuntimeError: identityResult.error,
+    lastExecutorDispatchState: lastExecutorDispatchOutcome?.state,
+    lastExecutorDispatchReason: lastExecutorDispatchOutcome?.reason || null,
+    lastExecutorDispatchAt: lastExecutorDispatchOutcome?.at || null,
     streaming: true,
     githubIdentity: identityResult.identity,
     githubIdentityError: identityResult.error,
@@ -1613,6 +1764,13 @@ reader.on('line', async line => {
     }
 
     if (message.type === 'runtime:status') {
+      adoptActorContext(
+        (message.payload?.actorContext as ActorContext | null | undefined) ||
+          null,
+        {
+        source: 'runtime:status',
+        },
+      );
       respond({
         requestId,
         payload: await buildDesktopRuntimeStatus(),
@@ -1621,26 +1779,14 @@ reader.on('line', async line => {
     }
 
     if (message.type === 'runtime:actor-context') {
-      activeActorContext =
-        (message.payload?.actor as ActorContext | null | undefined) || null;
-
-      if (activeActorContext?.userId) {
-        // Actor context is called from the renderer during app/session setup.
-        // Keep the IPC response fast; provider probing, DB preferences, and
-        // executor registration can each touch the control plane or local CLIs.
-        void (async () => {
-          try {
-            await loadPreferencesFromServer().catch(() => undefined);
-            await syncExecutorRegistration().catch(() => undefined);
-            ensureDesktopExecutorLoop();
-          } catch (error) {
-            console.warn(
-              '[worker] background actor-context initialization failed:',
-              error instanceof Error ? error.message : error,
-            );
-          }
-        })();
-      } else {
+      const actorWasAdopted = adoptActorContext(
+        (message.payload?.actor as ActorContext | null | undefined) || null,
+        {
+          source: 'runtime:actor-context',
+        },
+      );
+      if (!actorWasAdopted) {
+        activeActorContext = null;
         executorHeartbeatStatus = 'OFFLINE';
         executorHeartbeatAt = undefined;
         executorOwnedCapabilityIds = [];
@@ -1842,6 +1988,12 @@ reader.on('line', async line => {
       if (!payload.message || !payload.capability || !payload.agent) {
         throw new Error('Capability, agent, and message are required.');
       }
+      adoptActorContext(
+        (payload.actorContext as ActorContext | null | undefined) || null,
+        {
+          source: 'runtime:chat',
+        },
+      );
 
       let context = await resolveDesktopRuntimeContext(payload as DesktopRuntimePayload);
       if (context.chatAction?.handled) {
@@ -1916,13 +2068,33 @@ reader.on('line', async line => {
             runtimeLane: 'desktop-runtime-worker',
           }),
       );
+      // ── Post-LLM diagnostics (non-streaming) ────────────────────────────
+      console.log(`\n[chat:llm] ══════ LLM RESULT (non-stream) ══════`);
+      console.log(`[chat:llm]   contentLength:    ${(result.content || '').length}`);
+      console.log(`[chat:llm]   contentPreview:   ${(result.content || '').slice(0, 300)}`);
+      console.log(`[chat:llm]   toolLoopUsed:     ${result.toolLoopUsed}`);
+      console.log(`[chat:llm]   attemptedToolIds: ${(result.attemptedToolIds || []).join(', ') || 'NONE'}`);
+      console.log(`[chat:llm]   model:            ${result.model || 'unknown'}`);
+      // ────────────────────────────────────────────────────────────────────
+
       const runtimeTarget = await resolveRuntimeProviderTarget(result.runtimeProviderKey);
+      const enforceEvidenceOnlyNonStream = context.memoryTrustMode === 'repo-evidence-only';
       const sanitizedResult = await sanitizeGroundedChatResponse({
         content: result.content || '',
         checkoutPath: context.checkoutPath,
         verifiedPaths: context.verifiedPaths,
-        enforceEvidenceOnly: context.memoryTrustMode === 'repo-evidence-only',
+        enforceEvidenceOnly: enforceEvidenceOnlyNonStream,
       });
+
+      // ── Post-sanitize diagnostics (non-streaming) ────────────────────────
+      console.log(`\n[chat:sanitize] ══════ SANITIZE (non-stream) ══════`);
+      console.log(`[chat:sanitize]   enforceEvidenceOnly: ${enforceEvidenceOnlyNonStream}`);
+      console.log(`[chat:sanitize]   contentBefore:       ${(result.content || '').length} chars`);
+      console.log(`[chat:sanitize]   contentAfter:        ${sanitizedResult.content.length} chars`);
+      if (!sanitizedResult.content.trim() && (result.content || '').trim()) {
+        console.error(`[chat:sanitize] ❌ CONTENT WIPED — enforceEvidenceOnly=${enforceEvidenceOnlyNonStream}, checkoutPath=${context.checkoutPath || 'NONE'}`);
+      }
+      // ────────────────────────────────────────────────────────────────────
 
       respond({
         requestId,
@@ -2048,6 +2220,12 @@ reader.on('line', async line => {
       if (!payload.message || !payload.capability || !payload.agent) {
         throw new Error('Capability, agent, and message are required.');
       }
+      adoptActorContext(
+        (payload.actorContext as ActorContext | null | undefined) || null,
+        {
+          source: 'runtime:chat-stream',
+        },
+      );
 
       let context = await resolveDesktopRuntimeContext(payload as DesktopRuntimePayload);
       throwIfRuntimeStreamCancelled(streamId);
@@ -2106,6 +2284,24 @@ reader.on('line', async line => {
         context,
       );
       throwIfRuntimeStreamCancelled(streamId);
+
+      // ── Chat-stream context diagnostics ─────────────────────────────────
+      console.log(`\n[chat-stream:context] ══════ CONTEXT RESOLVED ══════`);
+      console.log(`[chat-stream:context]   streamId:          ${streamId}`);
+      console.log(`[chat-stream:context]   contextMode:       ${payload.contextMode || 'GENERAL'}`);
+      console.log(`[chat-stream:context]   scope:             ${context.scope} / ${context.scopeId || 'none'}`);
+      console.log(`[chat-stream:context]   isCodeQuestion:    ${context.isCodeQuestion}`);
+      console.log(`[chat-stream:context]   memoryTrustMode:   ${context.memoryTrustMode}`);
+      console.log(`[chat-stream:context]   allowedToolIds:    ${context.resolvedAllowedToolIds.join(', ') || 'NONE'}`);
+      console.log(`[chat-stream:context]   checkoutPath:      ${context.checkoutPath || 'NONE'}`);
+      console.log(`[chat-stream:context]   verifiedPaths:     ${context.verifiedPaths?.length ?? 0} paths`);
+      console.log(`[chat-stream:context]   workContextSource: ${context.workContextSource}`);
+      console.log(`[chat-stream:context]   workContextHydrated: ${context.workContextHydrated}`);
+      console.log(`[chat-stream:context]   agentId:           ${context.agent?.id || 'none'}`);
+      console.log(`[chat-stream:context]   capabilityId:      ${(context.bundle?.capability || context.capability)?.id || 'none'}`);
+      console.log(`[chat-stream:context]   effectiveMessage:  ${context.effectiveMessage.slice(0, 200)}`);
+      // ────────────────────────────────────────────────────────────────────
+
       const runtimeStatus = await buildDesktopRuntimeStatus();
       if (!runtimeStatus.configured) {
         throw new Error(getMissingRuntimeConfigurationMessage());
@@ -2185,13 +2381,45 @@ reader.on('line', async line => {
           }),
       );
       throwIfRuntimeStreamCancelled(streamId);
+
+      // ── Post-LLM diagnostics ─────────────────────────────────────────────
+      console.log(`\n[chat-stream:llm] ══════ LLM RESULT ══════`);
+      console.log(`[chat-stream:llm]   contentLength:       ${(streamed.content || '').length}`);
+      console.log(`[chat-stream:llm]   contentPreview:      ${(streamed.content || '').slice(0, 300)}`);
+      console.log(`[chat-stream:llm]   toolLoopUsed:        ${streamed.toolLoopUsed}`);
+      console.log(`[chat-stream:llm]   attemptedToolIds:    ${(streamed.attemptedToolIds || []).join(', ') || 'NONE'}`);
+      console.log(`[chat-stream:llm]   toolIntentDisposition: ${streamed.toolIntentDisposition || 'none'}`);
+      console.log(`[chat-stream:llm]   model:               ${streamed.model || 'unknown'}`);
+      console.log(`[chat-stream:llm]   promptTokens:        ${streamed.usage?.promptTokens ?? 0}`);
+      console.log(`[chat-stream:llm]   completionTokens:    ${streamed.usage?.completionTokens ?? 0}`);
+      // ────────────────────────────────────────────────────────────────────
+
       const runtimeTarget = await resolveRuntimeProviderTarget(streamed.runtimeProviderKey);
+      const enforceEvidenceOnly = context.memoryTrustMode === 'repo-evidence-only';
       const sanitizedStream = await sanitizeGroundedChatResponse({
         content: streamed.content || '',
         checkoutPath: context.checkoutPath,
         verifiedPaths: context.verifiedPaths,
-        enforceEvidenceOnly: context.memoryTrustMode === 'repo-evidence-only',
+        enforceEvidenceOnly,
       });
+
+      // ── Post-sanitize diagnostics ────────────────────────────────────────
+      console.log(`\n[chat-stream:sanitize] ══════ SANITIZE RESULT ══════`);
+      console.log(`[chat-stream:sanitize]   enforceEvidenceOnly:         ${enforceEvidenceOnly}`);
+      console.log(`[chat-stream:sanitize]   checkoutPath:                ${context.checkoutPath || 'NONE'}`);
+      console.log(`[chat-stream:sanitize]   verifiedPaths:               ${context.verifiedPaths?.length ?? 0}`);
+      console.log(`[chat-stream:sanitize]   pathValidationState:         ${sanitizedStream.pathValidationState}`);
+      console.log(`[chat-stream:sanitize]   unverifiedClaimsRemoved:     ${sanitizedStream.unverifiedPathClaimsRemoved.length}`);
+      console.log(`[chat-stream:sanitize]   contentBefore:               ${(streamed.content || '').length} chars`);
+      console.log(`[chat-stream:sanitize]   contentAfter:                ${sanitizedStream.content.length} chars`);
+      if (sanitizedStream.unverifiedPathClaimsRemoved.length > 0) {
+        console.warn(`[chat-stream:sanitize] ⚠️  STRIPPED unverified paths:`, sanitizedStream.unverifiedPathClaimsRemoved.slice(0, 10));
+      }
+      if (!sanitizedStream.content.trim() && (streamed.content || '').trim()) {
+        console.error(`[chat-stream:sanitize] ❌ CONTENT WIPED BY SANITIZER — enforceEvidenceOnly=${enforceEvidenceOnly}, checkoutPath=${context.checkoutPath || 'NONE'}`);
+      }
+      // ────────────────────────────────────────────────────────────────────
+
       throwIfRuntimeStreamCancelled(streamId);
 
       const completeEvent: ChatStreamEvent = {
