@@ -3042,12 +3042,21 @@ export const invokeScopedCapabilitySession = async ({
         });
       }
 
-      if (!shouldFallbackToHttp(error) || !shouldAllowHttpFallback()) {
+      const httpFallbackEligible = shouldFallbackToHttp(error);
+      const httpFallbackAllowed = shouldAllowHttpFallback();
+      console.warn(
+        `[invokeScopedSession] SDK/provider error for scope=${scope} scopeId=${scopeId || 'none'} | fallbackEligible=${httpFallbackEligible} | fallbackAllowed=${httpFallbackAllowed} | error=${error instanceof Error ? error.message : String(error)}`,
+      );
+      if (!httpFallbackEligible || !httpFallbackAllowed) {
         throw error;
       }
     }
   }
 
+  // ── HTTP fallback path ───────────────────────────────────────────────────
+  console.warn(
+    `[invokeScopedSession] Taking HTTP fallback for scope=${scope} scopeId=${scopeId || 'none'} | provider=${resolveAgentProviderKey(agent)}`,
+  );
   const fallbackMessages: ProviderMessage[] = [
     {
       role: 'system',
@@ -3098,6 +3107,14 @@ export const invokeScopedCapabilitySession = async ({
           tool_choice,
         });
 
+  console.log(
+    `[invokeScopedSession] HTTP fallback result: contentLength=${fallbackResult.content?.length ?? 0} | model=${fallbackResult.model || 'unknown'} | tokens=${fallbackResult.usage?.totalTokens ?? 0}`,
+  );
+  if (!fallbackResult.content?.trim()) {
+    console.error(
+      `[invokeScopedSession] ❌ HTTP fallback also returned empty content for scope=${scope} scopeId=${scopeId || 'none'}`,
+    );
+  }
   if (onDelta && fallbackResult.content) {
     onDelta(fallbackResult.content);
   }
