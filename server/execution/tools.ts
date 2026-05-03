@@ -1068,11 +1068,18 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         0,
         Math.min(Number(args.includeCallees ?? 0), 3),
       );
-      // Try to read the file at the resolved path. If it doesn't exist there
-      // (common when the symbol index is from the base clone but the resolved
-      // path was prefixed with a work-item checkout that hasn't materialised
-      // that file yet), retry with the same relative sub-path under each
-      // sibling code root before surfacing ENOENT to the caller.
+      // Try to read the file at the resolved path. On ENOENT we attempt two
+      // recovery strategies before surfacing the error:
+      //
+      // Strategy A — sibling-root lookup: the path is relative to a known code
+      //   root; try the same relative sub-path under every OTHER root.  Handles
+      //   the case where symbol index entries were built from the base clone but
+      //   _checkoutRoot was set to a work-item directory.
+      //
+      // Strategy B — work-item prefix strip: the LLM remembered a
+      //   `/WI-XXXXX/<repo-relative-path>` path from an earlier turn and passed
+      //   it directly to workspace_read.  Extract the repo-relative portion after
+      //   the work-item ID segment and probe every available code root.
       let content: string;
       let actualReadPath = targetPath;
       try {
@@ -1080,34 +1087,63 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       } catch (readErr) {
         if (
           readErr instanceof Error &&
-          (readErr as NodeJS.ErrnoException).code === "ENOENT" &&
-          codeRoots.length > 1
+          (readErr as NodeJS.ErrnoException).code === "ENOENT"
         ) {
-          // Compute the relative path from whichever code root contains targetPath.
+          // Strategy A: relative path from a known code root.
           const sourceRoot = findContainingCodeRoot(targetPath, codeRoots);
           const relFromRoot = sourceRoot
             ? path.relative(sourceRoot.checkoutPath, targetPath)
             : null;
+
+          // Strategy B: strip work-item prefix (e.g. /WI-BIXFCO/src/…).
+          // Matches any segment that looks like a work-item ID (WI- prefix).
+          const wiMatch = targetPath.match(/\/WI-[A-Z0-9]+\/(.*)/);
+          const relFromWiPrefix = wiMatch ? wiMatch[1] : null;
+
+          const rels = [...new Set([relFromRoot, relFromWiPrefix].filter(Boolean))] as string[];
+
           let fallbackContent: string | null = null;
           for (const altRoot of codeRoots) {
-            if (altRoot === sourceRoot) continue;
-            const altPath = relFromRoot
-              ? path.join(altRoot.checkoutPath, relFromRoot)
-              : null;
-            if (!altPath) continue;
-            try {
-              fallbackContent = await fs.readFile(altPath, "utf8");
-              actualReadPath = altPath;
-              console.warn(
-                `[workspace_read] ENOENT at primary path ${targetPath} — fell back to ${altPath} (root source: ${altRoot.source})`,
-              );
-              break;
-            } catch {
-              // try next root
+            if (altRoot === sourceRoot) continue; // already tried implicitly
+            for (const rel of rels) {
+              const altPath = path.join(altRoot.checkoutPath, rel);
+              try {
+                fallbackContent = await fs.readFile(altPath, "utf8");
+                actualReadPath = altPath;
+                console.warn(
+                  `[workspace_read] ENOENT at ${targetPath} — fell back to ${altPath} (root: ${altRoot.source})`,
+                );
+                break;
+              } catch {
+                // try next combination
+              }
+            }
+            if (fallbackContent !== null) break;
+          }
+
+          // Strategy B also covers the case where there is only one code root:
+          // try relFromWiPrefix directly on the single available root.
+          if (fallbackContent === null && relFromWiPrefix && codeRoots.length > 0) {
+            for (const altRoot of codeRoots) {
+              const altPath = path.join(altRoot.checkoutPath, relFromWiPrefix);
+              try {
+                fallbackContent = await fs.readFile(altPath, "utf8");
+                actualReadPath = altPath;
+                console.warn(
+                  `[workspace_read] ENOENT at ${targetPath} — WI-prefix strip fell back to ${altPath} (root: ${altRoot.source})`,
+                );
+                break;
+              } catch {
+                // keep trying
+              }
             }
           }
+
           if (fallbackContent === null) {
-            throw readErr; // no root had the file — surface original ENOENT
+            console.error(
+              `[workspace_read] ❌ No fallback found for ${targetPath} (tried ${rels.length} relative path(s) across ${codeRoots.length} code root(s))`,
+            );
+            throw readErr; // surface original ENOENT
           }
           content = fallbackContent;
         } else {
