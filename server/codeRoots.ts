@@ -194,13 +194,27 @@ export const resolveCapabilityCodeRoots = async ({
   };
 
   if (explicitCheckoutPath) {
-    addRoot({
-      checkoutPath: explicitCheckoutPath,
-      repository: pickDefaultRepository(repositories, explicitRepositoryId),
-      repositoryId: explicitRepositoryId,
-      source: "work-item-checkout",
-      isPrimary: true,
-    });
+    // Only promote the work-item checkout to primary when it actually exists on
+    // disk. If the directory is missing (no checkout yet, or a stale path), fall
+    // through to the base clones so symbol paths resolve against real files.
+    let workItemCheckoutExists = false;
+    try {
+      await fs.access(explicitCheckoutPath);
+      workItemCheckoutExists = true;
+    } catch {
+      console.warn(
+        `[codeRoots] explicit work-item checkout not found on disk, skipping: ${explicitCheckoutPath}`,
+      );
+    }
+    if (workItemCheckoutExists) {
+      addRoot({
+        checkoutPath: explicitCheckoutPath,
+        repository: pickDefaultRepository(repositories, explicitRepositoryId),
+        repositoryId: explicitRepositoryId,
+        source: "work-item-checkout",
+        isPrimary: true,
+      });
+    }
   }
 
   const baseClones = capability.id

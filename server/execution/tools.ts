@@ -1068,11 +1068,56 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         0,
         Math.min(Number(args.includeCallees ?? 0), 3),
       );
-      const content = await fs.readFile(targetPath, "utf8");
+      // Try to read the file at the resolved path. If it doesn't exist there
+      // (common when the symbol index is from the base clone but the resolved
+      // path was prefixed with a work-item checkout that hasn't materialised
+      // that file yet), retry with the same relative sub-path under each
+      // sibling code root before surfacing ENOENT to the caller.
+      let content: string;
+      let actualReadPath = targetPath;
+      try {
+        content = await fs.readFile(targetPath, "utf8");
+      } catch (readErr) {
+        if (
+          readErr instanceof Error &&
+          (readErr as NodeJS.ErrnoException).code === "ENOENT" &&
+          codeRoots.length > 1
+        ) {
+          // Compute the relative path from whichever code root contains targetPath.
+          const sourceRoot = findContainingCodeRoot(targetPath, codeRoots);
+          const relFromRoot = sourceRoot
+            ? path.relative(sourceRoot.checkoutPath, targetPath)
+            : null;
+          let fallbackContent: string | null = null;
+          for (const altRoot of codeRoots) {
+            if (altRoot === sourceRoot) continue;
+            const altPath = relFromRoot
+              ? path.join(altRoot.checkoutPath, relFromRoot)
+              : null;
+            if (!altPath) continue;
+            try {
+              fallbackContent = await fs.readFile(altPath, "utf8");
+              actualReadPath = altPath;
+              console.warn(
+                `[workspace_read] ENOENT at primary path ${targetPath} — fell back to ${altPath} (root source: ${altRoot.source})`,
+              );
+              break;
+            } catch {
+              // try next root
+            }
+          }
+          if (fallbackContent === null) {
+            throw readErr; // no root had the file — surface original ENOENT
+          }
+          content = fallbackContent;
+        } else {
+          throw readErr;
+        }
+      }
       const codeRootForPath =
-        pathResolution.repoRoot || findContainingCodeRoot(targetPath, codeRoots);
+        pathResolution.repoRoot || findContainingCodeRoot(actualReadPath, codeRoots);
       const relativePath = path
-        .relative(codeRootForPath?.checkoutPath || workspacePath, targetPath)
+        .relative(codeRootForPath?.checkoutPath || workspacePath, actualReadPath)
         .replace(/\\/g, "/");
       const readDiagnostics = {
         resolvedCodeRoots: summarizeResolvedCodeRoots(codeRoots),
