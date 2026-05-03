@@ -27,7 +27,7 @@ export const OrchestratorCopilotThread = ({
   threadRef,
   onScroll,
 }: Props) => (
-  <div className="flex min-h-0 flex-1 flex-col">
+  <div className="flex min-h-[12rem] flex-1 flex-col">
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
       <div>
         <p className="workspace-meta-label">Conversation</p>

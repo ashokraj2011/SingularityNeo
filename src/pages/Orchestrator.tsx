@@ -2581,7 +2581,13 @@ const Orchestrator = () => {
     () =>
       selectedWorkItem
         ? workspace.messages.filter(
-            (message) => message.workItemId === selectedWorkItem.id,
+            // Exclude hidden rows (tool-history entries persisted by the
+            // agent runtime so the next LLM turn inherits prior tool
+            // evidence).  They must not appear in the rendered thread;
+            // the runtime already forwards them back through the history
+            // window on the next invocation.
+            (message) =>
+              message.workItemId === selectedWorkItem.id && !message.hidden,
           )
         : [],
     [selectedWorkItem, workspace.messages],
@@ -3050,6 +3056,11 @@ const Orchestrator = () => {
     }
 
     if (currentRun) {
+      if (currentRun.queueReason === "PREPARING_EXECUTION_CONTEXT") {
+        return `Preparing the desktop workspace and shared branch for ${
+          selectedCurrentStep?.name || getPhaseMeta(selectedWorkItem.phase).label
+        } before agent execution starts.`;
+      }
       return `${RUN_STATUS_META[currentRun.status].label} in ${
         selectedCurrentStep?.name || getPhaseMeta(selectedWorkItem.phase).label
       } with ${selectedAgent?.name || "the assigned agent"} working this stage.`;

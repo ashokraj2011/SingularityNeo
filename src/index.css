@@ -992,12 +992,15 @@
   }
 
   .orchestrator-stage-chat-thread-dock {
-    @apply mt-0 min-h-0 flex-1 overflow-y-auto pr-1;
+    @apply mt-0 flex-1 overflow-y-auto pr-1;
     /* Override the dark Operate-tab thread look with a soft, Claude-style surface */
     background: linear-gradient(180deg, rgba(250, 251, 255, 0.97), rgba(240, 243, 250, 0.95));
-    /* Cap thread height so the conversation scrolls rather than pushing the
-       composer off-screen. The clamp keeps a readable minimum on small
-       viewports while not consuming the whole dock on tall ones. */
+    /* Guarantee the thread is always tall enough to show at least a couple of
+       messages even when the status card takes significant space. The clamp
+       floors at 8rem (≈128 px) so the scroll area is never collapsed to zero
+       by the flex layout. Cap at 38rem so it doesn't swallow the whole dock on
+       tall viewports. */
+    min-height: clamp(8rem, 18vh, 14rem);
     max-height: clamp(18rem, 48vh, 38rem);
     /* `auto` (not `contain`) so wheel events chain to the page when the
        thread is at its top/bottom boundary — lets users scroll the whole
@@ -1068,15 +1071,22 @@
        normally to the page (only overflow:auto/scroll would capture them).
        This is the necessary complement to the thread's own overflow-y:auto:
        without a clipping ancestor, flex-1 children can't compute a bounded
-       height and the thread grows to show all messages without scrolling. */
+       height and the thread grows to show all messages without scrolling.
+       min-height raised (26→36rem, 56vh→68vh) so that the thread section
+       always gets meaningful height even when the status card is at its
+       maximum (12rem). Budget at 900 px: 68vh≈612 - status(12rem≈192) -
+       composer(≈120) - gaps(≈64) = ~236px for the thread. */
     @apply flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-5 py-4;
-    min-height: clamp(26rem, 56vh, 46rem);
-    max-height: calc(100vh - 15rem);
+    min-height: clamp(36rem, 68vh, 52rem);
+    max-height: calc(100vh - 12rem);
   }
 
   .orchestrator-copilot-dock-status {
+    /* Reduced from min(16rem, 28vh) → min(12rem, 24vh) so the status card
+       scrolls sooner on smaller viewports, preserving vertical room for the
+       conversation thread below it. */
     @apply min-h-0 shrink-0 overflow-y-auto;
-    max-height: min(16rem, 28vh);
+    max-height: min(12rem, 24vh);
   }
 
   .orchestrator-copilot-dock-composer {
