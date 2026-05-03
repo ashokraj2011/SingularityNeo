@@ -1066,19 +1066,23 @@
   }
 
   .orchestrator-copilot-dock-body {
-    /* overflow: hidden clips content that exceeds max-height without creating
-       a scroll container — so wheel events over the thread/status still bubble
-       normally to the page (only overflow:auto/scroll would capture them).
-       This is the necessary complement to the thread's own overflow-y:auto:
-       without a clipping ancestor, flex-1 children can't compute a bounded
-       height and the thread grows to show all messages without scrolling.
-       min-height raised (26→36rem, 56vh→68vh) so that the thread section
-       always gets meaningful height even when the status card is at its
-       maximum (12rem). Budget at 900 px: 68vh≈612 - status(12rem≈192) -
-       composer(≈120) - gaps(≈64) = ~236px for the thread. */
-    @apply flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-5 py-4;
+    /* overflow-y:auto instead of overflow-hidden so the dock body becomes a
+       scroll container when its total content (status + thread + guidance
+       composer) exceeds max-height.  This ensures the "Guide and restart"
+       button (and any other action at the bottom of the composer) is always
+       reachable by scrolling, rather than being silently clipped.
+       The thread's own max-height (clamp(18rem…38rem)) already limits it
+       independently, so dropping the clipping ancestor still keeps the
+       conversation thread from growing unboundedly.
+       Trade-off: wheel events over the dock body are captured by the body's
+       scroll container when it has scrollable overflow; they chain back to
+       the page at the top/bottom boundary, which is standard browser behaviour
+       and acceptable for an interactive panel. */
+    @apply flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4;
     min-height: clamp(36rem, 68vh, 52rem);
     max-height: calc(100vh - 12rem);
+    /* Stable gutter so the scrollbar doesn't cause horizontal layout shift. */
+    scrollbar-gutter: stable;
   }
 
   .orchestrator-copilot-dock-status {
