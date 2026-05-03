@@ -325,12 +325,30 @@ const controlPlaneRequest = async <T>(
     timeoutMs?: number;
   },
 ): Promise<T> => {
-  const response = await fetch(new URL(path, `${controlPlaneUrl}/`), {
-    method: options?.method || 'GET',
-    headers: withActorHeaders(options?.actorContext),
-    body: options?.body !== undefined ? JSON.stringify(options.body) : undefined,
-    signal: AbortSignal.timeout(options?.timeoutMs || 15_000),
-  });
+  const timeoutMs = options?.timeoutMs || 15_000;
+  let response: Response;
+  try {
+    response = await fetch(new URL(path, `${controlPlaneUrl}/`), {
+      method: options?.method || 'GET',
+      headers: withActorHeaders(options?.actorContext),
+      body: options?.body !== undefined ? JSON.stringify(options.body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    // AbortSignal.timeout() throws a DOMException whose `.name` is 'TimeoutError'
+    // (Node 20+) or 'AbortError' on older runtimes. Convert either into a friendly
+    // message that includes the path and budget so callers and IPC consumers see
+    // something actionable instead of the raw "The operation was aborted due to timeout".
+    if (
+      error instanceof Error &&
+      (error.name === 'TimeoutError' || error.name === 'AbortError')
+    ) {
+      throw new Error(
+        `Control plane request timed out after ${timeoutMs}ms (${options?.method || 'GET'} ${path}).`,
+      );
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     let errorMessage = `Control plane request failed with status ${response.status}.`;
@@ -910,6 +928,9 @@ const resolveDesktopRuntimeContext = async (
       `/api/capabilities/${encodeURIComponent(capabilityId)}`,
       {
         actorContext,
+        // Cold-worker bundle fetches over a warming control plane can exceed
+        // the 15s default; give them the same 45s budget as LLM calls.
+        timeoutMs: 45_000,
       },
     );
     const resolvedAgent = resolveRuntimeAgentForWorkspace({
