@@ -8,6 +8,7 @@ import type {
   WorkspaceRole,
   WorkItem,
 } from '../types';
+import { isWorkItemLiveExecution, isWorkItemStaged } from './workItemState';
 import { CAPABILITIES } from '../constants';
 import type { RuntimeStatus } from './api';
 import type { EnterpriseTone } from './enterprise';
@@ -1335,7 +1336,7 @@ const buildNextAction = (
     };
   }
 
-  const activeItem = workspace.workItems.find(item => item.status === 'ACTIVE');
+  const activeItem = workspace.workItems.find(item => isWorkItemLiveExecution(item));
   if (activeItem) {
     return {
       id: `continue-${activeItem.id}`,
@@ -1343,6 +1344,18 @@ const buildNextAction = (
       description: 'Review the current step and keep delivery moving.',
       actionLabel: 'Open work',
       path: `/?selected=${encodeURIComponent(activeItem.id)}`,
+      tone: 'brand',
+    };
+  }
+
+  const stagedItem = workspace.workItems.find(item => isWorkItemStaged(item));
+  if (stagedItem) {
+    return {
+      id: `start-${stagedItem.id}`,
+      title: `Start ${stagedItem.title}`,
+      description: 'This work item is staged and ready to begin execution.',
+      actionLabel: 'Open work',
+      path: `/?selected=${encodeURIComponent(stagedItem.id)}`,
       tone: 'brand',
     };
   }
@@ -1508,7 +1521,9 @@ export const buildCapabilityExperience = ({
     runtimeHealth: getRuntimeHealth(runtimeStatus),
     ownerAgent,
     primaryCopilotAgent,
-    activeWorkCount: workspace.workItems.filter(item => item.status === 'ACTIVE').length,
+    activeWorkCount: workspace.workItems.filter(
+      item => item.status === 'ACTIVE' || isWorkItemStaged(item),
+    ).length,
     blockerCount: workspace.workItems.filter(item => item.status === 'BLOCKED').length,
     approvalCount: workspace.workItems.filter(item => item.status === 'PENDING_APPROVAL').length,
     completedWorkCount: workspace.workItems.filter(item => item.status === 'COMPLETED').length,
@@ -1529,7 +1544,11 @@ export const getBusinessWorkStatusLabel = (status: string) => {
     case 'WAITING_INPUT':
       return 'Waiting for input';
     case 'RUNNING':
+      return 'Running';
     case 'ACTIVE':
+      return 'Active';
+    case 'STAGED':
+      return 'Staged';
     case 'PROCESSING':
       return 'Running';
     case 'COMPLETED':

@@ -184,7 +184,7 @@ describe('capability experience model', () => {
         ],
       }),
       runtimeStatus: {
-        configured: false,
+        configured: true,
         provider: 'GitHub Copilot SDK',
         endpoint: '',
         tokenSource: null,

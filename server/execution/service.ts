@@ -37,6 +37,8 @@ import {
   WorkItemHistoryEntry,
   WorkItemPhase,
   WorkItemPendingRequest,
+  WorkItemStageOverride,
+  WorkItemStageOverrideStatus,
   WorkItemStatus,
   WorkflowStep,
 } from "../../src/types";
@@ -228,6 +230,77 @@ const createLogId = () =>
   `LOG-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createArtifactId = () =>
   `ART-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+
+const ACTIVE_WORKFLOW_RUN_STATUSES = new Set<WorkflowRun["status"]>([
+  "QUEUED",
+  "RUNNING",
+  "WAITING_APPROVAL",
+  "WAITING_HUMAN_TASK",
+  "WAITING_INPUT",
+  "WAITING_CONFLICT",
+]);
+
+const normalizeHumanChecklist = (checklist?: string[]) =>
+  Array.isArray(checklist)
+    ? checklist
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+    : [];
+
+const getWorkItemStageOverride = (
+  workItem: WorkItem,
+  workflowStepId?: string,
+) =>
+  (workItem.stageOverrides || []).find(
+    (override) => override.workflowStepId === workflowStepId,
+  );
+
+const replaceWorkItemStageOverride = (
+  workItem: WorkItem,
+  nextOverride: WorkItemStageOverride,
+) => ({
+  ...workItem,
+  stageOverrides: [
+    ...(workItem.stageOverrides || []).filter(
+      (override) => override.workflowStepId !== nextOverride.workflowStepId,
+    ),
+    nextOverride,
+  ],
+});
+
+const updateWorkItemStageOverrideStatus = ({
+  workItem,
+  workflowStepId,
+  status,
+  completedBy,
+  completedAt,
+  completionSummary,
+}: {
+  workItem: WorkItem;
+  workflowStepId: string;
+  status: WorkItemStageOverrideStatus;
+  completedBy?: string;
+  completedAt?: string;
+  completionSummary?: string;
+}) => {
+  const currentOverride = getWorkItemStageOverride(workItem, workflowStepId);
+  if (!currentOverride || currentOverride.ownerType !== "HUMAN") {
+    return workItem;
+  }
+
+  return replaceWorkItemStageOverride(workItem, {
+    ...currentOverride,
+    status,
+    completedBy:
+      completedBy !== undefined ? completedBy : currentOverride.completedBy,
+    completedAt:
+      completedAt !== undefined ? completedAt : currentOverride.completedAt,
+    completionSummary:
+      completionSummary !== undefined
+        ? completionSummary
+        : currentOverride.completionSummary,
+  });
+};
 const createLearningUpdateId = () =>
   `LEARN-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const createApprovalAssignmentId = () =>
@@ -1120,6 +1193,9 @@ const getStepStatus = (step?: WorkflowStep): WorkItemStatus =>
       ? "BLOCKED"
       : "ACTIVE";
 
+const getPreExecutionStepStatus = (_step?: WorkflowStep): WorkItemStatus =>
+  "STAGED";
+
 const buildPendingRequest = (
   step: WorkflowStep | undefined,
   wait?: { type: RunWaitType; message: string },
@@ -1709,6 +1785,38 @@ const persistProjection = async ({
     artifacts: artifacts || workspace.artifacts,
     learningUpdates: learningUpdates || workspace.learningUpdates,
   });
+};
+
+const persistWorkItemStageOverride = async ({
+  capabilityId,
+  workItemId,
+  workflowOverride,
+  mutate,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  workflowOverride?: Workflow;
+  mutate: (workItem: WorkItem, workflow: Workflow) => WorkItem;
+}) => {
+  const projection = await resolveProjectionContext(
+    capabilityId,
+    workItemId,
+    workflowOverride,
+  );
+  const nextWorkItem = mutate(projection.workItem, projection.workflow);
+
+  if (nextWorkItem === projection.workItem) {
+    return nextWorkItem;
+  }
+
+  await persistProjection({
+    capabilityId,
+    workspace: projection.workspace,
+    workItem: nextWorkItem,
+    workflow: projection.workflow,
+  });
+
+  return nextWorkItem;
 };
 
 const buildTargetedLearningUpdates = ({
@@ -2921,6 +3029,111 @@ const getCurrentWorkflowStep = (detail: WorkflowRunDetail) => {
   return step;
 };
 
+const maybePauseForHumanStageOverride = async ({
+  detail,
+  projection,
+  step,
+  runStep,
+}: {
+  detail: WorkflowRunDetail;
+  projection: ProjectionContext;
+  step: WorkflowStep;
+  runStep: WorkflowRunStep;
+}) => {
+  const stageOverride = getWorkItemStageOverride(projection.workItem, step.id);
+  if (
+    !stageOverride ||
+    stageOverride.ownerType !== "HUMAN" ||
+    stageOverride.status === "COMPLETED" ||
+    stageOverride.status === "CANCELLED"
+  ) {
+    return null;
+  }
+
+  const trimmedInstructions = stageOverride.instructions.trim();
+  if (!trimmedInstructions) {
+    throw new Error(
+      `Human stage override for ${step.name} is missing instructions.`,
+    );
+  }
+
+  const effectiveApprovalPolicy =
+    step.approvalPolicy || stageOverride.approvalPolicy;
+  if (!effectiveApprovalPolicy || effectiveApprovalPolicy.targets.length === 0) {
+    throw new Error(
+      `Human stage override for ${step.name} requires an approval policy before execution can continue.`,
+    );
+  }
+
+  const updatedRunStep = await updateWorkflowRunStep({
+    ...runStep,
+    status: "WAITING",
+    metadata: {
+      ...(runStep.metadata || {}),
+      delegatedHumanTask: {
+        delegatedAt: new Date().toISOString(),
+        delegatedBy: stageOverride.requestedBy,
+        delegatedByUserId: stageOverride.assigneeUserId,
+        instructions: trimmedInstructions,
+        checklist: normalizeHumanChecklist(stageOverride.checklist),
+        assigneeUserId: stageOverride.assigneeUserId || undefined,
+        assigneeRole: stageOverride.assigneeRole || undefined,
+        note: "Activated from a work-item stage ownership override.",
+      },
+    },
+  });
+
+  await insertRunEvent(
+    createRunEvent({
+      capabilityId: detail.run.capabilityId,
+      runId: detail.run.id,
+      workItemId: detail.run.workItemId,
+      runStepId: runStep.id,
+      traceId: detail.run.traceId,
+      spanId: runStep.spanId,
+      type: "STEP_DELEGATED_TO_HUMAN",
+      level: "INFO",
+      message: `${step.name} was routed to a human from its stage override.`,
+      details: {
+        source: "STAGE_OVERRIDE",
+        instructions: trimmedInstructions,
+        assigneeUserId: stageOverride.assigneeUserId || null,
+        assigneeRole: stageOverride.assigneeRole || null,
+      },
+    }),
+  );
+
+  const waitDetail = await completeRunWithWait({
+    detail,
+    waitType: "HUMAN_TASK",
+    waitMessage: trimmedInstructions,
+    waitPayload: {
+      checklist: normalizeHumanChecklist(stageOverride.checklist),
+      assigneeUserId: stageOverride.assigneeUserId || undefined,
+      assigneeRole: stageOverride.assigneeRole || undefined,
+      approvalPolicy: effectiveApprovalPolicy,
+      delegatedBy: stageOverride.requestedBy,
+      stageOverrideActivated: true,
+    },
+    runStepOverride: updatedRunStep,
+    approvalPolicyOverride: effectiveApprovalPolicy,
+  });
+
+  await persistWorkItemStageOverride({
+    capabilityId: detail.run.capabilityId,
+    workItemId: detail.run.workItemId,
+    workflowOverride: detail.run.workflowSnapshot,
+    mutate: (workItem) =>
+      replaceWorkItemStageOverride(workItem, {
+        ...stageOverride,
+        status: "ACTIVE",
+        approvalPolicy: effectiveApprovalPolicy,
+      }),
+  });
+
+  return waitDetail;
+};
+
 const getNodeTypeFromRunStep = (runStep: WorkflowRunStep, workflow: Workflow) =>
   getWorkflowNode(workflow, runStep.workflowNodeId)?.type ||
   (runStep.metadata?.nodeType as WorkflowNode["type"] | undefined) ||
@@ -3805,6 +4018,7 @@ const syncCompletedProjection = async ({
   summary,
   artifacts,
   toolInvocationId,
+  completeHumanOverride = false,
 }: {
   detail: WorkflowRunDetail;
   completedStep: WorkflowStep;
@@ -3813,6 +4027,7 @@ const syncCompletedProjection = async ({
   summary: string;
   artifacts: Artifact[];
   toolInvocationId?: string;
+  completeHumanOverride?: boolean;
 }) => {
   const projection = await resolveProjectionContext(
     detail.run.capabilityId,
@@ -3822,9 +4037,16 @@ const syncCompletedProjection = async ({
   const primaryArtifact =
     artifacts.find((artifact) => artifact.artifactKind === "PHASE_OUTPUT") ||
     artifacts[0];
+  const completedWorkItem = completeHumanOverride
+    ? updateWorkItemStageOverrideStatus({
+        workItem: projection.workItem,
+        workflowStepId: completedStep.id,
+        status: "COMPLETED",
+      })
+    : projection.workItem;
   const nextWorkItem: WorkItem = nextStep
     ? {
-        ...projection.workItem,
+        ...completedWorkItem,
         phase: nextStep.phase,
         phaseOwnerTeamId: resolveWorkItemPhaseOwnerTeamId({
           capability: projection.capability,
@@ -3839,7 +4061,7 @@ const syncCompletedProjection = async ({
         activeRunId: detail.run.id,
         lastRunId: detail.run.id,
         history: [
-          ...projection.workItem.history,
+          ...completedWorkItem.history,
           createHistoryEntry(
             completedStep.agentId,
             "Execution completed",
@@ -3850,7 +4072,7 @@ const syncCompletedProjection = async ({
         ],
       }
     : {
-        ...projection.workItem,
+        ...completedWorkItem,
         phase: "DONE",
         currentStepId: undefined,
         assignedAgentId: undefined,
@@ -3860,7 +4082,7 @@ const syncCompletedProjection = async ({
         activeRunId: undefined,
         lastRunId: detail.run.id,
         history: [
-          ...projection.workItem.history,
+          ...completedWorkItem.history,
           createHistoryEntry(
             completedStep.agentId,
             "Story completed",
@@ -5006,6 +5228,7 @@ export const createWorkItemRecord = async ({
   });
   const actorName = getActorDisplayName(actor, "System");
   const shouldClaim = Boolean(actor?.userId) && claimOnCreate;
+  const initialStatus = getPreExecutionStepStatus(firstStep);
 
   const nextWorkItem: WorkItem = {
     id: `WI-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
@@ -5028,7 +5251,7 @@ export const createWorkItemRecord = async ({
     workflowId,
     currentStepId: firstStep.id,
     assignedAgentId: firstStep.agentId,
-    status: getStepStatus(firstStep),
+    status: initialStatus,
     priority,
     tags,
     recordVersion: 1,
@@ -5038,16 +5261,16 @@ export const createWorkItemRecord = async ({
         "Story created",
         `${getWorkItemTaskTypeLabel(normalizedTaskType)} work entered ${firstStep.name} in ${workflow.name}.${normalizedPhaseStakeholders.length > 0 ? ` Stakeholder sign-off was configured for ${normalizedPhaseStakeholders.length} phases.` : ""}${normalizedAttachments.length > 0 ? ` ${normalizedAttachments.length} supporting file${normalizedAttachments.length === 1 ? "" : "s"} were attached for agent context.` : ""}`,
         firstStep.phase,
-        getStepStatus(firstStep),
+        initialStatus,
       ),
       ...(shouldClaim
         ? [
             createHistoryEntry(
               actorName,
               "Operator control claimed",
-              `${actorName} automatically took initial operator control so execution can begin immediately. Release control to hand off to the phase owner team when ready.`,
+              `${actorName} automatically took initial operator control so this work item is ready to start when you are. Release control to hand off to the phase owner team when ready.`,
               firstStep.phase,
-              getStepStatus(firstStep),
+              initialStatus,
             ),
           ]
         : []),
@@ -5188,6 +5411,8 @@ export const moveWorkItemToPhaseControl = async ({
           step: targetStep,
         });
   const actorName = getActorDisplayName(actor, "User");
+  const stagedTargetStatus =
+    targetStep ? getPreExecutionStepStatus(targetStep) : "STAGED";
 
   const nextWorkItem: WorkItem = {
     ...projection.workItem,
@@ -5205,8 +5430,8 @@ export const moveWorkItemToPhaseControl = async ({
       targetPhase === "DONE"
         ? "COMPLETED"
         : targetStep
-          ? getStepStatus(targetStep)
-          : "ACTIVE",
+          ? stagedTargetStatus
+          : "STAGED",
     pendingRequest: undefined,
     blocker: undefined,
     activeRunId: undefined,
@@ -5225,8 +5450,8 @@ export const moveWorkItemToPhaseControl = async ({
         targetPhase === "DONE"
           ? "COMPLETED"
           : targetStep
-            ? getStepStatus(targetStep)
-            : "ACTIVE",
+            ? stagedTargetStatus
+            : "STAGED",
       ),
     ],
   };
@@ -5847,6 +6072,9 @@ const resolveRunWaitAndQueue = async ({
       nextStep: nextWorkflowStep,
       summary: approvalCompletionSummary,
       artifacts: completionArtifacts,
+      completeHumanOverride:
+        typeof openWait.payload?.humanTaskWaitId === "string" &&
+        openWait.payload.humanTaskWaitId.trim().length > 0,
     });
 
     return nextDetail;
@@ -6161,7 +6389,7 @@ export const delegateWorkflowRunToHuman = async ({
     }),
   );
 
-  return completeRunWithWait({
+  const waitDetail = await completeRunWithWait({
     detail,
     waitType: "HUMAN_TASK",
     waitMessage: trimmedInstructions,
@@ -6175,6 +6403,29 @@ export const delegateWorkflowRunToHuman = async ({
     },
     runStepOverride: updatedRunStep,
   });
+
+  await persistWorkItemStageOverride({
+    capabilityId,
+    workItemId: detail.run.workItemId,
+    workflowOverride: detail.run.workflowSnapshot,
+    mutate: (workItem) =>
+      replaceWorkItemStageOverride(workItem, {
+        workflowStepId: currentStep.id,
+        ownerType: "HUMAN",
+        status: "ACTIVE",
+        instructions: trimmedInstructions,
+        checklist: normalizeHumanChecklist(checklist),
+        assigneeUserId: assigneeUserId || undefined,
+        assigneeRole: assigneeRole || undefined,
+        approvalPolicy: effectiveApprovalPolicy,
+        requestedBy: delegatedBy,
+        requestedAt:
+          getWorkItemStageOverride(workItem, currentStep.id)?.requestedAt ||
+          new Date().toISOString(),
+      }),
+  });
+
+  return waitDetail;
 };
 
 export const completeWorkflowRunHumanTask = async ({
@@ -6291,7 +6542,318 @@ export const completeWorkflowRunHumanTask = async ({
     approvalPolicyOverride: effectiveApprovalPolicy,
   });
 
+  await persistWorkItemStageOverride({
+    capabilityId,
+    workItemId: detail.run.workItemId,
+    workflowOverride: detail.run.workflowSnapshot,
+    mutate: (workItem) =>
+      updateWorkItemStageOverrideStatus({
+        workItem,
+        workflowStepId: currentStep.id,
+        status: "ACTIVE",
+        completedBy: resolvedBy,
+        completedAt: new Date().toISOString(),
+        completionSummary: trimmedResolution,
+      }),
+  });
+
   return approvalDetail;
+};
+
+export const setWorkItemStageOwner = async ({
+  capabilityId,
+  workItemId,
+  workflowStepId,
+  ownerType,
+  instructions,
+  checklist,
+  assigneeUserId,
+  assigneeRole,
+  approvalPolicy,
+  note,
+  requestedBy,
+  actor,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  workflowStepId: string;
+  ownerType: "AGENT" | "HUMAN";
+  instructions?: string;
+  checklist?: string[];
+  assigneeUserId?: string;
+  assigneeRole?: string;
+  approvalPolicy?: ApprovalPolicy;
+  note?: string;
+  requestedBy: string;
+  actor?: ActorContext;
+}) => {
+  const projection = await resolveProjectionContext(capabilityId, workItemId);
+  if (!canActorOperateWorkItem({ actor, workItem: projection.workItem })) {
+    throw new Error("Only the current phase owner can change this stage owner.");
+  }
+
+  const step = projection.workflow.steps.find((item) => item.id === workflowStepId);
+  if (!step) {
+    throw new Error(`Workflow step ${workflowStepId} was not found.`);
+  }
+
+  const existingOverride = getWorkItemStageOverride(
+    projection.workItem,
+    workflowStepId,
+  );
+  const activeRun = projection.workItem.activeRunId
+    ? await getWorkflowRunDetail(
+        capabilityId,
+        projection.workItem.activeRunId,
+      ).catch(() => null)
+    : null;
+  const activeStepId = activeRun
+    ? (() => {
+        try {
+          return getCurrentWorkflowStep(activeRun).id;
+        } catch {
+          return undefined;
+        }
+      })()
+    : undefined;
+
+  if (ownerType === "AGENT") {
+    if (
+      activeRun &&
+      activeStepId === workflowStepId &&
+      activeRun.run.status === "WAITING_HUMAN_TASK"
+    ) {
+      throw new Error(
+        "This stage is already waiting on human completion. Mark it done or cancel the run before returning it to the agent.",
+      );
+    }
+    if (
+      !existingOverride ||
+      existingOverride.ownerType !== "HUMAN" ||
+      existingOverride.status !== "PENDING"
+    ) {
+      throw new Error(
+        "Only pending human stage assignments can be returned to the agent before the stage starts.",
+      );
+    }
+
+    const detailMessage =
+      note?.trim() || `${step.name} will return to agent ownership.`;
+    const nextWorkItem: WorkItem = {
+      ...projection.workItem,
+      stageOverrides: [
+        ...(projection.workItem.stageOverrides || []).filter(
+          (override) => override.workflowStepId !== workflowStepId,
+        ),
+        {
+          ...existingOverride,
+          status: "CANCELLED",
+        },
+      ],
+      history: [
+        ...projection.workItem.history,
+        createHistoryEntry(
+          requestedBy,
+          "Stage returned to agent",
+          detailMessage,
+          step.phase,
+          projection.workItem.status,
+        ),
+      ],
+    };
+
+    await persistProjection({
+      capabilityId,
+      workspace: projection.workspace,
+      workItem: nextWorkItem,
+      workflow: projection.workflow,
+      logsToAppend: [
+        createExecutionLog({
+          capabilityId,
+          taskId: projection.workItem.id,
+          agentId: step.agentId,
+          message: detailMessage,
+          metadata: {
+            interactionType: "STAGE_OWNER_OVERRIDE",
+            workflowStepId,
+            ownerType: "AGENT",
+          },
+        }),
+      ],
+    });
+
+    return nextWorkItem;
+  }
+
+  const trimmedInstructions = String(instructions || "").trim();
+  if (!trimmedInstructions) {
+    throw new Error("Add human instructions before assigning this stage.");
+  }
+
+  const effectiveApprovalPolicy = step.approvalPolicy || approvalPolicy;
+  if (!effectiveApprovalPolicy || effectiveApprovalPolicy.targets.length === 0) {
+    throw new Error(
+      "Assigning a stage to a human requires an approval owner for the return gate.",
+    );
+  }
+
+  const normalizedChecklist = normalizeHumanChecklist(checklist);
+
+  if (
+    activeRun &&
+    activeStepId === workflowStepId &&
+    ACTIVE_WORKFLOW_RUN_STATUSES.has(activeRun.run.status)
+  ) {
+    if (activeRun.run.status === "WAITING_HUMAN_TASK") {
+      throw new Error(
+        "This stage is already waiting on human completion.",
+      );
+    }
+    await delegateWorkflowRunToHuman({
+      capabilityId,
+      runId: activeRun.run.id,
+      instructions: trimmedInstructions,
+      checklist: normalizedChecklist,
+      assigneeUserId,
+      assigneeRole,
+      approvalPolicy: effectiveApprovalPolicy,
+      note: note?.trim() || `Delegated from ${step.name}`,
+      delegatedBy: requestedBy,
+      actor,
+    });
+    const updatedProjection = await resolveProjectionContext(
+      capabilityId,
+      workItemId,
+      activeRun.run.workflowSnapshot,
+    );
+    return updatedProjection.workItem;
+  }
+
+  const nextOverride: WorkItemStageOverride = {
+    workflowStepId,
+    ownerType: "HUMAN",
+    status: "PENDING",
+    instructions: trimmedInstructions,
+    checklist: normalizedChecklist,
+    assigneeUserId: assigneeUserId || undefined,
+    assigneeRole: assigneeRole || undefined,
+    approvalPolicy: effectiveApprovalPolicy,
+    requestedBy,
+    requestedAt: existingOverride?.requestedAt || new Date().toISOString(),
+  };
+  const detailMessage =
+    note?.trim() ||
+    `${step.name} will pause for human completion when execution reaches it.`;
+  const nextWorkItem: WorkItem = {
+    ...projection.workItem,
+    stageOverrides: [
+      ...(projection.workItem.stageOverrides || []).filter(
+        (override) => override.workflowStepId !== workflowStepId,
+      ),
+      nextOverride,
+    ],
+    history: [
+      ...projection.workItem.history,
+      createHistoryEntry(
+        requestedBy,
+        "Stage assigned to human",
+        detailMessage,
+        step.phase,
+        projection.workItem.status,
+      ),
+    ],
+  };
+
+  await persistProjection({
+    capabilityId,
+    workspace: projection.workspace,
+    workItem: nextWorkItem,
+    workflow: projection.workflow,
+    logsToAppend: [
+      createExecutionLog({
+        capabilityId,
+        taskId: projection.workItem.id,
+        agentId: step.agentId,
+        message: detailMessage,
+        metadata: {
+          interactionType: "STAGE_OWNER_OVERRIDE",
+          workflowStepId,
+          ownerType: "HUMAN",
+          overrideStatus: "PENDING",
+        },
+      }),
+    ],
+  });
+
+  return nextWorkItem;
+};
+
+export const completeWorkItemHumanStage = async ({
+  capabilityId,
+  workItemId,
+  workflowStepId,
+  resolution,
+  resolvedBy,
+  actor,
+}: {
+  capabilityId: string;
+  workItemId: string;
+  workflowStepId: string;
+  resolution: string;
+  resolvedBy: string;
+  actor?: ActorContext;
+}) => {
+  const projection = await resolveProjectionContext(capabilityId, workItemId);
+  if (!canActorOperateWorkItem({ actor, workItem: projection.workItem })) {
+    throw new Error("Only the current phase owner can mark this human stage done.");
+  }
+
+  const stageOverride = getWorkItemStageOverride(
+    projection.workItem,
+    workflowStepId,
+  );
+  if (
+    !stageOverride ||
+    stageOverride.ownerType !== "HUMAN" ||
+    stageOverride.status === "CANCELLED" ||
+    stageOverride.status === "COMPLETED"
+  ) {
+    throw new Error("This workflow step is not currently assigned to a human.");
+  }
+
+  if (!projection.workItem.activeRunId) {
+    throw new Error(
+      "This human-owned stage cannot be completed until execution reaches it.",
+    );
+  }
+
+  const detail = await getWorkflowRunDetail(
+    capabilityId,
+    projection.workItem.activeRunId,
+  );
+  const currentStep = getCurrentWorkflowStep(detail);
+  if (currentStep.id !== workflowStepId) {
+    throw new Error(
+      "Only the current reachable human-owned stage can be marked complete.",
+    );
+  }
+
+  const openWait = [...detail.waits]
+    .reverse()
+    .find((wait) => wait.status === "OPEN" && wait.type === "HUMAN_TASK");
+  if (!openWait) {
+    throw new Error(
+      "This stage is not currently waiting on human completion.",
+    );
+  }
+
+  return completeWorkflowRunHumanTask({
+    capabilityId,
+    runId: detail.run.id,
+    resolution,
+    resolvedBy,
+    actor,
+  });
 };
 
 export const cancelWorkflowRun = async ({
@@ -6822,7 +7384,7 @@ const buildEntryStepResetWorkItemState = ({
   });
   const actorName = getActorDisplayName(actor, "User");
   const shouldClaim = Boolean(actor?.userId);
-  const nextStatus = getStepStatus(firstStep);
+  const nextStatus = getPreExecutionStepStatus(firstStep);
 
   const nextWorkItem: WorkItem = {
     ...workItem,
@@ -7908,6 +8470,25 @@ const executeAutomatedStep = async (
       agentName: agent.name,
     },
   });
+
+  const humanStageOverrideDetail = await maybePauseForHumanStageOverride({
+    detail: runningDetail,
+    projection,
+    step,
+    runStep: currentRunStep,
+  });
+  if (humanStageOverrideDetail) {
+    await finishTelemetrySpan({
+      capabilityId: detail.run.capabilityId,
+      spanId: stepSpan.id,
+      status: "WAITING",
+      attributes: {
+        waitType: "HUMAN_TASK",
+        reason: "STAGE_OVERRIDE",
+      },
+    });
+    return humanStageOverrideDetail;
+  }
 
   const toolHistory: Array<{ role: "assistant" | "user"; content: string }> =
     [];

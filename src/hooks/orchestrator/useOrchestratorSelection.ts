@@ -20,6 +20,7 @@ import {
   STORAGE_KEYS,
   readSessionValue,
 } from '../../lib/orchestrator/support';
+import { isWorkItemLiveExecution } from '../../lib/workItemState';
 
 const LIVE_EXECUTION_RUN_STATUSES: WorkflowRun['status'][] = ['QUEUED', 'RUNNING'];
 const ACTIVE_SELECTION_REFRESH_STATUSES: WorkflowRun['status'][] = [
@@ -279,11 +280,13 @@ export const useOrchestratorSelection = ({
 
   useEffect(() => {
     const hasOtherActiveWorkItems = workItems.some(
-      item => item.status === 'ACTIVE' && item.id !== selectedWorkItemId,
+      item => isWorkItemLiveExecution(item) && item.id !== selectedWorkItemId,
     );
     const selectedWorkItemHasLiveExecution = Boolean(
       (selectedWorkItemId &&
-        workItems.some(item => item.id === selectedWorkItemId && item.status === 'ACTIVE')) ||
+        workItems.some(
+          item => item.id === selectedWorkItemId && isWorkItemLiveExecution(item),
+        )) ||
       (selectedRunDetail?.run?.status &&
         LIVE_EXECUTION_RUN_STATUSES.includes(selectedRunDetail.run.status)) ||
       (selectedRunHistory[0] &&

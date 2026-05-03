@@ -68,6 +68,7 @@ const autonomyTone = (pct: number) => {
 
 const statusTone = (status: WorkItemEfficiencyRow['status']) => {
   switch (status) {
+    case 'STAGED':           return 'info';
     case 'ACTIVE':           return 'brand';
     case 'BLOCKED':          return 'danger';
     case 'COMPLETED':        return 'success';

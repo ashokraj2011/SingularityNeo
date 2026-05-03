@@ -128,18 +128,28 @@ export default function DesktopRuntimeSettingsCard({
   onSaveHttpProvider,
   onSetHttpProviderDefault,
 }: DesktopRuntimeSettingsCardProps) {
+  const availableRuntimeProviders =
+    runtimeProviders.length > 0
+      ? runtimeProviders
+      : runtimeStatus?.availableProviders || [];
+  const resolvedDefaultRuntimeProviderKey =
+    availableRuntimeProviders.find(provider => provider.key === defaultRuntimeProviderKey)?.key ||
+    availableRuntimeProviders.find(provider => provider.defaultSelected)?.key ||
+    availableRuntimeProviders.find(provider => provider.key === runtimeStatus?.providerKey)?.key ||
+    availableRuntimeProviders[0]?.key ||
+    defaultRuntimeProviderKey;
   const defaultProviderBusy =
-    runtimeProviderBusyKey === `probe:${defaultRuntimeProviderKey}` ||
-    runtimeProviderBusyKey === `default:${defaultRuntimeProviderKey}`;
+    runtimeProviderBusyKey === `probe:${resolvedDefaultRuntimeProviderKey}` ||
+    runtimeProviderBusyKey === `default:${resolvedDefaultRuntimeProviderKey}`;
   const selectedProvider =
-    runtimeProviders.find(provider => provider.defaultSelected) ||
-    runtimeProviders.find(provider => provider.key === runtimeStatus?.providerKey) ||
-    runtimeProviders.find(provider => provider.configured) ||
+    availableRuntimeProviders.find(provider => provider.defaultSelected) ||
+    availableRuntimeProviders.find(provider => provider.key === runtimeStatus?.providerKey) ||
+    availableRuntimeProviders.find(provider => provider.configured) ||
     null;
   const pgvectorAvailable = Boolean(runtimeStatus?.databaseRuntime?.pgvectorAvailable);
   const retrievalMode =
     runtimeStatus?.retrievalMode || runtimeStatus?.databaseRuntime?.retrievalMode || 'unknown';
-  const cliProviders = runtimeProviders.filter(
+  const cliProviders = availableRuntimeProviders.filter(
     provider =>
       provider.key === 'claude-code-cli' ||
       provider.key === 'codex-cli',
@@ -189,8 +199,8 @@ export default function DesktopRuntimeSettingsCard({
               {runtimeStatus?.defaultModel || selectedProvider?.model || 'Not resolved'}
             </p>
             <p className="mt-2 text-xs leading-relaxed text-secondary">
-              {(runtimeStatus?.availableProviders || []).length > 0
-                ? `${runtimeStatus.availableProviders.filter(provider => provider.configured).length} configured runtime lane(s) across ${runtimeStatus.availableProviders.length} available providers.`
+              {availableRuntimeProviders.length > 0
+                ? `${availableRuntimeProviders.filter(provider => provider.configured).length} configured runtime lane(s) across ${availableRuntimeProviders.length} available providers.`
                 : 'No runtime providers have been discovered yet.'}
             </p>
           </div>
@@ -208,13 +218,16 @@ export default function DesktopRuntimeSettingsCard({
           </p>
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <select
-              value={defaultRuntimeProviderKey}
+              value={resolvedDefaultRuntimeProviderKey}
               onChange={event =>
                 onDefaultRuntimeProviderChange(event.target.value as ProviderKey)
               }
               className="field-input min-w-[260px]"
             >
-              {runtimeProviders.map(provider => (
+              {availableRuntimeProviders.length === 0 ? (
+                <option value="">No runtime providers discovered yet</option>
+              ) : null}
+              {availableRuntimeProviders.map(provider => (
                 <option key={provider.key} value={provider.key}>
                   {provider.label}
                 </option>
@@ -223,7 +236,7 @@ export default function DesktopRuntimeSettingsCard({
             <button
               type="button"
               onClick={() => void onSaveDefaultRuntimeProvider()}
-              disabled={!defaultRuntimeProviderKey || defaultProviderBusy}
+              disabled={!availableRuntimeProviders.length || !resolvedDefaultRuntimeProviderKey || defaultProviderBusy}
               className="enterprise-button enterprise-button-secondary disabled:opacity-50"
             >
               Save default provider
@@ -231,10 +244,10 @@ export default function DesktopRuntimeSettingsCard({
             <button
               type="button"
               onClick={() => void onProbeDefaultRuntimeProvider()}
-              disabled={!defaultRuntimeProviderKey || defaultProviderBusy}
+              disabled={!availableRuntimeProviders.length || !resolvedDefaultRuntimeProviderKey || defaultProviderBusy}
               className="enterprise-button enterprise-button-brand-muted disabled:opacity-50"
             >
-              {runtimeProviderBusyKey === `probe:${defaultRuntimeProviderKey}`
+              {runtimeProviderBusyKey === `probe:${resolvedDefaultRuntimeProviderKey}`
                 ? 'Probing provider'
                 : 'Probe selected provider'}
             </button>

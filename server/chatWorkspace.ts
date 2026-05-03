@@ -2,6 +2,11 @@ import {
   getCapabilityBoardPhaseIds,
   getLifecyclePhaseLabel,
 } from '../src/lib/capabilityLifecycle';
+import {
+  getWorkItemDisplayStatus,
+  isWorkItemLiveExecution,
+  isWorkItemStaged,
+} from '../src/lib/workItemState';
 import type {
   Capability,
   CapabilityAgent,
@@ -451,8 +456,11 @@ const buildSuggestedExecutionActions = ({
   } else if (runId && fallbackRunStatus === 'RUNNING') {
     suggestions.push(`show the live status of ${workItem.id}`);
     suggestions.push(`cancel ${runId}: <reason to stop this attempt>`);
-  } else if (workItem.status === 'ACTIVE') {
+  } else if (isWorkItemLiveExecution(workItem)) {
     suggestions.push(`show the live status of ${workItem.id}`);
+  } else if (isWorkItemStaged(workItem)) {
+    suggestions.push(`start ${workItem.id}`);
+    suggestions.push(`show the staged plan for ${workItem.id}`);
   }
 
   return Array.from(new Set(suggestions)).slice(0, 4);
@@ -549,7 +557,7 @@ const buildWorkItemStatusSummary = async (
             .join('; ')}`
         : null,
       `Phase: ${getLifecyclePhaseLabel(bundle.capability, workItem.phase)}`,
-      `Status: ${workItem.status}`,
+      `Status: ${getWorkItemDisplayStatus(workItem)}`,
       currentStep ? `Current step: ${currentStep.name}` : null,
       workItem.assignedAgentId ? `Assigned agent: ${workItem.assignedAgentId}` : null,
       explain.latestRun
@@ -595,7 +603,7 @@ const buildWorkItemStatusSummary = async (
     return [
       `Work item: ${formatWorkItemHeading(workItem)}`,
       `Phase: ${getLifecyclePhaseLabel(bundle.capability, workItem.phase)}`,
-      `Status: ${workItem.status}`,
+      `Status: ${getWorkItemDisplayStatus(workItem)}`,
       currentStep ? `Current step: ${currentStep.name}` : null,
       workItem.assignedAgentId ? `Assigned agent: ${workItem.assignedAgentId}` : null,
       runDetail ? `Run: ${runDetail.run.id} (${runDetail.run.status})` : null,
@@ -674,7 +682,7 @@ export const buildWorkItemStageControlBriefing = async ({
     `Stage control context for ${formatWorkItemHeading(workItem)}`,
     explain.summary.headline,
     `Phase: ${getLifecyclePhaseLabel(bundle.capability, workItem.phase)}`,
-    `Status: ${workItem.status}`,
+    `Status: ${getWorkItemDisplayStatus(workItem)}`,
     currentStep ? `Current step: ${currentStep.name}` : 'Current step: Awaiting orchestration',
     agentId ? `Assigned stage agent: ${agentId}` : null,
     runDetail ? `Run: ${runDetail.run.id} (${runDetail.run.status})` : null,
@@ -715,7 +723,9 @@ export const buildWorkItemStageControlBriefing = async ({
 const buildAmbiguousTargetMessage = (matches: WorkItem[]) =>
   [
     'I found more than one matching work item. Tell me which one to act on using the exact work item id.',
-    ...matches.slice(0, 5).map(item => `- ${formatWorkItemHeading(item)} (${item.status})`),
+    ...matches
+      .slice(0, 5)
+      .map(item => `- ${formatWorkItemHeading(item)} (${getWorkItemDisplayStatus(item)})`),
   ].join('\n');
 
 const resolvePhaseFromMessage = (
@@ -989,7 +999,8 @@ const resolveRunForAction = async (
 
 const buildOverallStatusSummary = (bundle: CapabilityBundle) => {
   const counts = {
-    active: bundle.workspace.workItems.filter(item => item.status === 'ACTIVE').length,
+    staged: bundle.workspace.workItems.filter(item => isWorkItemStaged(item)).length,
+    active: bundle.workspace.workItems.filter(item => isWorkItemLiveExecution(item)).length,
     blocked: bundle.workspace.workItems.filter(item => item.status === 'BLOCKED').length,
     approvals: bundle.workspace.workItems.filter(item => item.status === 'PENDING_APPROVAL').length,
     completed: bundle.workspace.workItems.filter(item => item.status === 'COMPLETED').length,
@@ -1001,14 +1012,14 @@ const buildOverallStatusSummary = (bundle: CapabilityBundle) => {
     .slice(0, 8)
     .map(
       item =>
-        `- ${formatWorkItemHeading(item)} | ${getLifecyclePhaseLabel(bundle.capability, item.phase)} | ${item.status}${
+        `- ${formatWorkItemHeading(item)} | ${getLifecyclePhaseLabel(bundle.capability, item.phase)} | ${getWorkItemDisplayStatus(item)}${
           item.pendingRequest ? ` | waiting ${item.pendingRequest.type.toLowerCase()}` : ''
         }${item.blocker ? ` | blocker ${item.blocker.type.toLowerCase()}` : ''}`,
     );
 
   return [
     `Capability: ${bundle.capability.name}`,
-    `Work summary: ${counts.active} active, ${counts.blocked} blocked, ${counts.approvals} pending approval, ${counts.completed} completed.`,
+    `Work summary: ${counts.staged} staged, ${counts.active} active, ${counts.blocked} blocked, ${counts.approvals} pending approval, ${counts.completed} completed.`,
     items.length > 0 ? 'Current work items:' : 'There are no work items yet.',
     ...items,
   ].join('\n');
@@ -1126,7 +1137,7 @@ export const buildLiveWorkspaceBriefing = (bundle: CapabilityBundle) => {
     .slice(0, 5)
     .map(
       item =>
-        `${item.id} | ${item.title} | ${getLifecyclePhaseLabel(bundle.capability, item.phase)} | ${item.status}`,
+        `${item.id} | ${item.title} | ${getLifecyclePhaseLabel(bundle.capability, item.phase)} | ${getWorkItemDisplayStatus(item)}`,
     );
 
   return [

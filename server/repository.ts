@@ -981,6 +981,7 @@ const artifactFromRow = (row: Record<string, any>): Artifact => ({
   direction: row.direction || undefined,
   connectedAgentId: row.connected_agent_id || undefined,
   sourceWorkflowId: row.source_workflow_id || undefined,
+  workflowStepId: row.workflow_step_id || undefined,
   runId: row.run_id || undefined,
   runStepId: row.run_step_id || undefined,
   toolInvocationId: row.tool_invocation_id || undefined,
@@ -1114,6 +1115,9 @@ const workItemFromRow = (
       ? row.record_version
       : Number(row.record_version || 1) || 1,
   executionContext,
+  stageOverrides: asJsonArray<NonNullable<WorkItem['stageOverrides']>[number]>(
+    row.stage_overrides,
+  ),
   history: asJsonArray<WorkItem['history'][number]>(row.history),
   // Phase-segment additions (columns may not exist on legacy rows — the
   // DDL uses ADD COLUMN IF NOT EXISTS so every fresh or migrated DB has
@@ -1893,6 +1897,7 @@ const insertArtifactTx = async (
           direction,
           connected_agent_id,
           source_workflow_id,
+          workflow_step_id,
           run_id,
           run_step_id,
           tool_invocation_id,
@@ -1919,7 +1924,7 @@ const insertArtifactTx = async (
           updated_at
         )
         VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,${withUpdatedTimestamp}
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,${withUpdatedTimestamp}
         )
       `,
     [
@@ -1944,6 +1949,7 @@ const insertArtifactTx = async (
       artifact.direction || null,
       artifact.connectedAgentId || null,
       artifact.sourceWorkflowId || null,
+      artifact.workflowStepId || null,
       artifact.runId || null,
       artifact.runStepId || null,
       artifact.toolInvocationId || null,
@@ -2035,6 +2041,7 @@ const replaceArtifactsTx = async (
           direction,
           connected_agent_id,
           source_workflow_id,
+          workflow_step_id,
           run_id,
           run_step_id,
           tool_invocation_id,
@@ -2061,7 +2068,7 @@ const replaceArtifactsTx = async (
           updated_at
         )
         VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,${withUpdatedTimestamp}
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,${withUpdatedTimestamp}
         )
       `,
       [
@@ -2086,6 +2093,7 @@ const replaceArtifactsTx = async (
         artifact.direction || null,
         artifact.connectedAgentId || null,
         artifact.sourceWorkflowId || null,
+        artifact.workflowStepId || null,
         artifact.runId || null,
         artifact.runStepId || null,
         artifact.toolInvocationId || null,
@@ -2339,10 +2347,11 @@ const replaceWorkItemsTx = async (
 	          active_run_id,
 	          last_run_id,
 	          record_version,
+	          stage_overrides,
 	          history,
 	          updated_at
 	        )
-	        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,${withUpdatedTimestamp})
+	        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,${withUpdatedTimestamp})
 	      `,
 	      [
 	        capabilityId,
@@ -2369,13 +2378,14 @@ const replaceWorkItemsTx = async (
         item.priority,
         item.tags,
         item.pendingRequest || null,
-        item.blocker || null,
-        item.activeRunId || null,
-        item.lastRunId || null,
-        item.recordVersion || 1,
-        JSON.stringify(item.history || []),
-      ],
-    );
+	        item.blocker || null,
+	        item.activeRunId || null,
+	        item.lastRunId || null,
+	        item.recordVersion || 1,
+	        JSON.stringify(item.stageOverrides || []),
+	        JSON.stringify(item.history || []),
+	      ],
+	    );
 
     for (const assignment of item.executionContext?.repositoryAssignments || []) {
       await client.query(

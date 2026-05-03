@@ -6,6 +6,7 @@ type Props = {
   quickCreateSheet?: React.ReactNode;
   quickActionDialogs?: React.ReactNode;
   stageControl?: React.ReactNode;
+  stageOwnership?: React.ReactNode;
   explainDrawer?: React.ReactNode;
 };
 
@@ -15,6 +16,7 @@ export const OrchestratorSharedOverlays = ({
   quickCreateSheet,
   quickActionDialogs,
   stageControl,
+  stageOwnership,
   explainDrawer,
 }: Props) => (
   <>
@@ -23,6 +25,7 @@ export const OrchestratorSharedOverlays = ({
     {quickCreateSheet}
     {quickActionDialogs}
     {stageControl}
+    {stageOwnership}
     {explainDrawer}
   </>
 );

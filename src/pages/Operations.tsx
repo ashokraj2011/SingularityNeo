@@ -511,6 +511,10 @@ const Operations = () => {
     Record<string, { localRootPath: string; workingDirectoryPath: string }>
   >({});
   const lockPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const effectiveRuntimeProviders =
+    runtimeProviders.length > 0
+      ? runtimeProviders
+      : runtimeStatus?.availableProviders || [];
 
   // Desktop preferences
   const [desktopPrefs, setDesktopPrefs] = useState<DesktopPreferences | null>(null);
@@ -1235,21 +1239,21 @@ const Operations = () => {
   }, [runtimeStatus?.embeddingEndpoint, runtimeStatus?.embeddingModel]);
 
   useEffect(() => {
-    if (runtimeProviders.length === 0) {
+    if (effectiveRuntimeProviders.length === 0) {
       return;
     }
 
     const nextDefault =
-      runtimeProviders.find(provider => provider.defaultSelected)?.key ||
-      runtimeProviders.find(provider => provider.key === runtimeStatus?.providerKey)?.key ||
-      runtimeProviders[0]?.key;
+      effectiveRuntimeProviders.find(provider => provider.defaultSelected)?.key ||
+      effectiveRuntimeProviders.find(provider => provider.key === runtimeStatus?.providerKey)?.key ||
+      effectiveRuntimeProviders[0]?.key;
     if (nextDefault) {
       setDefaultRuntimeProviderKey(nextDefault);
     }
 
     setRuntimeProviderDrafts(current => {
       const nextDrafts = { ...current };
-      for (const provider of runtimeProviders) {
+      for (const provider of effectiveRuntimeProviders) {
         const isCliLane =
           provider.key === 'claude-code-cli' ||
           provider.key === 'codex-cli' ||
@@ -1281,7 +1285,7 @@ const Operations = () => {
       }
       return nextDrafts;
     });
-  }, [runtimeProviders]);
+  }, [effectiveRuntimeProviders, runtimeStatus?.providerKey]);
 
   useEffect(() => {
     const nextDrafts = Object.fromEntries(
@@ -1712,7 +1716,7 @@ const Operations = () => {
         runtimeStatusError={runtimeStatusError}
         runtimeTokenInput={runtimeTokenInput}
         isUpdatingRuntime={isUpdatingRuntime}
-        runtimeProviders={runtimeProviders}
+        runtimeProviders={effectiveRuntimeProviders}
         runtimeProviderDrafts={runtimeProviderDrafts}
         runtimeProviderBusyKey={runtimeProviderBusyKey}
         defaultRuntimeProviderKey={defaultRuntimeProviderKey}

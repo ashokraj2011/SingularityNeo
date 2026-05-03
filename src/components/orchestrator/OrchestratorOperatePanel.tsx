@@ -176,6 +176,7 @@ type Props = {
   renderReviewList: (items: string[], emptyLabel: string) => React.ReactNode;
   selectedCanTakeControl: boolean;
   onOpenStageControl: () => void;
+  onOpenStageOwnership: () => void;
   stageChatSuggestedPrompts: string[];
   onSelectStageChatPrompt: (prompt: string) => void;
   stageChatThreadRef: React.RefObject<HTMLDivElement | null>;
@@ -299,6 +300,7 @@ export const OrchestratorOperatePanel = ({
   renderReviewList,
   selectedCanTakeControl,
   onOpenStageControl,
+  onOpenStageOwnership,
   stageChatSuggestedPrompts,
   onSelectStageChatPrompt,
   stageChatThreadRef,
@@ -390,6 +392,16 @@ export const OrchestratorOperatePanel = ({
           >
             <MessageSquareText size={14} />
             Take control
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenStageOwnership}
+            disabled={!selectedWorkflow}
+            className="enterprise-button enterprise-button-secondary disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <User size={14} />
+            Stage owner & uploads
           </button>
 
           {selectedOpenWait?.type === "APPROVAL" ? (

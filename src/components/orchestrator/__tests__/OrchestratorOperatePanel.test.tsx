@@ -34,6 +34,7 @@ describe('OrchestratorOperatePanel', () => {
     const user = userEvent.setup();
     const onOpenTaskList = vi.fn();
     const onOpenStageControl = vi.fn();
+    const onOpenStageOwnership = vi.fn();
 
     render(
       <OrchestratorOperatePanel
@@ -83,7 +84,7 @@ describe('OrchestratorOperatePanel', () => {
         guidanceSuggestions={[]}
         onAppendGuidanceSuggestion={vi.fn()}
         resolutionIsRequired={false}
-        selectedWorkflow={null}
+        selectedWorkflow={{ id: 'WF-1', steps: [] } as never}
         selectedCurrentStep={null}
         currentRun={null}
         currentRunStatusLabel={null}
@@ -143,6 +144,7 @@ describe('OrchestratorOperatePanel', () => {
         renderReviewList={(_items, emptyLabel) => <div>{emptyLabel}</div>}
         selectedCanTakeControl
         onOpenStageControl={onOpenStageControl}
+        onOpenStageOwnership={onOpenStageOwnership}
         stageChatSuggestedPrompts={[]}
         onSelectStageChatPrompt={vi.fn()}
         stageChatThreadRef={createRef<HTMLDivElement>()}
@@ -171,5 +173,8 @@ describe('OrchestratorOperatePanel', () => {
 
     await user.click(screen.getAllByRole('button', { name: 'Take control' })[0]);
     expect(onOpenStageControl).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole('button', { name: 'Stage owner & uploads' }));
+    expect(onOpenStageOwnership).toHaveBeenCalledTimes(1);
   });
 });

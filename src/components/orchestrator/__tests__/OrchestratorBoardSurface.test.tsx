@@ -86,7 +86,7 @@ describe('OrchestratorBoardSurface', () => {
         workflowsById={new Map([[workflow.id, workflow]])}
         agentsById={agentsById}
         getPhaseMeta={phase => ({ label: phase })}
-        getStatusLabel={status => status}
+        getStatusLabel={workItem => workItem.status}
         getAttentionLabel={() => 'Attention'}
         getAttentionReason={() => 'Needs help'}
         isConflictAttention={() => false}

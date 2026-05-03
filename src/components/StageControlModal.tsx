@@ -113,6 +113,7 @@ export const StageControlModal = ({
   failureReason,
   runtimeReady,
   runtimeError,
+  onOpenStageOwnership,
   onClose,
   onRefresh,
 }: {
@@ -127,6 +128,7 @@ export const StageControlModal = ({
   failureReason?: string;
   runtimeReady: boolean;
   runtimeError?: string;
+  onOpenStageOwnership?: () => void;
   onClose: () => void;
   onRefresh: () => Promise<void>;
 }) => {
@@ -386,6 +388,16 @@ export const StageControlModal = ({
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge tone="brand">{getLifecyclePhaseLabel(capability, workItem.phase)}</StatusBadge>
             {currentRun ? <StatusBadge tone="neutral">{currentRun.status}</StatusBadge> : null}
+            {onOpenStageOwnership ? (
+              <button
+                type="button"
+                onClick={onOpenStageOwnership}
+                className="workspace-list-action"
+              >
+                <User size={14} />
+                Stage owner & uploads
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => {

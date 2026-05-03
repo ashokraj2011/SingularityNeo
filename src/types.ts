@@ -2178,6 +2178,7 @@ export interface Artifact {
   direction?: "INPUT" | "OUTPUT";
   connectedAgentId?: string;
   sourceWorkflowId?: string;
+  workflowStepId?: string;
   runId?: string;
   runStepId?: string;
   toolInvocationId?: string;
@@ -2973,6 +2974,7 @@ export interface LearningUpdate {
 }
 
 export type WorkItemStatus =
+  | "STAGED"
   | "ACTIVE"
   | "BLOCKED"
   | "PAUSED"
@@ -3233,6 +3235,30 @@ export interface WorkItemExecutionContext {
   strategy: "SHARED_BRANCH";
 }
 
+export type WorkItemStageOwnerType = "AGENT" | "HUMAN";
+
+export type WorkItemStageOverrideStatus =
+  | "PENDING"
+  | "ACTIVE"
+  | "COMPLETED"
+  | "CANCELLED";
+
+export interface WorkItemStageOverride {
+  workflowStepId: string;
+  ownerType: WorkItemStageOwnerType;
+  status: WorkItemStageOverrideStatus;
+  instructions: string;
+  checklist?: string[];
+  assigneeUserId?: string;
+  assigneeRole?: string;
+  approvalPolicy?: ApprovalPolicy;
+  requestedBy: string;
+  requestedAt: string;
+  completedBy?: string;
+  completedAt?: string;
+  completionSummary?: string;
+}
+
 export interface WorkItemCodeClaim {
   workItemId: string;
   userId: string;
@@ -3305,6 +3331,7 @@ export interface WorkItem {
   lastRunId?: string;
   recordVersion?: number;
   executionContext?: WorkItemExecutionContext;
+  stageOverrides?: WorkItemStageOverride[];
   history: WorkItemHistoryEntry[];
   // Long-lived cross-segment goal, visible at every segment start.
   // Separate from `description` (the original request) — brief captures

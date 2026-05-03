@@ -27,6 +27,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import ErrorBoundary from "../components/ErrorBoundary";
 import { ExplainWorkItemDrawer } from "../components/ExplainWorkItemDrawer";
 import StageControlModal from "../components/StageControlModal";
+import OrchestratorStageOwnershipModal from "../components/orchestrator/OrchestratorStageOwnershipModal";
 import { useCapability } from "../context/CapabilityContext";
 import { useToast } from "../context/ToastContext";
 import { formatEnumLabel, getStatusTone } from "../lib/enterprise";
@@ -94,6 +95,12 @@ import {
   resolveWorkItemEntryStep,
 } from "../lib/workItemTaskTypes";
 import { buildCapabilityInteractionFeed } from "../lib/interactionFeed";
+import {
+  getWorkItemDisplayStatus,
+  isWorkItemStaged,
+  type WorkItemDisplayStatus,
+} from "../lib/workItemState";
+import { buildDelegatedHumanApprovalPolicy } from "../lib/workItemStageOverrides";
 import { normalizeCompiledStepContext } from "../lib/workflowRuntime";
 import { cn } from "../lib/utils";
 import { OrchestratorQuickActionDialogs } from "../components/orchestrator/OrchestratorQuickActionDialogs";
@@ -230,9 +237,10 @@ const RUN_STATUS_META: Record<
 };
 
 const WORK_ITEM_STATUS_META: Record<
-  WorkItem["status"],
+  WorkItemDisplayStatus,
   { label: string; accent: string }
 > = {
+  STAGED: { label: "Staged", accent: "bg-sky-100 text-sky-700" },
   ACTIVE: { label: "Active", accent: "bg-primary/10 text-primary" },
   BLOCKED: { label: "Blocked", accent: "bg-red-100 text-red-700" },
   PAUSED: { label: "Paused", accent: "bg-slate-200 text-slate-700" },
@@ -259,6 +267,9 @@ const LIVE_EXECUTION_RUN_STATUSES: WorkflowRun["status"][] = [
   "QUEUED",
   "RUNNING",
 ];
+
+const getWorkItemStatusMeta = (workItem?: WorkItem | null) =>
+  WORK_ITEM_STATUS_META[getWorkItemDisplayStatus(workItem)];
 
 const PASSPORT_ELIGIBLE_RUN_STATUSES = new Set<WorkflowRun["status"]>([
   "WAITING_APPROVAL",
@@ -404,61 +415,6 @@ const getWorkItemAttentionTimestamp = (item: WorkItem) =>
 
 const buildBlockedGuidanceSeed = (reason: string) =>
   `Blocking reason from agent:\n- ${reason}\n\nGuidance for the next attempt:\n- `;
-
-const buildDelegatedHumanApprovalPolicy = ({
-  step,
-  workItem,
-  phaseStakeholders,
-}: {
-  step: Workflow["steps"][number] | null;
-  workItem: WorkItem | null;
-  phaseStakeholders: CapabilityStakeholder[];
-}): ApprovalPolicy | undefined => {
-  if (step?.approvalPolicy?.targets?.length) {
-    return step.approvalPolicy;
-  }
-
-  const roleTargets = Array.from(
-    new Set(
-      [
-        ...(step?.approverRoles || []),
-        ...phaseStakeholders
-          .map((stakeholder) => String(stakeholder.role || "").trim())
-          .filter(Boolean),
-      ],
-    ),
-  ).map((role) => ({
-    targetType: "CAPABILITY_ROLE" as const,
-    targetId: role,
-    label: role,
-  }));
-
-  const teamTargets = workItem?.phaseOwnerTeamId
-    ? [
-        {
-          targetType: "TEAM" as const,
-          targetId: workItem.phaseOwnerTeamId,
-          label: workItem.phaseOwnerTeamId,
-        },
-      ]
-    : [];
-
-  const targets = roleTargets.length > 0 ? roleTargets : teamTargets;
-  if (targets.length === 0) {
-    return undefined;
-  }
-
-  return {
-    id: `AUTO-DELEGATION-${step?.id || workItem?.id || "WORK"}`,
-    name: "Delegated human task approval",
-    description:
-      "Generated from the active workflow ownership so delegated human work still returns through the standard approval gate.",
-    mode: "ANY_ONE",
-    targets,
-    minimumApprovals: 1,
-    delegationAllowed: true,
-  };
-};
 
 const getRunEventTone = (event: RunEvent) => {
   if (
@@ -776,6 +732,14 @@ const Orchestrator = () => {
         accent: "bg-surface-container-high text-secondary",
       },
     [activeCapability, phaseMeta],
+  );
+  const getWorkItemStatusLabel = useCallback(
+    (workItem?: WorkItem | null) => getWorkItemStatusMeta(workItem).label,
+    [],
+  );
+  const getWorkItemStatusTone = useCallback(
+    (workItem?: WorkItem | null) => getStatusTone(getWorkItemDisplayStatus(workItem)),
+    [],
   );
 
   const [view, setView] = useState<OrchestratorView>(() =>
@@ -1735,6 +1699,8 @@ const Orchestrator = () => {
     setIsExplainOpen,
     isStageControlOpen,
     setIsStageControlOpen,
+    isStageOwnershipOpen,
+    setIsStageOwnershipOpen,
     handleOpenApprovalReview: openApprovalReviewModal,
   } = useOrchestratorModals({
     selectedOpenWait,
@@ -1945,7 +1911,7 @@ const Orchestrator = () => {
     selectedWorkItem?.status !== "ARCHIVED" &&
     selectedWorkItem?.status !== "COMPLETED" &&
     selectedWorkItem?.status !== "CANCELLED" &&
-    !selectedWorkItem?.activeRunId &&
+    isWorkItemStaged(selectedWorkItem) &&
     selectedWorkItem?.phase !== "DONE" &&
     capabilityExperience.canStartDelivery &&
     runtimeReady &&
@@ -5688,11 +5654,38 @@ const Orchestrator = () => {
         failureReason={selectedFailureReason || undefined}
         runtimeReady={runtimeReady}
         runtimeError={runtimeError}
+        onOpenStageOwnership={() => {
+          setIsStageControlOpen(false);
+          setIsStageOwnershipOpen(true);
+        }}
         onClose={() => setIsStageControlOpen(false)}
         onRefresh={handleStageControlRefresh}
       />
     </ErrorBoundary>
   ) : null;
+
+  const stageOwnershipOverlayNode =
+    selectedWorkItem && selectedWorkflow ? (
+      <ErrorBoundary
+        resetKey={`${selectedWorkItem.id}:${selectedWorkflow.id}:${selectedCurrentStep?.id || "stage"}:${isStageOwnershipOpen ? "open" : "closed"}`}
+        title="Stage ownership could not render"
+        description="The stage ownership workspace hit an unexpected UI problem. The rest of the workbench is still available while we keep this route alive."
+      >
+        <OrchestratorStageOwnershipModal
+          isOpen={isStageOwnershipOpen}
+          capability={activeCapability}
+          workItem={selectedWorkItem}
+          workflow={selectedWorkflow}
+          artifacts={selectedArtifacts}
+          currentRun={currentRun}
+          currentRunStepId={selectedRunStep?.id || null}
+          currentStep={selectedCurrentStep}
+          currentActorDisplayName={currentActorContext.displayName}
+          onClose={() => setIsStageOwnershipOpen(false)}
+          onRefresh={handleStageControlRefresh}
+        />
+      </ErrorBoundary>
+    ) : null;
 
   const explainDrawerOverlayNode = (
     <ExplainWorkItemDrawer
@@ -5927,12 +5920,12 @@ const Orchestrator = () => {
                   selectedWorkflowName={selectedWorkflow?.name || null}
                   selectedStatusTone={
                     selectedWorkItem
-                      ? getStatusTone(selectedWorkItem.status)
+                      ? getWorkItemStatusTone(selectedWorkItem)
                       : "neutral"
                   }
                   selectedStatusLabel={
                     selectedWorkItem
-                      ? WORK_ITEM_STATUS_META[selectedWorkItem.status].label
+                      ? getWorkItemStatusLabel(selectedWorkItem)
                       : "No selection"
                   }
                   canControlWorkItems={canControlWorkItems}
@@ -6060,9 +6053,7 @@ const Orchestrator = () => {
                   onStartNextSegment={handleStartNextSegment}
                   getPhaseMeta={getPhaseMeta}
                   getStatusTone={getStatusTone}
-                  getStatusLabel={(status) =>
-                    WORK_ITEM_STATUS_META[status].label
-                  }
+                  getStatusLabel={getWorkItemStatusLabel}
                 />
               }
               selectedWorkPanel={
@@ -6080,11 +6071,8 @@ const Orchestrator = () => {
                         taskTypeLabel: getWorkItemTaskTypeLabel(
                           selectedWorkItem.taskType,
                         ),
-                        workItemStatusLabel:
-                          WORK_ITEM_STATUS_META[selectedWorkItem.status].label,
-                        workItemStatusTone: getStatusTone(
-                          selectedWorkItem.status,
-                        ),
+                        workItemStatusLabel: getWorkItemStatusLabel(selectedWorkItem),
+                        workItemStatusTone: getWorkItemStatusTone(selectedWorkItem),
                         currentRunStatusLabel: currentRun
                           ? RUN_STATUS_META[currentRun.status].label
                           : null,
@@ -6300,6 +6288,8 @@ const Orchestrator = () => {
                         renderReviewList,
                         selectedCanTakeControl,
                         onOpenStageControl: () => setIsStageControlOpen(true),
+                        onOpenStageOwnership: () =>
+                          setIsStageOwnershipOpen(true),
                         stageChatSuggestedPrompts,
                         onSelectStageChatPrompt: (prompt) =>
                           setStageChatInput(prompt),
@@ -6475,6 +6465,7 @@ const Orchestrator = () => {
                 {startSegmentDialogNode}
               </>
             }
+            stageOwnership={stageOwnershipOverlayNode}
             quickCreateSheet={
               <OrchestratorListWorkbenchOverlays
                 quickCreateSheet={
@@ -6552,6 +6543,7 @@ const Orchestrator = () => {
                   />
                 }
                 stageControl={stageControlOverlayNode}
+                stageOwnership={stageOwnershipOverlayNode}
                 explainDrawer={explainDrawerOverlayNode}
               />
             }
@@ -6733,7 +6725,7 @@ const Orchestrator = () => {
               workflowsById={workflowsById}
               agentsById={agentsById}
               getPhaseMeta={getPhaseMeta}
-              getStatusLabel={(status) => WORK_ITEM_STATUS_META[status].label}
+              getStatusLabel={getWorkItemStatusLabel}
               getAttentionLabel={getAttentionLabel}
               getAttentionReason={getAttentionReason}
               isConflictAttention={isConflictAttention}
@@ -6769,7 +6761,7 @@ const Orchestrator = () => {
               navigatorSections={navigatorSections}
               selectedWorkItemId={selectedWorkItemId}
               getPhaseMeta={getPhaseMeta}
-              getStatusLabel={(status) => WORK_ITEM_STATUS_META[status].label}
+              getStatusLabel={getWorkItemStatusLabel}
               onSelectWorkItem={selectWorkItem}
               workbenchCanvas={
                 <OrchestratorWorkbenchCanvas
@@ -6786,11 +6778,8 @@ const Orchestrator = () => {
                         taskTypeLabel: getWorkItemTaskTypeLabel(
                           selectedWorkItem.taskType,
                         ),
-                        workItemStatusLabel:
-                          WORK_ITEM_STATUS_META[selectedWorkItem.status].label,
-                        workItemStatusTone: getStatusTone(
-                          selectedWorkItem.status,
-                        ),
+                        workItemStatusLabel: getWorkItemStatusLabel(selectedWorkItem),
+                        workItemStatusTone: getWorkItemStatusTone(selectedWorkItem),
                         currentRunStatusLabel: currentRun
                           ? RUN_STATUS_META[currentRun.status].label
                           : null,
@@ -7006,6 +6995,8 @@ const Orchestrator = () => {
                         renderReviewList,
                         selectedCanTakeControl,
                         onOpenStageControl: () => setIsStageControlOpen(true),
+                        onOpenStageOwnership: () =>
+                          setIsStageOwnershipOpen(true),
                         stageChatSuggestedPrompts,
                         onSelectStageChatPrompt: (prompt) =>
                           setStageChatInput(prompt),
@@ -7173,6 +7164,7 @@ const Orchestrator = () => {
           }
           quickActionDialogs={quickActionDialogsNode}
           stageControl={stageControlOverlayNode}
+          stageOwnership={stageOwnershipOverlayNode}
           explainDrawer={explainDrawerOverlayNode}
         />
       }

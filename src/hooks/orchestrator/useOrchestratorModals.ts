@@ -32,6 +32,7 @@ export const useOrchestratorModals = ({
   );
   const [isExplainOpen, setIsExplainOpen] = useState(false);
   const [isStageControlOpen, setIsStageControlOpen] = useState(false);
+  const [isStageOwnershipOpen, setIsStageOwnershipOpen] = useState(false);
 
   const autoOpenedApprovalWaitIdsRef = useRef<Set<string>>(new Set());
   const previousSelectedWorkItemIdRef = useRef<string | null>(null);
@@ -70,6 +71,7 @@ export const useOrchestratorModals = ({
     setApprovalReviewWaitSnapshot(null);
     setIsExplainOpen(false);
     setIsStageControlOpen(false);
+    setIsStageOwnershipOpen(false);
     setIsCancelWorkItemOpen(false);
     setIsArchiveWorkItemOpen(false);
     setIsRestoreWorkItemOpen(false);
@@ -171,6 +173,8 @@ export const useOrchestratorModals = ({
     setIsExplainOpen,
     isStageControlOpen,
     setIsStageControlOpen,
+    isStageOwnershipOpen,
+    setIsStageOwnershipOpen,
     handleOpenApprovalReview,
     handleApprovalReviewMouseDown,
   };

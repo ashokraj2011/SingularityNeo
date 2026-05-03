@@ -237,6 +237,7 @@ export const OrchestratorBoardWorkbench = ({
                 className="field-select"
               >
                 <option value="ALL">All statuses</option>
+                <option value="STAGED">Staged</option>
                 <option value="ACTIVE">Active</option>
                 <option value="BLOCKED">Blocked</option>
                 <option value="PAUSED">Paused</option>

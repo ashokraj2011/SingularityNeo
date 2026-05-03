@@ -11,6 +11,7 @@ describe('OrchestratorSharedOverlays', () => {
         quickCreateSheet={<div>Quick create sheet</div>}
         quickActionDialogs={<div>Quick action dialogs</div>}
         stageControl={<div>Stage control overlay</div>}
+        stageOwnership={<div>Stage ownership overlay</div>}
         explainDrawer={<div>Explain drawer</div>}
       />,
     );
@@ -20,6 +21,7 @@ describe('OrchestratorSharedOverlays', () => {
     expect(screen.getByText('Quick create sheet')).toBeInTheDocument();
     expect(screen.getByText('Quick action dialogs')).toBeInTheDocument();
     expect(screen.getByText('Stage control overlay')).toBeInTheDocument();
+    expect(screen.getByText('Stage ownership overlay')).toBeInTheDocument();
     expect(screen.getByText('Explain drawer')).toBeInTheDocument();
   });
 });

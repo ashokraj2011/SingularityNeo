@@ -11,6 +11,7 @@ const STATUS_TONE_MAP: Record<string, EnterpriseTone> = {
   VERIFIED: 'success',
   COMPLETED: 'success',
   ACTIVE: 'brand',
+  STAGED: 'info',
   RUNNING: 'brand',
   IN_PROGRESS: 'info',
   PROCESSING: 'info',

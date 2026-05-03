@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { EmptyState, StatusBadge } from '../EnterpriseUI';
 import { compactMarkdownPreview } from '../../lib/markdown';
+import { getWorkItemDisplayStatus } from '../../lib/workItemState';
 import { cn } from '../../lib/utils';
 import type { EnterpriseTone } from '../../lib/enterprise';
 import type {
@@ -83,7 +84,7 @@ type OrchestratorInboxPanelProps = {
   onStartNextSegment?: (workItemId: string) => void;
   getPhaseMeta: (phase?: WorkItemPhase) => { label: string; accent: string };
   getStatusTone: (status?: string) => EnterpriseTone;
-  getStatusLabel: (status: WorkItem['status']) => string;
+  getStatusLabel: (workItem: WorkItem) => string;
 };
 
 const QUEUE_OPTIONS: Array<[WorkbenchQueueView, string]> = [
@@ -262,6 +263,7 @@ export const OrchestratorInboxPanel = ({
                 className="field-select"
               >
                 <option value="ALL">All statuses</option>
+                <option value="STAGED">Staged</option>
                 <option value="ACTIVE">Active</option>
                 <option value="BLOCKED">Blocked</option>
                 <option value="PAUSED">Paused</option>
@@ -333,14 +335,22 @@ export const OrchestratorInboxPanel = ({
                           {entry.item.title}
                         </p>
                       </div>
-                      <StatusBadge tone={attention ? 'warning' : 'neutral'}>{cta}</StatusBadge>
+                      <StatusBadge
+                        tone={
+                          attention
+                            ? 'warning'
+                            : getStatusTone(getWorkItemDisplayStatus(entry.item))
+                        }
+                      >
+                        {cta}
+                      </StatusBadge>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2">
                       <StatusBadge tone="neutral">
                         {getPhaseMeta(entry.item.phase).label}
                       </StatusBadge>
-                      <StatusBadge tone={getStatusTone(entry.item.status)}>
-                        {getStatusLabel(entry.item.status)}
+                      <StatusBadge tone={getStatusTone(getWorkItemDisplayStatus(entry.item))}>
+                        {getStatusLabel(entry.item)}
                       </StatusBadge>
                       {entry.item.storyPoints ? (
                         <StatusBadge tone="neutral">{entry.item.storyPoints} pts</StatusBadge>

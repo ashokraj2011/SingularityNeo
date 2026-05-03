@@ -1752,11 +1752,25 @@ export const uploadCapabilityWorkItemFiles = async (
   capabilityId: string,
   workItemId: string,
   files: File[],
+  options?: {
+    workflowStepId?: string;
+    runId?: string;
+    runStepId?: string;
+  },
 ): Promise<Artifact[]> => {
   const formData = new FormData();
   files.forEach((file) => {
     formData.append("files", file);
   });
+  if (options?.workflowStepId) {
+    formData.append("workflowStepId", options.workflowStepId);
+  }
+  if (options?.runId) {
+    formData.append("runId", options.runId);
+  }
+  if (options?.runStepId) {
+    formData.append("runStepId", options.runStepId);
+  }
 
   const response = await fetch(
     resolveApiUrl(
@@ -1776,6 +1790,44 @@ export const uploadCapabilityWorkItemFiles = async (
   const payload = (await response.json()) as { artifacts?: Artifact[] };
   return Array.isArray(payload.artifacts) ? payload.artifacts : [];
 };
+
+export const setCapabilityWorkItemStageOwner = async (
+  capabilityId: string,
+  workItemId: string,
+  workflowStepId: string,
+  payload: {
+    ownerType: "AGENT" | "HUMAN";
+    instructions?: string;
+    checklist?: string[];
+    assigneeUserId?: string;
+    assigneeRole?: string;
+    approvalPolicy?: ApprovalPolicy;
+    note?: string;
+  },
+): Promise<WorkItem> =>
+  requestJson<WorkItem>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/stages/${encodeURIComponent(workflowStepId)}/owner`,
+    {
+      method: "PUT",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const completeCapabilityWorkItemHumanStage = async (
+  capabilityId: string,
+  workItemId: string,
+  workflowStepId: string,
+  payload: { resolution: string; resolvedBy: string },
+): Promise<WorkflowRunDetail> =>
+  requestJson<WorkflowRunDetail>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/stages/${encodeURIComponent(workflowStepId)}/complete-human-stage`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
 
 export const getWorkItemEvidenceBundleDownloadUrl = (
   capabilityId: string,

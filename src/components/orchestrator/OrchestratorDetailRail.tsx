@@ -1,5 +1,6 @@
 import React from 'react';
 import { getStatusTone } from '../../lib/enterprise';
+import { getWorkItemDisplayStatus } from '../../lib/workItemState';
 import { cn } from '../../lib/utils';
 import type {
   WorkItem,
@@ -13,7 +14,7 @@ type Props = {
   navigatorSections: WorkNavigatorSection[];
   selectedWorkItemId: string | null;
   getPhaseMeta: (phase: WorkItemPhase) => { label: string };
-  getStatusLabel: (status: WorkItem['status']) => string;
+  getStatusLabel: (workItem: WorkItem) => string;
   onSelectWorkItem: (workItemId: string) => void;
   workbenchCanvas: React.ReactNode;
 };
@@ -81,8 +82,10 @@ export const OrchestratorDetailRail = ({
                                 {entry.item.title}
                               </p>
                             </div>
-                            <StatusBadge tone={getStatusTone(entry.item.status)}>
-                              {getStatusLabel(entry.item.status)}
+                            <StatusBadge
+                              tone={getStatusTone(getWorkItemDisplayStatus(entry.item))}
+                            >
+                              {getStatusLabel(entry.item)}
                             </StatusBadge>
                           </div>
                           <div className="mt-3 flex flex-wrap gap-2">

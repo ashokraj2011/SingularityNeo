@@ -402,6 +402,27 @@ export const registerDeliveryAssetRoutes = (
         const workflow = bundle.workspace.workflows.find(
           item => item.id === workItem.workflowId,
         );
+        const requestedWorkflowStepId =
+          typeof request.body?.workflowStepId === 'string' &&
+          request.body.workflowStepId.trim()
+            ? request.body.workflowStepId.trim()
+            : undefined;
+        const workflowStep = requestedWorkflowStepId
+          ? workflow?.steps.find((step) => step.id === requestedWorkflowStepId)
+          : undefined;
+        if (requestedWorkflowStepId && !workflowStep) {
+          response.status(400).json({ error: 'Workflow step was not found.' });
+          return;
+        }
+        const requestedRunId =
+          typeof request.body?.runId === 'string' && request.body.runId.trim()
+            ? request.body.runId.trim()
+            : undefined;
+        const requestedRunStepId =
+          typeof request.body?.runStepId === 'string' &&
+          request.body.runStepId.trim()
+            ? request.body.runStepId.trim()
+            : undefined;
 
         const files = Array.isArray(request.files) ? request.files : [];
         if (files.length === 0) {
@@ -505,15 +526,20 @@ export const registerDeliveryAssetRoutes = (
             capabilityId: bundle.capability.id,
             type: mime.startsWith('image/') ? 'Reference Image' : 'Reference Document',
             inputs: [],
-            version: `phase-${toFileSlug(workItem.phase || 'work')}`,
+            version: `phase-${toFileSlug(workflowStep?.phase || workItem.phase || 'work')}`,
             agent: actor.displayName || 'User Upload',
             created: new Date().toISOString(),
             direction: 'INPUT' as const,
-            connectedAgentId: workItem.assignedAgentId,
+            connectedAgentId: workflowStep?.agentId || workItem.assignedAgentId,
             sourceWorkflowId: workflow?.id,
-            summary: `Uploaded ${file.originalname} for ${workItem.id}.`,
+            workflowStepId: workflowStep?.id,
+            runId: requestedRunId,
+            runStepId: requestedRunStepId,
+            summary: workflowStep
+              ? `Uploaded ${file.originalname} for ${workItem.id} · ${workflowStep.name}.`
+              : `Uploaded ${file.originalname} for ${workItem.id}.`,
             artifactKind: 'UPLOAD' as const,
-            phase: workItem.phase,
+            phase: workflowStep?.phase || workItem.phase,
             workItemId: workItem.id,
             contentFormat,
             mimeType: mime || 'application/octet-stream',

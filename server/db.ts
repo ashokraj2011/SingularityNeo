@@ -601,6 +601,7 @@ export const schemaStatements = [
       direction TEXT,
       connected_agent_id TEXT,
       source_workflow_id TEXT,
+      workflow_step_id TEXT,
       work_item_id TEXT,
       artifact_kind TEXT,
       phase TEXT,
@@ -878,6 +879,7 @@ export const schemaStatements = [
       blocker JSONB,
       active_run_id TEXT,
       last_run_id TEXT,
+      stage_overrides JSONB NOT NULL DEFAULT '[]'::jsonb,
       record_version INTEGER NOT NULL DEFAULT 1,
       history JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -2353,6 +2355,10 @@ export const migrationStatements = [
   `,
   `
     ALTER TABLE capability_work_items
+    ADD COLUMN IF NOT EXISTS stage_overrides JSONB NOT NULL DEFAULT '[]'::jsonb
+  `,
+  `
+    ALTER TABLE capability_work_items
     ADD COLUMN IF NOT EXISTS history JSONB NOT NULL DEFAULT '[]'::jsonb
   `,
   `
@@ -2434,6 +2440,10 @@ export const migrationStatements = [
   `
     ALTER TABLE capability_artifacts
     ADD COLUMN IF NOT EXISTS summary TEXT
+  `,
+  `
+    ALTER TABLE capability_artifacts
+    ADD COLUMN IF NOT EXISTS workflow_step_id TEXT
   `,
   `
     ALTER TABLE capability_artifacts

@@ -47,7 +47,7 @@ describe('OrchestratorDetailRail', () => {
         navigatorSections={navigatorSections}
         selectedWorkItemId={null}
         getPhaseMeta={phase => ({ label: phase })}
-        getStatusLabel={status => status}
+        getStatusLabel={workItem => workItem.status}
         onSelectWorkItem={onSelectWorkItem}
         workbenchCanvas={<div>workbench canvas</div>}
       />,

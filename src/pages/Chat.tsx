@@ -320,6 +320,7 @@ const formatRuntimeTarget = ({
 }) => endpoint || command || 'Not reported';
 
 const WORK_ITEM_BRANCH_STATUS_PRIORITY: Record<WorkItem['status'], number> = {
+  STAGED: 0,
   ACTIVE: 0,
   BLOCKED: 0,
   PAUSED: 1,

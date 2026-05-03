@@ -94,6 +94,7 @@ describe('work item control helpers', () => {
     expect(nextWorkItem.phase).toBe('ANALYSIS');
     expect(nextWorkItem.currentStepId).toBe('STEP-ANALYSIS');
     expect(nextWorkItem.assignedAgentId).toBe('AGENT-ANALYST');
+    expect(nextWorkItem.status).toBe('STAGED');
     expect(nextWorkItem.executionContext).toBeUndefined();
     expect(nextWorkItem.recordVersion).toBe(4);
     expect(nextWorkItem.history).toHaveLength(2);

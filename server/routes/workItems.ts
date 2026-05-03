@@ -27,11 +27,13 @@ import {
 import {
   archiveWorkItemControl,
   cancelWorkItemControl,
+  completeWorkItemHumanStage,
   createWorkItemRecord,
   listWorkItemSegments,
   moveWorkItemToPhaseControl,
   restoreWorkItemControl,
   retryWorkItemSegment,
+  setWorkItemStageOwner,
   startNextSegmentFromPreset,
   startWorkflowExecution,
   startWorkItemSegment,
@@ -1113,6 +1115,96 @@ export const registerWorkItemRoutes = (
           lastSeenAt: new Date().toISOString(),
         });
         response.status(201).json(presence);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.put(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/stages/:workflowStepId/owner",
+    async (request, response) => {
+      try {
+        const actor = parseActorContext(request, "Workspace Operator");
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.control",
+        });
+        const ownerType =
+          request.body?.ownerType === "AGENT" ? "AGENT" : "HUMAN";
+        const workItem = await setWorkItemStageOwner({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          workflowStepId: request.params.workflowStepId,
+          ownerType,
+          instructions:
+            typeof request.body?.instructions === "string"
+              ? request.body.instructions
+              : undefined,
+          checklist: Array.isArray(request.body?.checklist)
+            ? request.body.checklist
+                .map((value: unknown) => String(value || "").trim())
+                .filter(Boolean)
+            : undefined,
+          assigneeUserId:
+            typeof request.body?.assigneeUserId === "string" &&
+            request.body.assigneeUserId.trim()
+              ? request.body.assigneeUserId.trim()
+              : undefined,
+          assigneeRole:
+            typeof request.body?.assigneeRole === "string" &&
+            request.body.assigneeRole.trim()
+              ? request.body.assigneeRole.trim()
+              : undefined,
+          approvalPolicy:
+            request.body?.approvalPolicy &&
+            typeof request.body.approvalPolicy === "object"
+              ? request.body.approvalPolicy
+              : undefined,
+          note:
+            typeof request.body?.note === "string" &&
+            request.body.note.trim()
+              ? request.body.note.trim()
+              : undefined,
+          requestedBy: actor.displayName,
+          actor,
+        });
+        if (workItem.activeRunId) {
+          wakeExecutionWorker();
+        }
+        response.json(workItem);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/stages/:workflowStepId/complete-human-stage",
+    async (request, response) => {
+      try {
+        const actor = parseActorContext(
+          request,
+          parseActor(request.body?.resolvedBy, "Workspace Operator"),
+        );
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor,
+          action: "workitem.control",
+        });
+        const detail = await completeWorkItemHumanStage({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          workflowStepId: request.params.workflowStepId,
+          resolution:
+            String(request.body?.resolution || "").trim() ||
+            "Human stage completed and ready for approval.",
+          resolvedBy: actor.displayName,
+          actor,
+        });
+        wakeExecutionWorker();
+        response.json(detail);
       } catch (error) {
         sendApiError(response, error);
       }

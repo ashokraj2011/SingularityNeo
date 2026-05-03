@@ -2,6 +2,7 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { AlertCircle, Workflow as WorkflowIcon } from 'lucide-react';
 import { getStatusTone } from '../../lib/enterprise';
+import { getWorkItemDisplayStatus } from '../../lib/workItemState';
 import { cn } from '../../lib/utils';
 import {
   formatTimestamp,
@@ -28,7 +29,7 @@ type Props = {
   workflowsById: Map<string, Workflow>;
   agentsById: Map<string, CapabilityAgent>;
   getPhaseMeta: (phase: WorkItemPhase) => { label: string };
-  getStatusLabel: (status: WorkItem['status']) => string;
+  getStatusLabel: (workItem: WorkItem) => string;
   getAttentionLabel: (args: {
     blocker?: WorkItem['blocker'];
     pendingRequest?: WorkItem['pendingRequest'];
@@ -157,9 +158,9 @@ export const OrchestratorBoardSurface = ({
                     </div>
 
                     <div className="orchestrator-board-card-status">
-                      <StatusBadge tone={getStatusTone(item.status)}>
-                        {getStatusLabel(item.status)}
-                      </StatusBadge>
+                        <StatusBadge tone={getStatusTone(getWorkItemDisplayStatus(item))}>
+                          {getStatusLabel(item)}
+                        </StatusBadge>
                       {item.taskType && item.taskType !== DEFAULT_WORK_ITEM_TASK_TYPE && (
                         <StatusBadge tone="neutral">
                           {getWorkItemTaskTypeLabel(item.taskType)}
