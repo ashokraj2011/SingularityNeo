@@ -253,10 +253,14 @@ export const OrchestratorStageOwnershipModal = ({
                     className="w-full rounded-2xl border border-outline-variant/35 bg-white px-4 py-3 text-sm text-on-surface"
                     placeholder="QA lead, analyst, release manager..."
                   />
-                  <p className="text-xs text-secondary">
+                  <p
+                    className={`text-xs ${
+                      approvalPolicy ? "text-secondary" : "text-amber-700"
+                    }`}
+                  >
                     {approvalPolicy
                       ? `This stage will return through ${approvalPolicy.name}.`
-                      : "No approval policy is available yet for this step."}
+                      : "Cannot assign to a human yet — no approver is available for this stage. Add a phase stakeholder or owning team in capability settings, or set approver roles on this workflow step, then reopen this dialog."}
                   </p>
                 </div>
               </div>
@@ -445,6 +449,11 @@ export const OrchestratorStageOwnershipModal = ({
                     if (!selectedStep) {
                       return;
                     }
+                    if (!approvalPolicy) {
+                      throw new Error(
+                        "No approver is available for this stage. Configure a phase stakeholder, owning team, or step approver role first.",
+                      );
+                    }
                     if (!instructions.trim()) {
                       throw new Error("Add human instructions before assigning this stage.");
                     }
@@ -472,7 +481,12 @@ export const OrchestratorStageOwnershipModal = ({
                     onClose();
                   })
                 }
-                disabled={busyAction !== null || !selectedStep}
+                disabled={busyAction !== null || !selectedStep || !approvalPolicy}
+                title={
+                  !approvalPolicy
+                    ? "No approver is available for this stage. Configure a phase stakeholder, owning team, or step approver role first."
+                    : undefined
+                }
                 className="rounded-full bg-primary px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {busyAction === "assign" ? (
