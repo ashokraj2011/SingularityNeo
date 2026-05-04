@@ -481,7 +481,17 @@ export const InstanceDashboard = () => {
                 />
               </>
             )}
-            {tab === "context" && <ContextInspector context={instance.context} />}
+            {tab === "context" && (
+              <ContextInspector
+                capabilityId={capabilityId}
+                instanceId={instance.id}
+                context={instance.context}
+                editable={
+                  instance.status === "RUNNING" || instance.status === "PAUSED"
+                }
+                onChanged={() => void refresh()}
+              />
+            )}
             {tab === "notes" && (
               <NotesPanel
                 capabilityId={capabilityId}

@@ -16,10 +16,12 @@ import {
   fetchBusinessTemplateStats,
   fetchBusinessWorkflow,
   listBusinessInstances,
+  type BusinessPerNodeStats,
 } from "../../../lib/api";
 import { cn } from "../../../lib/utils";
 import type {
   BusinessInstanceStatus,
+  BusinessNode,
   BusinessWorkflowInstance,
 } from "../../../contracts/businessWorkflow";
 
@@ -68,8 +70,10 @@ export const StatusReport = () => {
     overdueTaskCount: number;
     pendingApprovalCount: number;
     recentInstances: BusinessWorkflowInstance[];
+    perNode: BusinessPerNodeStats[];
   } | null>(null);
   const [instances, setInstances] = useState<BusinessWorkflowInstance[]>([]);
+  const [latestNodes, setLatestNodes] = useState<readonly BusinessNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState<
     BusinessInstanceStatus | "ALL" | "ACTIVE"
@@ -95,6 +99,10 @@ export const StatusReport = () => {
         setTemplateName(tpl.template.name);
         setStats(st);
         setInstances(inst.rows);
+        // Use the latest published version's nodes for friendly
+        // per-node labels. Older versions may have different node ids
+        // — labels just degrade gracefully.
+        setLatestNodes(tpl.versions[0]?.nodes || []);
       } catch (err) {
         if (cancelled) return;
         toastError(
@@ -208,6 +216,15 @@ export const StatusReport = () => {
           </p>
         </div>
 
+        {/* Per-node breakdown.
+            Reveals bottlenecks: which step takes longest to claim,
+            which step's send-back rate is high, which is most active.
+            Sorted by activations desc by the engine. */}
+        <PerNodeBreakdown
+          perNode={stats.perNode || []}
+          nodes={latestNodes}
+        />
+
         {/* Filters */}
         <div className="mt-4 flex items-center gap-1.5">
           <p className="text-[0.62rem] font-semibold uppercase tracking-wider text-secondary">
@@ -307,6 +324,100 @@ export const StatusReport = () => {
       </div>
     </div>
   );
+};
+
+// ── Per-node breakdown ───────────────────────────────────────────────────────
+
+const PerNodeBreakdown = ({
+  perNode,
+  nodes,
+}: {
+  perNode: BusinessPerNodeStats[];
+  nodes: readonly BusinessNode[];
+}) => {
+  if (perNode.length === 0) return null;
+  const labelOf = (id: string) =>
+    nodes.find((n) => n.id === id)?.label || id;
+  // Highlight rows where the send-back rate is unusually high — quick
+  // visual flag for "this step is causing the most rework."
+  const maxSentBack = Math.max(...perNode.map((p) => p.sentBackCount), 1);
+
+  return (
+    <div className="mt-3 rounded-lg border border-outline-variant/30 bg-white">
+      <div className="border-b border-outline-variant/30 p-3">
+        <p className="text-[0.62rem] font-semibold uppercase tracking-wider text-secondary">
+          Per-node breakdown
+        </p>
+        <p className="text-[0.65rem] text-outline">
+          Aggregated from the events log across every instance of this
+          template. Sorted by activations.
+        </p>
+      </div>
+      <table className="w-full text-[0.7rem]">
+        <thead className="bg-surface-container-low text-left">
+          <tr className="text-[0.6rem] uppercase tracking-wider text-outline">
+            <th className="px-3 py-1.5">Node</th>
+            <th className="px-3 py-1.5">Activations</th>
+            <th className="px-3 py-1.5">Completions</th>
+            <th className="px-3 py-1.5">Avg time-to-claim</th>
+            <th className="px-3 py-1.5">Avg time-to-complete</th>
+            <th className="px-3 py-1.5">Sent back</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-outline-variant/20">
+          {perNode.map((p) => {
+            const sbRatio = maxSentBack > 0 ? p.sentBackCount / maxSentBack : 0;
+            return (
+              <tr key={p.nodeId}>
+                <td className="px-3 py-1.5">
+                  <span className="font-semibold">{labelOf(p.nodeId)}</span>
+                  <span className="ml-1 font-mono text-[0.55rem] text-outline">
+                    {p.nodeId}
+                  </span>
+                </td>
+                <td className="px-3 py-1.5 text-on-surface">
+                  {p.activations}
+                </td>
+                <td className="px-3 py-1.5 text-on-surface">
+                  {p.completions}
+                </td>
+                <td className="px-3 py-1.5 text-outline">
+                  {p.avgClaimMs == null ? "—" : formatMs(p.avgClaimMs)}
+                </td>
+                <td className="px-3 py-1.5 text-outline">
+                  {p.avgCompleteMs == null ? "—" : formatMs(p.avgCompleteMs)}
+                </td>
+                <td className="px-3 py-1.5">
+                  <span
+                    className={cn(
+                      "inline-flex items-center rounded-full px-1.5 py-0.5 text-[0.55rem] font-semibold ring-1",
+                      p.sentBackCount === 0
+                        ? "bg-slate-50 text-slate-500 ring-slate-200"
+                        : sbRatio > 0.66
+                          ? "bg-rose-100 text-rose-700 ring-rose-300 animate-pulse"
+                          : sbRatio > 0.33
+                            ? "bg-amber-100 text-amber-800 ring-amber-300"
+                            : "bg-amber-50 text-amber-700 ring-amber-200",
+                    )}
+                  >
+                    {p.sentBackCount}
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+const formatMs = (ms: number): string => {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 3_600_000) return `${(ms / 60_000).toFixed(1)}m`;
+  if (ms < 86_400_000) return `${(ms / 3_600_000).toFixed(1)}h`;
+  return `${(ms / 86_400_000).toFixed(1)}d`;
 };
 
 const Kpi = ({

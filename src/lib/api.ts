@@ -1324,6 +1324,15 @@ export const listBusinessInstances = async (
   );
 };
 
+export interface BusinessPerNodeStats {
+  nodeId: string;
+  activations: number;
+  completions: number;
+  sentBackCount: number;
+  avgClaimMs: number | null;
+  avgCompleteMs: number | null;
+}
+
 export const fetchBusinessTemplateStats = async (
   capabilityId: string,
   templateId: string,
@@ -1333,6 +1342,7 @@ export const fetchBusinessTemplateStats = async (
   overdueTaskCount: number;
   pendingApprovalCount: number;
   recentInstances: BusinessWorkflowInstance[];
+  perNode: BusinessPerNodeStats[];
 }> =>
   requestJson(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflows/${encodeURIComponent(templateId)}/stats`,
@@ -1389,6 +1399,38 @@ export const resumeBusinessInstance = async (
   const result = await requestJson<{ instance: BusinessWorkflowInstance }>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}/resume`,
     { method: "POST", headers: jsonHeaders },
+  );
+  return result.instance;
+};
+
+export const updateBusinessInstanceContext = async (
+  capabilityId: string,
+  instanceId: string,
+  patch: Record<string, unknown>,
+): Promise<BusinessWorkflowInstance> => {
+  const result = await requestJson<{ instance: BusinessWorkflowInstance }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}/context`,
+    {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ patch }),
+    },
+  );
+  return result.instance;
+};
+
+export const removeBusinessInstanceContextKeys = async (
+  capabilityId: string,
+  instanceId: string,
+  keys: string[],
+): Promise<BusinessWorkflowInstance> => {
+  const result = await requestJson<{ instance: BusinessWorkflowInstance }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}/context`,
+    {
+      method: "DELETE",
+      headers: jsonHeaders,
+      body: JSON.stringify({ keys }),
+    },
   );
   return result.instance;
 };

@@ -2218,6 +2218,122 @@ export const resumeBusinessInstance = async ({
  * just an INSTANCE_NOTE_ADDED event with `payload.body`. The
  * NotesPanel filters the timeline for these.
  */
+// ── Editable instance context ────────────────────────────────────────────────
+
+/**
+ * Merge a key-value patch into a running instance's `context`.
+ *
+ * Mirrors workgraph-studio's `PATCH /workflow-instances/:id/params`
+ * pattern: the operator can drop new keys into the live context
+ * mid-flight, which any downstream node's edge condition can reference
+ * (e.g. `params.priorityOverride`). Reserved key prefix `__` is left
+ * alone — that's where we stash internal collections like
+ * `__documents` (Slice 3).
+ *
+ * Strategy:
+ *   - Top-level shallow merge (last-write-wins).
+ *   - We do NOT support nested-path patches in V1; if you need to set
+ *     `foo.bar.baz`, set the whole `foo` object. Keeps the API
+ *     trivially debuggable.
+ *   - Emits CONTEXT_UPDATED with the diff (added/changed keys) so the
+ *     timeline shows "operator <name> set priorityOverride=URGENT".
+ */
+export const updateInstanceContext = async ({
+  capabilityId,
+  instanceId,
+  actorId,
+  patch,
+}: {
+  capabilityId: string;
+  instanceId: string;
+  actorId: string;
+  patch: Record<string, unknown>;
+}): Promise<BusinessWorkflowInstance | null> => {
+  const inst = await fetchInstance(capabilityId, instanceId);
+  if (!inst) return null;
+  if (
+    inst.status === "COMPLETED" ||
+    inst.status === "CANCELLED" ||
+    inst.status === "FAILED"
+  ) {
+    throw new Error(
+      `Cannot update context on a ${inst.status} instance — already terminal.`,
+    );
+  }
+  const before = inst.context || {};
+  const merged: Record<string, unknown> = { ...before };
+  const changed: Record<string, { from: unknown; to: unknown }> = {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (JSON.stringify(before[k]) !== JSON.stringify(v)) {
+      changed[k] = { from: before[k], to: v };
+    }
+    merged[k] = v;
+  }
+  if (Object.keys(changed).length === 0) {
+    // No-op — return current state without emitting.
+    return inst;
+  }
+  await query(
+    `UPDATE capability_business_workflow_instances
+     SET context = $3::jsonb, updated_at = NOW()
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, instanceId, JSON.stringify(merged)],
+  );
+  await emitEvent({
+    capabilityId,
+    instanceId,
+    eventType: "CONTEXT_UPDATED",
+    actorId,
+    payload: { changed, keys: Object.keys(changed) },
+  });
+  return (await fetchInstance(capabilityId, instanceId)) || null;
+};
+
+/**
+ * Remove keys from instance.context. Same audit pattern as update.
+ * Reserved-prefix (__*) keys can't be removed via this API — they
+ * have dedicated routes (e.g. document detach).
+ */
+export const removeInstanceContextKeys = async ({
+  capabilityId,
+  instanceId,
+  actorId,
+  keys,
+}: {
+  capabilityId: string;
+  instanceId: string;
+  actorId: string;
+  keys: string[];
+}): Promise<BusinessWorkflowInstance | null> => {
+  const inst = await fetchInstance(capabilityId, instanceId);
+  if (!inst) return null;
+  const before = inst.context || {};
+  const merged: Record<string, unknown> = { ...before };
+  const removed: Record<string, unknown> = {};
+  for (const k of keys) {
+    if (k.startsWith("__")) continue;
+    if (k in merged) {
+      removed[k] = merged[k];
+      delete merged[k];
+    }
+  }
+  if (Object.keys(removed).length === 0) return inst;
+  await query(
+    `UPDATE capability_business_workflow_instances
+     SET context = $3::jsonb, updated_at = NOW()
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, instanceId, JSON.stringify(merged)],
+  );
+  await emitEvent({
+    capabilityId,
+    instanceId,
+    eventType: "CONTEXT_UPDATED",
+    actorId,
+    payload: { removed, keys: Object.keys(removed) },
+  });
+  return (await fetchInstance(capabilityId, instanceId)) || null;
+};
+
 export const addInstanceNote = async ({
   capabilityId,
   instanceId,
@@ -2246,6 +2362,22 @@ export const addInstanceNote = async ({
 
 // ── Aggregate stats for status report ────────────────────────────────────────
 
+export interface PerNodeStats {
+  nodeId: string;
+  /** Times this node entered active state. */
+  activations: number;
+  /** Times this node emitted NODE_COMPLETED. */
+  completions: number;
+  /** Times an operator/approver bounced work back FROM this node. */
+  sentBackCount: number;
+  /** Mean ms between NODE_ACTIVATED and TASK_CLAIMED. null if no
+   *  task ever got claimed (e.g. the node is a DECISION_GATE that
+   *  doesn't create tasks). */
+  avgClaimMs: number | null;
+  /** Mean ms between NODE_ACTIVATED and NODE_COMPLETED. */
+  avgCompleteMs: number | null;
+}
+
 export const aggregateBusinessTemplateStats = async ({
   capabilityId,
   templateId,
@@ -2258,6 +2390,7 @@ export const aggregateBusinessTemplateStats = async ({
   overdueTaskCount: number;
   pendingApprovalCount: number;
   recentInstances: BusinessWorkflowInstance[];
+  perNode: PerNodeStats[];
 }> => {
   // Counts by instance status
   const statusResult = await query(
@@ -2337,6 +2470,127 @@ export const aggregateBusinessTemplateStats = async ({
   const recentInstances = recentResult.rows.map((row) =>
     rowToInstance(row as Record<string, unknown>),
   );
+
+  // ── Per-node breakdown ────────────────────────────────────────────────
+  //
+  // Aggregate from the events log. A self-join would be cleaner but
+  // less portable (lateral subqueries vary across PG versions); we
+  // keep it as 4 single-purpose queries that each take an index seek
+  // and stitch in the function body. Row counts here are bounded by
+  // events × instances in this template, which stays modest.
+  const activationsResult = await query(
+    `
+    SELECT e.node_id, COUNT(*)::int AS n
+    FROM capability_business_workflow_events e
+    JOIN capability_business_workflow_instances i
+      ON i.capability_id = e.capability_id AND i.id = e.instance_id
+    WHERE e.capability_id = $1 AND i.template_id = $2
+      AND e.event_type = 'NODE_ACTIVATED' AND e.node_id IS NOT NULL
+    GROUP BY e.node_id
+    `,
+    [capabilityId, templateId],
+  );
+  const completionsResult = await query(
+    `
+    SELECT e.node_id, COUNT(*)::int AS n,
+           AVG(EXTRACT(EPOCH FROM (e.occurred_at - act.activated_at)) * 1000)::float8 AS avg_complete_ms
+    FROM capability_business_workflow_events e
+    JOIN capability_business_workflow_instances i
+      ON i.capability_id = e.capability_id AND i.id = e.instance_id
+    LEFT JOIN LATERAL (
+      SELECT MAX(occurred_at) AS activated_at
+      FROM capability_business_workflow_events e2
+      WHERE e2.capability_id = e.capability_id
+        AND e2.instance_id = e.instance_id
+        AND e2.node_id = e.node_id
+        AND e2.event_type = 'NODE_ACTIVATED'
+        AND e2.occurred_at <= e.occurred_at
+    ) act ON TRUE
+    WHERE e.capability_id = $1 AND i.template_id = $2
+      AND e.event_type = 'NODE_COMPLETED' AND e.node_id IS NOT NULL
+    GROUP BY e.node_id
+    `,
+    [capabilityId, templateId],
+  );
+  const claimsResult = await query(
+    `
+    SELECT e.node_id,
+           AVG(EXTRACT(EPOCH FROM (e.occurred_at - act.activated_at)) * 1000)::float8 AS avg_claim_ms
+    FROM capability_business_workflow_events e
+    JOIN capability_business_workflow_instances i
+      ON i.capability_id = e.capability_id AND i.id = e.instance_id
+    LEFT JOIN LATERAL (
+      SELECT MAX(occurred_at) AS activated_at
+      FROM capability_business_workflow_events e2
+      WHERE e2.capability_id = e.capability_id
+        AND e2.instance_id = e.instance_id
+        AND e2.node_id = e.node_id
+        AND e2.event_type = 'NODE_ACTIVATED'
+        AND e2.occurred_at <= e.occurred_at
+    ) act ON TRUE
+    WHERE e.capability_id = $1 AND i.template_id = $2
+      AND e.event_type = 'TASK_CLAIMED' AND e.node_id IS NOT NULL
+    GROUP BY e.node_id
+    `,
+    [capabilityId, templateId],
+  );
+  const sentBackResult = await query(
+    `
+    SELECT e.node_id, COUNT(*)::int AS n
+    FROM capability_business_workflow_events e
+    JOIN capability_business_workflow_instances i
+      ON i.capability_id = e.capability_id AND i.id = e.instance_id
+    WHERE e.capability_id = $1 AND i.template_id = $2
+      AND e.event_type IN ('TASK_SENT_BACK','APPROVAL_SENT_BACK')
+      AND e.node_id IS NOT NULL
+    GROUP BY e.node_id
+    `,
+    [capabilityId, templateId],
+  );
+  const perNodeMap = new Map<string, PerNodeStats>();
+  const ensure = (id: string): PerNodeStats => {
+    let entry = perNodeMap.get(id);
+    if (!entry) {
+      entry = {
+        nodeId: id,
+        activations: 0,
+        completions: 0,
+        sentBackCount: 0,
+        avgClaimMs: null,
+        avgCompleteMs: null,
+      };
+      perNodeMap.set(id, entry);
+    }
+    return entry;
+  };
+  for (const row of activationsResult.rows) {
+    const r = row as { node_id: string; n: number };
+    ensure(r.node_id).activations = Number(r.n);
+  }
+  for (const row of completionsResult.rows) {
+    const r = row as {
+      node_id: string;
+      n: number;
+      avg_complete_ms: number | null;
+    };
+    const e = ensure(r.node_id);
+    e.completions = Number(r.n);
+    e.avgCompleteMs =
+      r.avg_complete_ms == null ? null : Number(r.avg_complete_ms);
+  }
+  for (const row of claimsResult.rows) {
+    const r = row as { node_id: string; avg_claim_ms: number | null };
+    ensure(r.node_id).avgClaimMs =
+      r.avg_claim_ms == null ? null : Number(r.avg_claim_ms);
+  }
+  for (const row of sentBackResult.rows) {
+    const r = row as { node_id: string; n: number };
+    ensure(r.node_id).sentBackCount = Number(r.n);
+  }
+  const perNode = Array.from(perNodeMap.values()).sort(
+    (a, b) => b.activations - a.activations,
+  );
+
   return {
     byStatus,
     avgDurationMs:
@@ -2344,5 +2598,6 @@ export const aggregateBusinessTemplateStats = async ({
     overdueTaskCount,
     pendingApprovalCount,
     recentInstances,
+    perNode,
   };
 };

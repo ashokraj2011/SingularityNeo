@@ -28,6 +28,8 @@ import type express from "express";
 import {
   addInstanceNote,
   aggregateBusinessTemplateStats,
+  removeInstanceContextKeys,
+  updateInstanceContext,
   archiveBusinessTemplate,
   cancelBusinessInstance,
   claimBusinessTask,
@@ -612,6 +614,63 @@ export const registerBusinessWorkflowRoutes = (app: express.Express) => {
           capabilityId: trim(request.params.capabilityId),
           instanceId: trim(request.params.instanceId),
           actorId: actor.displayName,
+        });
+        if (!inst) {
+          response.status(404).json({ error: "Instance not found" });
+          return;
+        }
+        response.json({ instance: inst });
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // Merge a key-value patch into a running instance's context.
+  // Mirrors workgraph-studio's PATCH .../params shape — operator can
+  // drop new keys mid-flight and edge conditions can reference them.
+  app.patch(
+    "/api/capabilities/:capabilityId/business-instances/:instanceId/context",
+    async (request, response) => {
+      try {
+        const actor = resolveActor(request);
+        const body = (request.body || {}) as { patch?: Record<string, unknown> };
+        if (!body.patch || typeof body.patch !== "object" || Array.isArray(body.patch)) {
+          response.status(400).json({ error: "patch (object) is required" });
+          return;
+        }
+        const inst = await updateInstanceContext({
+          capabilityId: trim(request.params.capabilityId),
+          instanceId: trim(request.params.instanceId),
+          actorId: actor.displayName,
+          patch: body.patch,
+        });
+        if (!inst) {
+          response.status(404).json({ error: "Instance not found" });
+          return;
+        }
+        response.json({ instance: inst });
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.delete(
+    "/api/capabilities/:capabilityId/business-instances/:instanceId/context",
+    async (request, response) => {
+      try {
+        const actor = resolveActor(request);
+        const body = (request.body || {}) as { keys?: string[] };
+        if (!Array.isArray(body.keys) || body.keys.length === 0) {
+          response.status(400).json({ error: "keys (string[]) is required" });
+          return;
+        }
+        const inst = await removeInstanceContextKeys({
+          capabilityId: trim(request.params.capabilityId),
+          instanceId: trim(request.params.instanceId),
+          actorId: actor.displayName,
+          keys: body.keys.filter((k) => typeof k === "string"),
         });
         if (!inst) {
           response.status(404).json({ error: "Instance not found" });
