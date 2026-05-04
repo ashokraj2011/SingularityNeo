@@ -64,7 +64,7 @@ import {
 import {
   getPrimaryBaseClone,
 } from "../desktopRepoSync";
-import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
+import { discoverWorkItemCheckoutPath } from "../workItemGitWorkspace";
 import { buildCodeSearchCandidates, looksLikeSymbolPattern } from "../codeDiscovery";
 import {
   canonicalizeRepoBackedPath,
@@ -501,17 +501,18 @@ const resolveWorkspaceContext = async (
       resolution.approvedWorkspaceRoots.length > 0
         ? resolution.approvedWorkspaceRoots
         : [resolution.localRootPath];
-    const workItemRepository =
-      (capability.repositories || []).find(
-        (repository) => repository.id === workItemRepositoryId,
-      ) ||
-      // Fallback: use the primary (or first) repo even when executionContext
-      // isn't set — needed by the Workflow Orchestrator which initialises the
-      // git workspace separately via initWorkItemGitWorkspace.
-      (workItem?.id
-        ? ((capability.repositories || []).find((r) => r.isPrimary) ??
-           (capability.repositories || [])[0])
-        : undefined);
+    // ── Work-item checkout discovery ──────────────────────────────────────
+    // Scan {operatorWorkDir}/{workItemId}/ for a git repository.
+    // This is formula-free: it works regardless of the repo/clone name and
+    // requires no executionContext to be set on the work item.
+    // Pattern enforced: workDir / workItemId / <repoCloneDir> /
+    const workItemCheckoutPath =
+      workItem?.id && resolution.workingDirectoryPath
+        ? discoverWorkItemCheckoutPath(
+            resolution.workingDirectoryPath,
+            workItem.id,
+          ) ?? ""
+        : "";
 
     const rawBaseClonePath =
       !workItem?.id && capability.id
@@ -520,9 +521,8 @@ const resolveWorkspaceContext = async (
           )
         : "";
     // Only trust the base clone path if it lives under the operator's
-    // working directory. Stale clones under the SingularityNeo project
-    // root (from before the operator configured their working directory)
-    // must not shadow the correct resolution.
+    // working directory. Stale clones under a different root must not
+    // shadow the correct resolution.
     const baseClonePath =
       rawBaseClonePath &&
       resolution.workingDirectoryPath &&
@@ -534,37 +534,18 @@ const resolveWorkspaceContext = async (
         `[resolveWorkspacePath] DISCARDED stale baseClonePath=${rawBaseClonePath} — not under workingDirectory=${resolution.workingDirectoryPath}`,
       );
     }
-    const derivedWorkItemCheckoutPath =
-      workItem?.id && workItemRepository
-        ? buildWorkItemCheckoutPath({
-            workingDirectoryPath: resolution.workingDirectoryPath,
-            capability,
-            workItemId: workItem.id,
-            repository: workItemRepository,
-            repositoryCount: (capability.repositories || []).length,
-          })
-        : "";
-    // Only promote the derived work-item path to the primary workspace when
-    // the Workflow Orchestrator (or any other flow) has already initialised
-    // it on disk.  If the directory does not exist yet, fall through to the
-    // base clone / working-directory fallback so code lookups still work.
-    const verifiedWorkItemCheckoutPath =
-      derivedWorkItemCheckoutPath &&
-      fsSync.existsSync(derivedWorkItemCheckoutPath)
-        ? derivedWorkItemCheckoutPath
-        : "";
 
     // Generic workspace tools still anchor to the desktop workspace, but
     // repo-backed code tools resolve against discovered code roots separately.
     const defaultPath =
-      verifiedWorkItemCheckoutPath ||
+      workItemCheckoutPath ||
       baseClonePath ||
       resolution.workingDirectoryPath ||
       resolution.localRootPath;
     const requestedPath = normalizeDirectoryPath(preferredPath || "");
     const candidate = requestedPath || defaultPath;
 
-    console.log(`[resolveWorkspacePath]   derivedCheckout=${derivedWorkItemCheckoutPath || 'EMPTY'} | verifiedCheckout=${verifiedWorkItemCheckoutPath || 'EMPTY'} | baseClone=${baseClonePath || 'EMPTY'} | workingDir=${resolution.workingDirectoryPath || 'EMPTY'} | defaultPath=${defaultPath || 'EMPTY'} | candidate=${candidate || 'EMPTY'}`);
+    console.log(`[resolveWorkspacePath]   workItemCheckout=${workItemCheckoutPath || 'EMPTY'} | baseClone=${baseClonePath || 'EMPTY'} | workingDir=${resolution.workingDirectoryPath || 'EMPTY'} | defaultPath=${defaultPath || 'EMPTY'} | candidate=${candidate || 'EMPTY'}`);
 
     if (!candidate) {
       throw new Error(

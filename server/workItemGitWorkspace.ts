@@ -1,31 +1,34 @@
 /**
  * Per-work-item git workspace manager.
  *
- * When a work item starts in the Workflow Orchestrator (or any workflow-driven
- * flow), this module creates an isolated, fully-writable git checkout that:
+ * Correct directory layout (matches the user-visible pattern):
  *
- *   • Lives at  {workingDir}/{capability-slug}/{workItemId}/
- *   • Tracks branch  wi/{workItemId}  (sanitised from the raw ID)
- *   • Can be seeded from the capability's registered base clone (fast —
- *     uses `git worktree add`, no network) or cloned from the repository
- *     URL when no base clone is available (network required).
+ *   {operatorWorkDir}/{workItemId}/{repoCloneName}/
  *
- * All agent tools (workspace_read, browse_code, workspace_write, …) that
- * receive a `workItem` whose ID matches this path will operate exclusively
- * within the isolated checkout, keeping work items hermetically separated.
+ * For example, if the operator's workDir is `/work`, the work item is
+ * `WI-FQYB8E`, and the repository is `rule-engine`, the checkout lands at:
  *
- * On workflow completion, `finalizeWorkItemGitWorkspace` stages and commits
- * every change and (optionally) pushes to the remote.
+ *   /work/WI-FQYB8E/rule-engine/
  *
- * This is a generic utility — it has no knowledge of Singularity-specific
- * workflow business logic and can be driven by any orchestration layer.
+ * This keeps work-item directories flat directly under the operator workDir
+ * (no capability slug in the path) and lets the actual git clone sit inside
+ * as a named subdirectory — matching the pattern `workDir/workItemId/<gitClone>`.
+ *
+ * All agent tools (workspace_read, browse_code, workspace_write, …) discover
+ * the checkout by scanning `{operatorWorkDir}/{workItemId}/` for the first
+ * subdirectory that contains a `.git` — no hard-coded path formula needed.
+ *
+ * On workflow completion `finalizeWorkItemGitWorkspace` stages all changes,
+ * commits them on branch `wi/{workItemId}`, and optionally pushes to origin.
+ *
+ * This module has no knowledge of Singularity-specific workflow business
+ * logic and can be driven by any orchestration layer.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { runGitCommand } from "./app/executionSupport";
 import { getCapabilityBaseClones, resolveOperatorWorkingDirectory } from "./desktopRepoSync";
-import { buildWorkItemCheckoutPath } from "./workItemCheckouts";
 import { normalizeDirectoryPath } from "./workspacePaths";
 import type { Capability } from "../src/types";
 
@@ -42,7 +45,10 @@ export type WorkItemGitWorkspaceSource =
   | "clone";
 
 export interface WorkItemGitWorkspaceResult {
+  /** Path to the actual git repository root (contains `.git`). */
   workspacePath: string;
+  /** Parent directory containing the git clone: `{workDir}/{workItemId}/` */
+  workItemDir: string;
   branchName: string;
   /** True when the workspace was freshly created (false when it already existed). */
   created: boolean;
@@ -52,9 +58,7 @@ export interface WorkItemGitWorkspaceResult {
 export interface WorkItemGitFinalizeResult {
   workspacePath: string;
   branchName: string;
-  /** True when at least one file was staged and committed. */
   committed: boolean;
-  /** True when changes were pushed to the remote. */
   pushed: boolean;
   headSha: string;
   commitMessage: string;
@@ -63,19 +67,18 @@ export interface WorkItemGitFinalizeResult {
 
 export interface WorkItemGitWorkspaceStatus {
   workspacePath: string;
+  workItemDir: string;
   exists: boolean;
   isGitRepo: boolean;
   branchName: string;
   headSha: string;
-  /** True when there are staged or unstaged changes. */
   dirty: boolean;
   changedFiles: string[];
-  /** Number of commits ahead of the tracking remote branch (0 when no upstream). */
   ahead: number;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Path / branch helpers
+// Path helpers
 // ────────────────────────────────────────────────────────────────────────────
 
 const sanitizeBranchSegment = (value: string): string =>
@@ -87,49 +90,91 @@ const sanitizeBranchSegment = (value: string): string =>
 
 /**
  * Canonical branch name for a work item: `wi/{sanitised-id}`.
- * Callers can also pass the raw work item ID to this helper.
  */
 export const buildWorkItemBranchName = (workItemId: string): string =>
   `wi/${sanitizeBranchSegment(workItemId)}`;
 
 /**
- * Derive the on-disk path for the work-item's isolated checkout.
+ * The parent directory for a work item's isolated workspace:
+ *   `{workDir}/{workItemId}/`
  *
- * Layout:  {workingDir}/{capability-slug}/{workItemId}/
- *
- * This intentionally matches `buildWorkItemCheckoutPath` from
- * `workItemCheckouts.ts` so that the standard `resolveCapabilityCodeRoots`
- * path can discover it without any additional plumbing.
+ * The actual git clone lives one level deeper at
+ *   `{workDir}/{workItemId}/{repoName}/`
  */
-export const getWorkItemWorkspacePath = (
-  workingDir: string,
-  capability: Pick<Capability, "name" | "id">,
-  workItemId: string,
-): string => {
+export const getWorkItemDir = (workingDir: string, workItemId: string): string => {
   const dir = normalizeDirectoryPath(workingDir);
   if (!dir || !workItemId) return "";
-  return buildWorkItemCheckoutPath({
-    workingDirectoryPath: dir,
-    capability,
-    workItemId,
-    // No repository suffix — single-repo layout is the default.
-  });
+  return path.join(dir, workItemId);
 };
 
-// ────────────────────────────────────────────────────────────────────────────
-// Internal helpers
-// ────────────────────────────────────────────────────────────────────────────
+/**
+ * Derive a short clone-directory name from a repository URL or label.
+ *
+ * Examples:
+ *   "https://github.com/example/rule-engine.git" → "rule-engine"
+ *   "git@github.com:example/my-app.git"          → "my-app"
+ *   "My App"                                       → "my-app"
+ */
+export const deriveRepoCloneName = (urlOrLabel: string): string => {
+  const trimmed = String(urlOrLabel || "").trim().replace(/\.git$/i, "");
+  const lastSegment = trimmed.replace(/[/\\:]+/g, "/").split("/").filter(Boolean).pop() || "";
+  return (
+    lastSegment
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "repo"
+  );
+};
 
-const checkPathExists = (p: string): boolean => {
-  try {
-    return fs.existsSync(p);
-  } catch {
-    return false;
+/**
+ * Scan `{workDir}/{workItemId}/` for a git repository.
+ *
+ * Returns the path to the git root (the directory that contains `.git`) when
+ * found, or `null` when the work-item directory does not exist or contains no
+ * git repositories.
+ *
+ * Search order:
+ * 1. `{workDir}/{workItemId}/` itself (single-level checkout, less common).
+ * 2. Every immediate subdirectory of `{workDir}/{workItemId}/` (the standard
+ *    layout: `{workDir}/{workItemId}/{repoName}/`).
+ *
+ * Only one level of subdirectories is scanned — deep nesting is not supported.
+ */
+export const discoverWorkItemCheckoutPath = (
+  workingDir: string,
+  workItemId: string,
+): string | null => {
+  const workItemDir = getWorkItemDir(workingDir, workItemId);
+  if (!workItemDir || !fs.existsSync(workItemDir)) return null;
+
+  // Check if the work-item dir itself is a git repo.
+  if (fs.existsSync(path.join(workItemDir, ".git"))) {
+    return workItemDir;
   }
+
+  // Scan one level of subdirectories.
+  try {
+    const entries = fs.readdirSync(workItemDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.name.startsWith(".")) {
+        const candidate = path.join(workItemDir, entry.name);
+        if (fs.existsSync(path.join(candidate, ".git"))) {
+          return candidate;
+        }
+      }
+    }
+  } catch {
+    // Permissions error or other FS issue — treat as not found.
+  }
+  return null;
 };
+
+// ────────────────────────────────────────────────────────────────────────────
+// Internal git helpers
+// ────────────────────────────────────────────────────────────────────────────
 
 const isGitRepository = async (dirPath: string): Promise<boolean> => {
-  if (!checkPathExists(dirPath)) return false;
+  if (!fs.existsSync(dirPath)) return false;
   try {
     const result = await runGitCommand(dirPath, [
       "rev-parse",
@@ -158,6 +203,14 @@ const branchExistsLocally = async (
   }
 };
 
+const removeDirSilently = (dirPath: string) => {
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  } catch {
+    // Ignore cleanup errors.
+  }
+};
+
 // ────────────────────────────────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────────────────────────────────
@@ -165,33 +218,36 @@ const branchExistsLocally = async (
 /**
  * Initialise (or reuse) an isolated git workspace for `workItemId`.
  *
- * **Strategy (in priority order):**
- * 1. If the checkout directory already exists and is a valid git repository →
- *    return immediately (idempotent).
- * 2. If the capability has a registered base clone on disk →
- *    `git worktree add -b wi/{workItemId} {workspacePath}` off that clone.
- *    This is fast (no network), shares the object store with the base clone,
- *    and means all future fetches update both the base clone and this worktree.
- * 3. If a `repositoryUrl` is supplied →
- *    `git clone --single-branch {url} {workspacePath}` then create/switch to
- *    `wi/{workItemId}`.
+ * Layout after a successful call:
+ *   `{workDir}/{workItemId}/{repoCloneName}/`  ← git root
  *
- * Throws when neither a base clone nor a repository URL is available.
+ * **Strategy (in priority order):**
+ * 1. Scan `{workDir}/{workItemId}/` — if a git repo already exists there,
+ *    return it immediately (idempotent, no network).
+ * 2. Registered base clone on disk → `git worktree add -b wi/{workItemId}`
+ *    places a linked worktree at `{workDir}/{workItemId}/{repoCloneName}/`.
+ *    Fast: shares the object store, no network required.
+ * 3. `repositoryUrl` supplied → `git clone` into
+ *    `{workDir}/{workItemId}/{repoCloneName}/` then create branch.
+ *
+ * Throws when neither a base clone nor a URL is available.
  */
 export const initWorkItemGitWorkspace = async ({
   capability,
   workItemId,
   workingDir: explicitWorkingDir,
   repositoryUrl,
+  repositoryLabel,
   defaultBranch = "main",
 }: {
   capability: Pick<Capability, "name" | "id">;
   workItemId: string;
-  /** Override the working directory.  Falls back to the operator's
-   *  registered working directory (from `desktopRepoSync`). */
+  /** Override the operator working directory. Falls back to the registered value. */
   workingDir?: string;
-  /** Repository URL used as a fallback when no base clone is registered. */
+  /** Repository URL — used as clone source and to derive the clone dir name. */
   repositoryUrl?: string;
+  /** Human-readable label used to derive the clone dir name when no URL is given. */
+  repositoryLabel?: string;
   defaultBranch?: string;
 }): Promise<WorkItemGitWorkspaceResult> => {
   const workingDir =
@@ -200,30 +256,37 @@ export const initWorkItemGitWorkspace = async ({
 
   if (!workingDir) {
     throw new Error(
-      "No working directory available. " +
-        "Configure one under Desktop Settings or set SINGULARITY_WORKING_DIRECTORY.",
+      "No operator working directory is configured. " +
+        "Set one in Desktop Settings or via SINGULARITY_WORKING_DIRECTORY.",
     );
   }
 
-  const workspacePath = getWorkItemWorkspacePath(workingDir, capability, workItemId);
-  if (!workspacePath) {
+  const workItemDir = getWorkItemDir(workingDir, workItemId);
+  if (!workItemDir) {
     throw new Error(
-      `Cannot determine workspace path for work item "${workItemId}".`,
+      `Cannot determine workspace directory for work item "${workItemId}".`,
     );
   }
 
   const branchName = buildWorkItemBranchName(workItemId);
 
-  // ── 1. Idempotent: already exists ──────────────────────────────────────
-  if (await isGitRepository(workspacePath)) {
+  // ── 1. Idempotent: scan for existing checkout ───────────────────────────
+  const existingPath = discoverWorkItemCheckoutPath(workingDir, workItemId);
+  if (existingPath) {
     console.log(
-      `[workItemGitWorkspace] reusing existing workspace for ${workItemId}: ${workspacePath}`,
+      `[workItemGitWorkspace] reusing existing workspace for ${workItemId}: ${existingPath}`,
     );
-    return { workspacePath, branchName, created: false, source: "existing" };
+    return {
+      workspacePath: existingPath,
+      workItemDir,
+      branchName,
+      created: false,
+      source: "existing",
+    };
   }
 
-  // Make sure the parent directory exists.
-  fs.mkdirSync(path.dirname(workspacePath), { recursive: true });
+  // Ensure the parent work-item directory exists.
+  fs.mkdirSync(workItemDir, { recursive: true });
 
   // ── 2. Git worktree from base clone ────────────────────────────────────
   const baseClones = getCapabilityBaseClones(capability.id).filter(
@@ -232,8 +295,15 @@ export const initWorkItemGitWorkspace = async ({
   const primaryClone =
     baseClones.find((entry) => entry.isPrimary) ?? baseClones[0];
 
-  if (primaryClone?.checkoutPath && checkPathExists(primaryClone.checkoutPath)) {
+  if (primaryClone?.checkoutPath && fs.existsSync(primaryClone.checkoutPath)) {
     const sourceRepoPath = primaryClone.checkoutPath;
+    // Derive clone dir name from the base clone's directory name.
+    const cloneDirName =
+      deriveRepoCloneName(
+        repositoryLabel || repositoryUrl || path.basename(sourceRepoPath),
+      );
+    const workspacePath = path.join(workItemDir, cloneDirName);
+
     try {
       const alreadyExists = await branchExistsLocally(sourceRepoPath, branchName);
       if (alreadyExists) {
@@ -253,20 +323,21 @@ export const initWorkItemGitWorkspace = async ({
         ]);
       }
       console.log(
-        `[workItemGitWorkspace] created worktree for ${workItemId} at ${workspacePath} (branch: ${branchName})`,
+        `[workItemGitWorkspace] worktree created for ${workItemId}: ${workspacePath} (branch: ${branchName})`,
       );
-      return { workspacePath, branchName, created: true, source: "worktree" };
+      return {
+        workspacePath,
+        workItemDir,
+        branchName,
+        created: true,
+        source: "worktree",
+      };
     } catch (err) {
       console.warn(
         `[workItemGitWorkspace] worktree add failed for ${workItemId}, falling back to clone:`,
         err instanceof Error ? err.message : err,
       );
-      // Clean up any partial directory before attempting a clone.
-      try {
-        fs.rmSync(workspacePath, { recursive: true, force: true });
-      } catch {
-        // Ignore cleanup errors.
-      }
+      removeDirSilently(workspacePath);
     }
   }
 
@@ -274,19 +345,18 @@ export const initWorkItemGitWorkspace = async ({
   const repoUrl = repositoryUrl?.trim();
   if (!repoUrl) {
     throw new Error(
-      `No base clone available for capability "${capability.name}" and no repository URL was ` +
-        `provided. Configure a repository in the capability settings or register a base clone ` +
-        `before initializing a work-item workspace.`,
+      `No base clone is available for capability "${capability.name}" and no repository ` +
+        `URL was provided. Configure a repository URL in the capability settings or ` +
+        `register a base clone before initialising a work-item workspace.`,
     );
   }
 
-  const parentDir = path.dirname(workspacePath);
-  const cloneDirName = path.basename(workspacePath);
-  fs.mkdirSync(parentDir, { recursive: true });
+  const cloneDirName = deriveRepoCloneName(repositoryLabel || repoUrl);
+  const workspacePath = path.join(workItemDir, cloneDirName);
 
-  // Attempt a single-branch clone first (faster); fall back to full clone.
+  // Single-branch clone (faster); falls back to full clone on failure.
   try {
-    await runGitCommand(parentDir, [
+    await runGitCommand(workItemDir, [
       "clone",
       "--branch",
       defaultBranch,
@@ -298,13 +368,8 @@ export const initWorkItemGitWorkspace = async ({
     console.warn(
       `[workItemGitWorkspace] single-branch clone failed for ${workItemId}, retrying full clone.`,
     );
-    // Remove any partial clone directory.
-    try {
-      fs.rmSync(workspacePath, { recursive: true, force: true });
-    } catch {
-      // Ignore.
-    }
-    await runGitCommand(parentDir, ["clone", repoUrl, cloneDirName]);
+    removeDirSilently(workspacePath);
+    await runGitCommand(workItemDir, ["clone", repoUrl, cloneDirName]);
   }
 
   if (!(await isGitRepository(workspacePath))) {
@@ -313,7 +378,7 @@ export const initWorkItemGitWorkspace = async ({
     );
   }
 
-  // Create and switch to the work-item branch.
+  // Create / switch to the work-item branch.
   if (await branchExistsLocally(workspacePath, branchName)) {
     await runGitCommand(workspacePath, ["switch", branchName]);
   } else {
@@ -321,16 +386,21 @@ export const initWorkItemGitWorkspace = async ({
   }
 
   console.log(
-    `[workItemGitWorkspace] cloned and branched ${workItemId} at ${workspacePath} (branch: ${branchName})`,
+    `[workItemGitWorkspace] cloned for ${workItemId}: ${workspacePath} (branch: ${branchName})`,
   );
-  return { workspacePath, branchName, created: true, source: "clone" };
+  return {
+    workspacePath,
+    workItemDir,
+    branchName,
+    created: true,
+    source: "clone",
+  };
 };
 
 /**
- * Stage all changes in the workspace, commit them, and optionally push to the
- * remote tracking branch.
- *
- * Does nothing (returns `committed: false`) when the working tree is clean.
+ * Stage all pending changes in the workspace, commit them, and optionally
+ * push to the remote.  Does nothing (returns `committed: false`) when the
+ * working tree is clean.
  */
 export const finalizeWorkItemGitWorkspace = async ({
   workspacePath,
@@ -345,7 +415,6 @@ export const finalizeWorkItemGitWorkspace = async ({
   commitMessage?: string;
   authorName?: string;
   authorEmail?: string;
-  /** When true, push the branch to `origin`. */
   push?: boolean;
 }): Promise<WorkItemGitFinalizeResult> => {
   if (!(await isGitRepository(workspacePath))) {
@@ -354,7 +423,6 @@ export const finalizeWorkItemGitWorkspace = async ({
     );
   }
 
-  // Collect changed files.
   const statusOutput = await runGitCommand(workspacePath, [
     "status",
     "--short",
@@ -388,14 +456,14 @@ export const finalizeWorkItemGitWorkspace = async ({
       () => "",
     );
     console.log(
-      `[workItemGitWorkspace] committed ${changedFiles.length} file(s) for ${branchName}: ${headSha.slice(0, 8)}`,
+      `[workItemGitWorkspace] committed ${changedFiles.length} file(s) on ${branchName}: ${headSha.slice(0, 8)}`,
     );
   } else {
     headSha = await runGitCommand(workspacePath, ["rev-parse", "HEAD"]).catch(
       () => "",
     );
     console.log(
-      `[workItemGitWorkspace] nothing to commit for ${branchName} — working tree is clean.`,
+      `[workItemGitWorkspace] nothing to commit on ${branchName} — working tree clean.`,
     );
   }
 
@@ -409,9 +477,7 @@ export const finalizeWorkItemGitWorkspace = async ({
         branchName,
       ]);
       pushed = true;
-      console.log(
-        `[workItemGitWorkspace] pushed ${branchName} to origin.`,
-      );
+      console.log(`[workItemGitWorkspace] pushed ${branchName} to origin.`);
     } catch (err) {
       console.warn(
         `[workItemGitWorkspace] push failed for ${branchName}:`,
@@ -433,18 +499,20 @@ export const finalizeWorkItemGitWorkspace = async ({
 
 /**
  * Returns the current git status of a work-item workspace.
- * Safe to call on a path that doesn't exist yet (returns `exists: false`).
+ * Safe to call before the workspace has been initialised (`exists: false`).
  */
 export const getWorkItemGitWorkspaceStatus = async (
-  workspacePath: string,
+  workingDir: string,
+  workItemId: string,
 ): Promise<WorkItemGitWorkspaceStatus> => {
-  const exists = checkPathExists(workspacePath);
-  const isRepo = exists && (await isGitRepository(workspacePath));
+  const workItemDir = getWorkItemDir(workingDir, workItemId);
+  const workspacePath = discoverWorkItemCheckoutPath(workingDir, workItemId) ?? "";
 
-  if (!isRepo) {
+  if (!workspacePath || !(await isGitRepository(workspacePath))) {
     return {
       workspacePath,
-      exists,
+      workItemDir,
+      exists: fs.existsSync(workItemDir),
       isGitRepo: false,
       branchName: "",
       headSha: "",
@@ -464,12 +532,9 @@ export const getWorkItemGitWorkspaceStatus = async (
       "--short",
       "--untracked-files=normal",
     ]).catch(() => ""),
-    // `@{u}..HEAD` counts commits not yet pushed; fails gracefully when no upstream.
-    runGitCommand(workspacePath, [
-      "rev-list",
-      "--count",
-      "@{u}..HEAD",
-    ]).catch(() => "0"),
+    runGitCommand(workspacePath, ["rev-list", "--count", "@{u}..HEAD"]).catch(
+      () => "0",
+    ),
   ]);
 
   const changedFiles = statusOutput
@@ -479,6 +544,7 @@ export const getWorkItemGitWorkspaceStatus = async (
 
   return {
     workspacePath,
+    workItemDir,
     exists: true,
     isGitRepo: true,
     branchName: branch.trim(),

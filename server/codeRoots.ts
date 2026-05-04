@@ -7,6 +7,7 @@ import {
   resolveOperatorWorkingDirectory,
 } from "./desktopRepoSync";
 import { buildCapabilityCheckoutSlug } from "./workItemCheckouts";
+import { discoverWorkItemCheckoutPath } from "./workItemGitWorkspace";
 import { normalizeDirectoryPath } from "./workspacePaths";
 
 export type CodeRootSource =
@@ -193,10 +194,27 @@ export const resolveCapabilityCodeRoots = async ({
     });
   };
 
+  // ── 1. Per-work-item git workspace (highest priority) ──────────────────
+  // Scan {operatorWorkDir}/{workItemId}/ for a git repository that was
+  // initialised by the Workflow Orchestrator.  Pattern: workDir/workItemId/<gitClone>
+  // This takes priority over base clones so every tool always reads/writes
+  // the work-item's own isolated checkout, not the shared read-only clone.
+  if (workItem?.id && operatorWorkDir) {
+    const wiCheckoutPath = discoverWorkItemCheckoutPath(operatorWorkDir, workItem.id);
+    if (wiCheckoutPath) {
+      addRoot({
+        checkoutPath: wiCheckoutPath,
+        repository: defaultRepository,
+        repositoryId: defaultRepository?.id,
+        source: "work-item-checkout",
+        isPrimary: true,
+      });
+    }
+  }
+
+  // ── 2. Explicit checkout path (legacy / executor-managed flow) ──────────
   if (explicitCheckoutPath) {
-    // Only promote the work-item checkout to primary when it actually exists on
-    // disk. If the directory is missing (no checkout yet, or a stale path), fall
-    // through to the base clones so symbol paths resolve against real files.
+    // Only promote when the path actually exists on disk.
     let workItemCheckoutExists = false;
     try {
       await fs.access(explicitCheckoutPath);
@@ -212,7 +230,7 @@ export const resolveCapabilityCodeRoots = async ({
         repository: pickDefaultRepository(repositories, explicitRepositoryId),
         repositoryId: explicitRepositoryId,
         source: "work-item-checkout",
-        isPrimary: true,
+        isPrimary: results.length === 0,
       });
     }
   }

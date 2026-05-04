@@ -64,9 +64,9 @@ import {
 import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
 import {
   buildWorkItemBranchName,
+  discoverWorkItemCheckoutPath,
   finalizeWorkItemGitWorkspace,
   getWorkItemGitWorkspaceStatus,
-  getWorkItemWorkspacePath,
   initWorkItemGitWorkspace,
 } from "../workItemGitWorkspace";
 import { resolveOperatorWorkingDirectory } from "../desktopRepoSync";
@@ -1395,15 +1395,9 @@ export const registerWorkItemRoutes = (
           actor: parseActorContext(request, "Workspace Operator"),
           action: "workitem.read",
         });
-        const { capabilityId, workItemId } = request.params;
-        const bundle = await getCapabilityBundle(capabilityId);
+        const { workItemId } = request.params;
         const workingDir = await resolveOperatorWorkingDirectory();
-        const workspacePath = getWorkItemWorkspacePath(
-          workingDir,
-          bundle.capability,
-          workItemId,
-        );
-        const status = await getWorkItemGitWorkspaceStatus(workspacePath);
+        const status = await getWorkItemGitWorkspaceStatus(workingDir, workItemId);
         response.json({
           ...status,
           branchNameExpected: buildWorkItemBranchName(workItemId),
@@ -1453,6 +1447,7 @@ export const registerWorkItemRoutes = (
           workItemId,
           workingDir,
           repositoryUrl,
+          repositoryLabel: primaryRepo?.label,
           defaultBranch,
         });
         response.json(result);
@@ -1481,14 +1476,16 @@ export const registerWorkItemRoutes = (
           actor: parseActorContext(request, "Workspace Operator"),
           action: "workitem.control",
         });
-        const { capabilityId, workItemId } = request.params;
-        const bundle = await getCapabilityBundle(capabilityId);
+        const { workItemId } = request.params;
         const workingDir = await resolveOperatorWorkingDirectory();
-        const workspacePath = getWorkItemWorkspacePath(
-          workingDir,
-          bundle.capability,
-          workItemId,
-        );
+        const workspacePath = discoverWorkItemCheckoutPath(workingDir, workItemId);
+        if (!workspacePath) {
+          response.status(404).json({
+            error: `No git workspace found for work item ${workItemId} under ${workingDir}. ` +
+              `Call /git-workspace/init first.`,
+          });
+          return;
+        }
         const branchName = buildWorkItemBranchName(workItemId);
         const result = await finalizeWorkItemGitWorkspace({
           workspacePath,
