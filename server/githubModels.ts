@@ -37,6 +37,10 @@ import {
 import { getCapabilityWorkspaceRoots } from './workspacePaths';
 import { loadGuidanceSystemPromptBlock } from './repoGuidance';
 import {
+  logLlmContextEnvelope,
+  type LlmContextLogPayload,
+} from './llmContextLog';
+import {
   getLocalOpenAIDefaultModel,
   isLocalOpenAIConfigured,
   listLocalOpenAIModels,
@@ -1665,12 +1669,11 @@ const requestGitHubModelsHttp = async ({
       // ── LLM Request logging ───────────────────────────────────────
       const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
       console.log(
-        `[LLM REQUEST] provider=GitHub-Models-HTTP | model=${normalizeHttpModel(model)} | messages=${messages.length} | chars=${totalChars} | tools=${tools?.length ?? 0} | attempt=${attempt + 1}`,
+        `[LLM REQUEST] provider=GitHub-Models-HTTP | model=${normalizeHttpModel(model)} | messages=${messages.length} | chars=${totalChars} | tools=${tools?.length ?? 0} | attempt=${attempt + 1} | url=${githubModelsHttpApiUrl}/chat/completions`,
       );
       for (const m of messages) {
         const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-        const preview = text.length > 300 ? text.slice(0, 300) + '…' : text;
-        console.log(`[LLM REQUEST]   [${m.role}] (${text.length} chars): ${preview}`);
+        console.log(`[LLM REQUEST]   [${m.role}] (${text.length} chars):\n${text}`);
       }
       // ──────────────────────────────────────────────────────────────
 
@@ -1862,10 +1865,9 @@ const runSessionExchange = async ({
 
       // ── LLM Request logging (Copilot SDK) ────────────────────────
       console.log(
-        `[LLM REQUEST] provider=Copilot-SDK | model=${model || 'default'} | promptLength=${prompt.length} | timeoutMs=${timeoutMs}`,
+        `[LLM REQUEST] provider=Copilot-SDK | model=${model || 'default'} | promptLength=${prompt.length} | timeoutMs=${timeoutMs} | endpoint=copilot-sdk-session`,
       );
-      const promptPreview = prompt.length > 400 ? prompt.slice(0, 400) + '…' : prompt;
-      console.log(`[LLM REQUEST]   [user] (${prompt.length} chars): ${promptPreview}`);
+      console.log(`[LLM REQUEST]   [user] (${prompt.length} chars):\n${prompt}`);
       // ──────────────────────────────────────────────────────────────
 
       session
@@ -3639,7 +3641,36 @@ export const invokeCapabilityChat = async ({
     preserveAllHistory,
   });
 
+  // ── Context envelope: full assembled messages[] sent to the LLM ──
+  // This is exactly what the model sees: a single system block holding
+  // the budgeted prompt body, followed by the user's latest turn. We
+  // build this once, log it to the terminal (gated by env), and attach
+  // it to the result so callers can persist it for the operator UI.
+  const contextEnvelope: LlmContextLogPayload = {
+    scope,
+    scopeId: resolvedScopeId,
+    capabilityId: capability.id,
+    provider: resolveAgentProviderKey(agent),
+    model: agent.model || 'default',
+    messages: [
+      { role: 'system', content: String(promptPlan.prompt || '') },
+      { role: 'user', content: message.trim() },
+    ],
+    budgetReceipt: promptPlan.currentReceipt,
+    historySummary: {
+      turns: promptPlan.historyTurnCount,
+      characters: normalizedHistory.reduce(
+        (sum, t) => sum + (t.content?.length ?? 0),
+        0,
+      ),
+    },
+  };
+  logLlmContextEnvelope(contextEnvelope);
+
   // ── DEBUG: Log the full prompt plan sent to LLM ─────────────────
+  // Kept for backwards-compat / quick-grep — `[llm:debug]` is a coarse
+  // truncated summary, `[llm:context]` (above) carries the full body
+  // when SINGULARITY_LOG_LLM_CONTEXT=verbose.
   console.log(`\n[llm:debug] ══════ invokeCapabilityChat ══════`);
   console.log(`[llm:debug]   scope: ${scope} | scopeId: ${resolvedScopeId || 'none'}`);
   console.log(`[llm:debug]   model: ${agent.model || 'default'} | provider: ${resolveAgentProviderKey(agent)}`);
@@ -3692,6 +3723,7 @@ export const invokeCapabilityChat = async ({
     historyTurnCount: promptPlan.historyTurnCount,
     historyRolledUp: promptPlan.historyRolledUp,
     tokenPolicy: promptPlan.tokenPolicy,
+    contextEnvelope,
   };
 };
 
@@ -3762,6 +3794,30 @@ export const invokeCapabilityChatStream = async ({
     preserveAllHistory,
   });
 
+  // ── Context envelope (streaming variant) — same shape as the
+  //    non-streaming chat handler above. See that block for the
+  //    rationale; we always log + return so callers can persist.
+  const contextEnvelope: LlmContextLogPayload = {
+    scope,
+    scopeId: resolvedScopeId,
+    capabilityId: capability.id,
+    provider: resolveAgentProviderKey(agent),
+    model: agent.model || 'default',
+    messages: [
+      { role: 'system', content: String(promptPlan.prompt || '') },
+      { role: 'user', content: message.trim() },
+    ],
+    budgetReceipt: promptPlan.currentReceipt,
+    historySummary: {
+      turns: promptPlan.historyTurnCount,
+      characters: normalizedHistory.reduce(
+        (sum, t) => sum + (t.content?.length ?? 0),
+        0,
+      ),
+    },
+  };
+  logLlmContextEnvelope(contextEnvelope);
+
   const result = await invokeScopedCapabilitySession({
     capability,
     agent,
@@ -3788,5 +3844,6 @@ export const invokeCapabilityChatStream = async ({
     historyTurnCount: promptPlan.historyTurnCount,
     historyRolledUp: promptPlan.historyRolledUp,
     tokenPolicy: promptPlan.tokenPolicy,
+    contextEnvelope,
   };
 };

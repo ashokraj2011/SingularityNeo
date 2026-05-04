@@ -3734,6 +3734,54 @@ export interface RunEvent {
   details?: Record<string, any>;
 }
 
+/**
+ * One row in `capability_llm_context_log` — a snapshot of the assembled
+ * prompt + budget receipt for a single LLM call. Powers the operator's
+ * "View context" drawer so any past chat turn can be replayed verbatim.
+ *
+ * Execution-mode (workflow run) calls do NOT use this table — they emit a
+ * `LLM_CONTEXT_PREPARED` RunEvent with the same payload in `details`
+ * instead, so the prompt sits inline in the run timeline.
+ */
+export interface LlmContextLogEntry {
+  id: string;
+  capabilityId: string;
+  traceId?: string;
+  agentId?: string;
+  sessionId?: string;
+  sessionScope?: string;
+  sessionScopeId?: string;
+  workItemId?: string;
+  provider: string;
+  model: string;
+  /**
+   * Full assembled `messages[]` array exactly as it was sent to the model.
+   * For chat: typically `[{role:'system',content:...},{role:'user',content:...}]`.
+   * For tool-loop execution: may include multiple alternating turns.
+   */
+  messages: Array<{ role: string; content: string }>;
+  /**
+   * Budget receipt from the prompt assembler — included + evicted fragments
+   * with token counts. Lets the drawer explain why memory hits / code hunks
+   * etc. were dropped.
+   */
+  budgetReceipt?: {
+    included?: Array<{ source: string; estimatedTokens: number }>;
+    evicted?: Array<{
+      source: string;
+      estimatedTokens: number;
+      reason?: string;
+    }>;
+    totalEstimatedTokens?: number;
+    maxInputTokens?: number;
+    reservedOutputTokens?: number;
+  };
+  promptTokens?: number;
+  completionTokens?: number;
+  costUsd?: number;
+  createdAt: string;
+}
+
 export interface RunWait {
   id: string;
   capabilityId: string;

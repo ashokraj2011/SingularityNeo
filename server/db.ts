@@ -1607,6 +1607,42 @@ export const schemaStatements = [
     )
   `,
   // ────────────────────────────────────────────────────────────────────
+  // LLM context log — one row per chat-mode LLM call.
+  //
+  // Stores the FULL assembled messages[] array sent to the model, plus the
+  // budget receipt (which fragments were included vs evicted) and usage
+  // numbers. Powers the operator's "View context" drawer so any past chat
+  // turn can be replayed verbatim — they can confirm exactly what the LLM
+  // saw, paste the prompt into a playground, or diff prompts across turns.
+  //
+  // Execution-mode (workflow run) calls don't write here — they emit a
+  // `LLM_CONTEXT_PREPARED` RunEvent so the prompt sits inline in the run
+  // timeline alongside other step events.
+  //
+  // Retention is best-effort manual today: rows accumulate until pruned
+  // (TODO: add a daily cron that keeps last 1000 / 30 days per capability).
+  // ────────────────────────────────────────────────────────────────────
+  `
+    CREATE TABLE IF NOT EXISTS capability_llm_context_log (
+      id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      trace_id TEXT,
+      agent_id TEXT,
+      session_id TEXT,
+      session_scope TEXT,
+      session_scope_id TEXT,
+      work_item_id TEXT,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      messages JSONB NOT NULL,
+      budget_receipt JSONB,
+      prompt_tokens INTEGER,
+      completion_tokens INTEGER,
+      cost_usd NUMERIC(12,6),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  // ────────────────────────────────────────────────────────────────────
   // Code understanding module (Phase A).
   //
   // `capability_code_symbols` is a flat catalog of every named thing in
@@ -3376,6 +3412,15 @@ export const migrationStatements = [
   `
     CREATE INDEX IF NOT EXISTS desktop_preferences_hostname_idx
       ON desktop_preferences (hostname)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_llm_context_log_capability_created_idx
+      ON capability_llm_context_log (capability_id, created_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_llm_context_log_trace_idx
+      ON capability_llm_context_log (trace_id)
+      WHERE trace_id IS NOT NULL
   `,
 ];
 

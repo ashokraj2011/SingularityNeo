@@ -30,6 +30,7 @@ import {
   type FollowUpIntent,
 } from '../chatContinuity';
 import { invokeCommonAgentRuntime, resolveReadOnlyToolIds } from '../agentRuntime';
+import { recordChatContextLogEntry } from '../llmContextLog';
 import {
   getDefaultRepoAwareReadOnlyToolIds,
   resolveRuntimeAgentForWorkspace,
@@ -667,6 +668,62 @@ export const registerRuntimeChatRoutes = (
         },
       });
 
+      // Persist the assembled context envelope so operators can inspect
+      // exactly what was sent to the model from the "View context" drawer.
+      // Best-effort: a failure here MUST NOT block the chat response.
+      const persistedEnvelope = (chatResponse as { contextEnvelope?: unknown })
+        .contextEnvelope as
+        | {
+            messages: Array<{ role: string; content: string }>;
+            budgetReceipt?: Record<string, unknown> | null;
+          }
+        | undefined;
+      if (persistedEnvelope?.messages?.length) {
+        try {
+          await recordChatContextLogEntry({
+            capabilityId: liveCapability.id,
+            traceId,
+            agentId: liveAgent.id,
+            sessionId: publicChatResponse.sessionId,
+            sessionScope: 'WORK_ITEM' in body && body.sessionScope
+              ? String(body.sessionScope)
+              : undefined,
+            sessionScopeId: body.sessionScopeId,
+            workItemId: body.workItemId,
+            provider: String(
+              publicChatResponse.runtimeProviderKey ||
+                liveAgent.providerKey ||
+                liveAgent.provider ||
+                'unknown',
+            ),
+            model: publicChatResponse.model || liveAgent.model || 'default',
+            messages: persistedEnvelope.messages,
+            budgetReceipt:
+              (persistedEnvelope.budgetReceipt as
+                | {
+                    included?: Array<{ source: string; estimatedTokens: number }>;
+                    evicted?: Array<{
+                      source: string;
+                      estimatedTokens: number;
+                      reason?: string;
+                    }>;
+                    totalEstimatedTokens?: number;
+                    maxInputTokens?: number;
+                    reservedOutputTokens?: number;
+                  }
+                | undefined) ?? undefined,
+            promptTokens: publicChatResponse.usage?.promptTokens,
+            completionTokens: publicChatResponse.usage?.completionTokens,
+            costUsd: publicChatResponse.usage?.estimatedCostUsd,
+          });
+        } catch (logError) {
+          console.warn(
+            '[llm:context] failed to persist chat context log entry:',
+            logError,
+          );
+        }
+      }
+
       response.json({
         ...publicChatResponse,
         ...runtimeTarget,
@@ -1129,6 +1186,59 @@ export const registerRuntimeChatRoutes = (
           stage: 'capability_chat',
         },
       });
+
+      // Persist the assembled context envelope (streaming variant). Same
+      // best-effort write as the non-streaming branch above.
+      const streamedEnvelope = (streamed as { contextEnvelope?: unknown })
+        .contextEnvelope as
+        | {
+            messages: Array<{ role: string; content: string }>;
+            budgetReceipt?: Record<string, unknown> | null;
+          }
+        | undefined;
+      if (streamedEnvelope?.messages?.length) {
+        try {
+          await recordChatContextLogEntry({
+            capabilityId: liveCapability.id,
+            traceId,
+            agentId: liveAgent.id,
+            sessionId: publicStreamed.sessionId,
+            sessionScope: body.sessionScope ? String(body.sessionScope) : undefined,
+            sessionScopeId: body.sessionScopeId,
+            workItemId: body.workItemId,
+            provider: String(
+              publicStreamed.runtimeProviderKey ||
+                liveAgent.providerKey ||
+                liveAgent.provider ||
+                'unknown',
+            ),
+            model: publicStreamed.model || liveAgent.model || 'default',
+            messages: streamedEnvelope.messages,
+            budgetReceipt:
+              (streamedEnvelope.budgetReceipt as
+                | {
+                    included?: Array<{ source: string; estimatedTokens: number }>;
+                    evicted?: Array<{
+                      source: string;
+                      estimatedTokens: number;
+                      reason?: string;
+                    }>;
+                    totalEstimatedTokens?: number;
+                    maxInputTokens?: number;
+                    reservedOutputTokens?: number;
+                  }
+                | undefined) ?? undefined,
+            promptTokens: publicStreamed.usage?.promptTokens,
+            completionTokens: publicStreamed.usage?.completionTokens,
+            costUsd: publicStreamed.usage?.estimatedCostUsd,
+          });
+        } catch (logError) {
+          console.warn(
+            '[llm:context] failed to persist streaming chat context log entry:',
+            logError,
+          );
+        }
+      }
 
       if (shouldBufferValidatedStream && sanitizedStream.content) {
         writeSseEvent(response, 'delta', {

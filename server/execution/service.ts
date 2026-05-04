@@ -2902,6 +2902,54 @@ const requestStepDecision = async ({
         error,
       );
     }
+
+    // Emit a `LLM_CONTEXT_PREPARED` event carrying the FULL assembled
+    // prompt body (sibling of PROMPT_RECEIPT, which only captures the
+    // metadata). Powers the operator's "View context" drawer — clicking
+    // any agent step in the timeline opens the exact text the model saw.
+    //
+    // Best-effort: a failure here MUST NOT block the run.
+    try {
+      await emitRunProgressEvent({
+        capabilityId: capability.id,
+        runId,
+        workItemId: workItem.id,
+        runStepId: runStep.id,
+        traceId,
+        spanId,
+        type: "LLM_CONTEXT_PREPARED",
+        level: "INFO",
+        message: `Sent ${budgeted.receipt.totalEstimatedTokens} tok to ${effectiveRuntimeProviderKey}/${response.model || "default"}.`,
+        details: {
+          stage: "LLM_CONTEXT_PREPARED",
+          provider: effectiveRuntimeProviderKey,
+          model: response.model || effectiveRuntimeModel || null,
+          // Execution mode invokes the model with a single JSON-only
+          // system prompt; there's no user turn separately — the
+          // assembled body is the whole instruction.
+          messages: [
+            {
+              role: "system",
+              content: budgeted.assembled,
+            },
+          ],
+          budgetReceipt: {
+            included: budgeted.receipt.included,
+            evicted: budgeted.receipt.evicted,
+            totalEstimatedTokens: budgeted.receipt.totalEstimatedTokens,
+            maxInputTokens: budgeted.receipt.maxInputTokens,
+            reservedOutputTokens: budgeted.receipt.reservedOutputTokens,
+          },
+          phase: step.phase || workItem.phase,
+          actualUsage: response.usage || null,
+        },
+      });
+    } catch (error) {
+      console.warn(
+        "[requestStepDecision] failed to emit LLM_CONTEXT_PREPARED event",
+        error,
+      );
+    }
   }
 
   // Time-travel debugging for AI decisions: persist the receipt so the

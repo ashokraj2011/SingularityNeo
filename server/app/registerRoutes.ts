@@ -8,6 +8,7 @@ import { registerDeliveryAssetRoutes } from '../routes/deliveryAssets';
 import { registerExecutionRuntimeRoutes } from '../routes/executionRuntime';
 import { registerGovernanceRoutes } from '../routes/governance';
 import { registerIncidentRoutes } from '../routes/incidents';
+import { registerLlmContextLogRoutes } from '../routes/llmContextLog';
 import { registerPassportRoutes } from '../routes/passport';
 import { registerReportingEvidenceRoutes } from '../routes/reportingEvidence';
 import { registerRuntimeChatRoutes } from '../routes/runtimeChat';
@@ -123,6 +124,7 @@ export const registerAllRoutes = (
   });
 
   registerRuntimeRoutes(app);
+  registerLlmContextLogRoutes(app);
   registerRuntimeSettingsRoutes(app);
   registerTokenManagementRoutes(app);
   registerExecutionRuntimeRoutes(app);
