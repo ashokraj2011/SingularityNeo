@@ -491,6 +491,20 @@ const Studio = () => {
                 <span>Step Templates</span>
                 <ArrowRight size={16} />
               </button>
+              <button
+                onClick={() => navigate("/studio/business-workflows")}
+                className="enterprise-button enterprise-button-secondary w-full justify-between"
+              >
+                <span>Business Workflows</span>
+                <ArrowRight size={16} />
+              </button>
+              <button
+                onClick={() => navigate("/studio/business-workflows/inbox")}
+                className="enterprise-button enterprise-button-secondary w-full justify-between"
+              >
+                <span>Business Workflow Inbox</span>
+                <ArrowRight size={16} />
+              </button>
             </div>
           </SectionCard>
         </div>

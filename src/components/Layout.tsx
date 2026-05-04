@@ -204,6 +204,8 @@ const routeTitles: Record<string, string> = {
   "/ast-explorer": "AST Explorer",
   "/code-graph": "Code Graph",
   "/world-model": "Code World Model",
+  "/studio/business-workflows": "Business Workflows",
+  "/studio/business-workflows/inbox": "Business Workflow Inbox",
 };
 
 const SIDEBAR_STORAGE_KEY = "singularity.sidebar.collapsed";
