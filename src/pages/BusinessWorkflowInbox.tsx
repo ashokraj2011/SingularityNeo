@@ -40,6 +40,7 @@ import { PriorityBadge } from "./businessWorkflow/runtime/components/PriorityBad
 import { DocumentsCountChip } from "./businessWorkflow/runtime/components/DocumentsCountChip";
 import { ReassignPopover } from "./businessWorkflow/runtime/ReassignPopover";
 import { SendBackPanel } from "./businessWorkflow/runtime/SendBackPanel";
+import { TaskCompletionDialog } from "./businessWorkflow/runtime/TaskCompletionDialog";
 
 /**
  * Tabbed inbox.
@@ -105,6 +106,9 @@ const BusinessWorkflowInbox = () => {
     | { kind: "approval"; approval: BusinessApproval }
     | null
   >(null);
+  const [completeTarget, setCompleteTarget] = useState<BusinessTask | null>(
+    null,
+  );
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const capabilityId = activeCapability.id;
@@ -260,6 +264,13 @@ const BusinessWorkflowInbox = () => {
   };
 
   const handleComplete = async (t: BusinessTask) => {
+    // Schemaless tasks (no formSchema, no send-back history) submit
+    // empty in one click — fast path. Anything else opens the
+    // form-fill dialog. Same UX as the dashboard's ActiveTasksPanel.
+    if (t.formSchema || t.sentBackFromNodeId) {
+      setCompleteTarget(t);
+      return;
+    }
     setBusyId(t.id);
     try {
       await completeBusinessTask(capabilityId, t.id, {});
@@ -663,6 +674,18 @@ const BusinessWorkflowInbox = () => {
           onClose={() => setSendBackTarget(null)}
           onSent={() => {
             setSendBackTarget(null);
+            void load();
+          }}
+        />
+      )}
+      {completeTarget && (
+        <TaskCompletionDialog
+          open
+          capabilityId={capabilityId}
+          task={completeTarget}
+          onClose={() => setCompleteTarget(null)}
+          onCompleted={() => {
+            setCompleteTarget(null);
             void load();
           }}
         />

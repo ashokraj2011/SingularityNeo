@@ -10,8 +10,8 @@ import { useToast } from "../../../context/ToastContext";
 import type {
   BusinessDocument,
   BusinessNode,
-  FormSchema,
 } from "../../../contracts/businessWorkflow";
+import { interpretFormSchema } from "../../../lib/businessFormSchema";
 import { DocumentsPanel } from "./DocumentsPanel";
 
 /**
@@ -43,56 +43,9 @@ type Props = {
   onClose: () => void;
 };
 
-interface StructuredField {
-  key: string;
-  label: string;
-  placeholder?: string;
-  multiline?: boolean;
-  defaultValue?: string;
-}
-
-const interpretSchema = (
-  schema: FormSchema | undefined,
-): { kind: "structured"; fields: StructuredField[] } | { kind: "raw" } => {
-  if (!schema || typeof schema !== "object") return { kind: "raw" };
-  const obj = schema as Record<string, unknown>;
-  if (Array.isArray(obj.fields)) {
-    const fields: StructuredField[] = [];
-    for (const raw of obj.fields as unknown[]) {
-      if (!raw || typeof raw !== "object") continue;
-      const r = raw as Record<string, unknown>;
-      const key = typeof r.key === "string" ? r.key : "";
-      if (!key) continue;
-      fields.push({
-        key,
-        label: typeof r.label === "string" ? r.label : key,
-        placeholder:
-          typeof r.placeholder === "string" ? r.placeholder : undefined,
-        multiline: r.multiline === true,
-        defaultValue:
-          typeof r.defaultValue === "string" ? r.defaultValue : undefined,
-      });
-    }
-    if (fields.length > 0) return { kind: "structured", fields };
-  }
-  // Plain { key: label } map shape — common shorthand from older
-  // templates. We treat values as labels.
-  if (
-    Object.keys(obj).every(
-      (k) =>
-        typeof obj[k] === "string" ||
-        typeof obj[k] === "number" ||
-        obj[k] == null,
-    )
-  ) {
-    const fields: StructuredField[] = Object.keys(obj).map((key) => ({
-      key,
-      label: typeof obj[key] === "string" ? (obj[key] as string) : key,
-    }));
-    return { kind: "structured", fields };
-  }
-  return { kind: "raw" };
-};
+// Schema interpretation lives in lib/businessFormSchema so the
+// launch dialog and the task-completion dialog stay aligned. See
+// `interpretFormSchema` for the supported shapes.
 
 export const InstanceLaunchDialog = ({
   open,
@@ -157,7 +110,7 @@ export const InstanceLaunchDialog = ({
   }, [open]);
 
   const interp = useMemo(
-    () => interpretSchema(startNode?.config?.formSchema),
+    () => interpretFormSchema(startNode?.config?.formSchema),
     [startNode],
   );
 

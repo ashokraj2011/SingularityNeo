@@ -21,6 +21,7 @@ import { PriorityBadge } from "./components/PriorityBadge";
 import { DocumentsCountChip } from "./components/DocumentsCountChip";
 import { ReassignPopover } from "./ReassignPopover";
 import { SendBackPanel } from "./SendBackPanel";
+import { TaskCompletionDialog } from "./TaskCompletionDialog";
 import type {
   ApprovalStatus,
   BusinessApproval,
@@ -77,6 +78,9 @@ export const ActiveTasksPanel = ({
     | { kind: "approval"; approval: BusinessApproval }
     | null
   >(null);
+  const [completeTarget, setCompleteTarget] = useState<BusinessTask | null>(
+    null,
+  );
 
   // Open tasks first (acting), then claimed, then ad-hoc — operator's
   // attention should land on the row that needs them right now.
@@ -116,12 +120,12 @@ export const ActiveTasksPanel = ({
   };
 
   const handleComplete = async (task: BusinessTask) => {
-    if (
-      task.formSchema &&
-      !confirm(
-        "This task has a form schema. Complete with empty form data? (Use the inbox for the full form.)",
-      )
-    ) {
+    // Tasks with a formSchema or sent-back history open the dialog so
+    // the operator can fill the form (or edit a prior submission).
+    // Schemaless tasks complete in one click — no friction for trivial
+    // nodes.
+    if (task.formSchema || task.sentBackFromNodeId) {
+      setCompleteTarget(task);
       return;
     }
     setBusyId(task.id);
@@ -382,6 +386,18 @@ export const ActiveTasksPanel = ({
           onClose={() => setSendBackTarget(null)}
           onSent={() => {
             setSendBackTarget(null);
+            onChanged?.();
+          }}
+        />
+      )}
+      {completeTarget && (
+        <TaskCompletionDialog
+          open
+          capabilityId={capabilityId}
+          task={completeTarget}
+          onClose={() => setCompleteTarget(null)}
+          onCompleted={() => {
+            setCompleteTarget(null);
             onChanged?.();
           }}
         />
