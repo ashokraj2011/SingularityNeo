@@ -262,8 +262,12 @@ const judgeEvalSummary = async ({
   results: EvalRunCaseResult[];
 }) => {
   try {
+    // No `model` / `providerKey` overrides — let requestGitHubModel resolve
+    // through the operator's configured runtime (normalizeProviderKey defaults
+    // to the operator's selected provider; resolveModelForProvider picks that
+    // provider's default model). The eval summary should not pin a specific
+    // model that may not be available on the operator's chosen runtime.
     const response = await requestGitHubModel({
-      model: 'openai/gpt-4.1',
       maxTokens: 400,
       temperature: 0.1,
       timeoutMs: 8000,
