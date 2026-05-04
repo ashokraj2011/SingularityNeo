@@ -24,6 +24,12 @@ const StepTemplateLibrary = lazy(() => import('./pages/StepTemplateLibrary'));
 const DesignerConfigPage = lazy(() => import('./pages/DesignerConfig'));
 const BusinessWorkflowDesigner = lazy(() => import('./pages/BusinessWorkflowDesigner'));
 const BusinessWorkflowInbox = lazy(() => import('./pages/BusinessWorkflowInbox'));
+const BusinessWorkflowInstanceDashboard = lazy(
+  () => import('./pages/businessWorkflow/runtime/InstanceDashboard'),
+);
+const BusinessWorkflowStatusReport = lazy(
+  () => import('./pages/businessWorkflow/runtime/StatusReport'),
+);
 const Studio = lazy(() => import('./pages/Studio'));
 const Chat = lazy(() => import('./pages/Chat'));
 const Orchestrator = lazy(() => import('./pages/Orchestrator'));
@@ -117,6 +123,14 @@ export default function App() {
                   <Route path="/studio/business-workflows" element={<BusinessWorkflowDesigner />} />
                   <Route path="/studio/business-workflows/inbox" element={<BusinessWorkflowInbox />} />
                   <Route path="/studio/business-workflows/:templateId" element={<BusinessWorkflowDesigner />} />
+                  <Route
+                    path="/studio/business-workflows/:templateId/report"
+                    element={<BusinessWorkflowStatusReport />}
+                  />
+                  <Route
+                    path="/studio/business-workflows/:templateId/instances/:instanceId"
+                    element={<BusinessWorkflowInstanceDashboard />}
+                  />
                   <Route path="/studio/designer-config" element={<DesignerConfigPage />} />
                   <Route path="/studio" element={<Studio />} />
                   <Route path="/chat" element={<Chat />} />

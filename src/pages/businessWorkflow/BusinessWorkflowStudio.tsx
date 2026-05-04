@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Activity,
   ArrowLeft,
   Check,
   History,
   Loader2,
+  Play,
   Save,
   Send,
   Sparkles,
@@ -42,6 +44,7 @@ import { NodePalette } from "./NodePalette";
 import { NodeInspector } from "./NodeInspector";
 import { EdgeInspector } from "./EdgeInspector";
 import { CustomNodeTypeModal } from "./CustomNodeTypeModal";
+import { InstanceLaunchDialog } from "./runtime/InstanceLaunchDialog";
 import { cn } from "../../lib/utils";
 
 type Selection =
@@ -71,6 +74,7 @@ export const BusinessWorkflowStudio = ({ templateId }: Props) => {
     BusinessCustomNodeType[]
   >([]);
   const [showCustomTypesModal, setShowCustomTypesModal] = useState(false);
+  const [showLaunchDialog, setShowLaunchDialog] = useState(false);
 
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const capabilityAgents = workspace.agents;
@@ -368,6 +372,41 @@ export const BusinessWorkflowStudio = ({ templateId }: Props) => {
           )}
           Publish
         </button>
+        {/* Start instance — only meaningful once a version is published.
+            We disable rather than hide so first-time users can see it
+            exists and the tooltip explains why. */}
+        <button
+          type="button"
+          onClick={() => setShowLaunchDialog(true)}
+          disabled={!template || template.status !== "PUBLISHED"}
+          className={cn(
+            "inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100",
+            (!template || template.status !== "PUBLISHED") &&
+              "cursor-not-allowed opacity-60",
+          )}
+          title={
+            template?.status === "PUBLISHED"
+              ? "Start a new instance from the published version"
+              : "Publish the template first to enable launching"
+          }
+        >
+          <Play size={11} />
+          Start instance
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            navigate(
+              `/studio/business-workflows/${encodeURIComponent(templateId)}/report`,
+            )
+          }
+          disabled={!template}
+          className="inline-flex items-center gap-1 rounded-lg border border-outline-variant/40 bg-white px-2 py-1.5 text-[0.7rem] font-semibold text-on-surface hover:bg-surface-container disabled:opacity-60"
+          title="View aggregate status across all instances"
+        >
+          <Activity size={11} />
+          Report
+        </button>
         {versions.length > 0 && (
           <span
             title={`Versions: ${versions.map((v) => `v${v.version} @ ${new Date(v.publishedAt).toLocaleString()}`).join("\n")}`}
@@ -473,6 +512,17 @@ export const BusinessWorkflowStudio = ({ templateId }: Props) => {
         onClose={() => setShowCustomTypesModal(false)}
         onChanged={() => void refreshCustomNodeTypes()}
       />
+
+      {showLaunchDialog && template && (
+        <InstanceLaunchDialog
+          open
+          capabilityId={activeCapability.id}
+          templateId={templateId}
+          templateName={template.name}
+          startNode={nodes.find((n) => n.type === "START")}
+          onClose={() => setShowLaunchDialog(false)}
+        />
+      )}
     </div>
   );
 };
