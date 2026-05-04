@@ -17,7 +17,7 @@ import {
   useState,
 } from "react";
 import { useSearchParams } from "react-router-dom";
-import { ChevronDown, Layers, Plus, Sparkles } from "lucide-react";
+import { AlertTriangle, ChevronDown, Layers, Plus, Sparkles, X } from "lucide-react";
 import { useCapability } from "../context/CapabilityContext";
 import { WorkflowApprovalGate } from "./workflowOrchestrator/WorkflowApprovalGate";
 import { CockpitHeader } from "./cockpit/CockpitHeader";
@@ -185,6 +185,23 @@ const Cockpit = () => {
           >
             <ChevronDown size={11} />
             {state.workItem?.id}
+          </button>
+        </div>
+      )}
+
+      {/* ── Error banner ──────────────────────────────────────────────── */}
+      {state.error && (
+        <div className="flex shrink-0 items-start gap-3 border-b border-rose-200 bg-rose-50 px-4 py-2.5 dark:border-rose-900/40 dark:bg-rose-950/30">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0 text-rose-500" />
+          <p className="flex-1 text-xs text-rose-700 dark:text-rose-300">
+            {state.error}
+          </p>
+          <button
+            type="button"
+            onClick={() => dispatch({ type: "CLEAR_ERROR" })}
+            className="shrink-0 text-rose-400 hover:text-rose-600"
+          >
+            <X size={13} />
           </button>
         </div>
       )}

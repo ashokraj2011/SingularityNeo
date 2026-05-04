@@ -223,8 +223,11 @@ const reducer = (state: CockpitState, action: CockpitAction): CockpitState => {
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
-const formatTimestamp = () =>
-  new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+/** Returns an ISO-8601 timestamp for timeline sort compatibility. */
+const isoNow = () => new Date().toISOString();
+/** Returns a human-readable time label for display. */
+const formatTimestamp = (d = new Date()) =>
+  d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 export const useCockpitState = (capability: Capability) => {
   const { getCapabilityWorkspace, refreshCapabilityBundle } = useCapability();
@@ -411,13 +414,15 @@ export const useCockpitState = (capability: Capability) => {
         toastError("No agent", "This stage has no agent assigned.");
         return;
       }
+
       const requestToken = ++requestRef.current;
       const userMsg: CapabilityChatMessage = {
         id: `${Date.now()}-user`,
         capabilityId: capability.id,
         role: "user",
         content: trimmed,
-        timestamp: formatTimestamp(),
+        // ISO timestamp so timeline sort against run events is correct
+        timestamp: isoNow(),
         workItemId: workItem.id,
         workflowStepId: currentStep?.id,
       };
@@ -425,6 +430,7 @@ export const useCockpitState = (capability: Capability) => {
 
       const controller = new AbortController();
       abortControllerRef.current = controller;
+
       try {
         const result = await streamCapabilityChat(
           {
@@ -454,35 +460,49 @@ export const useCockpitState = (capability: Capability) => {
           },
           { signal: controller.signal },
         );
+
         if (!isMountedRef.current || requestRef.current !== requestToken)
           return;
-        const content =
-          result.completeEvent?.content || result.draftContent || "";
+
+        // Surface server-side errors that didn't throw (e.g. model quota, policy block)
+        const rawContent = result.completeEvent?.content || result.draftContent;
+        if (!rawContent?.trim()) {
+          throw new Error(result.error || "The agent did not return a response. Check the run logs or try again.");
+        }
+
+        const isInterrupted = result.termination === "interrupted";
         const agentMsg: CapabilityChatMessage = {
           id: `${Date.now()}-agent`,
           capabilityId: capability.id,
           role: "agent",
-          content,
-          timestamp: formatTimestamp(),
+          content: isInterrupted
+            ? `${rawContent.trim()}\n\n_(paused)_`
+            : rawContent.trim(),
+          timestamp: isoNow(),
           agentId: agent.id,
           agentName: agent.name,
           workItemId: workItem.id,
           workflowStepId: currentStep?.id,
         };
         dispatch({ type: "STREAM_COMPLETE", agentMessage: agentMsg, requestToken });
+
+        if (result.termination === "recovered") {
+          info("Recovered draft", "A partial response was preserved.");
+        }
       } catch (err) {
         if (!isMountedRef.current || requestRef.current !== requestToken)
           return;
         if (err instanceof DOMException && err.name === "AbortError") {
+          const partial = stateRef.current.streamedDraft.trim();
           dispatch({
             type: "STREAM_ABORTED",
-            partialMessage: snap.streamedDraft.trim()
+            partialMessage: partial
               ? {
                   id: `${Date.now()}-paused`,
                   capabilityId: capability.id,
                   role: "agent",
-                  content: `${snap.streamedDraft.trim()}\n\n_(interrupted)_`,
-                  timestamp: formatTimestamp(),
+                  content: `${partial}\n\n_(paused)_`,
+                  timestamp: isoNow(),
                   agentId: agent.id,
                   agentName: agent.name,
                   workItemId: workItem.id,
@@ -492,14 +512,12 @@ export const useCockpitState = (capability: Capability) => {
           });
           return;
         }
-        dispatch({
-          type: "SET_ERROR",
-          error: err instanceof Error ? err.message : "Chat stream failed.",
-        });
-        toastError("Chat failed", err instanceof Error ? err.message : "");
+        const errMsg = err instanceof Error ? err.message : "Chat stream failed.";
+        dispatch({ type: "SET_ERROR", error: errMsg });
+        toastError("Chat failed", errMsg);
       }
     },
-    [capability, toastError],
+    [capability, info, toastError],
   );
 
   const stopStream = useCallback(() => {
