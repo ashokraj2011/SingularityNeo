@@ -10,7 +10,79 @@ import { StatusBadge } from '../EnterpriseUI';
 import { formatEnumLabel } from '../../lib/enterprise';
 import { cn } from '../../lib/utils';
 import { formatTimestamp } from '../../lib/orchestrator/support';
-import type { WorkItem, WorkflowRun, WorkflowRunStep, Workflow } from '../../types';
+import type {
+  WorkItem,
+  WorkflowRun,
+  WorkflowRunStep,
+  Workflow,
+} from '../../types';
+
+// ── Wait-type label + color helpers ──────────────────────────────────────────
+
+type WaitTypeMeta = {
+  label: string;
+  classes: string;   // pill bg + text color
+  hint: string;      // one-line guidance
+};
+
+const WAIT_TYPE_META: Record<string, WaitTypeMeta> = {
+  APPROVAL: {
+    label: 'Approval',
+    classes: 'bg-violet-100 text-violet-800 border-violet-300',
+    hint: 'A reviewer needs to approve or request changes.',
+  },
+  HUMAN_INPUT: {
+    label: 'Your input',
+    classes: 'bg-amber-100 text-amber-800 border-amber-300',
+    hint: 'Agent is asking you a question — type a response.',
+  },
+  INPUT: {
+    label: 'Your input',
+    classes: 'bg-amber-100 text-amber-800 border-amber-300',
+    hint: 'Agent is asking you a question — type a response.',
+  },
+  HUMAN_TASK: {
+    label: 'Human task',
+    classes: 'bg-sky-100 text-sky-800 border-sky-300',
+    hint: 'Agent delegated a task to a human — complete it and report back.',
+  },
+  CONFLICT_RESOLUTION: {
+    label: 'Conflict resolution',
+    classes: 'bg-rose-100 text-rose-800 border-rose-300',
+    hint: 'Agents disagreed — pick the path forward.',
+  },
+  SUB_WORKFLOW_WAIT: {
+    label: 'Sub-workflow',
+    classes: 'bg-gray-100 text-gray-700 border-gray-300',
+    hint: 'Waiting for a child workflow to finish.',
+  },
+};
+
+/**
+ * Derive the specific wait type from whichever signal the engine populated.
+ * Priority: explicit run.pauseReason → workItem.blocker.type →
+ * workItem.pendingRequest.type → derived from run.status WAITING_*.
+ */
+const deriveWaitType = (
+  workItem: WorkItem,
+  run: WorkflowRun | null,
+): string | null => {
+  if (run?.pauseReason) return run.pauseReason;
+  if (workItem.blocker?.type) return workItem.blocker.type;
+  if (workItem.pendingRequest?.type) return workItem.pendingRequest.type;
+  switch (run?.status) {
+    case 'WAITING_APPROVAL':
+      return 'APPROVAL';
+    case 'WAITING_INPUT':
+      return 'INPUT';
+    case 'WAITING_HUMAN_TASK':
+      return 'HUMAN_TASK';
+    case 'WAITING_CONFLICT':
+      return 'CONFLICT_RESOLUTION';
+    default:
+      return null;
+  }
+};
 
 type Props = {
   /** The work item being operated on. */
@@ -78,6 +150,12 @@ export const OrchestratorFailureRecoveryPanel = ({
   const failedAt = currentRun?.completedAt ?? currentRun?.updatedAt;
   const terminalNote = currentRun?.terminalOutcome;
 
+  // Specific wait type — only meaningful in the BLOCKED case; for FAILED runs
+  // the engine is simply paused with a failure reason, not awaiting a
+  // categorized action.
+  const waitType = isBlocked ? deriveWaitType(selectedWorkItem, currentRun) : null;
+  const waitMeta = waitType ? WAIT_TYPE_META[waitType] : null;
+
   return (
     <div
       className={cn(
@@ -108,6 +186,22 @@ export const OrchestratorFailureRecoveryPanel = ({
                 Stopped at step: <span className="text-primary">{stepName}</span>
               </p>
             ) : null}
+            {waitMeta && (
+              <p className="mt-1.5 flex flex-wrap items-center gap-2 text-sm font-medium text-on-surface">
+                <span>Waiting for:</span>
+                <span
+                  className={cn(
+                    'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide',
+                    waitMeta.classes,
+                  )}
+                >
+                  {waitMeta.label}
+                </span>
+              </p>
+            )}
+            {waitMeta && (
+              <p className="mt-1 text-xs text-secondary">{waitMeta.hint}</p>
+            )}
           </div>
         </div>
 
@@ -231,7 +325,17 @@ export const OrchestratorFailureRecoveryPanel = ({
       <p className="mt-3 text-xs leading-relaxed text-secondary">
         {isRunFailed
           ? 'Add operator guidance in the Operate tab before restarting — the agent will read it on the next attempt.'
-          : 'The agent is paused and waiting for operator guidance. Add a note and restart from the Operate tab.'}
+          : waitType === 'APPROVAL'
+            ? 'Open the approval review to approve or request changes; the workflow continues automatically once you decide.'
+            : waitType === 'INPUT' || waitType === 'HUMAN_INPUT'
+              ? 'Type the requested input in the Operate tab and submit — the agent resumes immediately.'
+              : waitType === 'HUMAN_TASK'
+                ? 'Complete the delegated task off-platform, then submit a "task done" note in the Operate tab to continue.'
+                : waitType === 'CONFLICT_RESOLUTION'
+                  ? 'Review the conflicting positions and submit your resolution in the Operate tab.'
+                  : waitType === 'SUB_WORKFLOW_WAIT'
+                    ? 'Waiting on a child workflow. The run will resume automatically when it completes.'
+                    : 'The agent is paused and waiting for operator guidance. Add a note and restart from the Operate tab.'}
       </p>
     </div>
   );
