@@ -1304,9 +1304,15 @@ import type {
 
 export const listBusinessCustomNodeTypes = async (
   capabilityId: string,
+  options: { includeInactive?: boolean } = {},
 ): Promise<BusinessCustomNodeType[]> => {
+  const params = new URLSearchParams();
+  if (options.includeInactive) params.set("includeInactive", "true");
+  const qs = params.toString();
   const result = await requestJson<{ types: BusinessCustomNodeType[] }>(
-    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflow-node-types`,
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflow-node-types${
+      qs ? `?${qs}` : ""
+    }`,
   );
   return result.types;
 };
@@ -1318,9 +1324,11 @@ export const upsertBusinessCustomNodeType = async (
     name: string;
     baseType: BusinessNodeBaseType;
     label: string;
+    description?: string;
     color?: string;
     icon?: string;
     fields: CustomNodeTypeFieldDef[];
+    isActive?: boolean;
   },
 ): Promise<BusinessCustomNodeType> => {
   const result = await requestJson<{ type: BusinessCustomNodeType }>(

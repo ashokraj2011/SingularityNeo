@@ -2,10 +2,12 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { ArrowRight } from "lucide-react";
 import { cn } from "../../lib/utils";
 import type {
+  BusinessCustomNodeType,
   BusinessEdge,
   BusinessNode,
 } from "../../contracts/businessWorkflow";
 import { PALETTE_BY_TYPE } from "./NodePalette";
+import { isHexColor, resolveCustomNodeIcon } from "./customNodeIcons";
 
 const NODE_WIDTH = 180;
 const NODE_HEIGHT = 64;
@@ -23,6 +25,11 @@ type Props = {
   onMoveNode: (nodeId: string, position: { x: number; y: number }) => void;
   onConnect: (sourceNodeId: string, targetNodeId: string) => void;
   onDeleteSelection: () => void;
+  /**
+   * Capability-defined custom node types — used to resolve icon/color
+   * for nodes whose `type` doesn't appear in `PALETTE_BY_TYPE`.
+   */
+  customNodeTypes?: BusinessCustomNodeType[];
 };
 
 const edgePath = (
@@ -45,6 +52,7 @@ export const Canvas = ({
   onMoveNode,
   onConnect,
   onDeleteSelection,
+  customNodeTypes = [],
 }: Props) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
@@ -58,6 +66,17 @@ export const Canvas = ({
     nodes.forEach((n) => map.set(n.id, n));
     return map;
   }, [nodes]);
+
+  /**
+   * Lookup table from `node.type` → custom node type definition. Built
+   * once per render so each node's icon/color resolves in O(1) without
+   * scanning the array.
+   */
+  const customByName = useMemo(() => {
+    const map = new Map<string, BusinessCustomNodeType>();
+    customNodeTypes.forEach((t) => map.set(t.name, t));
+    return map;
+  }, [customNodeTypes]);
 
   const handleNodeMouseDown = useCallback(
     (event: React.MouseEvent, node: BusinessNode) => {
@@ -228,7 +247,15 @@ export const Canvas = ({
       {/* Nodes */}
       {nodes.map((node) => {
         const palette = PALETTE_BY_TYPE[node.type] || null;
-        const Icon = palette?.icon;
+        const custom = !palette ? customByName.get(node.type) : null;
+        // Resolve icon: built-in palette wins, then custom (Lucide name
+        // looked up in CUSTOM_NODE_ICON_MAP), else nothing.
+        const Icon = palette?.icon ?? (custom ? resolveCustomNodeIcon(custom.icon) : null);
+        // Color is either a Tailwind class (built-in or legacy custom)
+        // or a hex code (new custom). The renderer below picks the
+        // right styling path.
+        const customColor = custom?.color;
+        const customColorIsHex = isHexColor(customColor);
         const isSelected =
           selection?.kind === "node" && selection.id === node.id;
         const isConnectSource = connectFrom === node.id;
@@ -293,16 +320,39 @@ export const Canvas = ({
           >
             <div className="flex h-full items-center gap-2 px-3 pr-9">
               {Icon && (
-                <span className={cn("rounded p-1 text-white", palette?.color)}>
-                  <Icon size={14} />
+                <span
+                  className={cn(
+                    "flex h-6 w-6 items-center justify-center rounded",
+                    // Built-in palette uses Tailwind class (text-white).
+                    // Legacy custom (Tailwind class) renders the same way.
+                    // New custom (hex) renders via inline style.
+                    palette?.color,
+                    !palette && !customColorIsHex && customColor,
+                    !customColorIsHex && (palette || customColor) && "text-white",
+                  )}
+                  style={
+                    customColorIsHex
+                      ? {
+                          backgroundColor: `${customColor}1A`,
+                          border: `1px solid ${customColor}40`,
+                        }
+                      : undefined
+                  }
+                >
+                  <Icon
+                    size={14}
+                    style={{
+                      color: customColorIsHex ? customColor : undefined,
+                    }}
+                  />
                 </span>
               )}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-xs font-semibold text-on-surface">
-                  {node.label || node.type}
+                  {node.label || custom?.label || node.type}
                 </p>
                 <p className="truncate text-[0.62rem] uppercase tracking-wider text-outline">
-                  {node.type}
+                  {custom ? `${custom.baseType} · ${node.type}` : node.type}
                 </p>
               </div>
             </div>

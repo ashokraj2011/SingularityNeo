@@ -1179,20 +1179,28 @@ const rowToCustomType = (
   name: String(row.name),
   baseType: String(row.base_type) as BusinessCustomNodeType["baseType"],
   label: String(row.label),
+  description: row.description ? String(row.description) : undefined,
   color: row.color ? String(row.color) : undefined,
   icon: row.icon ? String(row.icon) : undefined,
   fields: asJsonArray<BusinessCustomNodeType["fields"][number]>(row.fields),
+  // Default true so old rows (created before is_active existed) stay visible.
+  isActive: row.is_active === false ? false : true,
   createdAt: asIso(row.created_at),
   updatedAt: asIso(row.updated_at),
 });
 
 export const listBusinessCustomNodeTypes = async (
   capabilityId: string,
+  options: { includeInactive?: boolean } = {},
 ): Promise<BusinessCustomNodeType[]> => {
   const result = await query(
-    `SELECT * FROM capability_business_workflow_custom_node_types
-     WHERE capability_id = $1
-     ORDER BY label ASC`,
+    options.includeInactive
+      ? `SELECT * FROM capability_business_workflow_custom_node_types
+         WHERE capability_id = $1
+         ORDER BY label ASC`
+      : `SELECT * FROM capability_business_workflow_custom_node_types
+         WHERE capability_id = $1 AND is_active = TRUE
+         ORDER BY label ASC`,
     [capabilityId],
   );
   return result.rows.map((row) =>
@@ -1206,24 +1214,31 @@ export const upsertBusinessCustomNodeType = async ({
   name,
   baseType,
   label,
+  description,
   color,
   icon,
   fields,
-}: Omit<BusinessCustomNodeType, "createdAt" | "updatedAt"> & { id?: string }): Promise<BusinessCustomNodeType> => {
+  isActive,
+}: Omit<BusinessCustomNodeType, "createdAt" | "updatedAt" | "isActive"> & {
+  id?: string;
+  isActive?: boolean;
+}): Promise<BusinessCustomNodeType> => {
   const ensuredId = id || createId("BCNT");
   const result = await query(
     `
     INSERT INTO capability_business_workflow_custom_node_types
-      (capability_id, id, name, base_type, label, color, icon, fields)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+      (capability_id, id, name, base_type, label, description, color, icon, fields, is_active)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
     ON CONFLICT (capability_id, id) DO UPDATE SET
-      name       = EXCLUDED.name,
-      base_type  = EXCLUDED.base_type,
-      label      = EXCLUDED.label,
-      color      = EXCLUDED.color,
-      icon       = EXCLUDED.icon,
-      fields     = EXCLUDED.fields,
-      updated_at = NOW()
+      name        = EXCLUDED.name,
+      base_type   = EXCLUDED.base_type,
+      label       = EXCLUDED.label,
+      description = EXCLUDED.description,
+      color       = EXCLUDED.color,
+      icon        = EXCLUDED.icon,
+      fields      = EXCLUDED.fields,
+      is_active   = EXCLUDED.is_active,
+      updated_at  = NOW()
     RETURNING *
     `,
     [
@@ -1232,9 +1247,11 @@ export const upsertBusinessCustomNodeType = async ({
       name,
       baseType,
       label,
+      description || null,
       color || null,
       icon || null,
       JSON.stringify(fields || []),
+      isActive === false ? false : true,
     ],
   );
   return rowToCustomType(result.rows[0] as Record<string, unknown>);

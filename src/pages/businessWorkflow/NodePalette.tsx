@@ -20,6 +20,7 @@ import type {
   BusinessCustomNodeType,
   BusinessNodeBaseType,
 } from "../../contracts/businessWorkflow";
+import { isHexColor, resolveCustomNodeIcon } from "./customNodeIcons";
 
 interface PaletteEntry {
   type: BusinessNodeBaseType;
@@ -117,30 +118,53 @@ export const NodePalette = ({
             <Sparkles size={9} /> Custom (this capability)
           </p>
           <div className="space-y-1">
-            {customNodeTypes.map((custom) => (
-              <button
-                key={custom.id}
-                type="button"
-                onClick={() => onAdd(custom.name)}
-                title={`${custom.label} — wraps ${custom.baseType}`}
-                className="flex w-full items-center gap-2 rounded-lg border border-outline-variant/30 bg-white px-2 py-1.5 text-left text-xs text-on-surface hover:bg-surface-container"
-              >
-                <span
-                  className={cn(
-                    "rounded p-1 text-white",
-                    custom.color || "bg-fuchsia-500",
-                  )}
+            {customNodeTypes.map((custom) => {
+              const CustomIcon = resolveCustomNodeIcon(custom.icon);
+              const hex = isHexColor(custom.color);
+              return (
+                <button
+                  key={custom.id}
+                  type="button"
+                  onClick={() => onAdd(custom.name)}
+                  title={
+                    custom.description
+                      ? `${custom.label} — ${custom.description}`
+                      : `${custom.label} — wraps ${custom.baseType}`
+                  }
+                  className="flex w-full items-center gap-2 rounded-lg border border-outline-variant/30 bg-white px-2 py-1.5 text-left text-xs text-on-surface hover:bg-surface-container"
                 >
-                  <Sparkles size={12} />
-                </span>
-                <span className="min-w-0 flex-1 truncate font-medium">
-                  {custom.label}
-                </span>
-                <span className="rounded bg-surface-container px-1 text-[0.55rem] uppercase text-outline">
-                  {custom.baseType.split("_")[0]}
-                </span>
-              </button>
-            ))}
+                  <span
+                    className={cn(
+                      "flex h-6 w-6 items-center justify-center rounded",
+                      // Legacy entries stored a Tailwind class — keep
+                      // rendering with the white-on-class look. New
+                      // entries are hex; render via inline style.
+                      !hex && (custom.color || "bg-fuchsia-500"),
+                      !hex && "text-white",
+                    )}
+                    style={
+                      hex
+                        ? {
+                            backgroundColor: `${custom.color}1A`,
+                            border: `1px solid ${custom.color}40`,
+                          }
+                        : undefined
+                    }
+                  >
+                    <CustomIcon
+                      size={12}
+                      style={{ color: hex ? custom.color : undefined }}
+                    />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-medium">
+                    {custom.label}
+                  </span>
+                  <span className="rounded bg-surface-container px-1 text-[0.55rem] uppercase text-outline">
+                    {custom.baseType.split("_")[0]}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}

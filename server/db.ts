@@ -3475,14 +3475,24 @@ export const migrationStatements = [
       name TEXT NOT NULL,
       base_type TEXT NOT NULL,
       label TEXT NOT NULL,
+      description TEXT,
       color TEXT,
       icon TEXT,
       fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (capability_id, id),
       UNIQUE (capability_id, name)
     )
+  `,
+  `
+    ALTER TABLE capability_business_workflow_custom_node_types
+      ADD COLUMN IF NOT EXISTS description TEXT
+  `,
+  `
+    ALTER TABLE capability_business_workflow_custom_node_types
+      ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE
   `,
   `
     CREATE TABLE IF NOT EXISTS capability_business_workflow_instances (

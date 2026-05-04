@@ -399,6 +399,7 @@ export const BusinessWorkflowStudio = ({ templateId }: Props) => {
           onMoveNode={handleMoveNode}
           onConnect={handleConnect}
           onDeleteSelection={handleDeleteSelection}
+          customNodeTypes={customNodeTypes}
         />
         {selectedNode ? (
           <NodeInspector

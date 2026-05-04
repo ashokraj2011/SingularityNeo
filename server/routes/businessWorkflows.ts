@@ -385,8 +385,11 @@ export const registerBusinessWorkflowRoutes = (app: express.Express) => {
     "/api/capabilities/:capabilityId/business-workflow-node-types",
     async (request, response) => {
       try {
+        const includeInactive =
+          String(request.query.includeInactive ?? "").toLowerCase() === "true";
         const types = await listBusinessCustomNodeTypes(
           trim(request.params.capabilityId),
+          { includeInactive },
         );
         response.json({ types });
       } catch (error) {
@@ -405,6 +408,7 @@ export const registerBusinessWorkflowRoutes = (app: express.Express) => {
           name?: string;
           baseType?: string;
           label?: string;
+          description?: string;
           color?: string;
           icon?: string;
           fields?: Array<{
@@ -413,6 +417,7 @@ export const registerBusinessWorkflowRoutes = (app: express.Express) => {
             placeholder?: string;
             multiline?: boolean;
           }>;
+          isActive?: boolean;
         };
         if (!body.name?.trim() || !body.baseType?.trim() || !body.label?.trim()) {
           response
@@ -426,9 +431,11 @@ export const registerBusinessWorkflowRoutes = (app: express.Express) => {
           name: body.name,
           baseType: body.baseType as never,
           label: body.label,
+          description: body.description,
           color: body.color,
           icon: body.icon,
           fields: body.fields || [],
+          isActive: body.isActive,
         });
         response.json({ type: upserted });
       } catch (error) {

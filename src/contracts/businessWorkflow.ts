@@ -255,12 +255,24 @@ export interface CustomNodeTypeFieldDef {
 export interface BusinessCustomNodeType {
   capabilityId: string;
   id: string;
-  name: string; // unique within capability — used as node.type
+  name: string; // unique within capability — used as node.type. UPPER_SNAKE_CASE.
   baseType: BusinessNodeBaseType;
   label: string;
+  description?: string;
+  /**
+   * Either a hex color (e.g. "#38bdf8") rendered via inline style, or a
+   * Tailwind background class (e.g. "bg-emerald-500") for legacy entries.
+   * The renderer auto-detects.
+   */
   color?: string;
+  /** Lucide icon name, e.g. "Box", "Briefcase". */
   icon?: string;
   fields: CustomNodeTypeFieldDef[];
+  /**
+   * Soft-toggle. Inactive types are hidden from the palette by default
+   * but remain available to instances that already reference them.
+   */
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }
