@@ -100,6 +100,11 @@ export const removeEdge = (
 /**
  * Lightweight validation. Returns a list of human-readable warnings.
  * Empty list = OK.
+ *
+ * Tries to be ACTIONABLE rather than abstract — instead of just
+ * "Unreachable nodes from START: End", tell the operator the actual
+ * shape of the bug ("END has no incoming edge" or "Foo has no outgoing
+ * edge"), which is what they need to fix.
  */
 export const validateGraph = ({
   nodes,
@@ -116,6 +121,11 @@ export const validateGraph = ({
   if (endNodes.length === 0) issues.push("Missing END node.");
 
   const nodeIds = new Set(nodes.map((n) => n.id));
+  const labelOf = (id: string) => {
+    const n = nodes.find((x) => x.id === id);
+    return n ? `${n.label || n.type}` : id;
+  };
+
   for (const edge of edges) {
     if (!nodeIds.has(edge.sourceNodeId)) {
       issues.push(`Edge ${edge.id} has unknown source node.`);
@@ -124,7 +134,30 @@ export const validateGraph = ({
       issues.push(`Edge ${edge.id} has unknown target node.`);
     }
   }
-  // Reachability from START: BFS
+
+  // Outgoing/incoming presence checks. These produce the most
+  // actionable messages — usually the "fix" is to draw the missing
+  // edge in the right direction, and pointing at the specific node
+  // tells the operator exactly where.
+  for (const node of nodes) {
+    const out = edges.filter((e) => e.sourceNodeId === node.id).length;
+    const incoming = edges.filter((e) => e.targetNodeId === node.id).length;
+    if (node.type !== "END" && out === 0) {
+      issues.push(
+        `"${node.label || node.type}" has no outgoing edge — drag from its right-side → handle to the next node.`,
+      );
+    }
+    if (node.type !== "START" && incoming === 0) {
+      issues.push(
+        `"${node.label || node.type}" has no incoming edge — connect a previous node's → handle to it.`,
+      );
+    }
+  }
+
+  // Reachability from START: BFS over edge DIRECTION (source → target).
+  // Lists names of unreachable nodes so the operator knows where the
+  // disconnect is — usually it's an edge drawn the wrong way (e.g. END
+  // is the source instead of the target).
   if (startNodes.length === 1) {
     const reachable = new Set<string>();
     const stack = [startNodes[0].id];
@@ -140,9 +173,18 @@ export const validateGraph = ({
       (n) => !reachable.has(n.id) && n.type !== "START",
     );
     if (unreachable.length > 0) {
-      issues.push(
-        `Unreachable nodes from START: ${unreachable.map((n) => n.label || n.id).join(", ")}`,
+      // Only emit this if we haven't ALREADY explained the problem with
+      // the per-node "no incoming/outgoing" messages above — otherwise
+      // it's noise.
+      const namesOnly = unreachable.map((n) => labelOf(n.id));
+      const alreadyFlagged = namesOnly.every((name) =>
+        issues.some((iss) => iss.startsWith(`"${name}"`)),
       );
+      if (!alreadyFlagged) {
+        issues.push(
+          `Unreachable from START: ${namesOnly.join(", ")} — check edge direction (every arrow points source → target).`,
+        );
+      }
     }
   }
   return issues;

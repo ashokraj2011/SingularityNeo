@@ -192,6 +192,44 @@ export const Canvas = ({
         className="pointer-events-none absolute inset-0 h-full w-full"
         style={{ minWidth: 1600, minHeight: 1200 }}
       >
+        {/* Arrowhead markers — one per stroke colour so the head matches
+            the line. Without these every edge looks bidirectional and
+            users routinely draw connections backwards. */}
+        <defs>
+          <marker
+            id="bw-arrow-default"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgb(120 120 130)" />
+          </marker>
+          <marker
+            id="bw-arrow-selected"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgb(99 102 241)" />
+          </marker>
+          <marker
+            id="bw-arrow-pending"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgb(99 102 241)" />
+          </marker>
+        </defs>
         {edges.map((edge) => {
           const src = nodeMap.get(edge.sourceNodeId);
           const dst = nodeMap.get(edge.targetNodeId);
@@ -205,6 +243,11 @@ export const Canvas = ({
                 stroke={isSelected ? "rgb(99 102 241)" : "rgb(120 120 130)"}
                 strokeWidth={isSelected ? 2.5 : 1.5}
                 fill="none"
+                markerEnd={
+                  isSelected
+                    ? "url(#bw-arrow-selected)"
+                    : "url(#bw-arrow-default)"
+                }
                 className="pointer-events-auto cursor-pointer"
                 onClick={(event) => {
                   event.stopPropagation();
@@ -239,6 +282,7 @@ export const Canvas = ({
               strokeWidth={2}
               strokeDasharray="4 4"
               fill="none"
+              markerEnd="url(#bw-arrow-pending)"
             />
           );
         })()}
