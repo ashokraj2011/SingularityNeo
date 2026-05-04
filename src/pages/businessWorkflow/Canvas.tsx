@@ -273,16 +273,22 @@ export const Canvas = ({
               if (hoveredTargetId === node.id) setHoveredTargetId(null);
             }}
             onMouseUp={(e) => {
-              e.stopPropagation();
+              // ONLY stopPropagation when we're handling a connection.
+              // For a normal click-or-drag, let the event bubble to the
+              // container so its handleMouseUp clears draggingNodeId —
+              // otherwise the node sticks to the cursor after a click.
               if (connectFrom && connectFrom !== node.id) {
+                e.stopPropagation();
                 handleConnectEnd(node.id);
               }
             }}
             onClick={(e) => {
-              // Stop bubbling to the canvas background click
-              if (handleNodeClickWhileConnecting(node.id)) {
-                e.stopPropagation();
-              }
+              // Always stop propagation: a click on a node must NOT
+              // reach the container's onClick (background-click handler),
+              // otherwise the just-selected node is immediately
+              // deselected and the inspector vanishes.
+              e.stopPropagation();
+              handleNodeClickWhileConnecting(node.id);
             }}
           >
             <div className="flex h-full items-center gap-2 px-3 pr-9">
