@@ -41,6 +41,7 @@ import {
   Wrench,
   X,
   Zap,
+  LayoutPanelLeft,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useCapability } from "../context/CapabilityContext";
@@ -69,6 +70,7 @@ const primaryNavItems = [
 ] as const;
 
 const companionNavItems = [
+  { name: "Cockpit", shortName: "Cockpit", icon: LayoutPanelLeft, path: "/cockpit" },
   { name: "Chat", shortName: "Chat", icon: MessageSquare, path: "/chat" },
   { name: "Planning", shortName: "Plan", icon: ClipboardList, path: "/planning" },
   { name: "Agents", shortName: "Agents", icon: Users, path: "/team" },
@@ -174,6 +176,7 @@ const PATH_TO_GROUP: Record<string, ToolGroup> = {
 const routeTitles: Record<string, string> = {
   "/": "Work",
   "/home": "Home",
+  "/cockpit": "Work Item Cockpit",
   "/workflow-orchestrator": "Workflow Orchestrator",
   "/planning": "Planning",
   "/capabilities/new": "On Board Capability",
