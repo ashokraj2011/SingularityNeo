@@ -144,6 +144,13 @@ const clampLimit = (value: unknown, fallback: number, max: number) => {
 
 const TOP_LEVEL_SYMBOL_KINDS = new Set(["class", "interface", "enum", "type"]);
 const INVENTORY_CODE_QUESTION_TYPES = new Set(["inventory", "count"]);
+const BROAD_DISCOVERY_CODE_QUESTION_TYPES = new Set([
+  "inventory",
+  "count",
+  "location",
+  "explanation",
+  "implementation",
+]);
 
 const isTopLevelSymbol = (symbol: { kind?: string; parentSymbol?: string }) =>
   TOP_LEVEL_SYMBOL_KINDS.has(String(symbol.kind || "").toLowerCase()) &&
@@ -160,7 +167,11 @@ const promoteParentSymbols = <T extends {
   symbols: T[],
   questionType?: string,
 ) => {
-  if (!INVENTORY_CODE_QUESTION_TYPES.has(String(questionType || ""))) {
+  const normalizedQuestionType = String(questionType || "");
+  if (
+    normalizedQuestionType &&
+    !BROAD_DISCOVERY_CODE_QUESTION_TYPES.has(normalizedQuestionType)
+  ) {
     return symbols;
   }
 
@@ -765,11 +776,43 @@ export const classifyToolExecutionError = ({
   return null;
 };
 
-const runProcess = async (file: string, args: string[], cwd: string) => {
+// Default 12-second wall-clock cap per subprocess call.  ripgrep and similar
+// tools can run indefinitely on large repos when no cap is set.
+const RUN_PROCESS_DEFAULT_TIMEOUT_MS = 12_000;
+
+// Timeout for the AST index build/search inside browse_code.  The first call
+// on a new checkout triggers a full tree-walk + parse of up to 1,500 files.
+// 20 seconds is generous; beyond that we skip and fall through to ripgrep.
+const BROWSE_CODE_INDEX_SEARCH_TIMEOUT_MS = 20_000;
+
+/**
+ * Race `promise` against a deadline.  Returns `fallback` if the deadline
+ * fires first.  The original promise keeps running in the background (e.g.
+ * to warm a cache) — we just don't block the current call on it.
+ */
+const withTimeout = <T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> =>
+  Promise.race([
+    promise,
+    new Promise<T>((resolve) =>
+      setTimeout(() => {
+        console.warn(`[tools:withTimeout] promise exceeded ${ms}ms — using fallback`);
+        resolve(fallback);
+      }, ms),
+    ),
+  ]);
+
+const runProcess = async (
+  file: string,
+  args: string[],
+  cwd: string,
+  timeoutMs = RUN_PROCESS_DEFAULT_TIMEOUT_MS,
+) => {
   try {
     const result = await execFileAsync(file, args, {
       cwd,
       maxBuffer: 1024 * 1024 * 8,
+      timeout: timeoutMs,
+      killSignal: "SIGTERM",
     });
     return {
       exitCode: 0,
@@ -782,7 +825,11 @@ const runProcess = async (file: string, args: string[], cwd: string) => {
       stdout?: string;
       stderr?: string;
       message?: string;
+      killed?: boolean;
     };
+    if (execError.killed) {
+      console.warn(`[runProcess] ${file} killed after ${timeoutMs}ms timeout`, { args: args.slice(0, 4) });
+    }
     return {
       exitCode: typeof execError.code === "number" ? execError.code : 1,
       stdout: execError.stdout || "",
@@ -1415,13 +1462,17 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         let localSymbolRootSource: ResolvedCodeRoot["source"] | undefined;
         for (const candidate of codeRoots) {
           for (const candidateQuery of codeSearch.candidates) {
-            const result = await searchLocalCheckoutSymbols({
-              checkoutPath: candidate.checkoutPath,
-              capabilityId: capability.id,
-              repositoryId: candidate.repositoryId,
-              query: candidateQuery,
-              limit: Math.min(limit, 25),
-            }).catch(() => null);
+            const result = await withTimeout(
+              searchLocalCheckoutSymbols({
+                checkoutPath: candidate.checkoutPath,
+                capabilityId: capability.id,
+                repositoryId: candidate.repositoryId,
+                query: candidateQuery,
+                limit: Math.min(limit, 25),
+              }),
+              BROWSE_CODE_INDEX_SEARCH_TIMEOUT_MS,
+              null,
+            ).catch(() => null);
             if (result && result.symbols.length > 0) {
               localSymbolResults = result;
               localSymbolCheckoutRoot = candidate.checkoutPath.replace(/\/+$/, "");
@@ -1795,13 +1846,17 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
         ]) {
           const cloneRoot = clone.checkoutPath.replace(/\/+$/, "");
           for (const candidateQuery of semanticCandidates) {
-            const result = await searchLocalCheckoutSymbols({
-              checkoutPath: clone.checkoutPath,
-              capabilityId: capability.id,
-              repositoryId: clone.repositoryId,
-              query: candidateQuery,
-              limit: Math.min(limit, 25),
-            }).catch(() => null);
+            const result = await withTimeout(
+              searchLocalCheckoutSymbols({
+                checkoutPath: clone.checkoutPath,
+                capabilityId: capability.id,
+                repositoryId: clone.repositoryId,
+                query: candidateQuery,
+                limit: Math.min(limit, 25),
+              }),
+              BROWSE_CODE_INDEX_SEARCH_TIMEOUT_MS,
+              null,
+            ).catch(() => null);
             if (result?.symbols?.length) {
               localSemanticFreshness = result.builtAt || localSemanticFreshness;
               localSemanticSymbols.push(
@@ -2170,7 +2225,10 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
       const allSymbols: Array<any & { _checkoutRoot: string }> = [];
       const repoSummaries: string[] = [];
       const effectiveKind =
-        semanticSearch && INVENTORY_CODE_QUESTION_TYPES.has(String(semanticSearch.questionType || ""))
+        semanticSearch &&
+        BROAD_DISCOVERY_CODE_QUESTION_TYPES.has(
+          String(semanticSearch.questionType || ""),
+        )
           ? undefined
           : kind;
 	      for (const clone of [...localCloneCandidates.filter(e => e.isPrimary), ...localCloneCandidates.filter(e => !e.isPrimary)]) {
