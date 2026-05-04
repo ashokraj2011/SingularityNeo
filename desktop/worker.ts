@@ -16,6 +16,7 @@ import type {
   CapabilityChatMessage,
   CapabilityWorkspace,
   ChatStreamEvent,
+  DesktopWorkspaceMapping,
   ExecutionLog,
   ExecutorHeartbeatStatus,
   MemoryReference,
@@ -160,22 +161,8 @@ const resolveExecutorId = () => {
 };
 let executorId = resolveExecutorId();
 
-// User-level working directory — the single source of truth for this
-// machine's workspace root. Initially resolved from .env.local / project root;
-// overwritten by DB-sourced preferences once the server connection is ready.
-const resolveWorkingDirectory = () => {
-  const raw = String(process.env.SINGULARITY_WORKING_DIRECTORY || '').trim();
-  if (raw) return raw;
-  const root = String(projectRoot || '').trim();
-  return root || undefined;
-};
-let desktopWorkingDirectory = resolveWorkingDirectory();
-let desktopWorkingDirectorySource: RuntimeStatus['workingDirectorySource'] =
-  process.env.SINGULARITY_WORKING_DIRECTORY?.trim()
-  ? 'env'
-  : desktopWorkingDirectory
-  ? 'project-root'
-  : 'missing';
+// User-level working directory is now defined exclusively by the operator
+// via workspace mappings, rather than a global fallback.
 
 /**
  * Fetches stored preferences from the control plane and applies them to this
@@ -192,7 +179,6 @@ const loadPreferencesFromServer = async () => {
     });
     if (!raw.ok) return;
     const prefs = await raw.json() as {
-      workingDirectory?: string;
       copilotCliUrl?: string;
       allowHttpFallback?: boolean;
       embeddingBaseUrl?: string;
@@ -200,11 +186,7 @@ const loadPreferencesFromServer = async () => {
       executorId?: string;
     };
 
-    if (prefs.workingDirectory) {
-      process.env.SINGULARITY_WORKING_DIRECTORY = prefs.workingDirectory;
-      desktopWorkingDirectory = prefs.workingDirectory;
-      desktopWorkingDirectorySource = 'env';
-    }
+
     if (prefs.copilotCliUrl) {
       process.env.COPILOT_CLI_URL = prefs.copilotCliUrl;
     }
@@ -507,9 +489,8 @@ const syncExecutorRegistration = async () => {
     actorContext: activeActorContext,
     body: {
       runtimeSummary: await buildRuntimeSummary(),
-      // Resend on every heartbeat so a config change picked up from
-      // `.env.local` reaches the control plane within one poll cycle.
-      workingDirectory: desktopWorkingDirectory,
+      // .env.local working directory fallback has been removed. All working
+      // directories are now resolved via desktop_user_workspace_mappings.
     },
   }).catch(async () =>
     controlPlaneRequest<{
@@ -524,7 +505,6 @@ const syncExecutorRegistration = async () => {
       body: {
         executorId,
         runtimeSummary: await buildRuntimeSummary(),
-        workingDirectory: desktopWorkingDirectory,
       },
     }),
   );
@@ -1248,10 +1228,29 @@ const resolveDesktopRuntimeContext = async (
       ) ||
       (bundle.capability.repositories || []).find(repository => repository.isPrimary) ||
       bundle.capability.repositories?.[0];
+    const resolution = activeActorContext?.userId
+      ? await controlPlaneRequest<{
+          localRootPath?: string;
+          workingDirectoryPath?: string;
+        }>('/api/runtime/desktop-worker-rpc', {
+          method: 'POST',
+          actorContext: activeActorContext,
+          body: {
+            method: 'resolveDesktopWorkspace',
+            args: {
+              executorId,
+              userId: activeActorContext.userId,
+              capabilityId: bundle.capability.id,
+              repositoryId: astRepository?.id,
+            },
+          },
+        }).catch(() => null)
+      : null;
+
     const astCheckoutPath =
-      desktopWorkingDirectory && referencedWorkItem && astRepository
+      resolution?.workingDirectoryPath && referencedWorkItem && astRepository
         ? buildWorkItemCheckoutPath({
-            workingDirectoryPath: desktopWorkingDirectory,
+            workingDirectoryPath: resolution.workingDirectoryPath,
             capability: bundle.capability,
             workItemId: referencedWorkItem.id,
             repository: astRepository,
@@ -1609,28 +1608,50 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
         ? undefined
         : 'Choose the current operator from the top bar before claiming execution.',
     },
-    {
-      id: 'desktop-working-directory',
-      label: 'Desktop working directory',
-      status:
-        desktopWorkingDirectorySource === 'env'
-          ? 'healthy'
-          : desktopWorkingDirectorySource === 'project-root'
-          ? 'degraded'
-          : 'blocked',
-      message:
-        desktopWorkingDirectorySource === 'env'
-          ? 'SINGULARITY_WORKING_DIRECTORY is configured for this desktop.'
-          : desktopWorkingDirectorySource === 'project-root'
-          ? 'Using the project root as the desktop working-directory fallback.'
-          : 'No desktop working directory is available.',
-      remediation:
-        desktopWorkingDirectorySource === 'env'
-          ? undefined
-          : 'Set SINGULARITY_WORKING_DIRECTORY in .env.local for predictable split-enterprise startup.',
-    },
+
     ...(controlPlaneRuntimeStatus.checks || []),
   ];
+
+  // ── Resolve workingDirectory from desktop_user_workspace_mappings ────────
+  // Without this, the runtime always reports `workingDirectorySource: 'missing'`
+  // even when a valid mapping exists in the DB — which trips
+  // `hasDesktopWorkspaceAuthority` and silently blocks Start execution / the
+  // Copilot dock readiness banner.
+  let resolvedWorkingDirectory: string | undefined;
+  let resolvedWorkingDirectorySource: RuntimeStatus['workingDirectorySource'] =
+    'missing';
+  if (executorId && activeActorContext?.userId) {
+    try {
+      const mappingResult = await controlPlaneRequest<{
+        mappings: DesktopWorkspaceMapping[];
+      }>(
+        `/api/runtime/executors/${encodeURIComponent(executorId)}/workspace-mappings?userId=${encodeURIComponent(activeActorContext.userId)}`,
+      );
+      const validMapping = (mappingResult?.mappings || []).find(
+        (entry) => entry.validation?.valid && entry.workingDirectoryPath,
+      );
+      if (validMapping?.workingDirectoryPath) {
+        resolvedWorkingDirectory = validMapping.workingDirectoryPath;
+        resolvedWorkingDirectorySource = 'mapping';
+      }
+    } catch {
+      // Control plane unreachable or permission denied — fall through to
+      // env / project-root fallbacks below.
+    }
+  }
+  if (!resolvedWorkingDirectory) {
+    const envWorkingDir =
+      process.env.SINGULARITY_WORKING_DIRECTORY?.trim() ||
+      process.env.WORKING_DIRECTORY?.trim() ||
+      '';
+    if (envWorkingDir) {
+      resolvedWorkingDirectory = envWorkingDir;
+      resolvedWorkingDirectorySource = 'env';
+    } else if (projectRoot) {
+      resolvedWorkingDirectory = projectRoot;
+      resolvedWorkingDirectorySource = 'project-root';
+    }
+  }
 
   return {
     configured,
@@ -1642,8 +1663,8 @@ const buildDesktopRuntimeStatus = async (): Promise<RuntimeStatus> => {
     desktopExecutorId: executorId,
     desktopId,
     desktopHostname,
-    workingDirectory: desktopWorkingDirectory,
-    workingDirectorySource: desktopWorkingDirectorySource,
+    workingDirectory: resolvedWorkingDirectory,
+    workingDirectorySource: resolvedWorkingDirectorySource,
     runtimeOwner: 'DESKTOP',
     executionRuntimeOwner: 'DESKTOP',
     executorId,
@@ -1958,11 +1979,6 @@ reader.on('line', async line => {
         }
         const saved = await raw.json();
         // Apply to this worker process.
-        if (saved.workingDirectory) {
-          process.env.SINGULARITY_WORKING_DIRECTORY = saved.workingDirectory;
-          desktopWorkingDirectory = saved.workingDirectory;
-          desktopWorkingDirectorySource = 'env';
-        }
         if (saved.copilotCliUrl) process.env.COPILOT_CLI_URL = saved.copilotCliUrl;
         if (saved.allowHttpFallback !== undefined) {
           process.env.ALLOW_GITHUB_MODELS_HTTP_FALLBACK = saved.allowHttpFallback ? 'true' : 'false';
