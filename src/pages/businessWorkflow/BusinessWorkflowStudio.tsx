@@ -236,9 +236,12 @@ export const BusinessWorkflowStudio = ({ templateId }: Props) => {
   const handlePublish = useCallback(async () => {
     if (!template) return;
     if (issues.length > 0) {
+      // Surface the actual validation reasons so the user can self-fix
+      // instead of being stuck staring at "Fix 1 issue first."
       toastError(
         "Cannot publish",
-        `Fix ${issues.length} issue${issues.length === 1 ? "" : "s"} first.`,
+        issues.slice(0, 3).join(" · ") +
+          (issues.length > 3 ? ` (+${issues.length - 3} more)` : ""),
       );
       return;
     }

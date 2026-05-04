@@ -27,7 +27,7 @@
  *   - SAGA / compensation
  */
 
-import { query } from "./db";
+import { query, transaction } from "./db";
 import { evaluateEdgeCondition } from "../src/lib/businessWorkflowConditions";
 import type {
   ApprovalStatus,
@@ -345,41 +345,77 @@ export const publishBusinessTemplate = async ({
 }): Promise<BusinessWorkflowVersion | null> => {
   const tpl = await fetchBusinessTemplate(capabilityId, templateId);
   if (!tpl) return null;
-  const nextVersion = tpl.currentVersion + 1;
-  await query(
-    `
-    INSERT INTO capability_business_workflow_template_versions
-      (capability_id, template_id, version, nodes, edges, phases, published_by)
-    VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7)
-    `,
-    [
+
+  // Atomic publish.
+  //
+  // Two failure modes we used to hit:
+  //   1. INSERT version_row succeeds, then UPDATE current_version fails:
+  //      template's `current_version` stays stale, and the next publish
+  //      attempt computes the SAME nextVersion → unique-constraint
+  //      violation on (capability_id, template_id, version).
+  //   2. Two operators clicking Publish at the same instant both compute
+  //      the same nextVersion → duplicate insert.
+  //
+  // Fix:
+  //   - Wrap both writes in a single transaction.
+  //   - Take a row-level lock on the templates row (FOR UPDATE) to
+  //     serialise concurrent publishes.
+  //   - Compute nextVersion from MAX(version) on the actual versions
+  //     table inside the same transaction, so any drift between
+  //     `templates.current_version` and the versions table self-heals.
+  return transaction(async (client) => {
+    await client.query(
+      `SELECT 1 FROM capability_business_workflow_templates
+       WHERE capability_id = $1 AND id = $2 FOR UPDATE`,
+      [capabilityId, templateId],
+    );
+    const maxResult = await client.query<{ max: number | null }>(
+      `SELECT MAX(version) AS max
+       FROM capability_business_workflow_template_versions
+       WHERE capability_id = $1 AND template_id = $2`,
+      [capabilityId, templateId],
+    );
+    const existingMax = Number(maxResult.rows[0]?.max ?? 0) || 0;
+    // Honour either the locked row's current_version OR what's actually
+    // in the versions table — whichever is greater.
+    const nextVersion =
+      Math.max(existingMax, Number(tpl.currentVersion) || 0) + 1;
+
+    await client.query(
+      `
+      INSERT INTO capability_business_workflow_template_versions
+        (capability_id, template_id, version, nodes, edges, phases, published_by)
+      VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7)
+      `,
+      [
+        capabilityId,
+        templateId,
+        nextVersion,
+        JSON.stringify(tpl.draftNodes),
+        JSON.stringify(tpl.draftEdges),
+        JSON.stringify(tpl.draftPhases),
+        publishedBy,
+      ],
+    );
+    await client.query(
+      `
+      UPDATE capability_business_workflow_templates
+      SET current_version = $3, status = 'PUBLISHED', updated_at = NOW()
+      WHERE capability_id = $1 AND id = $2
+      `,
+      [capabilityId, templateId, nextVersion],
+    );
+    return {
       capabilityId,
       templateId,
-      nextVersion,
-      JSON.stringify(tpl.draftNodes),
-      JSON.stringify(tpl.draftEdges),
-      JSON.stringify(tpl.draftPhases),
+      version: nextVersion,
+      nodes: tpl.draftNodes,
+      edges: tpl.draftEdges,
+      phases: tpl.draftPhases,
       publishedBy,
-    ],
-  );
-  await query(
-    `
-    UPDATE capability_business_workflow_templates
-    SET current_version = $3, status = 'PUBLISHED', updated_at = NOW()
-    WHERE capability_id = $1 AND id = $2
-    `,
-    [capabilityId, templateId, nextVersion],
-  );
-  return {
-    capabilityId,
-    templateId,
-    version: nextVersion,
-    nodes: tpl.draftNodes,
-    edges: tpl.draftEdges,
-    phases: tpl.draftPhases,
-    publishedBy,
-    publishedAt: new Date().toISOString(),
-  };
+      publishedAt: new Date().toISOString(),
+    };
+  });
 };
 
 export const listBusinessTemplateVersions = async (
