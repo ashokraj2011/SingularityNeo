@@ -7,6 +7,7 @@ import { registerCodeWorkspaceRoutes } from '../routes/codeWorkspaces';
 import { registerDeliveryAssetRoutes } from '../routes/deliveryAssets';
 import { registerExecutionRuntimeRoutes } from '../routes/executionRuntime';
 import { registerGovernanceRoutes } from '../routes/governance';
+import { registerBusinessWorkflowRoutes } from '../routes/businessWorkflows';
 import { registerIncidentRoutes } from '../routes/incidents';
 import { registerLlmContextLogRoutes } from '../routes/llmContextLog';
 import { registerPassportRoutes } from '../routes/passport';
@@ -125,6 +126,7 @@ export const registerAllRoutes = (
 
   registerRuntimeRoutes(app);
   registerLlmContextLogRoutes(app);
+  registerBusinessWorkflowRoutes(app);
   registerRuntimeSettingsRoutes(app);
   registerTokenManagementRoutes(app);
   registerExecutionRuntimeRoutes(app);

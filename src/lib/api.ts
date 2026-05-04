@@ -1085,6 +1085,215 @@ export const fetchLedgerArtifacts = async (
     `/api/capabilities/${encodeURIComponent(capabilityId)}/ledger/artifacts`,
   );
 
+// ── Business Workflow Designer ────────────────────────────────────────────
+
+import type {
+  ApprovalStatus,
+  BusinessApproval,
+  BusinessNode,
+  BusinessEdge,
+  BusinessPhase,
+  BusinessTask,
+  BusinessWorkflowEvent,
+  BusinessWorkflowInstance,
+  BusinessWorkflowTemplate,
+  BusinessWorkflowVersion,
+  TaskStatus,
+} from "../contracts/businessWorkflow";
+
+export const fetchBusinessWorkflows = async (
+  capabilityId: string,
+): Promise<BusinessWorkflowTemplate[]> => {
+  const result = await requestJson<{ templates: BusinessWorkflowTemplate[] }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflows`,
+  );
+  return result.templates;
+};
+
+export const fetchBusinessWorkflow = async (
+  capabilityId: string,
+  templateId: string,
+): Promise<{
+  template: BusinessWorkflowTemplate;
+  versions: BusinessWorkflowVersion[];
+}> =>
+  requestJson<{
+    template: BusinessWorkflowTemplate;
+    versions: BusinessWorkflowVersion[];
+  }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflows/${encodeURIComponent(templateId)}`,
+  );
+
+export const createBusinessWorkflow = async (
+  capabilityId: string,
+  payload: { name: string; description?: string },
+): Promise<BusinessWorkflowTemplate> => {
+  const result = await requestJson<{ template: BusinessWorkflowTemplate }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflows`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+  return result.template;
+};
+
+export const saveBusinessWorkflow = async (
+  capabilityId: string,
+  templateId: string,
+  patch: {
+    name?: string;
+    description?: string;
+    draftNodes?: BusinessNode[];
+    draftEdges?: BusinessEdge[];
+    draftPhases?: BusinessPhase[];
+    metadata?: Record<string, unknown>;
+  },
+): Promise<BusinessWorkflowTemplate> => {
+  const result = await requestJson<{ template: BusinessWorkflowTemplate }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflows/${encodeURIComponent(templateId)}`,
+    {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify(patch),
+    },
+  );
+  return result.template;
+};
+
+export const archiveBusinessWorkflow = async (
+  capabilityId: string,
+  templateId: string,
+): Promise<void> => {
+  await requestJson<{ ok: true }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflows/${encodeURIComponent(templateId)}`,
+    { method: "DELETE" },
+  );
+};
+
+export const publishBusinessWorkflow = async (
+  capabilityId: string,
+  templateId: string,
+): Promise<BusinessWorkflowVersion> => {
+  const result = await requestJson<{ version: BusinessWorkflowVersion }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflows/${encodeURIComponent(templateId)}/publish`,
+    { method: "POST", headers: jsonHeaders },
+  );
+  return result.version;
+};
+
+export const startBusinessWorkflowInstance = async (
+  capabilityId: string,
+  templateId: string,
+  context?: Record<string, unknown>,
+): Promise<BusinessWorkflowInstance> => {
+  const result = await requestJson<{ instance: BusinessWorkflowInstance }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflows/${encodeURIComponent(templateId)}/instances`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ context: context || {} }),
+    },
+  );
+  return result.instance;
+};
+
+export const fetchBusinessInstance = async (
+  capabilityId: string,
+  instanceId: string,
+): Promise<{
+  instance: BusinessWorkflowInstance;
+  events: BusinessWorkflowEvent[];
+}> =>
+  requestJson<{
+    instance: BusinessWorkflowInstance;
+    events: BusinessWorkflowEvent[];
+  }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}`,
+  );
+
+export const cancelBusinessWorkflowInstance = async (
+  capabilityId: string,
+  instanceId: string,
+): Promise<BusinessWorkflowInstance> => {
+  const result = await requestJson<{ instance: BusinessWorkflowInstance }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}/cancel`,
+    { method: "POST", headers: jsonHeaders },
+  );
+  return result.instance;
+};
+
+export const listBusinessTasks = async (
+  capabilityId: string,
+  status: TaskStatus | "OPEN_OR_CLAIMED" = "OPEN_OR_CLAIMED",
+): Promise<BusinessTask[]> => {
+  const result = await requestJson<{ tasks: BusinessTask[] }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-tasks?status=${encodeURIComponent(status)}`,
+  );
+  return result.tasks;
+};
+
+export const claimBusinessTask = async (
+  capabilityId: string,
+  taskId: string,
+): Promise<BusinessTask> => {
+  const result = await requestJson<{ task: BusinessTask }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-tasks/${encodeURIComponent(taskId)}/claim`,
+    { method: "POST", headers: jsonHeaders },
+  );
+  return result.task;
+};
+
+export const completeBusinessTask = async (
+  capabilityId: string,
+  taskId: string,
+  payload: {
+    formData?: Record<string, unknown>;
+    output?: Record<string, unknown>;
+  },
+): Promise<BusinessTask> => {
+  const result = await requestJson<{ task: BusinessTask }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-tasks/${encodeURIComponent(taskId)}/complete`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+  return result.task;
+};
+
+export const fetchBusinessApproval = async (
+  capabilityId: string,
+  approvalId: string,
+): Promise<BusinessApproval> => {
+  const result = await requestJson<{ approval: BusinessApproval }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-approvals/${encodeURIComponent(approvalId)}`,
+  );
+  return result.approval;
+};
+
+export const decideBusinessApproval = async (
+  capabilityId: string,
+  approvalId: string,
+  payload: {
+    decision: ApprovalStatus;
+    conditions?: string;
+    notes?: string;
+  },
+): Promise<BusinessApproval> => {
+  const result = await requestJson<{ approval: BusinessApproval }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-approvals/${encodeURIComponent(approvalId)}/decide`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+  return result.approval;
+};
+
 // ── LLM context log ───────────────────────────────────────────────────────
 
 export const fetchCapabilityLlmContextLog = async (

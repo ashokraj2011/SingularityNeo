@@ -3422,6 +3422,178 @@ export const migrationStatements = [
       ON capability_llm_context_log (trace_id)
       WHERE trace_id IS NOT NULL
   `,
+  // ───────────────────────────────────────────────────────────────────────
+  // Business Workflow Designer
+  //
+  // A separate workflow surface from the existing agent-driven
+  // `capability_workflows`. Models human-driven business processes
+  // (approvals, expense reviews, contract sign-offs, onboarding) with
+  // optional hybrid steps that delegate to capability agents.
+  //
+  // Tables prefixed `capability_business_*` so they cannot collide with
+  // the existing agent-workflow namespace. The agent designer continues
+  // to live untouched in `capability_workflows`.
+  // ───────────────────────────────────────────────────────────────────────
+  `
+    CREATE TABLE IF NOT EXISTS capability_business_workflow_templates (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'DRAFT',
+      current_version INTEGER NOT NULL DEFAULT 0,
+      draft_nodes JSONB NOT NULL DEFAULT '[]'::jsonb,
+      draft_edges JSONB NOT NULL DEFAULT '[]'::jsonb,
+      draft_phases JSONB NOT NULL DEFAULT '[]'::jsonb,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      archived_at TIMESTAMPTZ,
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_business_workflow_template_versions (
+      capability_id TEXT NOT NULL,
+      template_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      nodes JSONB NOT NULL,
+      edges JSONB NOT NULL,
+      phases JSONB NOT NULL,
+      published_by TEXT NOT NULL,
+      published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, template_id, version),
+      FOREIGN KEY (capability_id, template_id)
+        REFERENCES capability_business_workflow_templates(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_business_workflow_custom_node_types (
+      capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      base_type TEXT NOT NULL,
+      label TEXT NOT NULL,
+      color TEXT,
+      icon TEXT,
+      fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id),
+      UNIQUE (capability_id, name)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_business_workflow_instances (
+      capability_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      template_id TEXT NOT NULL,
+      template_version INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'RUNNING',
+      context JSONB NOT NULL DEFAULT '{}'::jsonb,
+      active_node_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      started_by TEXT NOT NULL,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      PRIMARY KEY (capability_id, id),
+      FOREIGN KEY (capability_id, template_id)
+        REFERENCES capability_business_workflow_templates(capability_id, id)
+        ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_business_tasks (
+      capability_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      assignment_mode TEXT NOT NULL,
+      assigned_user_id TEXT,
+      assigned_team_id TEXT,
+      assigned_role TEXT,
+      assigned_skill TEXT,
+      claimed_by TEXT,
+      claimed_at TIMESTAMPTZ,
+      due_at TIMESTAMPTZ,
+      priority TEXT NOT NULL DEFAULT 'NORMAL',
+      form_schema JSONB,
+      form_data JSONB,
+      output JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ,
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_business_approvals (
+      capability_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      assigned_user_id TEXT,
+      assigned_team_id TEXT,
+      assigned_role TEXT,
+      due_at TIMESTAMPTZ,
+      decision TEXT,
+      decided_by TEXT,
+      decided_at TIMESTAMPTZ,
+      conditions TEXT,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (capability_id, id)
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_business_workflow_events (
+      id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      node_id TEXT,
+      event_type TEXT NOT NULL,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      actor_id TEXT,
+      occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS capability_business_workflow_mutations (
+      id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL,
+      template_id TEXT NOT NULL,
+      mutation_type TEXT NOT NULL,
+      before_state JSONB,
+      after_state JSONB,
+      performed_by TEXT NOT NULL,
+      performed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  // Indexes for the runtime tables (inbox queries hit these heavily).
+  `
+    CREATE INDEX IF NOT EXISTS capability_business_tasks_status_idx
+      ON capability_business_tasks (capability_id, status)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_business_tasks_instance_idx
+      ON capability_business_tasks (capability_id, instance_id)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_business_approvals_instance_idx
+      ON capability_business_approvals (capability_id, instance_id)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_business_workflow_events_instance_idx
+      ON capability_business_workflow_events (capability_id, instance_id, occurred_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_business_workflow_template_versions_template_idx
+      ON capability_business_workflow_template_versions (capability_id, template_id, version DESC)
+  `,
 ];
 
 const detectOptionalPlatformExtensions = async (client: PoolClient) => {
