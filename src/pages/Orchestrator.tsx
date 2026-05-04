@@ -649,10 +649,12 @@ const getLatestRunFailureReason = ({
   run,
   runSteps,
   runEvents,
+  runWaits,
 }: {
   run?: WorkflowRun | null;
   runSteps?: WorkflowRunDetail["steps"];
   runEvents?: RunEvent[];
+  runWaits?: WorkflowRunDetail["waits"];
 }) => {
   const failedStep = [...(runSteps || [])]
     .reverse()
@@ -660,6 +662,10 @@ const getLatestRunFailureReason = ({
   const failedEvent = [...(runEvents || [])]
     .reverse()
     .find((event) => event.level === "ERROR" || event.type === "STEP_FAILED");
+  // When the run is BLOCKED on a wait (no failure yet, just paused for
+  // human action), the engine's actual prompt lives in the OPEN wait's
+  // .message — surface it so operators see what's being asked.
+  const openWait = (runWaits || []).find((wait) => wait.status === "OPEN");
 
   return (
     failedStep?.outputSummary ||
@@ -669,6 +675,7 @@ const getLatestRunFailureReason = ({
       : undefined) ||
     run?.terminalOutcome ||
     failedEvent?.message ||
+    openWait?.message ||
     ""
   );
 };
@@ -3087,8 +3094,9 @@ const Orchestrator = () => {
         run: currentRun,
         runSteps: selectedRunSteps,
         runEvents: selectedRunEvents,
+        runWaits: selectedRunDetail?.waits,
       }),
-    [currentRun, selectedRunEvents, selectedRunSteps],
+    [currentRun, selectedRunDetail?.waits, selectedRunEvents, selectedRunSteps],
   );
   const selectedBlockerSummary =
     selectedAttentionReason ||
