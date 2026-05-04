@@ -67,6 +67,7 @@ import {
   normalizeCapabilitySharedReferences,
 } from '../src/lib/capabilityArchitecture';
 import { query, transaction, getDatabaseRuntimeInfo } from './db';
+import { seedDemoBusinessWorkflowsTx } from './businessWorkflowSeed';
 import { resolveRuntimeModel } from './githubModels';
 import {
   normalizeEmbeddingProviderKey,
@@ -3187,6 +3188,19 @@ export const initializeSeedData = async () => {
           );
         }
       }
+
+      // Demo Onboarding business workflow — runs after every demo
+      // capability is guaranteed to exist (the upsert loop above
+      // creates them when missing). Idempotent: stable template id +
+      // ON CONFLICT DO NOTHING means re-runs are no-ops. Showcases
+      // START launch form, FORM_FILL with output bindings, APPROVAL
+      // with branching, DECISION_GATE, PARALLEL_FORK + JOIN,
+      // attached timer/notification behaviors, NOTIFICATION
+      // boundary, and dual ENDs.
+      await seedDemoBusinessWorkflowsTx(
+        client,
+        CAPABILITIES.map((capability) => capability.id),
+      );
     }
 
     const capabilityResult = await client.query<{ id: string }>(
