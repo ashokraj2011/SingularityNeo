@@ -122,7 +122,9 @@ export type AdvancedToolId =
   | 'blast-radius'
   | 'ast-explorer'
   | 'code-graph'
-  | 'world-model';
+  | 'world-model'
+  | 'business-workflows'
+  | 'business-workflow-inbox';
 
 export type AdvancedToolAudience =
   | 'ALL'
@@ -468,6 +470,28 @@ export const ADVANCED_TOOL_DESCRIPTORS: AdvancedToolDescriptor[] = [
     description:
       'Semantic force-directed interactive graph of the capability world model: connects APIs, Services, Repositories, Data objects and impacted downstream workflows.',
     audience: 'BUILDERS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'business-workflows',
+    label: 'Business Workflows',
+    shortName: 'Business WF',
+    path: '/studio/business-workflows',
+    description:
+      'Design human-driven business workflows (approval chains, expense reviews, sign-offs, onboarding). Hybrid steps can delegate to capability agents.',
+    audience: 'BUILDERS',
+    exposureMode: 'ALWAYS',
+    contextTriggers: [],
+  },
+  {
+    id: 'business-workflow-inbox',
+    label: 'Business Workflow Inbox',
+    shortName: 'My Tasks',
+    path: '/studio/business-workflows/inbox',
+    description:
+      'Open business-workflow tasks for the current operator: claim, complete with form data, decide approvals.',
+    audience: 'OPERATORS',
     exposureMode: 'ALWAYS',
     contextTriggers: [],
   },

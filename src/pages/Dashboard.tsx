@@ -103,6 +103,8 @@ const advancedToolIcons: Record<AdvancedToolId, typeof Database> = {
   'ast-explorer': TreePine,
   'code-graph': Network,
   'world-model': Network,
+  'business-workflows': Workflow,
+  'business-workflow-inbox': Workflow,
 };
 
 const Dashboard = () => {
