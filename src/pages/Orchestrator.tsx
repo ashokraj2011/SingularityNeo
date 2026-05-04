@@ -23,7 +23,7 @@ import {
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import ErrorBoundary from "../components/ErrorBoundary";
 import { ExplainWorkItemDrawer } from "../components/ExplainWorkItemDrawer";
 import StageControlModal from "../components/StageControlModal";
@@ -182,6 +182,7 @@ import type {
   CompiledWorkItemPlan,
   ContrarianConflictReview,
   DesktopWorkspaceMapping,
+  RequiredInputFieldSource,
   RunEvent,
   RunWait,
   WorkItem,
@@ -555,43 +556,153 @@ const renderReviewList = (items: string[], emptyLabel: string) =>
     <p className="mt-2 text-xs leading-relaxed text-secondary">{emptyLabel}</p>
   );
 
+/**
+ * Group required-input fields by where they actually come from. The UI used
+ * to lump everything into "Required structured inputs", which made it look
+ * like every missing item was something an upstream agent should have
+ * produced. In reality the list mixes three distinct categories:
+ *
+ *   - **Operator-side runtime config** — Desktop workspace, runtime token,
+ *     human input. The HUMAN typing at this desktop has to satisfy these.
+ *   - **Upstream agent outputs** — handoffs and artifacts from earlier
+ *     workflow steps. These are what the Planning phase et al. produce.
+ *   - **Static request context** — work item description and capability
+ *     metadata. These are set when the work item / capability is created.
+ *
+ * Grouping makes the source-of-fix obvious at a glance.
+ */
+const STRUCTURED_INPUT_GROUPS: Array<{
+  title: string;
+  description: string;
+  sources: RequiredInputFieldSource[];
+}> = [
+  {
+    title: "From you, the operator",
+    description:
+      "Runtime configuration scoped to this desktop. Set these in Operations / Run Console, not by an agent.",
+    sources: ["WORKSPACE", "RUNTIME", "HUMAN_INPUT"],
+  },
+  {
+    title: "From upstream workflow steps",
+    description:
+      "Hand-offs and artifacts that earlier steps in this workflow are expected to produce.",
+    sources: ["HANDOFF", "ARTIFACT"],
+  },
+  {
+    title: "From the work item & capability",
+    description:
+      "Static request context attached to the work item or capability metadata.",
+    sources: ["WORK_ITEM", "CAPABILITY"],
+  },
+];
+
+/** Per-source CTA: where to go to satisfy a missing input. */
+const STRUCTURED_INPUT_ACTIONS: Partial<
+  Record<RequiredInputFieldSource, { label: string; path: string }>
+> = {
+  WORKSPACE: {
+    label: "Open Desktop Workspaces",
+    path: "/operations#desktop-workspaces",
+  },
+  RUNTIME: {
+    label: "Open Run Console",
+    path: "/run-console",
+  },
+  CAPABILITY: {
+    label: "Edit capability metadata",
+    path: "/capabilities/metadata",
+  },
+  // WORK_ITEM, HANDOFF, ARTIFACT, HUMAN_INPUT have no fixed nav target —
+  // the operator addresses them inline (work-item edit dialog, upstream
+  // step inspector, or the wait-input box).
+};
+
+const renderStructuredInputItem = (item: CompiledRequiredInputField) => {
+  const isMissing = item.status !== "READY";
+  const action = STRUCTURED_INPUT_ACTIONS[item.source];
+  return (
+    <div
+      key={item.id}
+      className="rounded-2xl border border-outline-variant/30 bg-white/85 px-3 py-3"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-semibold text-on-surface">{item.label}</p>
+        <StatusBadge tone={isMissing ? "warning" : "success"}>
+          {isMissing ? "Missing" : "Ready"}
+        </StatusBadge>
+      </div>
+      {item.description ? (
+        <p className="mt-1 text-xs leading-relaxed text-secondary">
+          {item.description}
+        </p>
+      ) : null}
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[0.72rem] text-secondary">
+        <span>Source: {formatEnumLabel(item.source)}</span>
+        <span>Type: {formatEnumLabel(item.kind)}</span>
+        {item.valueSummary ? <span>Current: {item.valueSummary}</span> : null}
+      </div>
+      {isMissing && action ? (
+        <Link
+          to={action.path}
+          className="mt-2 inline-flex items-center gap-1 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1 text-[0.7rem] font-semibold text-primary hover:bg-primary/10"
+        >
+          {action.label}
+          <span aria-hidden>→</span>
+        </Link>
+      ) : null}
+    </div>
+  );
+};
+
 const renderStructuredInputs = (
   items: CompiledRequiredInputField[],
   emptyLabel: string,
-) =>
-  items.length > 0 ? (
-    <div className="mt-3 space-y-2">
-      {items.map((item) => (
-        <div
-          key={item.id}
-          className="rounded-2xl border border-outline-variant/30 bg-white/85 px-3 py-3"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm font-semibold text-on-surface">
-              {item.label}
-            </p>
-            <StatusBadge tone={item.status === "READY" ? "success" : "warning"}>
-              {item.status === "READY" ? "Ready" : "Missing"}
-            </StatusBadge>
-          </div>
-          {item.description ? (
-            <p className="mt-1 text-xs leading-relaxed text-secondary">
-              {item.description}
+) => {
+  if (items.length === 0) {
+    return (
+      <p className="mt-3 text-xs leading-relaxed text-secondary">{emptyLabel}</p>
+    );
+  }
+
+  // Bucket items into the named groups, plus catch any unexpected sources.
+  const groups = STRUCTURED_INPUT_GROUPS.map((group) => ({
+    ...group,
+    items: items.filter((item) => group.sources.includes(item.source)),
+  })).filter((group) => group.items.length > 0);
+
+  const namedSources = new Set(
+    STRUCTURED_INPUT_GROUPS.flatMap((g) => g.sources),
+  );
+  const unmatched = items.filter((item) => !namedSources.has(item.source));
+  if (unmatched.length > 0) {
+    groups.push({
+      title: "Other",
+      description: "",
+      sources: [],
+      items: unmatched,
+    });
+  }
+
+  return (
+    <div className="mt-3 space-y-4">
+      {groups.map((group) => (
+        <div key={group.title}>
+          <p className="text-[0.62rem] font-semibold uppercase tracking-wider text-secondary">
+            {group.title}
+          </p>
+          {group.description ? (
+            <p className="mt-0.5 text-[0.65rem] leading-snug text-outline">
+              {group.description}
             </p>
           ) : null}
-          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[0.72rem] text-secondary">
-            <span>Source: {formatEnumLabel(item.source)}</span>
-            <span>Type: {formatEnumLabel(item.kind)}</span>
-            {item.valueSummary ? (
-              <span>Current: {item.valueSummary}</span>
-            ) : null}
+          <div className="mt-2 space-y-2">
+            {group.items.map(renderStructuredInputItem)}
           </div>
         </div>
       ))}
     </div>
-  ) : (
-    <p className="mt-3 text-xs leading-relaxed text-secondary">{emptyLabel}</p>
   );
+};
 
 const renderArtifactChecklist = (items: CompiledArtifactChecklistItem[]) =>
   items.length > 0 ? (
