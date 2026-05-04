@@ -19,6 +19,7 @@ import {
   executeTool,
   listToolDescriptions,
 } from "./execution/tools";
+import { buildCodeSearchCandidates } from "./codeDiscovery";
 import { normalizeToolAdapterId } from "./toolIds";
 import {
   providerSelfManagesContext,
@@ -611,11 +612,20 @@ const buildAutomaticDiscoveryToolCall = ({
   return null;
 };
 
-const INVENTORY_CODE_QUESTION_PATTERN =
-  /\b(what|which|list|show|how many|count|enumerate)\b.*\b(operator|operators|class|classes|interface|interfaces|enum|enums|function|functions|method|methods|file|files)\b/i;
-
-const shouldAutoReadFromBrowseCode = (message: string) =>
-  INVENTORY_CODE_QUESTION_PATTERN.test(String(message || ""));
+const shouldAutoReadFromBrowseCode = (
+  message: string,
+  browseResult: Awaited<ReturnType<typeof executeTool>>,
+) => {
+  const details = (browseResult.details || {}) as {
+    codeQuestionType?: string;
+  };
+  const questionType = String(details.codeQuestionType || "").trim();
+  if (questionType && questionType !== "unknown" && questionType !== "file-wide") {
+    return true;
+  }
+  const codeSearch = buildCodeSearchCandidates(message);
+  return codeSearch.isCodeQuestion && codeSearch.questionType !== "file-wide";
+};
 
 const extractPathFromSearchMatch = (
   match: unknown,
@@ -648,7 +658,7 @@ const buildAutomaticWorkspaceReadCalls = ({
   browseResult: Awaited<ReturnType<typeof executeTool>>;
   attemptedToolIds: ToolAdapterId[];
 }) => {
-  if (!shouldAutoReadFromBrowseCode(message)) {
+  if (!shouldAutoReadFromBrowseCode(message, browseResult)) {
     return [];
   }
   if (attemptedToolIds.includes("workspace_read")) {
@@ -822,13 +832,23 @@ const executeReadOnlyToolChain = async ({
   return executed;
 };
 
-const buildForcedAnswerPrompt = () =>
+const buildForcedAnswerPrompt = (noCodeIndex?: boolean) =>
   [
-    "You already have tool evidence for the original request.",
+    noCodeIndex
+      ? [
+          "Code indexing is not available for this repository — browsing tools returned no results.",
+          "Do NOT wait for code access. Answer the original request using your expert knowledge",
+          "and any work-item context you have. Provide concrete architectural guidance,",
+          "design patterns, and implementation steps so the operator can proceed.",
+          "Be specific and actionable even though you cannot see the actual source files.",
+        ].join(" ")
+      : "You already have tool evidence for the original request.",
     "Answer the user directly in plain text.",
     "Do not return JSON.",
     "Do not request or invoke any more tools.",
-    "Use only the gathered tool evidence. If it is insufficient, say what remains uncertain.",
+    noCodeIndex
+      ? "Ground your answer in well-established patterns for this type of task."
+      : "Use only the gathered tool evidence. If it is insufficient, say what remains uncertain.",
   ].join("\n");
 
 const extractUserFacingContent = (content: string) => {
@@ -1234,6 +1254,10 @@ export const invokeCommonAgentRuntime = async ({
   // "[agentRuntime] recovered final answer after tool-loop exhaustion").
   const attemptedToolSignatures = new Set<string>();
   let duplicateAttemptCount = 0;
+  // Set to true when any tool result signals that no code index exists for
+  // the capability.  Used post-loop to swap in a knowledge-based forced-answer
+  // prompt instead of the evidence-only one.
+  let noIndexDetected = false;
   // Resolve whether the active provider self-manages context (CLI lanes do).
   // When true, do NOT preserve all history end-to-end — the underlying CLI
   // already maintains its own conversation state and our bundling would
@@ -1633,6 +1657,7 @@ export const invokeCommonAgentRuntime = async ({
           (call.result.details as Record<string, unknown> | undefined)?.error === "no-index",
       );
       if (hasNoIndexResult) {
+        noIndexDetected = true;
         console.warn("[agentRuntime] no-index detected — breaking tool loop early", {
           runtimeLane,
           toolId: decision.toolCall.toolId,
@@ -1678,8 +1703,10 @@ export const invokeCommonAgentRuntime = async ({
           capability,
           agent,
           history: [...history, ...toolHistory],
-          message: `Answer the original request directly using the gathered tool evidence: ${message}`,
-          developerPrompt: [developerPrompt, buildForcedAnswerPrompt()]
+          message: noIndexDetected
+            ? `Answer the original request using your expert knowledge — code index unavailable: ${message}`
+            : `Answer the original request directly using the gathered tool evidence: ${message}`,
+          developerPrompt: [developerPrompt, buildForcedAnswerPrompt(noIndexDetected)]
             .filter(Boolean)
             .join("\n\n"),
           memoryPrompt,
