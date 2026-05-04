@@ -256,6 +256,12 @@ export const useWorkflowOrchestrator = ({
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  // Guard that prevents the initial auto-load from firing more than once per
+  // (capabilityId, workItemId) pair.  Without this, any context update that
+  // causes `initialWorkItemId` to be seen as "changed" would re-trigger
+  // pickWorkItem, resetting the orchestrator in an infinite loop.
+  const autoLoadedForRef = useRef<string | null>(null);
+
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
@@ -357,11 +363,15 @@ export const useWorkflowOrchestrator = ({
     [bindStage],
   );
 
-  // Auto-load if initialWorkItemId provided
+  // Auto-load if initialWorkItemId provided — at most once per unique
+  // (capabilityId, workItemId) pair so that the URL-sync effect in the page
+  // writing workItemId into searchParams doesn't re-trigger this.
   useEffect(() => {
-    if (initialWorkItemId) {
-      void pickWorkItem(initialWorkItemId);
-    }
+    if (!initialWorkItemId) return;
+    const key = `${capability.id}::${initialWorkItemId}`;
+    if (autoLoadedForRef.current === key) return;
+    autoLoadedForRef.current = key;
+    void pickWorkItem(initialWorkItemId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialWorkItemId, capability.id]);
 
@@ -647,29 +657,48 @@ export const useWorkflowOrchestrator = ({
     dispatch({ type: "RESET" });
   }, []);
 
+  // ── Stable refs for polling callbacks ───────────────────────────────
+  // `getCapabilityWorkspace` and `refreshCapabilityBundle` are plain functions
+  // inside the context provider (not memoized), so they receive new references
+  // on every context update.  Storing them in refs lets the polling interval
+  // always call the latest version without adding unstable values to the
+  // dependency array — which would cause the interval to be torn down and
+  // restarted on every bundle refresh, creating a runaway re-registration loop.
+  const bindStageRef = useRef(bindStage);
+  bindStageRef.current = bindStage;
+  const findWorkItemRef = useRef(findWorkItem);
+  findWorkItemRef.current = findWorkItem;
+  const refreshCapabilityBundleRef = useRef(refreshCapabilityBundle);
+  refreshCapabilityBundleRef.current = refreshCapabilityBundle;
+
   // ── AGENT-stage polling: detect server-side advancement ─────────────
   useEffect(() => {
     if (
       state.status !== "STAGE_AWAITING_USER" ||
-      !state.workItem ||
-      !state.currentStep ||
+      !state.workItem?.id ||
+      !state.currentStep?.id ||
       isHumanStage(state.currentStep)
     ) {
       return;
     }
+    // Capture primitive IDs so the interval callback doesn't form a stale
+    // closure over the full work-item / step objects.
+    const workItemId = state.workItem.id;
+    const currentStepId = state.currentStep.id;
+    const capId = capability.id;
+
     const handle = window.setInterval(() => {
       void (async () => {
         try {
-          await refreshCapabilityBundle(capability.id);
-          const refreshed = findWorkItem(state.workItem!.id);
-          if (
-            refreshed &&
-            refreshed.currentStepId &&
-            refreshed.currentStepId !== state.currentStep!.id
-          ) {
-            await bindStage(refreshed.id);
-          } else if (refreshed && !refreshed.currentStepId) {
+          await refreshCapabilityBundleRef.current(capId);
+          const refreshed = findWorkItemRef.current(workItemId);
+          if (refreshed && !refreshed.currentStepId) {
             dispatch({ type: "WORKFLOW_DONE" });
+          } else if (
+            refreshed?.currentStepId &&
+            refreshed.currentStepId !== currentStepId
+          ) {
+            await bindStageRef.current(refreshed.id);
           }
         } catch {
           // Silent — polling is best-effort.
@@ -678,13 +707,12 @@ export const useWorkflowOrchestrator = ({
     }, 3000);
     return () => window.clearInterval(handle);
   }, [
+    // Only primitive-stable values here — object/function references are
+    // accessed via refs (see above) so they don't trigger re-registration.
     state.status,
-    state.workItem,
-    state.currentStep,
+    state.workItem?.id,
+    state.currentStep?.id,
     capability.id,
-    bindStage,
-    findWorkItem,
-    refreshCapabilityBundle,
   ]);
 
   return {

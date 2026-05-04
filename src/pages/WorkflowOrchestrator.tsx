@@ -89,9 +89,14 @@ const WorkflowOrchestrator = () => {
   const { activeCapability, getCapabilityWorkspace } = useCapability();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const initialWorkItemId = searchParams.get("workItemId") || undefined;
-  const initialAutoAdvance = searchParams.get("autoAdvance") !== "0";
-  const initialShowCreate = searchParams.get("new") === "1";
+  // Snapshot URL params once at mount so the URL-sync effect (which writes
+  // workItemId back into searchParams after every pick) doesn't flip
+  // initialWorkItemId and re-trigger the auto-load effect in the hook,
+  // causing an infinite pick → reset → URL-update → pick loop.
+  const mountSearchParamsRef = useRef(searchParams);
+  const initialWorkItemId = mountSearchParamsRef.current.get("workItemId") || undefined;
+  const initialAutoAdvance = mountSearchParamsRef.current.get("autoAdvance") !== "0";
+  const initialShowCreate = mountSearchParamsRef.current.get("new") === "1";
 
   const workspace = useMemo(
     () => getCapabilityWorkspace(activeCapability.id),
