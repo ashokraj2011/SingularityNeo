@@ -320,37 +320,39 @@ const buildWorkItemExecutionContextsTx = async (
   client: PoolClient,
   capabilityId: string,
 ): Promise<Map<string, WorkItemExecutionContext>> => {
-  const [assignmentResult, branchResult, claimResult] = await Promise.all([
-    client.query(
-      `
-        SELECT *
-        FROM capability_work_item_repository_assignments
-        WHERE capability_id = $1
-        ORDER BY created_at ASC
-      `,
-      [capabilityId],
-    ),
-    client.query(
-      `
-        SELECT *
-        FROM capability_work_item_branches
-        WHERE capability_id = $1
-        ORDER BY created_at DESC
-      `,
-      [capabilityId],
-    ),
-    client.query(
-      `
-        SELECT *
-        FROM capability_work_item_code_claims
-        WHERE capability_id = $1
-          AND status = 'ACTIVE'
-          AND claim_type = 'WRITE'
-        ORDER BY claimed_at DESC
-      `,
-      [capabilityId],
-    ),
-  ])
+  // These three queries must run sequentially on the same PoolClient.
+  // pg does not multiplex — firing multiple client.query() calls concurrently
+  // on one connection triggers a DeprecationWarning in pg@8 and will be an
+  // error in pg@9.  Use individual awaits instead of Promise.all here.
+  const assignmentResult = await client.query(
+    `
+      SELECT *
+      FROM capability_work_item_repository_assignments
+      WHERE capability_id = $1
+      ORDER BY created_at ASC
+    `,
+    [capabilityId],
+  )
+  const branchResult = await client.query(
+    `
+      SELECT *
+      FROM capability_work_item_branches
+      WHERE capability_id = $1
+      ORDER BY created_at DESC
+    `,
+    [capabilityId],
+  )
+  const claimResult = await client.query(
+    `
+      SELECT *
+      FROM capability_work_item_code_claims
+      WHERE capability_id = $1
+        AND status = 'ACTIVE'
+        AND claim_type = 'WRITE'
+      ORDER BY claimed_at DESC
+    `,
+    [capabilityId],
+  )
 
   const assignmentsByWorkItem = new Map<string, WorkItemRepositoryAssignment[]>()
   for (const row of assignmentResult.rows) {

@@ -230,6 +230,11 @@ const getSourceBoost = (document: MemoryDocument) => {
   }
 };
 
+// Each distinct fallback reason is logged at most once per server process so
+// that a misconfigured embedding model (e.g. `nomic-embed-text` not installed
+// in Ollama) doesn't spam the console on every memory retrieval call.
+const loggedFallbackReasons = new Set<string>();
+
 const embedTexts = async (
   texts: string[],
   options?: {
@@ -259,9 +264,14 @@ const embedTexts = async (
       ? response.fallbackReason ||
         'Embedding provider fell back to deterministic hash embeddings.'
       : `Embedding provider returned ${response.vectors.length} vectors for ${texts.length} texts.`;
-  if (!options?.suppressFallbackLog) {
+
+  if (!options?.suppressFallbackLog && !loggedFallbackReasons.has(fallbackReason)) {
+    loggedFallbackReasons.add(fallbackReason);
     const contextPrefix = options?.fallbackLogContext ? `${options.fallbackLogContext}: ` : '';
-    console.warn(`[memory] ${contextPrefix}${fallbackReason}`);
+    console.warn(
+      `[memory] ${contextPrefix}${fallbackReason}` +
+        ` (further occurrences of this message are suppressed)`,
+    );
   }
 
   return {
