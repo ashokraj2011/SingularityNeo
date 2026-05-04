@@ -25,6 +25,7 @@ const DesignerConfigPage = lazy(() => import('./pages/DesignerConfig'));
 const Studio = lazy(() => import('./pages/Studio'));
 const Chat = lazy(() => import('./pages/Chat'));
 const Orchestrator = lazy(() => import('./pages/Orchestrator'));
+const WorkflowOrchestrator = lazy(() => import('./pages/WorkflowOrchestrator'));
 const Operations = lazy(() => import('./pages/Operations'));
 const TokenIntelligence = lazy(() => import('./pages/TokenIntelligence'));
 const DesktopConnectors = lazy(() => import('./pages/DesktopConnectors'));
@@ -115,6 +116,7 @@ export default function App() {
                   <Route path="/chat" element={<Chat />} />
                   <Route path="/orchestrator" element={<Orchestrator />} />
                   <Route path="/work" element={<Orchestrator />} />
+                  <Route path="/workflow-orchestrator" element={<WorkflowOrchestrator />} />
                   <Route
                     path="/work/approvals/:capabilityId/:runId/:waitId"
                     element={<ApprovalWorkspace />}

@@ -74,6 +74,7 @@ const companionNavItems = [
   { name: "Agents", shortName: "Agents", icon: Users, path: "/team" },
   { name: "Activity Record", shortName: "Record", icon: Wallet, path: "/ledger" },
   { name: "Designer", shortName: "Design", icon: Workflow, path: "/designer" },
+  { name: "Workflow", shortName: "Flow", icon: Sparkles, path: "/workflow-orchestrator" },
 ] as const;
 
 const advancedToolIcons: Record<AdvancedToolId, typeof BrainCircuit> = {
@@ -173,6 +174,7 @@ const PATH_TO_GROUP: Record<string, ToolGroup> = {
 const routeTitles: Record<string, string> = {
   "/": "Work",
   "/home": "Home",
+  "/workflow-orchestrator": "Workflow Orchestrator",
   "/planning": "Planning",
   "/capabilities/new": "On Board Capability",
   "/capabilities/metadata": "Capability Metadata",
