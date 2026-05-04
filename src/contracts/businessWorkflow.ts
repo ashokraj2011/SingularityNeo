@@ -146,6 +146,39 @@ export interface OutputBinding {
   contextPath: string;
 }
 
+// ── Documents attached to an instance ────────────────────────────────────────
+//
+// Stored under the reserved key `instance.context.__documents` — an
+// array of BusinessDocument records. Stashing them in context (instead
+// of a dedicated table) means they FLOW automatically to every task:
+// the existing form-data + context-binding plumbing already carries
+// the instance's context to each task view, so a HUMAN_TASK assigned
+// at step 5 can read the same documents the operator attached at
+// launch without any extra wiring.
+//
+// V1 stores metadata + an external URL only — no upload backend wired
+// here. The URL can be a Confluence link, Drive link, signed S3 URL,
+// or any other place the document actually lives. When a real upload
+// pipeline ships (V2.1), only `url` changes.
+
+export interface BusinessDocument {
+  id: string;
+  /** Display name. Whatever the operator types or the upload returns. */
+  name: string;
+  /** MIME type when known. Used to render the right icon (📄 / 🖼 / etc.). */
+  mimeType?: string;
+  /** Bytes when known. */
+  sizeBytes?: number;
+  /** Where the document actually lives. Operator-pasted URL in V1;
+   *  signed storage URL once upload ships. */
+  url: string;
+  /** Optional free-text description shown in the task panel so the
+   *  assignee knows WHY it's attached. */
+  description?: string;
+  uploadedBy: string;
+  uploadedAt: string;
+}
+
 // ── Attached behaviors (Lego blocks) ─────────────────────────────────────────
 //
 // Timers and notifications are NOT distinct node types. They're tiny

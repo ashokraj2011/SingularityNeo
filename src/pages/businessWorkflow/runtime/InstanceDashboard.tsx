@@ -30,9 +30,11 @@ import { ActiveTasksPanel } from "./ActiveTasksPanel";
 import { ContextInspector } from "./ContextInspector";
 import { NotesPanel } from "./NotesPanel";
 import { AdHocTaskDialog } from "./AdHocTaskDialog";
+import { DocumentsPanel } from "./DocumentsPanel";
 import type {
   BusinessApproval,
   BusinessCustomNodeType,
+  BusinessDocument,
   BusinessNode,
   BusinessTask,
   BusinessWorkflowEvent,
@@ -61,7 +63,7 @@ import type {
  *   the matching node (and the timeline keeps showing that filter).
  */
 
-type Tab = "tasks" | "timeline" | "context" | "notes";
+type Tab = "tasks" | "timeline" | "context" | "documents" | "notes";
 
 const POLL_MS = 4000;
 
@@ -420,6 +422,16 @@ export const InstanceDashboard = () => {
                 { id: "tasks", label: "Tasks", count: tasks.filter((t) => t.status !== "COMPLETED" && t.status !== "CANCELLED" && t.status !== "SENT_BACK").length + approvals.filter((a) => a.status === "PENDING").length },
                 { id: "timeline", label: "Timeline", count: events.length },
                 { id: "context", label: "Context" },
+                {
+                  id: "documents",
+                  label: "Docs",
+                  count: Array.isArray(
+                    (instance.context as Record<string, unknown>)?.__documents,
+                  )
+                    ? ((instance.context as Record<string, unknown>)
+                        .__documents as unknown[]).length
+                    : 0,
+                },
                 { id: "notes", label: "Notes", count: events.filter((e) => e.eventType === "INSTANCE_NOTE_ADDED").length },
               ] as { id: Tab; label: string; count?: number }[]
             ).map((t) => (
@@ -488,6 +500,26 @@ export const InstanceDashboard = () => {
                 context={instance.context}
                 editable={
                   instance.status === "RUNNING" || instance.status === "PAUSED"
+                }
+                onChanged={() => void refresh()}
+              />
+            )}
+            {tab === "documents" && (
+              <DocumentsPanel
+                mode="live"
+                capabilityId={capabilityId}
+                instanceId={instance.id}
+                documents={
+                  (Array.isArray(
+                    (instance.context as Record<string, unknown>)?.__documents,
+                  )
+                    ? ((instance.context as Record<string, unknown>)
+                        .__documents as BusinessDocument[])
+                    : []) || []
+                }
+                readOnly={
+                  instance.status !== "RUNNING" &&
+                  instance.status !== "PAUSED"
                 }
                 onChanged={() => void refresh()}
               />

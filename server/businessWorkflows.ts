@@ -34,6 +34,7 @@ import type {
   AssignmentMode,
   BusinessApproval,
   BusinessAttachment,
+  BusinessDocument,
   BusinessEdge,
   BusinessInstanceStatus,
   BusinessNode,
@@ -2330,6 +2331,128 @@ export const removeInstanceContextKeys = async ({
     eventType: "CONTEXT_UPDATED",
     actorId,
     payload: { removed, keys: Object.keys(removed) },
+  });
+  return (await fetchInstance(capabilityId, instanceId)) || null;
+};
+
+// ── Documents (stashed under context.__documents) ───────────────────────────
+
+const DOCUMENTS_KEY = "__documents";
+
+const readDocuments = (
+  context: Record<string, unknown> | null | undefined,
+): BusinessDocument[] => {
+  if (!context) return [];
+  const raw = (context as Record<string, unknown>)[DOCUMENTS_KEY];
+  if (!Array.isArray(raw)) return [];
+  return raw as BusinessDocument[];
+};
+
+/**
+ * Attach a document to a running (or paused) instance.
+ *
+ * Stored in `instance.context.__documents` so the existing context
+ * plumbing flows it automatically into every task view. The URL is
+ * external for V1 — when an upload pipeline lands, only the URL
+ * source changes.
+ */
+export const attachInstanceDocument = async ({
+  capabilityId,
+  instanceId,
+  actorId,
+  document,
+}: {
+  capabilityId: string;
+  instanceId: string;
+  actorId: string;
+  document: Omit<BusinessDocument, "id" | "uploadedBy" | "uploadedAt">;
+}): Promise<{
+  instance: BusinessWorkflowInstance;
+  document: BusinessDocument;
+}> => {
+  const inst = await fetchInstance(capabilityId, instanceId);
+  if (!inst) throw new Error(`Instance ${instanceId} not found.`);
+  if (
+    inst.status === "COMPLETED" ||
+    inst.status === "CANCELLED" ||
+    inst.status === "FAILED"
+  ) {
+    throw new Error(`Cannot attach to a ${inst.status} instance.`);
+  }
+  if (!document.url || !document.url.trim() || !document.name?.trim()) {
+    throw new Error("name and url are required");
+  }
+  const fullDoc: BusinessDocument = {
+    id: createId("BDOC"),
+    name: document.name.trim(),
+    url: document.url.trim(),
+    mimeType: document.mimeType,
+    sizeBytes: document.sizeBytes,
+    description: document.description,
+    uploadedBy: actorId,
+    uploadedAt: new Date().toISOString(),
+  };
+  const existing = readDocuments(inst.context);
+  const nextContext = {
+    ...(inst.context || {}),
+    [DOCUMENTS_KEY]: [...existing, fullDoc],
+  };
+  await query(
+    `UPDATE capability_business_workflow_instances
+     SET context = $3::jsonb, updated_at = NOW()
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, instanceId, JSON.stringify(nextContext)],
+  );
+  await emitEvent({
+    capabilityId,
+    instanceId,
+    eventType: "DOCUMENT_ATTACHED",
+    actorId,
+    payload: {
+      documentId: fullDoc.id,
+      name: fullDoc.name,
+      url: fullDoc.url,
+      mimeType: fullDoc.mimeType,
+      sizeBytes: fullDoc.sizeBytes,
+    },
+  });
+  const refreshed = await fetchInstance(capabilityId, instanceId);
+  return { instance: refreshed!, document: fullDoc };
+};
+
+export const removeInstanceDocument = async ({
+  capabilityId,
+  instanceId,
+  documentId,
+  actorId,
+}: {
+  capabilityId: string;
+  instanceId: string;
+  documentId: string;
+  actorId: string;
+}): Promise<BusinessWorkflowInstance | null> => {
+  const inst = await fetchInstance(capabilityId, instanceId);
+  if (!inst) return null;
+  const existing = readDocuments(inst.context);
+  const target = existing.find((d) => d.id === documentId);
+  if (!target) return inst;
+  const nextDocs = existing.filter((d) => d.id !== documentId);
+  const nextContext = { ...(inst.context || {}), [DOCUMENTS_KEY]: nextDocs };
+  await query(
+    `UPDATE capability_business_workflow_instances
+     SET context = $3::jsonb, updated_at = NOW()
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, instanceId, JSON.stringify(nextContext)],
+  );
+  await emitEvent({
+    capabilityId,
+    instanceId,
+    eventType: "DOCUMENT_REMOVED",
+    actorId,
+    payload: {
+      documentId,
+      name: target.name,
+    },
   });
   return (await fetchInstance(capabilityId, instanceId)) || null;
 };

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Loader2, Play, X } from "lucide-react";
+import { Loader2, Paperclip, Play, Settings2, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import {
   startBusinessWorkflowInstance,
@@ -8,9 +8,11 @@ import {
 import { cn } from "../../../lib/utils";
 import { useToast } from "../../../context/ToastContext";
 import type {
+  BusinessDocument,
   BusinessNode,
   FormSchema,
 } from "../../../contracts/businessWorkflow";
+import { DocumentsPanel } from "./DocumentsPanel";
 
 /**
  * Launch dialog opened from the Studio's "Start instance" button.
@@ -109,6 +111,11 @@ export const InstanceLaunchDialog = ({
   const [submitting, setSubmitting] = useState(false);
   const [structured, setStructured] = useState<Record<string, string>>({});
   const [rawJson, setRawJson] = useState("{}");
+  /** Two tabs in the body: Inputs and Documents. Documents bake into
+   *  context.__documents at submit time so the assignee on every
+   *  task sees them. */
+  const [tab, setTab] = useState<"inputs" | "documents">("inputs");
+  const [draftDocuments, setDraftDocuments] = useState<BusinessDocument[]>([]);
 
   // On first open, if the parent didn't pass a startNode, fetch the
   // template and find it in the latest published version. We do this
@@ -177,6 +184,28 @@ export const InstanceLaunchDialog = ({
         return;
       }
     }
+    // Bake any draft documents into context.__documents so the
+    // first task already sees them.
+    if (draftDocuments.length > 0) {
+      context = {
+        ...context,
+        __documents: draftDocuments.map((d, i) => ({
+          // Replace the synthetic draft id with a stable launch-time id
+          // so timeline events can reference it.
+          id: `bdoc-launch-${i}-${Date.now().toString(36)}`,
+          name: d.name,
+          url: d.url,
+          mimeType: d.mimeType,
+          sizeBytes: d.sizeBytes,
+          description: d.description,
+          // Server doesn't see the live operator name here; it's filled
+          // by the route's resolveActor on subsequent attaches. For
+          // launch-time docs the operator is the instance's startedBy.
+          uploadedBy: "operator",
+          uploadedAt: new Date().toISOString(),
+        })),
+      };
+    }
     setSubmitting(true);
     try {
       const instance = await startBusinessWorkflowInstance(
@@ -228,8 +257,64 @@ export const InstanceLaunchDialog = ({
           </button>
         </header>
 
+        {/* Tab strip — Inputs vs Documents.
+            Documents are an instance-level concern; they're bundled
+            into the launch context but kept on a separate tab so the
+            input form doesn't get cluttered. */}
+        <div className="flex shrink-0 border-b border-outline-variant/30 bg-white">
+          <button
+            type="button"
+            onClick={() => setTab("inputs")}
+            className={cn(
+              "flex-1 border-b-2 px-3 py-1.5 text-xs font-semibold inline-flex items-center justify-center gap-1.5",
+              tab === "inputs"
+                ? "border-primary text-primary"
+                : "border-transparent text-secondary hover:text-on-surface",
+            )}
+          >
+            <Settings2 size={11} /> Inputs
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("documents")}
+            className={cn(
+              "flex-1 border-b-2 px-3 py-1.5 text-xs font-semibold inline-flex items-center justify-center gap-1.5",
+              tab === "documents"
+                ? "border-primary text-primary"
+                : "border-transparent text-secondary hover:text-on-surface",
+            )}
+          >
+            <Paperclip size={11} /> Documents
+            {draftDocuments.length > 0 && (
+              <span className="rounded-full bg-primary/15 px-1.5 text-[0.55rem] text-primary">
+                {draftDocuments.length}
+              </span>
+            )}
+          </button>
+        </div>
+
         <div className="flex-1 overflow-y-auto p-5">
-          {loadingStart ? (
+          {tab === "documents" ? (
+            <div className="flex flex-col gap-2">
+              <p className="text-[0.7rem] text-outline">
+                Documents attached here are bundled into the instance's
+                context as <code>__documents</code> and visible to every
+                task assignee — no extra wiring per node.
+              </p>
+              <DocumentsPanel
+                mode="draft"
+                documents={draftDocuments}
+                onAdd={(doc) =>
+                  setDraftDocuments((prev) => [...prev, doc])
+                }
+                onRemove={(id) =>
+                  setDraftDocuments((prev) =>
+                    prev.filter((d) => d.id !== id),
+                  )
+                }
+              />
+            </div>
+          ) : loadingStart ? (
             <div className="flex items-center gap-2 text-xs text-secondary">
               <Loader2 size={12} className="animate-spin" /> Loading template…
             </div>

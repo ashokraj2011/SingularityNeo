@@ -1091,6 +1091,7 @@ import type {
   ApprovalStatus,
   AssignmentMode,
   BusinessApproval,
+  BusinessDocument,
   BusinessInstanceStatus,
   BusinessNode,
   BusinessEdge,
@@ -1431,6 +1432,41 @@ export const removeBusinessInstanceContextKeys = async (
       headers: jsonHeaders,
       body: JSON.stringify({ keys }),
     },
+  );
+  return result.instance;
+};
+
+export const attachBusinessInstanceDocument = async (
+  capabilityId: string,
+  instanceId: string,
+  payload: {
+    name: string;
+    url: string;
+    mimeType?: string;
+    sizeBytes?: number;
+    description?: string;
+  },
+): Promise<{
+  instance: BusinessWorkflowInstance;
+  document: BusinessDocument;
+}> =>
+  requestJson(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}/documents`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const removeBusinessInstanceDocument = async (
+  capabilityId: string,
+  instanceId: string,
+  documentId: string,
+): Promise<BusinessWorkflowInstance> => {
+  const result = await requestJson<{ instance: BusinessWorkflowInstance }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}/documents/${encodeURIComponent(documentId)}`,
+    { method: "DELETE", headers: jsonHeaders },
   );
   return result.instance;
 };

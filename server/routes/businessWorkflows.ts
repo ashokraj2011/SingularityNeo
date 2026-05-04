@@ -28,7 +28,9 @@ import type express from "express";
 import {
   addInstanceNote,
   aggregateBusinessTemplateStats,
+  attachInstanceDocument,
   removeInstanceContextKeys,
+  removeInstanceDocument,
   updateInstanceContext,
   archiveBusinessTemplate,
   cancelBusinessInstance,
@@ -68,6 +70,11 @@ import type {
   TaskPriority,
   TaskStatus,
 } from "../../src/contracts/businessWorkflow";
+
+const trimSafe = (v: unknown): string | undefined => {
+  const s = String(v ?? "").trim();
+  return s ? s : undefined;
+};
 
 const trim = (value: unknown): string => String(value ?? "").trim();
 
@@ -671,6 +678,67 @@ export const registerBusinessWorkflowRoutes = (app: express.Express) => {
           instanceId: trim(request.params.instanceId),
           actorId: actor.displayName,
           keys: body.keys.filter((k) => typeof k === "string"),
+        });
+        if (!inst) {
+          response.status(404).json({ error: "Instance not found" });
+          return;
+        }
+        response.json({ instance: inst });
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // Attach a document to the running instance.
+  // Stored under context.__documents — auto-flows into every task
+  // because the existing context plumbing carries it.
+  app.post(
+    "/api/capabilities/:capabilityId/business-instances/:instanceId/documents",
+    async (request, response) => {
+      try {
+        const actor = resolveActor(request);
+        const body = (request.body || {}) as {
+          name?: string;
+          url?: string;
+          mimeType?: string;
+          sizeBytes?: number;
+          description?: string;
+        };
+        if (!body.name?.trim() || !body.url?.trim()) {
+          response.status(400).json({ error: "name and url are required" });
+          return;
+        }
+        const result = await attachInstanceDocument({
+          capabilityId: trim(request.params.capabilityId),
+          instanceId: trim(request.params.instanceId),
+          actorId: actor.displayName,
+          document: {
+            name: body.name.trim(),
+            url: body.url.trim(),
+            mimeType: trimSafe(body.mimeType),
+            sizeBytes:
+              typeof body.sizeBytes === "number" ? body.sizeBytes : undefined,
+            description: trimSafe(body.description),
+          },
+        });
+        response.json(result);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.delete(
+    "/api/capabilities/:capabilityId/business-instances/:instanceId/documents/:documentId",
+    async (request, response) => {
+      try {
+        const actor = resolveActor(request);
+        const inst = await removeInstanceDocument({
+          capabilityId: trim(request.params.capabilityId),
+          instanceId: trim(request.params.instanceId),
+          documentId: trim(request.params.documentId),
+          actorId: actor.displayName,
         });
         if (!inst) {
           response.status(404).json({ error: "Instance not found" });
