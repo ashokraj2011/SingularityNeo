@@ -13,6 +13,7 @@ import {
 } from "../../lib/api";
 import { useCapability } from "../../context/CapabilityContext";
 import { useToast } from "../../context/ToastContext";
+import { explainEmptyChatStream } from "../../lib/orchestrator/support";
 import type {
   Capability,
   CapabilityAgent,
@@ -608,9 +609,7 @@ export const useWorkflowOrchestrator = ({
 
         const rawContent = result.completeEvent?.content || result.draftContent;
         if (!rawContent.trim()) {
-          throw new Error(
-            result.error || "The agent did not return a response.",
-          );
+          throw new Error(explainEmptyChatStream(result));
         }
 
         const detection = detectStageComplete(rawContent);

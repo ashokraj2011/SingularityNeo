@@ -315,3 +315,52 @@ export const buildApprovalWorkspacePath = ({
   waitId: string;
 }) =>
   `/work/approvals/${encodeURIComponent(capabilityId)}/${encodeURIComponent(runId)}/${encodeURIComponent(waitId)}`;
+
+/**
+ * Build a diagnostic message for an empty / silent chat-stream result.
+ *
+ * The default "agent did not return a response" string leaves operators
+ * with no idea whether the LLM never received the request, hit a quota,
+ * returned an empty completion, or got aborted. Use the stream-result
+ * accumulator flags (sawDelta / sawComplete / sawError, termination,
+ * retryAfterMs) to differentiate.
+ *
+ * Categories distinguished:
+ *   - sawDelta=false, sawComplete=false, sawError=false →
+ *     transport delivered no events → likely runtime / network
+ *   - sawError=true with no error message → server emitted an error event
+ *     but did not provide text → check Run Console
+ *   - termination==='empty' → LLM accepted the request but returned no
+ *     tokens → likely model/quota/token issue
+ *   - termination==='interrupted' → user navigated / aborted before
+ *     content arrived → retry
+ *   - retryAfterMs > 0 → throttled
+ */
+export const explainEmptyChatStream = (result: {
+  termination: "complete" | "recovered" | "interrupted" | "empty";
+  error?: string;
+  retryAfterMs?: number;
+  sawDelta: boolean;
+  sawComplete: boolean;
+  sawError: boolean;
+}): string => {
+  if (result.error?.trim()) {
+    return result.error.trim();
+  }
+  if (!result.sawDelta && !result.sawComplete && !result.sawError) {
+    return "Agent runtime did not deliver any response — check the Run Console for runtime status, provider configuration, and the active model.";
+  }
+  if (result.sawError) {
+    return "Agent runtime emitted an error event with no message — open the Run Console for details.";
+  }
+  if (result.termination === "empty") {
+    return "Agent runtime accepted the request but returned an empty completion. This usually means a model/quota issue, an unavailable model, or an expired token. Open the Run Console.";
+  }
+  if (result.termination === "interrupted") {
+    return "The agent stream was interrupted before any content arrived — please try again.";
+  }
+  if (result.retryAfterMs && result.retryAfterMs > 0) {
+    return `Agent runtime is throttled — retry after ~${Math.ceil(result.retryAfterMs / 1000)}s.`;
+  }
+  return "The agent did not return a response.";
+};

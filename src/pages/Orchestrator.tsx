@@ -151,6 +151,7 @@ import {
   type ArtifactWorkbenchFilter,
   buildApprovalWorkspacePath,
   type DetailTab,
+  explainEmptyChatStream,
   formatRelativeTime,
   formatTimestamp,
   getArtifactDocumentBody,
@@ -4909,9 +4910,7 @@ const Orchestrator = () => {
         streamResult.completeEvent?.content || streamResult.draftContent;
 
       if (!assistantContent.trim()) {
-        throw new Error(
-          streamResult.error || "The agent did not return a response.",
-        );
+        throw new Error(explainEmptyChatStream(streamResult));
       }
 
       await appendCapabilityMessageRecord(activeCapability.id, {
@@ -5580,9 +5579,7 @@ const Orchestrator = () => {
         streamResult.completeEvent?.content || streamResult.draftContent;
 
       if (!assistantContent.trim()) {
-        throw new Error(
-          streamResult.error || "The stage agent did not return a response.",
-        );
+        throw new Error(explainEmptyChatStream(streamResult));
       }
 
       updateStageChatMessages(stageChatScopeKey, (current) => [

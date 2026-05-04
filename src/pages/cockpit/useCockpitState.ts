@@ -24,6 +24,7 @@ import {
 import { useCapability } from "../../context/CapabilityContext";
 import { useToast } from "../../context/ToastContext";
 import { createApiEventSource } from "../../lib/desktop";
+import { explainEmptyChatStream } from "../../lib/orchestrator/support";
 import type {
   Capability,
   CapabilityAgent,
@@ -627,10 +628,12 @@ export const useCockpitState = (capability: Capability) => {
         if (!isMountedRef.current || requestRef.current !== requestToken)
           return;
 
-        // Surface server-side errors that didn't throw (e.g. model quota, policy block)
+        // Surface server-side errors that didn't throw (e.g. model quota, policy block).
+        // explainEmptyChatStream differentiates: no events, error event without
+        // message, empty completion, interrupt, or throttle.
         const rawContent = result.completeEvent?.content || result.draftContent;
         if (!rawContent?.trim()) {
-          throw new Error(result.error || "The agent did not return a response. Check the run logs or try again.");
+          throw new Error(explainEmptyChatStream(result));
         }
 
         const isInterrupted = result.termination === "interrupted";
