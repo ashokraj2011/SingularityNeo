@@ -2000,6 +2000,9 @@ reader.on('line', async line => {
     }
 
     if (message.type === 'runtime:chat') {
+      // Always-visible entry log via stderr — bypasses the IPC pipe so
+      // operators can see chat activity even before any provider call.
+      process.stderr.write(`[chat:enter] runtime:chat (non-stream) requestId=${message.requestId}\n`);
       const payload = message.payload || {};
       if (!payload.message || !payload.capability || !payload.agent) {
         throw new Error('Capability, agent, and message are required.');
@@ -2087,7 +2090,8 @@ reader.on('line', async line => {
       // ── Post-LLM diagnostics (non-streaming) ────────────────────────────
       console.log(`\n[chat:llm] ══════ LLM RESULT (non-stream) ══════`);
       console.log(`[chat:llm]   contentLength:    ${(result.content || '').length}`);
-      console.log(`[chat:llm]   contentPreview:   ${(result.content || '').slice(0, 300)}`);
+      console.log(`[chat:llm]   content:`);
+      console.log(result.content || '');
       console.log(`[chat:llm]   toolLoopUsed:     ${result.toolLoopUsed}`);
       console.log(`[chat:llm]   attemptedToolIds: ${(result.attemptedToolIds || []).join(', ') || 'NONE'}`);
       console.log(`[chat:llm]   model:            ${result.model || 'unknown'}`);
@@ -2104,9 +2108,14 @@ reader.on('line', async line => {
 
       // ── Post-sanitize diagnostics (non-streaming) ────────────────────────
       console.log(`\n[chat:sanitize] ══════ SANITIZE (non-stream) ══════`);
+      console.log(`[chat:sanitize]   runtimeProviderKey:  ${result.runtimeProviderKey || 'unknown'}`);
+      console.log(`[chat:sanitize]   runtimeEndpoint:     ${runtimeTarget.runtimeEndpoint || 'unknown'}`);
+      console.log(`[chat:sanitize]   runtimeCommand:      ${runtimeTarget.runtimeCommand || 'none'}`);
       console.log(`[chat:sanitize]   enforceEvidenceOnly: ${enforceEvidenceOnlyNonStream}`);
       console.log(`[chat:sanitize]   contentBefore:       ${(result.content || '').length} chars`);
       console.log(`[chat:sanitize]   contentAfter:        ${sanitizedResult.content.length} chars`);
+      console.log(`[chat:sanitize]   finalReply:`);
+      console.log(sanitizedResult.content);
       if (!sanitizedResult.content.trim() && (result.content || '').trim()) {
         console.error(`[chat:sanitize] ❌ CONTENT WIPED — enforceEvidenceOnly=${enforceEvidenceOnlyNonStream}, checkoutPath=${context.checkoutPath || 'NONE'}`);
       }
@@ -2230,6 +2239,9 @@ reader.on('line', async line => {
     }
 
     if (message.type === 'runtime:chat-stream') {
+      // Always-visible entry log via stderr — bypasses the IPC pipe so
+      // operators can see chat-stream activity even before any provider call.
+      process.stderr.write(`[chat:enter] runtime:chat-stream requestId=${message.requestId}\n`);
       const payload = message.payload || {};
       const streamId = String(payload.streamId || randomUUID());
       cancelledRuntimeStreamIds.delete(streamId);
@@ -2401,7 +2413,8 @@ reader.on('line', async line => {
       // ── Post-LLM diagnostics ─────────────────────────────────────────────
       console.log(`\n[chat-stream:llm] ══════ LLM RESULT ══════`);
       console.log(`[chat-stream:llm]   contentLength:       ${(streamed.content || '').length}`);
-      console.log(`[chat-stream:llm]   contentPreview:      ${(streamed.content || '').slice(0, 300)}`);
+      console.log(`[chat-stream:llm]   content:`);
+      console.log(streamed.content || '');
       console.log(`[chat-stream:llm]   toolLoopUsed:        ${streamed.toolLoopUsed}`);
       console.log(`[chat-stream:llm]   attemptedToolIds:    ${(streamed.attemptedToolIds || []).join(', ') || 'NONE'}`);
       console.log(`[chat-stream:llm]   toolIntentDisposition: ${streamed.toolIntentDisposition || 'none'}`);
@@ -2421,6 +2434,9 @@ reader.on('line', async line => {
 
       // ── Post-sanitize diagnostics ────────────────────────────────────────
       console.log(`\n[chat-stream:sanitize] ══════ SANITIZE RESULT ══════`);
+      console.log(`[chat-stream:sanitize]   runtimeProviderKey:          ${streamed.runtimeProviderKey || 'unknown'}`);
+      console.log(`[chat-stream:sanitize]   runtimeEndpoint:             ${runtimeTarget.runtimeEndpoint || 'unknown'}`);
+      console.log(`[chat-stream:sanitize]   runtimeCommand:              ${runtimeTarget.runtimeCommand || 'none'}`);
       console.log(`[chat-stream:sanitize]   enforceEvidenceOnly:         ${enforceEvidenceOnly}`);
       console.log(`[chat-stream:sanitize]   checkoutPath:                ${context.checkoutPath || 'NONE'}`);
       console.log(`[chat-stream:sanitize]   verifiedPaths:               ${context.verifiedPaths?.length ?? 0}`);
@@ -2428,6 +2444,8 @@ reader.on('line', async line => {
       console.log(`[chat-stream:sanitize]   unverifiedClaimsRemoved:     ${sanitizedStream.unverifiedPathClaimsRemoved.length}`);
       console.log(`[chat-stream:sanitize]   contentBefore:               ${(streamed.content || '').length} chars`);
       console.log(`[chat-stream:sanitize]   contentAfter:                ${sanitizedStream.content.length} chars`);
+      console.log(`[chat-stream:sanitize]   finalReply:`);
+      console.log(sanitizedStream.content);
       if (sanitizedStream.unverifiedPathClaimsRemoved.length > 0) {
         console.warn(`[chat-stream:sanitize] ⚠️  STRIPPED unverified paths:`, sanitizedStream.unverifiedPathClaimsRemoved.slice(0, 10));
       }
@@ -2507,6 +2525,15 @@ reader.on('line', async line => {
       error: `Unsupported worker request: ${message.type}`,
     });
   } catch (error) {
+    // Always-visible diagnostic via stderr — covers the case where chat
+    // (stream or non-stream) throws before any LLM call. Stack trace
+    // included so the operator can see WHERE the failure happened
+    // without enabling verbose logging.
+    process.stderr.write(
+      `[chat:error] type=${message?.type} requestId=${message?.requestId} ` +
+        `${error instanceof Error ? error.stack || error.message : String(error)}\n`,
+    );
+
     if (message.type === 'runtime:chat-stream') {
       const streamId = String(message.payload?.streamId || randomUUID());
       if (error instanceof Error && error.name === 'AbortError') {
