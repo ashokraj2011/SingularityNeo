@@ -6,6 +6,7 @@ import {
   isHexColor,
   resolveCustomNodeIcon,
 } from "../customNodeIcons";
+import { AttachmentBadges } from "../AttachmentBadges";
 import {
   buildBackflowEdges,
   nodeRuntimeState,
@@ -302,6 +303,10 @@ export const CanvasReadOnly = ({
                 {state === "failed" && "fail"}
               </span>
             </button>
+
+            {/* Attached-behavior badges (⏱ / 🔔). Same component as
+                the designer canvas so muscle memory is preserved. */}
+            <AttachmentBadges attachments={node.config.attachments} />
           </div>
         );
       })}

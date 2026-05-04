@@ -146,6 +146,64 @@ export interface OutputBinding {
   contextPath: string;
 }
 
+// ── Attached behaviors (Lego blocks) ─────────────────────────────────────────
+//
+// Timers and notifications are NOT distinct node types. They're tiny
+// behaviors that bolt onto ANY actionable node (HUMAN_TASK, APPROVAL,
+// FORM_FILL, AGENT_TASK, TOOL_REQUEST, CALL_WORKFLOW) and fire on the
+// node's lifecycle transitions. This mirrors workgraph-studio's
+// `config.attachments` shape so the model is familiar to anyone who's
+// seen that designer.
+//
+// V1 scope: store + emit events on triggers so the timeline shows
+// "notification fired" / "timer scheduled". Actual SMTP delivery and
+// timer auto-fire are V2.1 (require a background sweep / queue
+// worker — out of scope for this PR).
+
+export type BusinessAttachmentType = "TIMER" | "NOTIFICATION";
+
+/** When a NOTIFICATION attachment fires. Timers always start at
+ *  ON_ACTIVATE — `durationMinutes` carries the relative offset. */
+export type BusinessAttachmentTrigger =
+  | "ON_ACTIVATE"
+  | "ON_COMPLETE"
+  | "ON_OVERDUE";
+
+export type BusinessNotificationChannel = "EMAIL" | "WEBHOOK" | "IN_APP";
+
+/** What happens when a TIMER attachment fires. V1 only emits an
+ *  event. AUTO_COMPLETE / ESCALATE are reserved for V2.1 sweep. */
+export type BusinessTimerAction = "NOTIFY" | "ESCALATE" | "AUTO_COMPLETE";
+
+export interface BusinessAttachment {
+  /** Stable id within the node's attachment list. */
+  id: string;
+  type: BusinessAttachmentType;
+  /** Friendly label for the inspector + timeline event payload. */
+  label?: string;
+  /** Toggle without deleting — useful for templating-then-disabling. */
+  enabled: boolean;
+
+  // ── TIMER fields ──────────────────────────────────────────────────────────
+  /** Minutes after the node activates when the timer fires. */
+  durationMinutes?: number;
+  onFire?: BusinessTimerAction;
+  escalateToUserId?: string;
+  escalateToRole?: string;
+
+  // ── NOTIFICATION fields ───────────────────────────────────────────────────
+  /** Lifecycle trigger. Only used for NOTIFICATION (timers always
+   *  schedule on ON_ACTIVATE). */
+  trigger?: BusinessAttachmentTrigger;
+  channel?: BusinessNotificationChannel;
+  /** User ids, team ids, role names, or raw email/webhook URLs.
+   *  V1 doesn't deliver — but the recipient list is captured on the
+   *  audit event so the operator can see "who SHOULD have been told". */
+  recipients?: string[];
+  /** Free-form message template. Future: ${context.foo} interpolation. */
+  message?: string;
+}
+
 // ── Node config (per-base-type fields are loose by design — JSONB) ───────────
 
 export interface BusinessNodeConfig {
@@ -183,6 +241,14 @@ export interface BusinessNodeConfig {
 
   // Output bindings — applied after the node completes.
   outputBindings?: OutputBinding[];
+
+  /**
+   * Attached behaviors. Each entry is a tiny Lego-block that runs on
+   * a lifecycle trigger (ON_ACTIVATE / ON_COMPLETE / ON_OVERDUE) or
+   * after a duration (TIMER). Stored on the node so the per-node
+   * inspector edits them in place.
+   */
+  attachments?: BusinessAttachment[];
 
   // Free-form K/V for custom node types or UI extras.
   extras?: Record<string, unknown>;
@@ -402,7 +468,15 @@ export type BusinessWorkflowEventType =
   | "AD_HOC_TASK_CREATED"
   | "INSTANCE_PAUSED"
   | "INSTANCE_RESUMED"
-  | "INSTANCE_NOTE_ADDED";
+  | "INSTANCE_NOTE_ADDED"
+  // ── Attached behaviors ──────────────────────────────────────────
+  | "ATTACHED_NOTIFICATION_SENT"
+  | "ATTACHED_TIMER_SCHEDULED"
+  | "ATTACHED_TIMER_FIRED" // reserved for V2.1 sweep
+  // ── Editable context + documents ────────────────────────────────
+  | "CONTEXT_UPDATED"
+  | "DOCUMENT_ATTACHED"
+  | "DOCUMENT_REMOVED";
 
 export interface BusinessWorkflowEvent {
   id: string;

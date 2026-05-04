@@ -1,10 +1,12 @@
 import { useMemo } from "react";
 import type {
   AssignmentMode,
+  BusinessAttachment,
   BusinessNode,
   TaskPriority,
 } from "../../contracts/businessWorkflow";
 import type { CapabilityAgent as Agent } from "../../types";
+import { BehaviorsEditor } from "./BehaviorsEditor";
 
 const ASSIGNMENT_MODES: AssignmentMode[] = [
   "DIRECT_USER",
@@ -323,6 +325,16 @@ export const NodeInspector = ({
           onChange={(v) => updateConfig({ childTemplateId: v })}
         />
       )}
+
+      {/* Attached behaviors — Lego-blocks. Available on every node
+          type since "drop a timer or notification on ANY step" is the
+          point of the feature. */}
+      <BehaviorsEditor
+        attachments={cfg.attachments || []}
+        onChange={(next: BusinessAttachment[]) =>
+          updateConfig({ attachments: next })
+        }
+      />
     </aside>
   );
 };

@@ -33,6 +33,7 @@ import type {
   ApprovalStatus,
   AssignmentMode,
   BusinessApproval,
+  BusinessAttachment,
   BusinessEdge,
   BusinessInstanceStatus,
   BusinessNode,
@@ -657,6 +658,74 @@ interface ActivationContext {
 }
 
 /**
+ * Walk a node's `config.attachments` and emit events for every entry
+ * whose lifecycle matches `trigger`. Used by activateNode (ON_ACTIVATE)
+ * and advanceFromCompletedNode (ON_COMPLETE).
+ *
+ * V1 emits events only — actual delivery (SMTP, webhook POST) and
+ * timer auto-fire are V2.1 (require a background sweep). The events
+ * row is the system of record so when delivery is added later, an
+ * outbox worker can replay the unsent ones.
+ */
+const fireAttachmentsForTrigger = async (
+  capabilityId: string,
+  instanceId: string,
+  node: BusinessNode,
+  trigger: "ON_ACTIVATE" | "ON_COMPLETE" | "ON_OVERDUE",
+  actorId?: string,
+): Promise<void> => {
+  const attachments: BusinessAttachment[] = node.config.attachments || [];
+  for (const att of attachments) {
+    if (!att.enabled) continue;
+    if (att.type === "NOTIFICATION") {
+      // Notifications fire on whichever lifecycle trigger they're
+      // configured for.
+      if (att.trigger !== trigger) continue;
+      await emitEvent({
+        capabilityId,
+        instanceId,
+        nodeId: node.id,
+        eventType: "ATTACHED_NOTIFICATION_SENT",
+        actorId,
+        payload: {
+          attachmentId: att.id,
+          label: att.label,
+          channel: att.channel,
+          recipients: att.recipients,
+          message: att.message,
+          trigger,
+        },
+      });
+    } else if (att.type === "TIMER" && trigger === "ON_ACTIVATE") {
+      // Timers always schedule on activation. We record the schedule
+      // event so the timeline shows "timer X started, fires in Y
+      // minutes" — the V2.1 sweep job will scan instances.metadata to
+      // actually fire them.
+      if (!att.durationMinutes) continue;
+      const dueAt = new Date(
+        Date.now() + att.durationMinutes * 60_000,
+      ).toISOString();
+      await emitEvent({
+        capabilityId,
+        instanceId,
+        nodeId: node.id,
+        eventType: "ATTACHED_TIMER_SCHEDULED",
+        actorId,
+        payload: {
+          attachmentId: att.id,
+          label: att.label,
+          durationMinutes: att.durationMinutes,
+          onFire: att.onFire,
+          escalateToUserId: att.escalateToUserId,
+          escalateToRole: att.escalateToRole,
+          dueAt,
+        },
+      });
+    }
+  }
+};
+
+/**
  * Recursive activation of a node. Synchronous-completing nodes (START,
  * DECISION_GATE, NOTIFICATION, END) advance immediately; long-running
  * ones (HUMAN_TASK, APPROVAL, TIMER) leave the node in `activeNodeIds`
@@ -677,6 +746,18 @@ const activateNode = async (
     payload: { type: base },
     actorId,
   });
+
+  // Fire any ON_ACTIVATE attached notifications + schedule any
+  // attached timers. Done BEFORE the type-specific switch so even
+  // synchronous nodes (DECISION_GATE, START, NOTIFICATION) respect
+  // their own attachments.
+  await fireAttachmentsForTrigger(
+    instance.capabilityId,
+    instance.id,
+    node,
+    "ON_ACTIVATE",
+    actorId,
+  );
 
   switch (base) {
     case "START":
@@ -1303,6 +1384,18 @@ const advanceFromCompletedNode = async ({
     eventType: "NODE_COMPLETED",
     actorId,
   });
+
+  // Fire any ON_COMPLETE attached notifications. Done BEFORE applying
+  // output bindings so the notification payload reflects the context
+  // the operator was looking at WHEN it was sent (not the post-bind
+  // context).
+  await fireAttachmentsForTrigger(
+    capabilityId,
+    instanceId,
+    node,
+    "ON_COMPLETE",
+    actorId,
+  );
 
   // Apply output bindings to context.
   instance.context = applyOutputBindings(instance.context, node, output);

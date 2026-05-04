@@ -8,6 +8,7 @@ import type {
 } from "../../contracts/businessWorkflow";
 import { PALETTE_BY_TYPE } from "./NodePalette";
 import { isHexColor, resolveCustomNodeIcon } from "./customNodeIcons";
+import { AttachmentBadges } from "./AttachmentBadges";
 
 const NODE_WIDTH = 180;
 const NODE_HEIGHT = 64;
@@ -432,6 +433,9 @@ export const Canvas = ({
             {isPotentialTarget && (
               <div className="pointer-events-none absolute -left-2 top-1/2 h-6 w-3 -translate-y-1/2 rounded-l-md border-2 border-r-0 border-emerald-400 bg-emerald-200" />
             )}
+
+            {/* Attached-behavior badges. */}
+            <AttachmentBadges attachments={node.config.attachments} />
           </div>
         );
       })}

@@ -6,14 +6,18 @@ import {
   CheckCircle2,
   CircleDot,
   Cpu,
+  Database,
   FileText,
   Flag,
+  Paperclip,
   Play,
   PauseCircle,
   PlayCircle,
   RotateCcw,
   Sparkles,
   StickyNote,
+  Timer,
+  Trash2,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -123,6 +127,38 @@ const EVENT_META: Record<
     Icon: StickyNote,
     tone: "text-slate-700 bg-slate-50 ring-slate-200",
     label: "Note",
+  },
+  // ── V2 attached behaviors ────────────────────────────────────────
+  ATTACHED_NOTIFICATION_SENT: {
+    Icon: Bell,
+    tone: "text-blue-700 bg-blue-50 ring-blue-200",
+    label: "Notification (attached)",
+  },
+  ATTACHED_TIMER_SCHEDULED: {
+    Icon: Timer,
+    tone: "text-blue-700 bg-blue-50 ring-blue-200",
+    label: "Timer scheduled",
+  },
+  ATTACHED_TIMER_FIRED: {
+    Icon: AlarmClockOff,
+    tone: "text-amber-700 bg-amber-50 ring-amber-300",
+    label: "Timer fired",
+  },
+  // ── V2 editable context + documents ─────────────────────────────
+  CONTEXT_UPDATED: {
+    Icon: Database,
+    tone: "text-violet-700 bg-violet-50 ring-violet-200",
+    label: "Context updated",
+  },
+  DOCUMENT_ATTACHED: {
+    Icon: Paperclip,
+    tone: "text-sky-700 bg-sky-50 ring-sky-200",
+    label: "Document attached",
+  },
+  DOCUMENT_REMOVED: {
+    Icon: Trash2,
+    tone: "text-rose-700 bg-rose-50 ring-rose-200",
+    label: "Document removed",
   },
 };
 
