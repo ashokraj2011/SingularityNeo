@@ -15,6 +15,13 @@ export interface AlertContext {
   runId: string;
   nodeId: string;
   resolvedRecipients: string[];
+  /**
+   * Optional — when set, the IN_APP notification row carries this so
+   * the bell-icon dropdown can deep-link to the business workflow's
+   * instance dashboard. Agent-workflow callers leave it undefined and
+   * the column is nullable.
+   */
+  businessInstanceId?: string;
 }
 
 async function sendEmail(
@@ -115,9 +122,18 @@ async function insertInApp(config: WorkflowAlertConfig, context: AlertContext): 
     const message = config.messageTemplate ?? `Workflow alert in ${context.workflowName}`;
 
     await dbQuery(
-      `INSERT INTO notifications (id, run_id, capability_id, node_id, severity, message)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [id, context.runId, context.capabilityId, context.nodeId, config.severity ?? 'INFO', message],
+      `INSERT INTO notifications
+         (id, run_id, capability_id, node_id, severity, message, business_instance_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        id,
+        context.runId,
+        context.capabilityId,
+        context.nodeId,
+        config.severity ?? 'INFO',
+        message,
+        context.businessInstanceId ?? null,
+      ],
     );
 
     console.log(`[NotificationDispatcher] IN_APP notification inserted (${id})`);

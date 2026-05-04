@@ -7,6 +7,10 @@ import {
   hydratePersistedDatabaseBootstrapRuntime,
   reconcileDesktopExecutionOwnerships,
 } from './runtimeBootstrap';
+import {
+  startBusinessWorkflowSweeper,
+  stopBusinessWorkflowSweeper,
+} from '../businessWorkflowSweeper';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -56,6 +60,10 @@ export const startServer = async (serverApp: express.Express) => {
     });
   }, 30_000);
   reconciliationInterval.unref();
+
+  // Business-workflow sweep worker — drains armed timers + flags
+  // overdue tasks. Idempotent boot, so a hot-reload replays safely.
+  startBusinessWorkflowSweeper();
   server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') {
       console.error(
@@ -71,6 +79,7 @@ export const startServer = async (serverApp: express.Express) => {
 
   const shutdown = (signal: string) => {
     console.log(`[server] ${signal} — draining connections…`);
+    stopBusinessWorkflowSweeper();
     server.close(async () => {
       await closeDatabasePool();
       console.log('[server] clean exit');
