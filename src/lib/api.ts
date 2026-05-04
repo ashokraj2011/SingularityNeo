@@ -4281,3 +4281,50 @@ export const setLLMDefaultProvider = async (providerKey: string): Promise<{ succ
     headers: jsonHeaders,
     body: JSON.stringify({ providerKey }),
   });
+
+// ── Bell-icon notifications ───────────────────────────────────────────────
+
+export interface InAppNotification {
+  id: string;
+  userId: string | null;
+  runId: string | null;
+  capabilityId: string | null;
+  nodeId: string | null;
+  severity: string;
+  message: string;
+  acknowledged: boolean;
+  createdAt: string;
+  /** When set, deep-link to /studio/business-workflows/.../instances/<id>.
+   *  When null and runId is set, that's an agent-workflow alert. */
+  businessInstanceId: string | null;
+}
+
+export const listNotifications = async (
+  options: { unread?: boolean; limit?: number } = {},
+): Promise<InAppNotification[]> => {
+  const params = new URLSearchParams();
+  if (options.unread === false) params.set("unread", "false");
+  if (options.limit != null) params.set("limit", String(options.limit));
+  const qs = params.toString();
+  const result = await requestJson<{ notifications: InAppNotification[] }>(
+    `/api/notifications${qs ? `?${qs}` : ""}`,
+  );
+  return result.notifications;
+};
+
+export const acknowledgeNotification = async (
+  id: string,
+): Promise<void> => {
+  await requestJson<{ ok: true }>(
+    `/api/notifications/${encodeURIComponent(id)}/ack`,
+    { method: "POST", headers: jsonHeaders },
+  );
+};
+
+export const acknowledgeAllNotifications = async (): Promise<number> => {
+  const result = await requestJson<{ ok: true; count: number }>(
+    `/api/notifications/ack-all`,
+    { method: "POST", headers: jsonHeaders },
+  );
+  return result.count;
+};

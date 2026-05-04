@@ -47,6 +47,7 @@ import {
 import { cn } from "../lib/utils";
 import { useCapability } from "../context/CapabilityContext";
 import { useToast } from "../context/ToastContext";
+import { NotificationBell } from "./NotificationBell";
 import {
   claimCapabilityExecution,
   fetchRuntimeStatus,
@@ -1088,6 +1089,10 @@ const TopBar = ({
                 <span>{isClaiming ? "Claiming…" : "Claim"}</span>
               </button>
             ) : null}
+
+            {/* Bell — V2.1 alert surface. Polls /api/notifications
+                every 15s. Same operator-id header as everything else. */}
+            <NotificationBell />
 
             <button
               type="button"
