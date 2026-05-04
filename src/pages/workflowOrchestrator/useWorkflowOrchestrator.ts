@@ -722,10 +722,15 @@ export const useWorkflowOrchestrator = ({
     async (resolution: string) => {
       const snapshot = stateRef.current;
       const { workItem } = snapshot;
-      if (!workItem?.activeRunId) {
+      if (!workItem) return;
+
+      // activeRunId may be absent when the run is in WAITING_* state —
+      // fall back to lastRunId so we can still call the resolution endpoints.
+      const runId = workItem.activeRunId ?? workItem.lastRunId;
+      if (!runId) {
         toastError(
           "Cannot resolve block",
-          "No active run found for this work item.",
+          "No run ID found. Try refreshing the work item.",
         );
         return;
       }
@@ -742,23 +747,11 @@ export const useWorkflowOrchestrator = ({
         };
 
         if (blockType === "HUMAN_INPUT" || blockType === "INPUT") {
-          await provideCapabilityWorkflowRunInput(
-            capability.id,
-            workItem.activeRunId,
-            payload,
-          );
+          await provideCapabilityWorkflowRunInput(capability.id, runId, payload);
         } else if (blockType === "CONFLICT_RESOLUTION") {
-          await resolveCapabilityWorkflowRunConflict(
-            capability.id,
-            workItem.activeRunId,
-            payload,
-          );
+          await resolveCapabilityWorkflowRunConflict(capability.id, runId, payload);
         } else if (blockType === "HUMAN_TASK") {
-          await completeCapabilityWorkflowRunHumanTask(
-            capability.id,
-            workItem.activeRunId,
-            payload,
-          );
+          await completeCapabilityWorkflowRunHumanTask(capability.id, runId, payload);
         }
 
         success(

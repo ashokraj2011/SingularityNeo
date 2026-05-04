@@ -609,11 +609,24 @@ export const useCockpitState = (capability: Capability) => {
   const resolveBlock = useCallback(
     async (resolution: string) => {
       const snap = stateRef.current;
-      const { workItem } = snap;
-      if (!workItem?.activeRunId) {
-        toastError("Cannot resolve", "No active run.");
+      const { workItem, runDetail } = snap;
+      if (!workItem) return;
+
+      // activeRunId may be absent when the run is in a WAITING_* state —
+      // fall back to lastRunId then to the loaded run detail.
+      const runId =
+        workItem.activeRunId ??
+        workItem.lastRunId ??
+        runDetail?.run.id;
+
+      if (!runId) {
+        toastError(
+          "Cannot resolve",
+          "No run ID found. Try refreshing the work item.",
+        );
         return;
       }
+
       const blockType =
         workItem.blocker?.type || workItem.pendingRequest?.type;
       if (!blockType) return;
@@ -621,23 +634,11 @@ export const useCockpitState = (capability: Capability) => {
       try {
         const payload = { resolution, resolvedBy: "cockpit-operator" };
         if (blockType === "HUMAN_INPUT" || blockType === "INPUT") {
-          await provideCapabilityWorkflowRunInput(
-            capability.id,
-            workItem.activeRunId,
-            payload,
-          );
+          await provideCapabilityWorkflowRunInput(capability.id, runId, payload);
         } else if (blockType === "CONFLICT_RESOLUTION") {
-          await resolveCapabilityWorkflowRunConflict(
-            capability.id,
-            workItem.activeRunId,
-            payload,
-          );
+          await resolveCapabilityWorkflowRunConflict(capability.id, runId, payload);
         } else if (blockType === "HUMAN_TASK") {
-          await completeCapabilityWorkflowRunHumanTask(
-            capability.id,
-            workItem.activeRunId,
-            payload,
-          );
+          await completeCapabilityWorkflowRunHumanTask(capability.id, runId, payload);
         }
         success("Resolved", "The work item is now unblocked.");
         dispatch({ type: "SUBMIT_DONE" });
