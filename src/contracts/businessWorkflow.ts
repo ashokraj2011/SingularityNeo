@@ -76,7 +76,13 @@ export type TaskStatus =
   | "CLAIMED"
   | "IN_PROGRESS"
   | "COMPLETED"
-  | "CANCELLED";
+  | "CANCELLED"
+  /**
+   * Set when an operator/approver routes the work back to an earlier
+   * node. The original task row is preserved (form_data and audit
+   * trail intact); a fresh task is spawned at the target node.
+   */
+  | "SENT_BACK";
 
 export type TaskPriority = "LOW" | "NORMAL" | "HIGH" | "URGENT";
 
@@ -298,12 +304,21 @@ export interface BusinessWorkflowInstance {
   startedAt: string;
   completedAt?: string;
   metadata: Record<string, unknown>;
+  /** Set when status becomes PAUSED. Cleared on resume. */
+  pausedAt?: string;
+  pausedBy?: string;
+  pausedReason?: string;
 }
 
 export interface BusinessTask {
   capabilityId: string;
   id: string;
   instanceId: string;
+  /**
+   * Either a real `node.id` from the pinned template version, or a
+   * synthetic `adhoc-<uuid>` for ad-hoc tasks (which don't appear on
+   * the canvas).
+   */
   nodeId: string;
   title: string;
   description?: string;
@@ -322,6 +337,26 @@ export interface BusinessTask {
   output?: Record<string, unknown>;
   createdAt: string;
   completedAt?: string;
+
+  // ── V2 runtime additions ─────────────────────────────────────────
+  /** When this task replaced an earlier task via send-back, the id of
+   *  the source node it was bounced FROM. Renders backflow on canvas. */
+  sentBackFromNodeId?: string;
+  sentBackReason?: string;
+  /** Set when reassigned post-creation (claim is released). */
+  reassignedAt?: string;
+  reassignedBy?: string;
+  /** Ad-hoc tasks live alongside the planned graph and do not advance
+   *  the workflow on completion. `adHocBlocking` true means the
+   *  instance pauses on creation and auto-resumes on completion. */
+  isAdHoc: boolean;
+  adHocBlocking: boolean;
+  /** Optional link to the task that spawned this one (e.g. a parent
+   *  HUMAN_TASK whose owner kicked off a side ad-hoc task). */
+  parentTaskId?: string;
+  /** The actor who created this task — the `started_by` of the
+   *  instance for planned tasks, the operator for ad-hoc. */
+  createdBy?: string;
 }
 
 export interface BusinessApproval {
@@ -340,6 +375,12 @@ export interface BusinessApproval {
   conditions?: string;
   notes?: string;
   createdAt: string;
+
+  // ── V2 runtime additions ─────────────────────────────────────────
+  sentBackFromNodeId?: string;
+  sentBackReason?: string;
+  reassignedAt?: string;
+  reassignedBy?: string;
 }
 
 export type BusinessWorkflowEventType =
@@ -352,7 +393,16 @@ export type BusinessWorkflowEventType =
   | "INSTANCE_COMPLETED"
   | "INSTANCE_CANCELLED"
   | "AGENT_DELEGATED"
-  | "NOTIFICATION_SENT";
+  | "NOTIFICATION_SENT"
+  // ── V2 additions ─────────────────────────────────────────────────
+  | "TASK_SENT_BACK"
+  | "APPROVAL_SENT_BACK"
+  | "TASK_REASSIGNED"
+  | "APPROVAL_REASSIGNED"
+  | "AD_HOC_TASK_CREATED"
+  | "INSTANCE_PAUSED"
+  | "INSTANCE_RESUMED"
+  | "INSTANCE_NOTE_ADDED";
 
 export interface BusinessWorkflowEvent {
   id: string;

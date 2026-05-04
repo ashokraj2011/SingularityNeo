@@ -1089,7 +1089,9 @@ export const fetchLedgerArtifacts = async (
 
 import type {
   ApprovalStatus,
+  AssignmentMode,
   BusinessApproval,
+  BusinessInstanceStatus,
   BusinessNode,
   BusinessEdge,
   BusinessPhase,
@@ -1098,6 +1100,8 @@ import type {
   BusinessWorkflowInstance,
   BusinessWorkflowTemplate,
   BusinessWorkflowVersion,
+  FormSchema,
+  TaskPriority,
   TaskStatus,
 } from "../contracts/businessWorkflow";
 
@@ -1293,6 +1297,220 @@ export const decideBusinessApproval = async (
   );
   return result.approval;
 };
+
+// ── V2 runtime: instances, approvals listings, reassign, send-back, ────────
+//                ad-hoc, pause/resume, notes, stats
+// ───────────────────────────────────────────────────────────────────────────
+
+export const listBusinessInstances = async (
+  capabilityId: string,
+  options: {
+    templateId?: string;
+    status?: BusinessInstanceStatus | "ACTIVE";
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<{ rows: BusinessWorkflowInstance[]; total: number }> => {
+  const params = new URLSearchParams();
+  if (options.templateId) params.set("templateId", options.templateId);
+  if (options.status) params.set("status", options.status);
+  if (options.limit != null) params.set("limit", String(options.limit));
+  if (options.offset != null) params.set("offset", String(options.offset));
+  const qs = params.toString();
+  return requestJson<{ rows: BusinessWorkflowInstance[]; total: number }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances${
+      qs ? `?${qs}` : ""
+    }`,
+  );
+};
+
+export const fetchBusinessTemplateStats = async (
+  capabilityId: string,
+  templateId: string,
+): Promise<{
+  byStatus: Record<BusinessInstanceStatus, number>;
+  avgDurationMs: number | null;
+  overdueTaskCount: number;
+  pendingApprovalCount: number;
+  recentInstances: BusinessWorkflowInstance[];
+}> =>
+  requestJson(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflows/${encodeURIComponent(templateId)}/stats`,
+  );
+
+export const listBusinessApprovals = async (
+  capabilityId: string,
+  status: ApprovalStatus | "PENDING_OR_INFO_REQUESTED" = "PENDING_OR_INFO_REQUESTED",
+): Promise<BusinessApproval[]> => {
+  const result = await requestJson<{ approvals: BusinessApproval[] }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-approvals?status=${encodeURIComponent(
+      status,
+    )}`,
+  );
+  return result.approvals;
+};
+
+/** Incremental events poll. Pass the last event id you've seen to get
+ *  only newer events; first poll: pass undefined. */
+export const fetchBusinessInstanceEvents = async (
+  capabilityId: string,
+  instanceId: string,
+  since?: string,
+): Promise<BusinessWorkflowEvent[]> => {
+  const qs = since ? `?since=${encodeURIComponent(since)}` : "";
+  const result = await requestJson<{ events: BusinessWorkflowEvent[] }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(
+      instanceId,
+    )}/events${qs}`,
+  );
+  return result.events;
+};
+
+export const pauseBusinessInstance = async (
+  capabilityId: string,
+  instanceId: string,
+  reason?: string,
+): Promise<BusinessWorkflowInstance> => {
+  const result = await requestJson<{ instance: BusinessWorkflowInstance }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}/pause`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ reason }),
+    },
+  );
+  return result.instance;
+};
+
+export const resumeBusinessInstance = async (
+  capabilityId: string,
+  instanceId: string,
+): Promise<BusinessWorkflowInstance> => {
+  const result = await requestJson<{ instance: BusinessWorkflowInstance }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}/resume`,
+    { method: "POST", headers: jsonHeaders },
+  );
+  return result.instance;
+};
+
+export const addBusinessInstanceNote = async (
+  capabilityId: string,
+  instanceId: string,
+  payload: { note: string; taskId?: string; approvalId?: string },
+): Promise<BusinessWorkflowEvent> => {
+  const result = await requestJson<{ event: BusinessWorkflowEvent }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}/notes`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+  return result.event;
+};
+
+export const createBusinessAdHocTask = async (
+  capabilityId: string,
+  instanceId: string,
+  payload: {
+    title: string;
+    description?: string;
+    assignment: {
+      mode: AssignmentMode;
+      userId?: string;
+      teamId?: string;
+      role?: string;
+      skill?: string;
+    };
+    priority?: TaskPriority;
+    dueAt?: string;
+    formSchema?: FormSchema | null;
+    blocking?: boolean;
+    parentTaskId?: string;
+  },
+): Promise<BusinessTask> => {
+  const result = await requestJson<{ task: BusinessTask }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-instances/${encodeURIComponent(instanceId)}/ad-hoc-tasks`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+  return result.task;
+};
+
+export const reassignBusinessTask = async (
+  capabilityId: string,
+  taskId: string,
+  payload: {
+    assignmentMode: AssignmentMode;
+    assignedUserId?: string;
+    assignedTeamId?: string;
+    assignedRole?: string;
+    assignedSkill?: string;
+    reason?: string;
+  },
+): Promise<BusinessTask> => {
+  const result = await requestJson<{ task: BusinessTask }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-tasks/${encodeURIComponent(taskId)}/reassign`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+  return result.task;
+};
+
+export const sendBackBusinessTask = async (
+  capabilityId: string,
+  taskId: string,
+  payload: { targetNodeId: string; reason: string },
+): Promise<{ closedTask: BusinessTask; activatedNodeId: string }> =>
+  requestJson(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-tasks/${encodeURIComponent(taskId)}/send-back`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+
+export const reassignBusinessApproval = async (
+  capabilityId: string,
+  approvalId: string,
+  payload: {
+    assignedUserId?: string;
+    assignedTeamId?: string;
+    assignedRole?: string;
+    reason?: string;
+  },
+): Promise<BusinessApproval> => {
+  const result = await requestJson<{ approval: BusinessApproval }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-approvals/${encodeURIComponent(approvalId)}/reassign`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+  return result.approval;
+};
+
+export const sendBackBusinessApproval = async (
+  capabilityId: string,
+  approvalId: string,
+  payload: { targetNodeId: string; reason: string },
+): Promise<{ closedApproval: BusinessApproval; activatedNodeId: string }> =>
+  requestJson(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-approvals/${encodeURIComponent(approvalId)}/send-back`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
 
 // ── Custom node types ─────────────────────────────────────────────────────
 

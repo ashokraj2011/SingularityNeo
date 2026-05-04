@@ -45,9 +45,11 @@ import type {
   BusinessWorkflowInstance,
   BusinessWorkflowTemplate,
   BusinessWorkflowVersion,
+  FormSchema,
   TaskPriority,
   TaskStatus,
 } from "../src/contracts/businessWorkflow";
+import { findJoinsBetween } from "../src/lib/businessWorkflowRuntime";
 
 // ── ID helpers ───────────────────────────────────────────────────────────────
 
@@ -109,6 +111,9 @@ const rowToInstance = (
   startedAt: asIso(row.started_at),
   completedAt: row.completed_at ? asIso(row.completed_at) : undefined,
   metadata: asJsonObject<Record<string, unknown>>(row.metadata),
+  pausedAt: row.paused_at ? asIso(row.paused_at) : undefined,
+  pausedBy: asString(row.paused_by),
+  pausedReason: asString(row.paused_reason),
 });
 
 const rowToTask = (row: Record<string, unknown>): BusinessTask => ({
@@ -133,6 +138,16 @@ const rowToTask = (row: Record<string, unknown>): BusinessTask => ({
   output: row.output as Record<string, unknown> | undefined,
   createdAt: asIso(row.created_at),
   completedAt: row.completed_at ? asIso(row.completed_at) : undefined,
+  // V2 fields. Default booleans to false for legacy rows that pre-date
+  // the columns being added (NULL → false).
+  sentBackFromNodeId: asString(row.sent_back_from_node_id),
+  sentBackReason: asString(row.sent_back_reason),
+  reassignedAt: row.reassigned_at ? asIso(row.reassigned_at) : undefined,
+  reassignedBy: asString(row.reassigned_by),
+  isAdHoc: row.is_ad_hoc === true,
+  adHocBlocking: row.ad_hoc_blocking === true,
+  parentTaskId: asString(row.parent_task_id),
+  createdBy: asString(row.created_by),
 });
 
 const rowToApproval = (row: Record<string, unknown>): BusinessApproval => ({
@@ -151,6 +166,10 @@ const rowToApproval = (row: Record<string, unknown>): BusinessApproval => ({
   conditions: asString(row.conditions),
   notes: asString(row.notes),
   createdAt: asIso(row.created_at),
+  sentBackFromNodeId: asString(row.sent_back_from_node_id),
+  sentBackReason: asString(row.sent_back_reason),
+  reassignedAt: row.reassigned_at ? asIso(row.reassigned_at) : undefined,
+  reassignedBy: asString(row.reassigned_by),
 });
 
 // ── Event emit ───────────────────────────────────────────────────────────────
@@ -926,26 +945,73 @@ export const cancelBusinessInstance = async ({
   capabilityId,
   instanceId,
   actorId,
+  reason,
 }: {
   capabilityId: string;
   instanceId: string;
   actorId: string;
+  reason?: string;
 }): Promise<BusinessWorkflowInstance | null> => {
   const instance = await fetchInstance(capabilityId, instanceId);
   if (!instance) return null;
   if (instance.status === "COMPLETED" || instance.status === "CANCELLED") {
     return instance;
   }
-  instance.status = "CANCELLED";
-  instance.completedAt = new Date().toISOString();
-  await updateInstance(instance);
+  // Cascade in a single transaction so we never leave orphan OPEN tasks
+  // or PENDING approvals visible to the inbox after cancel.
+  await transaction(async (client) => {
+    await client.query(
+      `UPDATE capability_business_workflow_instances
+       SET status = 'CANCELLED', completed_at = NOW()
+       WHERE capability_id = $1 AND id = $2`,
+      [capabilityId, instanceId],
+    );
+    await client.query(
+      `UPDATE capability_business_tasks
+       SET status = 'CANCELLED', completed_at = NOW()
+       WHERE capability_id = $1 AND instance_id = $2
+         AND status IN ('OPEN','CLAIMED','IN_PROGRESS')`,
+      [capabilityId, instanceId],
+    );
+    await client.query(
+      `UPDATE capability_business_approvals
+       SET status = 'REJECTED', decided_by = $3, decided_at = NOW(),
+           notes = COALESCE(notes, '') || E'\n[cancelled with instance]'
+       WHERE capability_id = $1 AND instance_id = $2 AND status = 'PENDING'`,
+      [capabilityId, instanceId, actorId],
+    );
+  });
   await emitEvent({
     capabilityId,
     instanceId,
     eventType: "INSTANCE_CANCELLED",
     actorId,
+    payload: reason ? { reason } : undefined,
   });
-  return instance;
+  return (await fetchInstance(capabilityId, instanceId)) || null;
+};
+
+// ── Pause guard ──────────────────────────────────────────────────────────────
+
+/**
+ * Throw a typed error when the instance is paused. The route layer
+ * maps the message → HTTP 409 via the regex in `server/api/errors.ts`
+ * (the word "already" matches the conflict pattern).
+ *
+ * Reassign + ad-hoc are allowed while paused (the operator pauses TO
+ * fix things), so this is only called from claim / complete / decide /
+ * advance.
+ */
+const assertInstanceNotPaused = async (
+  capabilityId: string,
+  instanceId: string,
+): Promise<void> => {
+  const inst = await fetchInstance(capabilityId, instanceId);
+  if (inst && inst.status === "PAUSED") {
+    throw new Error(
+      `Instance ${instanceId} is paused — already paused, resume it before continuing.`,
+    );
+  }
 };
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
@@ -989,6 +1055,18 @@ export const claimBusinessTask = async ({
   taskId: string;
   claimedBy: string;
 }): Promise<BusinessTask | null> => {
+  // Pre-check: refuse to claim against a paused instance.
+  const taskRow = await query(
+    `SELECT instance_id FROM capability_business_tasks
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, taskId],
+  );
+  if (taskRow.rows.length > 0) {
+    await assertInstanceNotPaused(
+      capabilityId,
+      String((taskRow.rows[0] as Record<string, unknown>).instance_id),
+    );
+  }
   const result = await query(
     `
     UPDATE capability_business_tasks SET
@@ -1025,6 +1103,22 @@ export const completeBusinessTask = async ({
   formData?: Record<string, unknown>;
   output?: Record<string, unknown>;
 }): Promise<BusinessTask | null> => {
+  // Pause guard: reject completion attempts on a paused instance so
+  // the operator can't accidentally race past their own pause.
+  const taskRow = await query(
+    `SELECT instance_id, is_ad_hoc, ad_hoc_blocking
+     FROM capability_business_tasks
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, taskId],
+  );
+  if (taskRow.rows.length > 0) {
+    const r = taskRow.rows[0] as Record<string, unknown>;
+    // Allow completion of a blocking-ad-hoc task even when paused —
+    // that's how the instance auto-resumes (handled at end of fn).
+    if (!(r.is_ad_hoc === true && r.ad_hoc_blocking === true)) {
+      await assertInstanceNotPaused(capabilityId, String(r.instance_id));
+    }
+  }
   const result = await query(
     `
     UPDATE capability_business_tasks SET
@@ -1050,10 +1144,29 @@ export const completeBusinessTask = async ({
     nodeId: task.nodeId,
     eventType: "TASK_COMPLETED",
     actorId: completedBy,
-    payload: { formData, output },
+    payload: { formData, output, isAdHoc: task.isAdHoc },
   });
 
-  // Advance the workflow.
+  if (task.isAdHoc) {
+    // Ad-hoc tasks don't advance the planned graph — they're a
+    // side-channel. If this was a BLOCKING ad-hoc, auto-resume the
+    // instance now that the operator's done with the side errand.
+    if (task.adHocBlocking) {
+      try {
+        await resumeBusinessInstance({
+          capabilityId,
+          instanceId: task.instanceId,
+          actorId: completedBy,
+        });
+      } catch {
+        // Resume can race with cancel — swallow; the task is still
+        // recorded as completed and the timeline will show both.
+      }
+    }
+    return task;
+  }
+
+  // Planned task: advance the workflow.
   await advanceFromCompletedNode({
     capabilityId,
     instanceId: task.instanceId,
@@ -1082,6 +1195,18 @@ export const decideBusinessApproval = async ({
   conditions?: string;
   notes?: string;
 }): Promise<BusinessApproval | null> => {
+  // Pause guard.
+  const apRow = await query(
+    `SELECT instance_id FROM capability_business_approvals
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, approvalId],
+  );
+  if (apRow.rows.length > 0) {
+    await assertInstanceNotPaused(
+      capabilityId,
+      String((apRow.rows[0] as Record<string, unknown>).instance_id),
+    );
+  }
   const result = await query(
     `
     UPDATE capability_business_approvals SET
@@ -1309,14 +1434,30 @@ export const deleteBusinessCustomNodeType = async (
 export const listBusinessInstanceEvents = async (
   capabilityId: string,
   instanceId: string,
+  options: { sinceEventId?: string } = {},
 ): Promise<BusinessWorkflowEvent[]> => {
+  // `sinceEventId` is the last event id the dashboard already has —
+  // we filter on (occurred_at, id) > the matching row so polling
+  // returns deltas only and the typical payload is empty.
+  const params: unknown[] = [capabilityId, instanceId];
+  let extra = "";
+  if (options.sinceEventId) {
+    params.push(options.sinceEventId);
+    extra = `
+      AND (occurred_at, id) > (
+        SELECT occurred_at, id FROM capability_business_workflow_events
+        WHERE id = $${params.length}
+      )
+    `;
+  }
   const result = await query(
     `
     SELECT * FROM capability_business_workflow_events
     WHERE capability_id = $1 AND instance_id = $2
-    ORDER BY occurred_at ASC
+    ${extra}
+    ORDER BY occurred_at ASC, id ASC
     `,
-    [capabilityId, instanceId],
+    params,
   );
   return result.rows.map((row) => {
     const r = row as Record<string, unknown>;
@@ -1331,4 +1472,784 @@ export const listBusinessInstanceEvents = async (
       occurredAt: asIso(r.occurred_at),
     };
   });
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+// V2 runtime — reassign, send-back, ad-hoc, pause/resume, notes, listings
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── List instances + approvals ───────────────────────────────────────────────
+
+export const listBusinessInstances = async ({
+  capabilityId,
+  templateId,
+  status,
+  startedAfter,
+  startedBefore,
+  limit = 50,
+  offset = 0,
+}: {
+  capabilityId: string;
+  templateId?: string;
+  /** "ACTIVE" is shorthand for RUNNING|PAUSED. */
+  status?: BusinessInstanceStatus | "ACTIVE";
+  startedAfter?: string;
+  startedBefore?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ rows: BusinessWorkflowInstance[]; total: number }> => {
+  const params: unknown[] = [capabilityId];
+  let where = "WHERE capability_id = $1";
+  if (templateId) {
+    params.push(templateId);
+    where += ` AND template_id = $${params.length}`;
+  }
+  if (status === "ACTIVE") {
+    where += ` AND status IN ('RUNNING','PAUSED')`;
+  } else if (status) {
+    params.push(status);
+    where += ` AND status = $${params.length}`;
+  }
+  if (startedAfter) {
+    params.push(startedAfter);
+    where += ` AND started_at >= $${params.length}`;
+  }
+  if (startedBefore) {
+    params.push(startedBefore);
+    where += ` AND started_at <= $${params.length}`;
+  }
+  // Page + count in two queries — could be a single SELECT … OVER ()
+  // but the row counts are bounded enough that this stays cheap.
+  const totalResult = await query(
+    `SELECT COUNT(*)::int AS total FROM capability_business_workflow_instances ${where}`,
+    params,
+  );
+  const total = Number((totalResult.rows[0] as { total: number })?.total || 0);
+  params.push(Math.max(1, Math.min(500, limit)));
+  params.push(Math.max(0, offset));
+  const rowsResult = await query(
+    `
+    SELECT * FROM capability_business_workflow_instances
+    ${where}
+    ORDER BY started_at DESC
+    LIMIT $${params.length - 1} OFFSET $${params.length}
+    `,
+    params,
+  );
+  return {
+    rows: rowsResult.rows.map((row) =>
+      rowToInstance(row as Record<string, unknown>),
+    ),
+    total,
+  };
+};
+
+export const listBusinessApprovals = async ({
+  capabilityId,
+  status,
+  limit = 100,
+}: {
+  capabilityId: string;
+  /** "PENDING_OR_INFO_REQUESTED" is shorthand for PENDING|NEEDS_MORE_INFORMATION. */
+  status?: ApprovalStatus | "PENDING_OR_INFO_REQUESTED";
+  limit?: number;
+}): Promise<BusinessApproval[]> => {
+  const params: unknown[] = [capabilityId];
+  let where = "WHERE capability_id = $1";
+  if (status === "PENDING_OR_INFO_REQUESTED") {
+    where += ` AND status IN ('PENDING','NEEDS_MORE_INFORMATION')`;
+  } else if (status) {
+    params.push(status);
+    where += ` AND status = $${params.length}`;
+  }
+  params.push(Math.max(1, Math.min(500, limit)));
+  const result = await query(
+    `
+    SELECT * FROM capability_business_approvals
+    ${where}
+    ORDER BY created_at DESC
+    LIMIT $${params.length}
+    `,
+    params,
+  );
+  return result.rows.map((row) =>
+    rowToApproval(row as Record<string, unknown>),
+  );
+};
+
+// ── Reassign ─────────────────────────────────────────────────────────────────
+
+export const reassignBusinessTask = async ({
+  capabilityId,
+  taskId,
+  actorId,
+  assignmentMode,
+  assignedUserId,
+  assignedTeamId,
+  assignedRole,
+  assignedSkill,
+  reason,
+}: {
+  capabilityId: string;
+  taskId: string;
+  actorId: string;
+  assignmentMode: AssignmentMode;
+  assignedUserId?: string;
+  assignedTeamId?: string;
+  assignedRole?: string;
+  assignedSkill?: string;
+  reason?: string;
+}): Promise<BusinessTask | null> => {
+  // Reassignment is allowed even on a paused instance — that's how
+  // the operator unwinds a stuck task. We DO release the existing
+  // claim (status flips back to OPEN) so the new assignee starts from
+  // a clean slate.
+  const result = await query(
+    `
+    UPDATE capability_business_tasks SET
+      assignment_mode  = $3,
+      assigned_user_id = $4,
+      assigned_team_id = $5,
+      assigned_role    = $6,
+      assigned_skill   = $7,
+      claimed_by       = NULL,
+      claimed_at       = NULL,
+      status           = CASE WHEN status = 'CLAIMED' THEN 'OPEN' ELSE status END,
+      reassigned_at    = NOW(),
+      reassigned_by    = $8
+    WHERE capability_id = $1 AND id = $2
+      AND status IN ('OPEN','CLAIMED','IN_PROGRESS')
+    RETURNING *
+    `,
+    [
+      capabilityId,
+      taskId,
+      assignmentMode,
+      assignedUserId || null,
+      assignedTeamId || null,
+      assignedRole || null,
+      assignedSkill || null,
+      actorId,
+    ],
+  );
+  if (result.rows.length === 0) return null;
+  const task = rowToTask(result.rows[0] as Record<string, unknown>);
+  await emitEvent({
+    capabilityId,
+    instanceId: task.instanceId,
+    nodeId: task.nodeId,
+    eventType: "TASK_REASSIGNED",
+    actorId,
+    payload: {
+      assignmentMode,
+      assignedUserId,
+      assignedTeamId,
+      assignedRole,
+      assignedSkill,
+      reason,
+    },
+  });
+  return task;
+};
+
+export const reassignBusinessApproval = async ({
+  capabilityId,
+  approvalId,
+  actorId,
+  assignedUserId,
+  assignedTeamId,
+  assignedRole,
+  reason,
+}: {
+  capabilityId: string;
+  approvalId: string;
+  actorId: string;
+  assignedUserId?: string;
+  assignedTeamId?: string;
+  assignedRole?: string;
+  reason?: string;
+}): Promise<BusinessApproval | null> => {
+  const result = await query(
+    `
+    UPDATE capability_business_approvals SET
+      assigned_user_id = $3,
+      assigned_team_id = $4,
+      assigned_role    = $5,
+      reassigned_at    = NOW(),
+      reassigned_by    = $6
+    WHERE capability_id = $1 AND id = $2 AND status = 'PENDING'
+    RETURNING *
+    `,
+    [
+      capabilityId,
+      approvalId,
+      assignedUserId || null,
+      assignedTeamId || null,
+      assignedRole || null,
+      actorId,
+    ],
+  );
+  if (result.rows.length === 0) return null;
+  const approval = rowToApproval(result.rows[0] as Record<string, unknown>);
+  await emitEvent({
+    capabilityId,
+    instanceId: approval.instanceId,
+    nodeId: approval.nodeId,
+    eventType: "APPROVAL_REASSIGNED",
+    actorId,
+    payload: { assignedUserId, assignedTeamId, assignedRole, reason },
+  });
+  return approval;
+};
+
+// ── Send-back ────────────────────────────────────────────────────────────────
+
+/**
+ * Bounce a task back to a previous (or any other) node in the pinned
+ * template version. The original task row is preserved with
+ * `status='SENT_BACK'` so the audit trail keeps the form_data they
+ * already entered. A FRESH task is then activated at the target node,
+ * inheriting THAT node's formSchema / assignment / SLA — not the
+ * source's.
+ */
+export const sendBackBusinessTask = async ({
+  capabilityId,
+  taskId,
+  targetNodeId,
+  actorId,
+  reason,
+}: {
+  capabilityId: string;
+  taskId: string;
+  targetNodeId: string;
+  actorId: string;
+  reason: string;
+}): Promise<{ closedTask: BusinessTask; activatedNodeId: string } | null> => {
+  // Load the task + its instance + the pinned template version. Do
+  // this BEFORE the close, so we know we have a valid target node.
+  const taskRowResult = await query(
+    `SELECT * FROM capability_business_tasks
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, taskId],
+  );
+  if (taskRowResult.rows.length === 0) return null;
+  const closedTaskBefore = rowToTask(
+    taskRowResult.rows[0] as Record<string, unknown>,
+  );
+  if (closedTaskBefore.status === "COMPLETED" || closedTaskBefore.status === "CANCELLED" || closedTaskBefore.status === "SENT_BACK") {
+    throw new Error(`Task ${taskId} is already closed.`);
+  }
+  const instance = await fetchInstance(
+    capabilityId,
+    closedTaskBefore.instanceId,
+  );
+  if (!instance) throw new Error("Instance not found.");
+  await assertInstanceNotPaused(capabilityId, instance.id);
+
+  const version = await fetchTemplateVersion(
+    capabilityId,
+    instance.templateId,
+    instance.templateVersion,
+  );
+  if (!version) throw new Error("Pinned version row missing.");
+  const target = version.nodes.find((n) => n.id === targetNodeId);
+  if (!target) {
+    throw new Error(`Target node ${targetNodeId} is not in this template.`);
+  }
+  if (target.type === "START" || target.type === "END") {
+    throw new Error(`Cannot send back to ${target.type} node.`);
+  }
+
+  // Mark original task SENT_BACK (preserved for audit, NOT cancelled).
+  const closedResult = await query(
+    `
+    UPDATE capability_business_tasks SET
+      status                  = 'SENT_BACK',
+      sent_back_from_node_id  = $3,
+      sent_back_reason        = $4,
+      completed_at            = NOW()
+    WHERE capability_id = $1 AND id = $2
+    RETURNING *
+    `,
+    [capabilityId, taskId, targetNodeId, reason],
+  );
+  const closedTask = rowToTask(closedResult.rows[0] as Record<string, unknown>);
+
+  // Reset PARALLEL_JOIN counters on any join sitting between target
+  // and source — otherwise a join that already counted us would still
+  // be holding a stale arrival.
+  const joins = findJoinsBetween(
+    targetNodeId,
+    closedTaskBefore.nodeId,
+    version.nodes,
+    version.edges,
+  );
+  if (joins.length > 0) {
+    const meta = { ...(instance.metadata || {}) };
+    const arrivals = (meta.joinArrivals as Record<string, number>) || {};
+    for (const joinId of joins) {
+      delete arrivals[joinId];
+    }
+    meta.joinArrivals = arrivals;
+    await query(
+      `UPDATE capability_business_workflow_instances
+       SET metadata = $3::jsonb, updated_at = NOW()
+       WHERE capability_id = $1 AND id = $2`,
+      [capabilityId, instance.id, JSON.stringify(meta)],
+    );
+  }
+
+  // Remove the source node from active and activate the target.
+  const refreshedInstance = (await fetchInstance(capabilityId, instance.id))!;
+  refreshedInstance.activeNodeIds = refreshedInstance.activeNodeIds.filter(
+    (id) => id !== closedTaskBefore.nodeId,
+  );
+  await updateInstance(refreshedInstance);
+
+  await emitEvent({
+    capabilityId,
+    instanceId: instance.id,
+    nodeId: closedTaskBefore.nodeId,
+    eventType: "TASK_SENT_BACK",
+    actorId,
+    payload: { targetNodeId, reason, taskId },
+  });
+
+  const customBaseTypes = await loadCustomNodeBaseTypeMap(capabilityId);
+  await activateNode(
+    {
+      instance: (await fetchInstance(capabilityId, instance.id))!,
+      version,
+      customBaseTypes,
+      actorId,
+    },
+    target,
+  );
+
+  return { closedTask, activatedNodeId: target.id };
+};
+
+export const sendBackBusinessApproval = async ({
+  capabilityId,
+  approvalId,
+  targetNodeId,
+  actorId,
+  reason,
+}: {
+  capabilityId: string;
+  approvalId: string;
+  targetNodeId: string;
+  actorId: string;
+  reason: string;
+}): Promise<{ closedApproval: BusinessApproval; activatedNodeId: string } | null> => {
+  const approvalRowResult = await query(
+    `SELECT * FROM capability_business_approvals
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, approvalId],
+  );
+  if (approvalRowResult.rows.length === 0) return null;
+  const before = rowToApproval(
+    approvalRowResult.rows[0] as Record<string, unknown>,
+  );
+  if (before.status !== "PENDING") {
+    throw new Error(`Approval ${approvalId} is no longer pending.`);
+  }
+  const instance = await fetchInstance(capabilityId, before.instanceId);
+  if (!instance) throw new Error("Instance not found.");
+  await assertInstanceNotPaused(capabilityId, instance.id);
+  const version = await fetchTemplateVersion(
+    capabilityId,
+    instance.templateId,
+    instance.templateVersion,
+  );
+  if (!version) throw new Error("Pinned version row missing.");
+  const target = version.nodes.find((n) => n.id === targetNodeId);
+  if (!target) throw new Error(`Target node ${targetNodeId} not in template.`);
+  if (target.type === "START" || target.type === "END") {
+    throw new Error(`Cannot send back to ${target.type} node.`);
+  }
+
+  const closedResult = await query(
+    `
+    UPDATE capability_business_approvals SET
+      status                  = 'NEEDS_MORE_INFORMATION',
+      sent_back_from_node_id  = $3,
+      sent_back_reason        = $4,
+      decided_by              = $5,
+      decided_at              = NOW(),
+      notes                   = COALESCE(notes, '') || E'\n[sent back]'
+    WHERE capability_id = $1 AND id = $2
+    RETURNING *
+    `,
+    [capabilityId, approvalId, targetNodeId, reason, actorId],
+  );
+  const closedApproval = rowToApproval(
+    closedResult.rows[0] as Record<string, unknown>,
+  );
+
+  // Same active-set + join-counter cleanup as task send-back.
+  const joins = findJoinsBetween(
+    targetNodeId,
+    before.nodeId,
+    version.nodes,
+    version.edges,
+  );
+  if (joins.length > 0) {
+    const meta = { ...(instance.metadata || {}) };
+    const arrivals = (meta.joinArrivals as Record<string, number>) || {};
+    for (const joinId of joins) delete arrivals[joinId];
+    meta.joinArrivals = arrivals;
+    await query(
+      `UPDATE capability_business_workflow_instances
+       SET metadata = $3::jsonb, updated_at = NOW()
+       WHERE capability_id = $1 AND id = $2`,
+      [capabilityId, instance.id, JSON.stringify(meta)],
+    );
+  }
+
+  const refreshed = (await fetchInstance(capabilityId, instance.id))!;
+  refreshed.activeNodeIds = refreshed.activeNodeIds.filter(
+    (id) => id !== before.nodeId,
+  );
+  await updateInstance(refreshed);
+
+  await emitEvent({
+    capabilityId,
+    instanceId: instance.id,
+    nodeId: before.nodeId,
+    eventType: "APPROVAL_SENT_BACK",
+    actorId,
+    payload: { targetNodeId, reason, approvalId },
+  });
+
+  const customBaseTypes = await loadCustomNodeBaseTypeMap(capabilityId);
+  await activateNode(
+    {
+      instance: (await fetchInstance(capabilityId, instance.id))!,
+      version,
+      customBaseTypes,
+      actorId,
+    },
+    target,
+  );
+
+  return { closedApproval, activatedNodeId: target.id };
+};
+
+// ── Ad-hoc tasks ─────────────────────────────────────────────────────────────
+
+export const createAdHocTask = async ({
+  capabilityId,
+  instanceId,
+  actorId,
+  title,
+  description,
+  assignment,
+  priority,
+  dueAt,
+  formSchema,
+  blocking,
+  parentTaskId,
+}: {
+  capabilityId: string;
+  instanceId: string;
+  actorId: string;
+  title: string;
+  description?: string;
+  assignment: {
+    mode: AssignmentMode;
+    userId?: string;
+    teamId?: string;
+    role?: string;
+    skill?: string;
+  };
+  priority?: TaskPriority;
+  dueAt?: string;
+  formSchema?: FormSchema | null;
+  blocking?: boolean;
+  parentTaskId?: string;
+}): Promise<BusinessTask> => {
+  const instance = await fetchInstance(capabilityId, instanceId);
+  if (!instance) throw new Error(`Instance ${instanceId} not found.`);
+  if (
+    instance.status === "COMPLETED" ||
+    instance.status === "CANCELLED" ||
+    instance.status === "FAILED"
+  ) {
+    throw new Error(`Instance ${instanceId} is ${instance.status}.`);
+  }
+  const id = createId("BTASK");
+  // Synthetic node_id so the canvas — which keys off pinned version
+  // node ids — never tries to render an ad-hoc task as a graph node.
+  const syntheticNodeId = `adhoc-${id.toLowerCase()}`;
+  const result = await query(
+    `
+    INSERT INTO capability_business_tasks
+      (capability_id, id, instance_id, node_id, title, description, status,
+       assignment_mode, assigned_user_id, assigned_team_id, assigned_role,
+       assigned_skill, due_at, priority, form_schema,
+       is_ad_hoc, ad_hoc_blocking, parent_task_id, created_by)
+    VALUES ($1, $2, $3, $4, $5, $6, 'OPEN',
+            $7, $8, $9, $10, $11, $12, $13, $14::jsonb,
+            TRUE, $15, $16, $17)
+    RETURNING *
+    `,
+    [
+      capabilityId,
+      id,
+      instanceId,
+      syntheticNodeId,
+      title,
+      description || null,
+      assignment.mode,
+      assignment.userId || null,
+      assignment.teamId || null,
+      assignment.role || null,
+      assignment.skill || null,
+      dueAt || null,
+      priority || "NORMAL",
+      formSchema ? JSON.stringify(formSchema) : null,
+      blocking === true,
+      parentTaskId || null,
+      actorId,
+    ],
+  );
+  const task = rowToTask(result.rows[0] as Record<string, unknown>);
+  await emitEvent({
+    capabilityId,
+    instanceId,
+    nodeId: syntheticNodeId,
+    eventType: "AD_HOC_TASK_CREATED",
+    actorId,
+    payload: { taskId: id, title, blocking: blocking === true, parentTaskId },
+  });
+  if (blocking) {
+    // Auto-pause the planned graph until the operator finishes the
+    // side errand. resumeBusinessInstance is called from
+    // completeBusinessTask when this ad-hoc closes.
+    try {
+      await pauseBusinessInstance({
+        capabilityId,
+        instanceId,
+        actorId,
+        reason: `Blocking ad-hoc task: ${title}`,
+      });
+    } catch {
+      // Already paused or something else — that's fine, the ad-hoc
+      // still got created and event-logged.
+    }
+  }
+  return task;
+};
+
+// ── Pause / Resume ───────────────────────────────────────────────────────────
+
+export const pauseBusinessInstance = async ({
+  capabilityId,
+  instanceId,
+  actorId,
+  reason,
+}: {
+  capabilityId: string;
+  instanceId: string;
+  actorId: string;
+  reason?: string;
+}): Promise<BusinessWorkflowInstance | null> => {
+  // Pause is only valid from RUNNING. Pausing a paused/completed/
+  // cancelled instance is a no-op so the caller doesn't have to know.
+  const result = await query(
+    `
+    UPDATE capability_business_workflow_instances SET
+      status        = 'PAUSED',
+      paused_at     = NOW(),
+      paused_by     = $3,
+      paused_reason = $4
+    WHERE capability_id = $1 AND id = $2 AND status = 'RUNNING'
+    RETURNING *
+    `,
+    [capabilityId, instanceId, actorId, reason || null],
+  );
+  if (result.rows.length === 0) {
+    // Not RUNNING — return current state so the UI can reflect it.
+    return fetchInstance(capabilityId, instanceId);
+  }
+  const inst = rowToInstance(result.rows[0] as Record<string, unknown>);
+  await emitEvent({
+    capabilityId,
+    instanceId,
+    eventType: "INSTANCE_PAUSED",
+    actorId,
+    payload: reason ? { reason } : undefined,
+  });
+  return inst;
+};
+
+export const resumeBusinessInstance = async ({
+  capabilityId,
+  instanceId,
+  actorId,
+}: {
+  capabilityId: string;
+  instanceId: string;
+  actorId: string;
+}): Promise<BusinessWorkflowInstance | null> => {
+  const result = await query(
+    `
+    UPDATE capability_business_workflow_instances SET
+      status        = 'RUNNING',
+      paused_at     = NULL,
+      paused_by     = NULL,
+      paused_reason = NULL
+    WHERE capability_id = $1 AND id = $2 AND status = 'PAUSED'
+    RETURNING *
+    `,
+    [capabilityId, instanceId],
+  );
+  if (result.rows.length === 0) {
+    return fetchInstance(capabilityId, instanceId);
+  }
+  const inst = rowToInstance(result.rows[0] as Record<string, unknown>);
+  await emitEvent({
+    capabilityId,
+    instanceId,
+    eventType: "INSTANCE_RESUMED",
+    actorId,
+  });
+  return inst;
+};
+
+// ── Notes ────────────────────────────────────────────────────────────────────
+
+/**
+ * Notes live in the events table — no separate notes table. A note is
+ * just an INSTANCE_NOTE_ADDED event with `payload.body`. The
+ * NotesPanel filters the timeline for these.
+ */
+export const addInstanceNote = async ({
+  capabilityId,
+  instanceId,
+  actorId,
+  note,
+  taskId,
+  approvalId,
+}: {
+  capabilityId: string;
+  instanceId: string;
+  actorId: string;
+  note: string;
+  taskId?: string;
+  approvalId?: string;
+}): Promise<BusinessWorkflowEvent> => {
+  const inst = await fetchInstance(capabilityId, instanceId);
+  if (!inst) throw new Error(`Instance ${instanceId} not found.`);
+  return emitEvent({
+    capabilityId,
+    instanceId,
+    eventType: "INSTANCE_NOTE_ADDED",
+    actorId,
+    payload: { body: note, taskId, approvalId },
+  });
+};
+
+// ── Aggregate stats for status report ────────────────────────────────────────
+
+export const aggregateBusinessTemplateStats = async ({
+  capabilityId,
+  templateId,
+}: {
+  capabilityId: string;
+  templateId: string;
+}): Promise<{
+  byStatus: Record<BusinessInstanceStatus, number>;
+  avgDurationMs: number | null;
+  overdueTaskCount: number;
+  pendingApprovalCount: number;
+  recentInstances: BusinessWorkflowInstance[];
+}> => {
+  // Counts by instance status
+  const statusResult = await query(
+    `
+    SELECT status, COUNT(*)::int AS n
+    FROM capability_business_workflow_instances
+    WHERE capability_id = $1 AND template_id = $2
+    GROUP BY status
+    `,
+    [capabilityId, templateId],
+  );
+  const byStatus: Record<BusinessInstanceStatus, number> = {
+    RUNNING: 0,
+    PAUSED: 0,
+    COMPLETED: 0,
+    CANCELLED: 0,
+    FAILED: 0,
+  };
+  for (const row of statusResult.rows) {
+    const r = row as { status: string; n: number };
+    if (r.status in byStatus) {
+      byStatus[r.status as BusinessInstanceStatus] = Number(r.n);
+    }
+  }
+  // Average duration over completed instances
+  const avgResult = await query(
+    `
+    SELECT AVG(EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)::float8 AS avg_ms
+    FROM capability_business_workflow_instances
+    WHERE capability_id = $1 AND template_id = $2 AND status = 'COMPLETED'
+    `,
+    [capabilityId, templateId],
+  );
+  const avgDurationMs = (avgResult.rows[0] as { avg_ms: number | null })
+    ?.avg_ms;
+  // Overdue tasks across this template's instances
+  const overdueResult = await query(
+    `
+    SELECT COUNT(*)::int AS n
+    FROM capability_business_tasks t
+    JOIN capability_business_workflow_instances i
+      ON i.capability_id = t.capability_id AND i.id = t.instance_id
+    WHERE t.capability_id = $1 AND i.template_id = $2
+      AND t.status IN ('OPEN','CLAIMED','IN_PROGRESS')
+      AND t.due_at IS NOT NULL AND t.due_at < NOW()
+    `,
+    [capabilityId, templateId],
+  );
+  const overdueTaskCount = Number(
+    (overdueResult.rows[0] as { n: number })?.n || 0,
+  );
+  // Pending approvals
+  const pendingResult = await query(
+    `
+    SELECT COUNT(*)::int AS n
+    FROM capability_business_approvals a
+    JOIN capability_business_workflow_instances i
+      ON i.capability_id = a.capability_id AND i.id = a.instance_id
+    WHERE a.capability_id = $1 AND i.template_id = $2
+      AND a.status = 'PENDING'
+    `,
+    [capabilityId, templateId],
+  );
+  const pendingApprovalCount = Number(
+    (pendingResult.rows[0] as { n: number })?.n || 0,
+  );
+  // Recent instances (top 10) for the dashboard table
+  const recentResult = await query(
+    `
+    SELECT * FROM capability_business_workflow_instances
+    WHERE capability_id = $1 AND template_id = $2
+    ORDER BY started_at DESC
+    LIMIT 10
+    `,
+    [capabilityId, templateId],
+  );
+  const recentInstances = recentResult.rows.map((row) =>
+    rowToInstance(row as Record<string, unknown>),
+  );
+  return {
+    byStatus,
+    avgDurationMs:
+      avgDurationMs == null ? null : Number(avgDurationMs),
+    overdueTaskCount,
+    pendingApprovalCount,
+    recentInstances,
+  };
 };

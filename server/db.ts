@@ -3604,6 +3604,44 @@ export const migrationStatements = [
     CREATE INDEX IF NOT EXISTS capability_business_workflow_template_versions_template_idx
       ON capability_business_workflow_template_versions (capability_id, template_id, version DESC)
   `,
+  // ── V2 runtime additions: send-back, reassign, ad-hoc, pause/resume ─────────
+  `
+    ALTER TABLE capability_business_tasks
+      ADD COLUMN IF NOT EXISTS sent_back_from_node_id TEXT,
+      ADD COLUMN IF NOT EXISTS sent_back_reason       TEXT,
+      ADD COLUMN IF NOT EXISTS reassigned_at          TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS reassigned_by          TEXT,
+      ADD COLUMN IF NOT EXISTS is_ad_hoc              BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS ad_hoc_blocking        BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS parent_task_id         TEXT,
+      ADD COLUMN IF NOT EXISTS created_by             TEXT
+  `,
+  `
+    ALTER TABLE capability_business_approvals
+      ADD COLUMN IF NOT EXISTS sent_back_from_node_id TEXT,
+      ADD COLUMN IF NOT EXISTS sent_back_reason       TEXT,
+      ADD COLUMN IF NOT EXISTS reassigned_at          TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS reassigned_by          TEXT
+  `,
+  `
+    ALTER TABLE capability_business_workflow_instances
+      ADD COLUMN IF NOT EXISTS paused_at      TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS paused_by      TEXT,
+      ADD COLUMN IF NOT EXISTS paused_reason  TEXT
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_business_instances_status_idx
+      ON capability_business_workflow_instances (capability_id, template_id, status)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_business_approvals_status_idx
+      ON capability_business_approvals (capability_id, status)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_business_tasks_due_idx
+      ON capability_business_tasks (capability_id, due_at)
+      WHERE status IN ('OPEN','CLAIMED','IN_PROGRESS')
+  `,
 ];
 
 const detectOptionalPlatformExtensions = async (client: PoolClient) => {
