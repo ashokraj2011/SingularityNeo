@@ -37,6 +37,7 @@ import type {
 import { cn } from "../lib/utils";
 import { SlaChip } from "./businessWorkflow/runtime/components/SlaChip";
 import { PriorityBadge } from "./businessWorkflow/runtime/components/PriorityBadge";
+import { DocumentsCountChip } from "./businessWorkflow/runtime/components/DocumentsCountChip";
 import { ReassignPopover } from "./businessWorkflow/runtime/ReassignPopover";
 import { SendBackPanel } from "./businessWorkflow/runtime/SendBackPanel";
 
@@ -332,6 +333,7 @@ const BusinessWorkflowInbox = () => {
             <div className="mt-1 flex flex-wrap items-center gap-1.5">
               <SlaChip dueAt={t.dueAt} size="xs" />
               <PriorityBadge priority={t.priority as TaskPriority} size="xs" />
+              <DocumentsCountChip count={t.documentsCount} />
               <span
                 className={cn(
                   "rounded-full px-1.5 py-0.5 text-[0.55rem] font-semibold uppercase ring-1",

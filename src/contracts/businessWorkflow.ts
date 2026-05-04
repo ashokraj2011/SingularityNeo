@@ -456,6 +456,14 @@ export interface BusinessTask {
   /** The actor who created this task — the `started_by` of the
    *  instance for planned tasks, the operator for ad-hoc. */
   createdBy?: string;
+  /**
+   * Count of documents attached to this task's instance (read from
+   * `instance.context.__documents`). Surfaced on the task row so the
+   * assignee sees "this task has 3 docs" without opening the
+   * instance dashboard. Computed by `listBusinessTasks` server-side;
+   * may be undefined for callers that don't include the join.
+   */
+  documentsCount?: number;
 }
 
 export interface BusinessApproval {

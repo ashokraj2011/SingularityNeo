@@ -18,6 +18,7 @@ import { cn } from "../../../lib/utils";
 import { useToast } from "../../../context/ToastContext";
 import { SlaChip } from "./components/SlaChip";
 import { PriorityBadge } from "./components/PriorityBadge";
+import { DocumentsCountChip } from "./components/DocumentsCountChip";
 import { ReassignPopover } from "./ReassignPopover";
 import { SendBackPanel } from "./SendBackPanel";
 import type {
@@ -198,6 +199,7 @@ export const ActiveTasksPanel = ({
                       size="xs"
                       withLabel={false}
                     />
+                    <DocumentsCountChip count={task.documentsCount} />
                     {task.isAdHoc && (
                       <span className="rounded-full bg-pink-100 px-1.5 py-0.5 text-[0.55rem] font-semibold text-pink-700 ring-1 ring-pink-300">
                         ad-hoc

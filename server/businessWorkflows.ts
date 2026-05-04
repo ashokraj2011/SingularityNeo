@@ -1107,25 +1107,47 @@ export const listBusinessTasks = async ({
   status?: TaskStatus | "OPEN_OR_CLAIMED";
   limit?: number;
 }): Promise<BusinessTask[]> => {
+  // Join in a `documents_count` per task. Computed from
+  // jsonb_array_length(instance.context->'__documents') with a
+  // COALESCE to 0 when the key isn't present. Single subquery per
+  // row — cheap because the instance lookup hits the (capability_id,
+  // id) primary key.
   const params: unknown[] = [capabilityId];
-  let where = "WHERE capability_id = $1";
+  let where = "WHERE t.capability_id = $1";
   if (status === "OPEN_OR_CLAIMED") {
-    where += ` AND status IN ('OPEN', 'CLAIMED', 'IN_PROGRESS')`;
+    where += ` AND t.status IN ('OPEN', 'CLAIMED', 'IN_PROGRESS')`;
   } else if (status) {
     params.push(status);
-    where += ` AND status = $${params.length}`;
+    where += ` AND t.status = $${params.length}`;
   }
   params.push(Math.max(1, Math.min(500, limit)));
   const result = await query(
     `
-    SELECT * FROM capability_business_tasks
+    SELECT t.*,
+      COALESCE(
+        (SELECT jsonb_array_length(i.context -> '__documents')
+         FROM capability_business_workflow_instances i
+         WHERE i.capability_id = t.capability_id
+           AND i.id = t.instance_id
+           AND jsonb_typeof(i.context -> '__documents') = 'array'),
+        0
+      ) AS documents_count
+    FROM capability_business_tasks t
     ${where}
-    ORDER BY created_at DESC
+    ORDER BY t.created_at DESC
     LIMIT $${params.length}
     `,
     params,
   );
-  return result.rows.map((row) => rowToTask(row as Record<string, unknown>));
+  return result.rows.map((row) => {
+    const r = row as Record<string, unknown>;
+    const task = rowToTask(r);
+    task.documentsCount =
+      typeof r.documents_count === "number"
+        ? r.documents_count
+        : Number(r.documents_count) || 0;
+    return task;
+  });
 };
 
 export const claimBusinessTask = async ({
