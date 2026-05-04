@@ -32,9 +32,11 @@ import {
   completeBusinessTask,
   createBusinessTemplate,
   decideBusinessApproval,
+  deleteBusinessCustomNodeType,
   fetchBusinessApproval,
   fetchBusinessTemplate,
   getBusinessInstance,
+  listBusinessCustomNodeTypes,
   listBusinessInstanceEvents,
   listBusinessTasks,
   listBusinessTemplateVersions,
@@ -42,6 +44,7 @@ import {
   publishBusinessTemplate,
   saveBusinessTemplateDraft,
   startBusinessInstance,
+  upsertBusinessCustomNodeType,
 } from "../businessWorkflows";
 import { sendApiError } from "../api/errors";
 import type { ApprovalStatus, TaskStatus } from "../../src/contracts/businessWorkflow";
@@ -370,6 +373,79 @@ export const registerBusinessWorkflowRoutes = (app: express.Express) => {
           return;
         }
         response.json({ approval });
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // ── Custom node types ──────────────────────────────────────────────────
+
+  app.get(
+    "/api/capabilities/:capabilityId/business-workflow-node-types",
+    async (request, response) => {
+      try {
+        const types = await listBusinessCustomNodeTypes(
+          trim(request.params.capabilityId),
+        );
+        response.json({ types });
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.put(
+    "/api/capabilities/:capabilityId/business-workflow-node-types",
+    async (request, response) => {
+      try {
+        const capabilityId = trim(request.params.capabilityId);
+        const body = (request.body || {}) as {
+          id?: string;
+          name?: string;
+          baseType?: string;
+          label?: string;
+          color?: string;
+          icon?: string;
+          fields?: Array<{
+            key: string;
+            label: string;
+            placeholder?: string;
+            multiline?: boolean;
+          }>;
+        };
+        if (!body.name?.trim() || !body.baseType?.trim() || !body.label?.trim()) {
+          response
+            .status(400)
+            .json({ error: "name, baseType, and label are required" });
+          return;
+        }
+        const upserted = await upsertBusinessCustomNodeType({
+          capabilityId,
+          id: body.id,
+          name: body.name,
+          baseType: body.baseType as never,
+          label: body.label,
+          color: body.color,
+          icon: body.icon,
+          fields: body.fields || [],
+        });
+        response.json({ type: upserted });
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  app.delete(
+    "/api/capabilities/:capabilityId/business-workflow-node-types/:id",
+    async (request, response) => {
+      try {
+        await deleteBusinessCustomNodeType(
+          trim(request.params.capabilityId),
+          trim(request.params.id),
+        );
+        response.json({ ok: true });
       } catch (error) {
         sendApiError(response, error);
       }

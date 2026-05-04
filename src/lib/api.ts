@@ -1294,6 +1294,56 @@ export const decideBusinessApproval = async (
   return result.approval;
 };
 
+// ── Custom node types ─────────────────────────────────────────────────────
+
+import type {
+  BusinessCustomNodeType,
+  BusinessNodeBaseType,
+  CustomNodeTypeFieldDef,
+} from "../contracts/businessWorkflow";
+
+export const listBusinessCustomNodeTypes = async (
+  capabilityId: string,
+): Promise<BusinessCustomNodeType[]> => {
+  const result = await requestJson<{ types: BusinessCustomNodeType[] }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflow-node-types`,
+  );
+  return result.types;
+};
+
+export const upsertBusinessCustomNodeType = async (
+  capabilityId: string,
+  payload: {
+    id?: string;
+    name: string;
+    baseType: BusinessNodeBaseType;
+    label: string;
+    color?: string;
+    icon?: string;
+    fields: CustomNodeTypeFieldDef[];
+  },
+): Promise<BusinessCustomNodeType> => {
+  const result = await requestJson<{ type: BusinessCustomNodeType }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflow-node-types`,
+    {
+      method: "PUT",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+  return result.type;
+};
+
+export const deleteBusinessCustomNodeType = async (
+  capabilityId: string,
+  id: string,
+): Promise<void> => {
+  await requestJson<{ ok: true }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/business-workflow-node-types/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+};
+
 // ── LLM context log ───────────────────────────────────────────────────────
 
 export const fetchCapabilityLlmContextLog = async (

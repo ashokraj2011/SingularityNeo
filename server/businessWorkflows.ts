@@ -1167,6 +1167,90 @@ const advanceFromCompletedNode = async ({
   }
 };
 
+// ── Custom node types ────────────────────────────────────────────────────────
+
+import type { BusinessCustomNodeType } from "../src/contracts/businessWorkflow";
+
+const rowToCustomType = (
+  row: Record<string, unknown>,
+): BusinessCustomNodeType => ({
+  capabilityId: String(row.capability_id),
+  id: String(row.id),
+  name: String(row.name),
+  baseType: String(row.base_type) as BusinessCustomNodeType["baseType"],
+  label: String(row.label),
+  color: row.color ? String(row.color) : undefined,
+  icon: row.icon ? String(row.icon) : undefined,
+  fields: asJsonArray<BusinessCustomNodeType["fields"][number]>(row.fields),
+  createdAt: asIso(row.created_at),
+  updatedAt: asIso(row.updated_at),
+});
+
+export const listBusinessCustomNodeTypes = async (
+  capabilityId: string,
+): Promise<BusinessCustomNodeType[]> => {
+  const result = await query(
+    `SELECT * FROM capability_business_workflow_custom_node_types
+     WHERE capability_id = $1
+     ORDER BY label ASC`,
+    [capabilityId],
+  );
+  return result.rows.map((row) =>
+    rowToCustomType(row as Record<string, unknown>),
+  );
+};
+
+export const upsertBusinessCustomNodeType = async ({
+  capabilityId,
+  id,
+  name,
+  baseType,
+  label,
+  color,
+  icon,
+  fields,
+}: Omit<BusinessCustomNodeType, "createdAt" | "updatedAt"> & { id?: string }): Promise<BusinessCustomNodeType> => {
+  const ensuredId = id || createId("BCNT");
+  const result = await query(
+    `
+    INSERT INTO capability_business_workflow_custom_node_types
+      (capability_id, id, name, base_type, label, color, icon, fields)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+    ON CONFLICT (capability_id, id) DO UPDATE SET
+      name       = EXCLUDED.name,
+      base_type  = EXCLUDED.base_type,
+      label      = EXCLUDED.label,
+      color      = EXCLUDED.color,
+      icon       = EXCLUDED.icon,
+      fields     = EXCLUDED.fields,
+      updated_at = NOW()
+    RETURNING *
+    `,
+    [
+      capabilityId,
+      ensuredId,
+      name,
+      baseType,
+      label,
+      color || null,
+      icon || null,
+      JSON.stringify(fields || []),
+    ],
+  );
+  return rowToCustomType(result.rows[0] as Record<string, unknown>);
+};
+
+export const deleteBusinessCustomNodeType = async (
+  capabilityId: string,
+  id: string,
+): Promise<void> => {
+  await query(
+    `DELETE FROM capability_business_workflow_custom_node_types
+     WHERE capability_id = $1 AND id = $2`,
+    [capabilityId, id],
+  );
+};
+
 // ── Events read ──────────────────────────────────────────────────────────────
 
 export const listBusinessInstanceEvents = async (

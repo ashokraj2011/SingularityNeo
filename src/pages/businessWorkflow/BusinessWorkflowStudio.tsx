@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Check, Loader2, Save, Send, History } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  History,
+  Loader2,
+  Save,
+  Send,
+  Sparkles,
+} from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useCapability } from "../../context/CapabilityContext";
 import { useToast } from "../../context/ToastContext";
 import {
   fetchBusinessWorkflow,
+  listBusinessCustomNodeTypes,
   publishBusinessWorkflow,
   saveBusinessWorkflow,
 } from "../../lib/api";
@@ -16,10 +25,12 @@ import {
   newBusinessNode,
   removeEdge,
   removeNode,
+  updateEdge,
   updateNode,
   validateGraph,
 } from "../../lib/businessWorkflowGraph";
 import type {
+  BusinessCustomNodeType,
   BusinessEdge,
   BusinessNode,
   BusinessNodeBaseType,
@@ -29,6 +40,8 @@ import type {
 import { Canvas } from "./Canvas";
 import { NodePalette } from "./NodePalette";
 import { NodeInspector } from "./NodeInspector";
+import { EdgeInspector } from "./EdgeInspector";
+import { CustomNodeTypeModal } from "./CustomNodeTypeModal";
 import { cn } from "../../lib/utils";
 
 type Selection =
@@ -54,9 +67,26 @@ export const BusinessWorkflowStudio = ({ templateId }: Props) => {
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [name, setName] = useState("");
+  const [customNodeTypes, setCustomNodeTypes] = useState<
+    BusinessCustomNodeType[]
+  >([]);
+  const [showCustomTypesModal, setShowCustomTypesModal] = useState(false);
 
   const workspace = getCapabilityWorkspace(activeCapability.id);
   const capabilityAgents = workspace.agents;
+
+  const refreshCustomNodeTypes = useCallback(async () => {
+    try {
+      const list = await listBusinessCustomNodeTypes(activeCapability.id);
+      setCustomNodeTypes(list);
+    } catch {
+      // Non-fatal — palette just won't include custom types.
+    }
+  }, [activeCapability.id]);
+
+  useEffect(() => {
+    void refreshCustomNodeTypes();
+  }, [refreshCustomNodeTypes]);
 
   const issues = useMemo(() => validateGraph({ nodes, edges }), [nodes, edges]);
 
@@ -96,14 +126,40 @@ export const BusinessWorkflowStudio = ({ templateId }: Props) => {
     [selection, nodes],
   );
 
-  const handleAddNode = useCallback((type: BusinessNodeBaseType) => {
-    const node = newBusinessNode(type, {
-      x: 200 + Math.round(Math.random() * 200),
-      y: 200 + Math.round(Math.random() * 200),
-    });
-    setNodes((prev) => addNodeFn(prev, node));
-    setSelection({ kind: "node", id: node.id });
-  }, []);
+  const selectedEdge = useMemo(
+    () =>
+      selection?.kind === "edge"
+        ? edges.find((e) => e.id === selection.id) || null
+        : null,
+    [selection, edges],
+  );
+
+  const handleEdgePatch = useCallback(
+    (patch: Partial<BusinessEdge>) => {
+      if (selection?.kind !== "edge") return;
+      setEdges((prev) => updateEdge(prev, selection.id, patch));
+    },
+    [selection],
+  );
+
+  const handleAddNode = useCallback(
+    (type: string) => {
+      // For custom node types, use the registered label; for base types
+      // the palette label suffices.
+      const custom = customNodeTypes.find((t) => t.name === type);
+      const node = newBusinessNode(
+        type,
+        {
+          x: 240 + Math.round(Math.random() * 240),
+          y: 200 + Math.round(Math.random() * 200),
+        },
+        custom?.label,
+      );
+      setNodes((prev) => addNodeFn(prev, node));
+      setSelection({ kind: "node", id: node.id });
+    },
+    [customNodeTypes],
+  );
 
   const handleMoveNode = useCallback(
     (nodeId: string, position: { x: number; y: number }) => {
@@ -318,11 +374,23 @@ export const BusinessWorkflowStudio = ({ templateId }: Props) => {
             {versions.length} versions
           </span>
         )}
+        <button
+          type="button"
+          onClick={() => setShowCustomTypesModal(true)}
+          className="inline-flex items-center gap-1 rounded-lg border border-outline-variant/40 bg-white px-2 py-1.5 text-[0.7rem] font-semibold text-on-surface hover:bg-surface-container"
+          title="Manage capability-specific node types (e.g. 'Marketing Review')"
+        >
+          <Sparkles size={11} />
+          Custom Types ({customNodeTypes.length})
+        </button>
       </header>
 
       {/* 3-pane body */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <NodePalette onAdd={handleAddNode} />
+        <NodePalette
+          onAdd={handleAddNode}
+          customNodeTypes={customNodeTypes}
+        />
         <Canvas
           nodes={nodes}
           edges={edges}
@@ -339,14 +407,43 @@ export const BusinessWorkflowStudio = ({ templateId }: Props) => {
             onChange={handleNodePatch}
             onDelete={handleDeleteSelection}
           />
+        ) : selectedEdge ? (
+          <EdgeInspector
+            edge={selectedEdge}
+            sourceLabel={
+              nodes.find((n) => n.id === selectedEdge.sourceNodeId)?.label ||
+              selectedEdge.sourceNodeId
+            }
+            targetLabel={
+              nodes.find((n) => n.id === selectedEdge.targetNodeId)?.label ||
+              selectedEdge.targetNodeId
+            }
+            onChange={handleEdgePatch}
+            onDelete={handleDeleteSelection}
+          />
         ) : (
           <aside className="flex w-80 shrink-0 flex-col gap-3 border-l border-outline-variant/30 bg-surface-container-low p-4">
             <p className="text-[0.62rem] font-semibold uppercase tracking-wider text-secondary">
               Inspector
             </p>
             <p className="text-xs text-outline">
-              Select a node to edit its config.
+              Select a node to edit its config — or click an edge to add an
+              AND/OR routing condition.
             </p>
+            <div className="rounded-lg border border-sky-200 bg-sky-50 p-2 text-[0.7rem] text-sky-900">
+              <p className="font-semibold">Wiring tips</p>
+              <ul className="mt-1 list-disc pl-4 space-y-0.5">
+                <li>
+                  <strong>Drag</strong> the right-edge → handle to another
+                  node.
+                </li>
+                <li>
+                  Or <strong>click</strong> the → handle, then click any
+                  target node.
+                </li>
+                <li>Esc cancels. Delete/Backspace removes selection.</li>
+              </ul>
+            </div>
             {issues.length > 0 ? (
               <div className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-[0.7rem] text-amber-800">
                 <p className="font-semibold">Validation</p>
@@ -365,6 +462,13 @@ export const BusinessWorkflowStudio = ({ templateId }: Props) => {
           </aside>
         )}
       </div>
+
+      <CustomNodeTypeModal
+        capabilityId={activeCapability.id}
+        open={showCustomTypesModal}
+        onClose={() => setShowCustomTypesModal(false)}
+        onChanged={() => void refreshCustomNodeTypes()}
+      />
     </div>
   );
 };

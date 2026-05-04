@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
+import { ArrowRight } from "lucide-react";
 import { cn } from "../../lib/utils";
 import type {
   BusinessEdge,
@@ -6,8 +7,8 @@ import type {
 } from "../../contracts/businessWorkflow";
 import { PALETTE_BY_TYPE } from "./NodePalette";
 
-const NODE_WIDTH = 160;
-const NODE_HEIGHT = 56;
+const NODE_WIDTH = 180;
+const NODE_HEIGHT = 64;
 
 type Selection =
   | { kind: "node"; id: string }
@@ -50,6 +51,7 @@ export const Canvas = ({
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
   const [pointer, setPointer] = useState<{ x: number; y: number } | null>(null);
+  const [hoveredTargetId, setHoveredTargetId] = useState<string | null>(null);
 
   const nodeMap = useMemo(() => {
     const map = new Map<string, BusinessNode>();
@@ -107,6 +109,27 @@ export const Canvas = ({
         onConnect(connectFrom, nodeId);
       }
       setConnectFrom(null);
+      setHoveredTargetId(null);
+    },
+    [connectFrom, onConnect],
+  );
+
+  /**
+   * Click-then-click alternative for users who can't reliably drag the
+   * tiny handle. Click a node's right-side "→" badge once to ARM
+   * connection mode, then click any other node to complete.
+   */
+  const handleNodeClickWhileConnecting = useCallback(
+    (nodeId: string) => {
+      if (!connectFrom) return false;
+      if (connectFrom === nodeId) {
+        setConnectFrom(null);
+        return true;
+      }
+      onConnect(connectFrom, nodeId);
+      setConnectFrom(null);
+      setHoveredTargetId(null);
+      return true;
     },
     [connectFrom, onConnect],
   );
@@ -124,8 +147,13 @@ export const Canvas = ({
           onDeleteSelection();
         }
       }
+      if (event.key === "Escape" && connectFrom) {
+        event.preventDefault();
+        setConnectFrom(null);
+        setHoveredTargetId(null);
+      }
     },
-    [onDeleteSelection, selection],
+    [connectFrom, onDeleteSelection, selection],
   );
 
   return (
@@ -203,14 +231,25 @@ export const Canvas = ({
         const Icon = palette?.icon;
         const isSelected =
           selection?.kind === "node" && selection.id === node.id;
+        const isConnectSource = connectFrom === node.id;
+        const isPotentialTarget =
+          Boolean(connectFrom) && connectFrom !== node.id;
+        const isHoveredTarget =
+          isPotentialTarget && hoveredTargetId === node.id;
         return (
           <div
             key={node.id}
             className={cn(
-              "absolute select-none rounded-xl border-2 bg-white shadow-sm",
-              isSelected
+              "absolute select-none rounded-xl border-2 bg-white shadow-sm transition-colors",
+              isSelected && !isPotentialTarget
                 ? "border-primary"
-                : "border-outline-variant/40",
+                : isHoveredTarget
+                  ? "border-emerald-500 ring-4 ring-emerald-200"
+                  : isConnectSource
+                    ? "border-amber-500 ring-4 ring-amber-200"
+                    : isPotentialTarget
+                      ? "border-emerald-300 cursor-crosshair"
+                      : "border-outline-variant/40",
             )}
             style={{
               left: node.position.x,
@@ -218,13 +257,35 @@ export const Canvas = ({
               width: NODE_WIDTH,
               height: NODE_HEIGHT,
             }}
-            onMouseDown={(e) => handleNodeMouseDown(e, node)}
+            onMouseDown={(e) => {
+              // If we're in connect-mode, clicking another node ends
+              // the connection — don't start a drag.
+              if (connectFrom && connectFrom !== node.id) {
+                e.stopPropagation();
+                return;
+              }
+              handleNodeMouseDown(e, node);
+            }}
+            onMouseEnter={() => {
+              if (isPotentialTarget) setHoveredTargetId(node.id);
+            }}
+            onMouseLeave={() => {
+              if (hoveredTargetId === node.id) setHoveredTargetId(null);
+            }}
             onMouseUp={(e) => {
               e.stopPropagation();
-              if (connectFrom) handleConnectEnd(node.id);
+              if (connectFrom && connectFrom !== node.id) {
+                handleConnectEnd(node.id);
+              }
+            }}
+            onClick={(e) => {
+              // Stop bubbling to the canvas background click
+              if (handleNodeClickWhileConnecting(node.id)) {
+                e.stopPropagation();
+              }
             }}
           >
-            <div className="flex h-full items-center gap-2 px-3">
+            <div className="flex h-full items-center gap-2 px-3 pr-9">
               {Icon && (
                 <span className={cn("rounded p-1 text-white", palette?.color)}>
                   <Icon size={14} />
@@ -239,16 +300,49 @@ export const Canvas = ({
                 </p>
               </div>
             </div>
-            {/* Connection handles */}
+
+            {/* Right-edge connection handle.
+              * Big enough to grab on a trackpad. Visible at all times.
+              * - Mouse-DOWN starts a drag-to-connect
+              * - CLICK arms click-then-click mode (then click a target)
+              * Both flows are equivalent; whichever the user prefers. */}
             <button
               type="button"
-              title="Drag to connect"
-              className="absolute -right-2 top-1/2 h-3 w-3 -translate-y-1/2 rounded-full border-2 border-primary bg-white hover:bg-primary"
+              title="Drag to another node, OR click here then click the target node, to connect"
+              className={cn(
+                "absolute -right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border-2 bg-white text-primary shadow-md hover:bg-primary hover:text-white",
+                isConnectSource ? "border-amber-500 bg-amber-100" : "border-primary",
+              )}
               onMouseDown={(e) => handleConnectStart(e, node.id)}
-            />
+              onClick={(e) => {
+                e.stopPropagation();
+                // If user just clicked (no drag), arm connect-mode.
+                if (!connectFrom) setConnectFrom(node.id);
+                else if (connectFrom !== node.id) {
+                  onConnect(connectFrom, node.id);
+                  setConnectFrom(null);
+                }
+              }}
+            >
+              <ArrowRight size={14} />
+            </button>
+
+            {/* Inbound landing strip on the left edge — purely visual,
+              * shows where targets accept incoming connections. */}
+            {isPotentialTarget && (
+              <div className="pointer-events-none absolute -left-2 top-1/2 h-6 w-3 -translate-y-1/2 rounded-l-md border-2 border-r-0 border-emerald-400 bg-emerald-200" />
+            )}
           </div>
         );
       })}
+
+      {/* Floating instruction banner when in connect mode */}
+      {connectFrom && (
+        <div className="pointer-events-none absolute left-1/2 top-2 -translate-x-1/2 rounded-full bg-amber-100 px-3 py-1 text-[0.7rem] font-semibold text-amber-800 shadow-md">
+          Connecting from {nodeMap.get(connectFrom)?.label || connectFrom} —
+          click another node, or press Esc to cancel
+        </div>
+      )}
     </div>
   );
 };

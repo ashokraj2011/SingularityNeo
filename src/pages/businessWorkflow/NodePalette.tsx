@@ -8,6 +8,7 @@ import {
   Hand,
   Mail,
   Play,
+  Sparkles,
   Square,
   Split,
   Wrench,
@@ -15,7 +16,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
-import type { BusinessNodeBaseType } from "../../contracts/businessWorkflow";
+import type {
+  BusinessCustomNodeType,
+  BusinessNodeBaseType,
+} from "../../contracts/businessWorkflow";
 
 interface PaletteEntry {
   type: BusinessNodeBaseType;
@@ -59,8 +63,11 @@ const GROUPS = ["Tasks", "Boundary", "Control flow", "Async", "Integration"];
 
 export const NodePalette = ({
   onAdd,
+  customNodeTypes = [],
 }: {
-  onAdd: (type: BusinessNodeBaseType) => void;
+  /** Called with the literal `node.type` string to create. */
+  onAdd: (type: string) => void;
+  customNodeTypes?: BusinessCustomNodeType[];
 }) => {
   return (
     <aside className="flex w-56 shrink-0 flex-col gap-3 overflow-y-auto border-r border-outline-variant/30 bg-surface-container-low p-3">
@@ -103,6 +110,40 @@ export const NodePalette = ({
           </div>
         );
       })}
+
+      {customNodeTypes.length > 0 && (
+        <div>
+          <p className="mb-1 flex items-center gap-1 text-[0.6rem] font-semibold uppercase text-outline">
+            <Sparkles size={9} /> Custom (this capability)
+          </p>
+          <div className="space-y-1">
+            {customNodeTypes.map((custom) => (
+              <button
+                key={custom.id}
+                type="button"
+                onClick={() => onAdd(custom.name)}
+                title={`${custom.label} — wraps ${custom.baseType}`}
+                className="flex w-full items-center gap-2 rounded-lg border border-outline-variant/30 bg-white px-2 py-1.5 text-left text-xs text-on-surface hover:bg-surface-container"
+              >
+                <span
+                  className={cn(
+                    "rounded p-1 text-white",
+                    custom.color || "bg-fuchsia-500",
+                  )}
+                >
+                  <Sparkles size={12} />
+                </span>
+                <span className="min-w-0 flex-1 truncate font-medium">
+                  {custom.label}
+                </span>
+                <span className="rounded bg-surface-container px-1 text-[0.55rem] uppercase text-outline">
+                  {custom.baseType.split("_")[0]}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </aside>
   );
 };
