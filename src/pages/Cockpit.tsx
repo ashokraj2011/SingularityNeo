@@ -17,7 +17,7 @@ import {
   useState,
 } from "react";
 import { useSearchParams } from "react-router-dom";
-import { AlertTriangle, ChevronDown, Layers, Plus, Sparkles, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Layers, Sparkles, X } from "lucide-react";
 import { useCapability } from "../context/CapabilityContext";
 import { WorkflowApprovalGate } from "./workflowOrchestrator/WorkflowApprovalGate";
 import { CockpitHeader } from "./cockpit/CockpitHeader";
@@ -26,12 +26,12 @@ import { CockpitTimeline } from "./cockpit/CockpitTimeline";
 import { CockpitRightPanel } from "./cockpit/CockpitRightPanel";
 import { CockpitCommandBar } from "./cockpit/CockpitCommandBar";
 import { useCockpitState } from "./cockpit/useCockpitState";
-import type { WorkItem } from "../types";
+import OrchestratorStageOwnershipModal from "../components/orchestrator/OrchestratorStageOwnershipModal";
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 const Cockpit = () => {
-  const { activeCapability, getCapabilityWorkspace } = useCapability();
+  const { activeCapability } = useCapability();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Snapshot URL params once at mount to avoid auto-load loops
@@ -52,9 +52,22 @@ const Cockpit = () => {
     startRun,
     resumeRun,
     restartRun,
+    refreshSourceWorkspace,
+    markStepComplete,
   } = useCockpitState(activeCapability);
 
   const [showPicker, setShowPicker] = useState(false);
+  const [showStageOwnership, setShowStageOwnership] = useState(false);
+
+  const currentRunStepId = useMemo(
+    () =>
+      state.runDetail?.steps.find(
+        (step) =>
+          step.workflowStepId === state.currentStep?.id &&
+          step.status !== "COMPLETED",
+      )?.id || null,
+    [state.currentStep?.id, state.runDetail?.steps],
+  );
 
   // Auto-load if URL has workItemId
   const autoLoadedRef = useRef<string | null>(null);
@@ -124,6 +137,13 @@ const Cockpit = () => {
         gitWorkspace={state.gitWorkspace}
         status={state.status}
         onRefresh={() => state.workItem && void loadWorkItem(state.workItem.id)}
+        onRefreshSource={() =>
+          state.workItem &&
+          void refreshSourceWorkspace(state.workItem.id, {
+            forceAstRefresh: true,
+            toast: true,
+          })
+        }
       />
 
       {/* ── Work item picker bar (always visible when no work item) ───── */}
@@ -266,6 +286,16 @@ const Cockpit = () => {
             onStartRun={startRun}
             onResumeRun={resumeRun}
             onRestartRun={restartRun}
+            onOpenStageOwnership={() => setShowStageOwnership(true)}
+            onRefreshAst={() =>
+              state.workItem
+                ? refreshSourceWorkspace(state.workItem.id, {
+                    forceAstRefresh: true,
+                    toast: true,
+                  })
+                : Promise.resolve()
+            }
+            onMarkStepComplete={markStepComplete}
           />
         </div>
       ) : (
@@ -305,6 +335,24 @@ const Cockpit = () => {
           onResolved={() => void handleApprovalResolved()}
         />
       ) : null}
+
+      <OrchestratorStageOwnershipModal
+        isOpen={showStageOwnership}
+        capability={activeCapability}
+        workItem={state.workItem}
+        workflow={state.workflow}
+        artifacts={state.ledgerArtifacts.map((record) => record.artifact)}
+        currentRun={state.runDetail?.run ?? null}
+        currentRunStepId={currentRunStepId}
+        currentStep={state.currentStep}
+        currentActorDisplayName="Cockpit operator"
+        onClose={() => setShowStageOwnership(false)}
+        onRefresh={async () => {
+          if (state.workItem) {
+            await loadWorkItem(state.workItem.id);
+          }
+        }}
+      />
     </div>
   );
 };

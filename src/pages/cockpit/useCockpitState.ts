@@ -23,6 +23,7 @@ import {
 } from "../../lib/api";
 import { useCapability } from "../../context/CapabilityContext";
 import { useToast } from "../../context/ToastContext";
+import { createApiEventSource } from "../../lib/desktop";
 import type {
   Capability,
   CapabilityAgent,
@@ -100,12 +101,26 @@ type CockpitAction =
       runDetail: WorkflowRunDetail | null;
       runEvents: RunEvent[];
       ledgerArtifacts: LedgerArtifactRecord[];
+      messages: CapabilityChatMessage[];
     }
   | {
       type: "RUN_REFRESHED";
       workItem: WorkItem;
       runDetail: WorkflowRunDetail;
       runEvents: RunEvent[];
+    }
+  | {
+      type: "RUN_STREAM_SNAPSHOT";
+      runDetail: WorkflowRunDetail;
+      runEvents: RunEvent[];
+    }
+  | {
+      type: "RUN_STREAM_HEARTBEAT";
+      runDetail: WorkflowRunDetail;
+    }
+  | {
+      type: "RUN_STREAM_APPEND";
+      event: RunEvent;
     }
   | { type: "SET_GIT_WORKSPACE"; gitWorkspace: WorkItemGitWorkspaceInitResult | null }
   | {
@@ -152,7 +167,7 @@ const reducer = (state: CockpitState, action: CockpitAction): CockpitState => {
         runDetail: action.runDetail,
         runEvents: action.runEvents,
         ledgerArtifacts: action.ledgerArtifacts,
-        messages: [],
+        messages: action.messages,
         streamedDraft: "",
         error: null,
       };
@@ -163,6 +178,19 @@ const reducer = (state: CockpitState, action: CockpitAction): CockpitState => {
         runDetail: action.runDetail,
         runEvents: action.runEvents,
       };
+    case "RUN_STREAM_SNAPSHOT":
+      return {
+        ...state,
+        runDetail: action.runDetail,
+        runEvents: action.runEvents,
+      };
+    case "RUN_STREAM_HEARTBEAT":
+      return { ...state, runDetail: action.runDetail };
+    case "RUN_STREAM_APPEND":
+      // Dedupe by id to handle reconnects / replay
+      return state.runEvents.some((e) => e.id === action.event.id)
+        ? state
+        : { ...state, runEvents: [...state.runEvents, action.event] };
     case "SET_GIT_WORKSPACE":
       return { ...state, gitWorkspace: action.gitWorkspace };
     case "BEGIN_STREAM":
@@ -284,6 +312,72 @@ export const useCockpitState = (capability: Capability) => {
     [capability.id, getCapabilityWorkspace],
   );
 
+  const refreshSourceWorkspace = useCallback(
+    async (workItemId?: string, options?: { forceAstRefresh?: boolean; toast?: boolean }) => {
+      const targetWorkItemId = workItemId || stateRef.current.workItem?.id;
+      if (!targetWorkItemId) return;
+
+      try {
+        const workspaceResult = await initWorkItemGitWorkspace(
+          capability.id,
+          targetWorkItemId,
+          { forceAstRefresh: options?.forceAstRefresh },
+        );
+        if (!isMountedRef.current) return;
+        dispatch({
+          type: "SET_GIT_WORKSPACE",
+          gitWorkspace: workspaceResult,
+        });
+        if (options?.toast) {
+          success(
+            options.forceAstRefresh ? "Source refresh queued" : "Source ready",
+            `${workspaceResult.repoRoot || workspaceResult.workspacePath} is the active work-item checkout.`,
+          );
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Could not prepare the source workspace.";
+        try {
+          const statusResult = await getWorkItemGitWorkspaceStatus(
+            capability.id,
+            targetWorkItemId,
+          );
+          if (isMountedRef.current && statusResult.exists && statusResult.workspacePath) {
+            dispatch({
+              type: "SET_GIT_WORKSPACE",
+              gitWorkspace: {
+                workspacePath: statusResult.workspacePath,
+                workItemDir: statusResult.workItemDir,
+                branchName: statusResult.branchName || statusResult.branchNameExpected,
+                created: false,
+                source: "existing",
+                sourceWorkspaceState: statusResult.sourceWorkspaceState,
+                operatorWorkDir: statusResult.operatorWorkDir,
+                repoRoot: statusResult.repoRoot || statusResult.workspacePath,
+                astStatus: statusResult.astStatus,
+                astFreshness: statusResult.astFreshness,
+                sourceWorkspaceError:
+                  statusResult.sourceWorkspaceError || message,
+                remediation: statusResult.remediation,
+              },
+            });
+          }
+        } catch {
+          // The original error is more useful than a failed status fallback.
+        }
+        if (isMountedRef.current) {
+          dispatch({ type: "SET_ERROR", error: message });
+        }
+        if (options?.toast) {
+          toastError("Source workspace blocked", message);
+        }
+      }
+    },
+    [capability.id, success, toastError],
+  );
+
   // ── Load work item ────────────────────────────────────────────────────────
 
   const loadWorkItem = useCallback(
@@ -291,7 +385,8 @@ export const useCockpitState = (capability: Capability) => {
       dispatch({ type: "BEGIN_LOAD" });
       try {
         await refreshCapabilityBundle(capability.id);
-        const workItem = findWorkItem(workItemId);
+        const capabilityWorkspace = getCapabilityWorkspace(capability.id);
+        const workItem = capabilityWorkspace.workItems.find((w) => w.id === workItemId) ?? null;
         if (!workItem) throw new Error(`Work item ${workItemId} not found.`);
 
         const workflow = findWorkflow(workItem.workflowId);
@@ -317,6 +412,20 @@ export const useCockpitState = (capability: Capability) => {
         const ledgerArtifacts = allRecords.filter(
           (r) => r.artifact.workItemId === workItemId,
         );
+        const scopedMessages = capabilityWorkspace.messages
+          .filter(
+            (message) =>
+              !message.hidden &&
+              (message.workItemId === workItemId ||
+                (message.sessionScope === "WORK_ITEM" &&
+                  message.sessionScopeId === workItemId)),
+          )
+          .sort(
+            (left, right) =>
+              new Date(left.timestamp).getTime() -
+              new Date(right.timestamp).getTime(),
+          )
+          .slice(-24);
 
         if (!isMountedRef.current) return;
         dispatch({
@@ -328,32 +437,10 @@ export const useCockpitState = (capability: Capability) => {
           runDetail,
           runEvents,
           ledgerArtifacts,
+          messages: scopedMessages,
         });
 
-        // Git workspace — fire and forget
-        initWorkItemGitWorkspace(capability.id, workItemId)
-          .then((ws) => {
-            if (isMountedRef.current)
-              dispatch({ type: "SET_GIT_WORKSPACE", gitWorkspace: ws });
-          })
-          .catch(() => {
-            // try status endpoint as fallback
-            getWorkItemGitWorkspaceStatus(capability.id, workItemId)
-              .then((s) => {
-                if (isMountedRef.current && s.exists && s.workspacePath) {
-                  dispatch({
-                    type: "SET_GIT_WORKSPACE",
-                    gitWorkspace: {
-                      workspacePath: s.workspacePath,
-                      branchName: s.branchName ?? "",
-                      created: false,
-                      source: "existing",
-                    },
-                  });
-                }
-              })
-              .catch(() => undefined);
-          });
+        void refreshSourceWorkspace(workItemId);
       } catch (err) {
         if (!isMountedRef.current) return;
         dispatch({
@@ -365,9 +452,10 @@ export const useCockpitState = (capability: Capability) => {
     [
       capability.id,
       findAgent,
-      findWorkItem,
       findWorkflow,
+      getCapabilityWorkspace,
       refreshCapabilityBundle,
+      refreshSourceWorkspace,
     ],
   );
 
@@ -394,16 +482,88 @@ export const useCockpitState = (capability: Capability) => {
     }
   }, [capability.id, findWorkItem, refreshCapabilityBundle]);
 
-  // Poll every 8s while a run is active
+  // ── Live execution stream (SSE) for QUEUED / RUNNING ─────────────────────
+  // Mirrors useOrchestratorSelection — opens an EventSource that pushes
+  // snapshot / heartbeat / event payloads as the worker progresses, so the
+  // operator sees tool invocations and wait state changes within ~1s.
+  const liveRunId =
+    state.runDetail?.run?.id || state.workItem?.activeRunId || null;
+  const liveRunStatus = state.runDetail?.run?.status || null;
+  const isLive =
+    !!liveRunId &&
+    (liveRunStatus === "QUEUED" || liveRunStatus === "RUNNING");
+
   useEffect(() => {
-    if (
-      state.status !== "READY" ||
-      !state.workItem?.activeRunId
-    )
-      return;
-    const handle = window.setInterval(() => void refreshRun(), 8000);
+    if (!isLive || !liveRunId) return;
+
+    let mounted = true;
+    const es = createApiEventSource(
+      `/api/capabilities/${encodeURIComponent(capability.id)}/runs/${encodeURIComponent(liveRunId)}/stream`,
+    );
+
+    es.addEventListener("snapshot", (event) => {
+      if (!mounted) return;
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as {
+          detail: WorkflowRunDetail;
+          events: RunEvent[];
+        };
+        dispatch({
+          type: "RUN_STREAM_SNAPSHOT",
+          runDetail: payload.detail,
+          runEvents: payload.events,
+        });
+      } catch {
+        // ignore malformed payloads — server-side bug, not our problem
+      }
+    });
+
+    es.addEventListener("heartbeat", (event) => {
+      if (!mounted) return;
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as {
+          detail: WorkflowRunDetail;
+        };
+        dispatch({
+          type: "RUN_STREAM_HEARTBEAT",
+          runDetail: payload.detail,
+        });
+      } catch {
+        // ignore
+      }
+    });
+
+    es.addEventListener("event", (event) => {
+      if (!mounted) return;
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as RunEvent;
+        dispatch({ type: "RUN_STREAM_APPEND", event: payload });
+      } catch {
+        // ignore
+      }
+    });
+
+    es.onerror = () => {
+      // Browser will auto-retry; close on hard errors so React can re-mount
+      // through the dependency-list change if status flips.
+      es.close();
+    };
+
+    return () => {
+      mounted = false;
+      es.close();
+    };
+  }, [capability.id, isLive, liveRunId]);
+
+  // ── Fallback polling for non-live statuses (PAUSED / WAITING_*) ───────────
+  // 15s cadence matches the Work page; the bundle poll catches blocker /
+  // pendingRequest changes that arrive on the work-item record, not the run.
+  useEffect(() => {
+    if (state.status !== "READY" || !state.workItem?.activeRunId) return;
+    if (isLive) return; // live SSE is handling it
+    const handle = window.setInterval(() => void refreshRun(), 15000);
     return () => window.clearInterval(handle);
-  }, [state.status, state.workItem?.activeRunId, refreshRun]);
+  }, [state.status, state.workItem?.activeRunId, refreshRun, isLive]);
 
   // ── Send message (chat) ───────────────────────────────────────────────────
 
@@ -627,8 +787,18 @@ export const useCockpitState = (capability: Capability) => {
         return;
       }
 
+      const openWait = runDetail?.waits?.find((wait) => wait.status === "OPEN");
+      if (!openWait && workItem.status !== "BLOCKED") {
+        info(
+          "Nothing to resolve",
+          "This run is not waiting on input, approval, conflict resolution, or a human task. Refreshing the cockpit state.",
+        );
+        void loadWorkItem(workItem.id);
+        return;
+      }
+
       const blockType =
-        workItem.blocker?.type || workItem.pendingRequest?.type;
+        openWait?.type || workItem.blocker?.type || workItem.pendingRequest?.type;
       if (!blockType) return;
       dispatch({ type: "BEGIN_SUBMIT" });
       try {
@@ -679,6 +849,63 @@ export const useCockpitState = (capability: Capability) => {
     [capability.id, info, toastError],
   );
 
+  // ── Mark step complete & advance (HUMAN takeover) ────────────────────────
+
+  /**
+   * Records the current chat as the stage's conversation log AND signals
+   * the worker to advance — the canonical "human takes the wheel" path
+   * (mirrors StageControlModal in the Work page).
+   *
+   * Caller must ensure the stream is not active. AGENT-step advancement
+   * is server-driven; this is intended for HUMAN steps only.
+   */
+  const markStepComplete = useCallback(
+    async (carryForwardNote?: string) => {
+      const snap = stateRef.current;
+      const { workItem, agent, messages, currentStep } = snap;
+      if (!workItem) return;
+      if (snap.status === "STREAMING") {
+        toastError(
+          "Cannot advance",
+          "Stop or pause the agent stream first, then advance.",
+        );
+        return;
+      }
+      if (currentStep?.stepType === "AGENT_TASK") {
+        toastError(
+          "Agent step",
+          "Agent steps advance automatically when the worker completes them.",
+        );
+        return;
+      }
+      dispatch({ type: "BEGIN_SUBMIT" });
+      try {
+        await continueCapabilityWorkItemStageControl(capability.id, workItem.id, {
+          agentId: agent?.id,
+          conversation: messages.map((m) => ({
+            role: m.role,
+            content: m.content,
+            timestamp: m.timestamp,
+          })),
+          carryForwardNote: carryForwardNote?.trim() || undefined,
+          resolvedBy: "cockpit-operator",
+          markComplete: true,
+        });
+        success(
+          "Step completed",
+          "Advancing to the next stage.",
+        );
+        dispatch({ type: "SUBMIT_DONE" });
+        await loadWorkItem(workItem.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to advance.";
+        dispatch({ type: "SET_ERROR", error: msg });
+        toastError("Advance failed", msg);
+      }
+    },
+    [capability.id, loadWorkItem, success, toastError],
+  );
+
   // ── Stable refs for polling ───────────────────────────────────────────────
   const refreshRunRef = useRef(refreshRun);
   refreshRunRef.current = refreshRun;
@@ -696,5 +923,7 @@ export const useCockpitState = (capability: Capability) => {
     startRun,
     resumeRun,
     restartRun,
+    refreshSourceWorkspace,
+    markStepComplete,
   };
 };

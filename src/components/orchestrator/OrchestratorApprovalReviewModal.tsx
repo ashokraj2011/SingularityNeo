@@ -48,6 +48,11 @@ type Props = {
   onOpenRunFromTimeline: (runId: string) => void;
   onOpenTaskFromTimeline: (taskId: string) => void;
   filteredApprovalArtifacts: Artifact[];
+  /** Optional pre-filter counts per category — when present, rendered next to each chip. */
+  approvalArtifactFilterCounts?: Partial<Record<ArtifactWorkbenchFilter, number>>;
+  /** Optional artifact search string. */
+  approvalArtifactSearch?: string;
+  onApprovalArtifactSearchChange?: (value: string) => void;
   approvalArtifactFilter: ArtifactWorkbenchFilter;
   onApprovalArtifactFilterChange: (value: ArtifactWorkbenchFilter) => void;
   selectedApprovalArtifact: Artifact | null;
@@ -92,6 +97,9 @@ export const OrchestratorApprovalReviewModal = ({
   filteredApprovalArtifacts,
   approvalArtifactFilter,
   onApprovalArtifactFilterChange,
+  approvalArtifactFilterCounts,
+  approvalArtifactSearch,
+  onApprovalArtifactSearchChange,
   selectedApprovalArtifact,
   selectedApprovalArtifactDocument,
   onSelectApprovalArtifact,
@@ -373,22 +381,50 @@ export const OrchestratorApprovalReviewModal = ({
                   ['DIFFS', 'Diffs'],
                   ['APPROVALS', 'Approvals'],
                   ['HANDOFFS', 'Handoffs'],
-                ] as const).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => onApprovalArtifactFilterChange(value)}
-                    className={cn(
-                      'rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors',
-                      approvalArtifactFilter === value
-                        ? 'border-primary/30 bg-primary text-white'
-                        : 'border-outline-variant/30 bg-surface-container-low text-secondary hover:border-primary/20 hover:text-primary',
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
+                ] as const).map(([value, label]) => {
+                  const count = approvalArtifactFilterCounts?.[value];
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => onApprovalArtifactFilterChange(value)}
+                      className={cn(
+                        'inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors',
+                        approvalArtifactFilter === value
+                          ? 'border-primary/30 bg-primary text-white'
+                          : 'border-outline-variant/30 bg-surface-container-low text-secondary hover:border-primary/20 hover:text-primary',
+                      )}
+                    >
+                      <span>{label}</span>
+                      {typeof count === 'number' && (
+                        <span
+                          className={cn(
+                            'rounded-full px-1.5 text-[0.62rem] font-bold',
+                            approvalArtifactFilter === value
+                              ? 'bg-white/20 text-white'
+                              : 'bg-primary/10 text-primary',
+                          )}
+                        >
+                          {count}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
+
+              {/* Artifact search */}
+              {onApprovalArtifactSearchChange && (
+                <div className="mt-3">
+                  <input
+                    type="search"
+                    value={approvalArtifactSearch ?? ''}
+                    onChange={(e) => onApprovalArtifactSearchChange(e.target.value)}
+                    placeholder="Search artifacts by name or description…"
+                    className="w-full rounded-lg border border-outline-variant/40 bg-white px-3 py-1.5 text-xs text-on-surface placeholder-secondary focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                </div>
+              )}
 
               {filteredApprovalArtifacts.length === 0 ? (
                 <div className="mt-4 rounded-3xl border border-outline-variant/35 bg-surface-container-low px-4 py-4 text-sm text-secondary">

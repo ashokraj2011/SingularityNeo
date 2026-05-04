@@ -10,6 +10,7 @@ import {
   Send,
   Shield,
   Sparkles,
+  User,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import ArtifactPreview from "../../components/ArtifactPreview";
@@ -46,6 +47,9 @@ type Props = {
   onStartRun: (guidance?: string) => Promise<void>;
   onResumeRun: (note?: string) => Promise<void>;
   onRestartRun: (guidance?: string) => Promise<void>;
+  onOpenStageOwnership: () => void;
+  onRefreshAst: () => Promise<void>;
+  onMarkStepComplete: (carryForwardNote?: string) => Promise<void>;
 };
 
 const PANEL_TABS: { id: RightPanelMode; label: string }[] = [
@@ -145,6 +149,50 @@ const RUN_STATUS_META: Record<string, RunStatusMeta> = {
   },
 };
 
+// ── AST status helpers ────────────────────────────────────────────────────────
+
+type AstStatusMeta = {
+  label: string;
+  color: string;
+  bg: string;
+  spin?: boolean;
+  canRefresh?: boolean;
+};
+
+const AST_STATUS_META: Record<string, AstStatusMeta> = {
+  READY: {
+    label: "AST ready",
+    color: "text-emerald-700 dark:text-emerald-300",
+    bg: "bg-emerald-500/10",
+    canRefresh: true,
+  },
+  BUILDING: {
+    label: "AST building",
+    color: "text-amber-700 dark:text-amber-300",
+    bg: "bg-amber-500/10",
+    spin: true,
+  },
+  STALE: {
+    label: "AST stale",
+    color: "text-amber-700 dark:text-amber-300",
+    bg: "bg-amber-500/10",
+    canRefresh: true,
+  },
+  MISSING: {
+    label: "AST missing",
+    color: "text-rose-700 dark:text-rose-300",
+    bg: "bg-rose-500/10",
+    canRefresh: true,
+  },
+  ERROR: {
+    label: "AST error",
+    color: "text-rose-700 dark:text-rose-300",
+    bg: "bg-rose-500/10",
+    canRefresh: true,
+  },
+  // NOT_REQUIRED → pill hidden entirely
+};
+
 // ── NOW panel ─────────────────────────────────────────────────────────────────
 
 const NowPanel = ({
@@ -161,6 +209,9 @@ const NowPanel = ({
   onStartRun,
   onResumeRun,
   onRestartRun,
+  onOpenStageOwnership,
+  onRefreshAst,
+  onMarkStepComplete,
 }: Pick<
   Props,
   | "workItem"
@@ -176,15 +227,21 @@ const NowPanel = ({
   | "onStartRun"
   | "onResumeRun"
   | "onRestartRun"
+  | "onOpenStageOwnership"
+  | "onRefreshAst"
+  | "onMarkStepComplete"
 >) => {
   const [guidanceInput, setGuidanceInput] = useState("");
+  const [carryForwardInput, setCarryForwardInput] = useState("");
 
   const run = runDetail?.run;
   const runMeta = run ? (RUN_STATUS_META[run.status] ?? null) : null;
+  const openWait = runDetail?.waits?.find((wait) => wait.status === "OPEN");
 
   const isBlocked =
     workItem?.status === "BLOCKED" ||
-    Boolean(workItem?.pendingRequest?.type);
+    Boolean(openWait) ||
+    Boolean(run?.status?.startsWith("WAITING_"));
 
   const hasNoRun = !workItem?.activeRunId;
 
@@ -316,11 +373,62 @@ const NowPanel = ({
         </div>
       )}
 
+      {/* ── Mark step complete & advance (HUMAN takeover) ─────── */}
+      {currentStep?.stepType !== "AGENT_TASK" &&
+        !isBlocked &&
+        (run?.status === "RUNNING" || run?.status === "PAUSED") && (
+          <div className="workspace-meta-card border-l-2 border-primary/40">
+            <p className="workspace-meta-label">Take control</p>
+            <p className="mt-1.5 text-xs text-secondary">
+              Mark this step done and advance the workflow. The chat history
+              becomes the stage's record.
+            </p>
+            <textarea
+              value={carryForwardInput}
+              onChange={(e) => setCarryForwardInput(e.target.value)}
+              placeholder="Brief note for the next agent (optional)…"
+              rows={2}
+              maxLength={500}
+              className="mt-2 w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-900 placeholder-gray-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary dark:border-gray-700 dark:bg-black/20 dark:text-gray-100"
+            />
+            <button
+              type="button"
+              disabled={isSubmitting}
+              onClick={() => {
+                void onMarkStepComplete(carryForwardInput.trim() || undefined);
+                setCarryForwardInput("");
+              }}
+              className={cn(
+                "mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90",
+                isSubmitting && "cursor-not-allowed opacity-60",
+              )}
+            >
+              {isSubmitting ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : (
+                <CheckCircle2 size={13} />
+              )}
+              Mark step complete & advance
+            </button>
+          </div>
+        )}
+
       {/* ── Block panel (WAITING_* states and explicit BLOCKED status) ─ */}
       {isBlocked && (
         <BlockedPanel
-          blocker={workItem.blocker}
-          pendingRequest={workItem.pendingRequest}
+          blocker={workItem.status === "BLOCKED" ? workItem.blocker : undefined}
+          pendingRequest={
+            openWait
+              ? {
+                  type: openWait.type,
+                  message: openWait.message,
+                  requestedBy: openWait.requestedBy,
+                  timestamp: openWait.createdAt,
+                }
+              : run?.status?.startsWith("WAITING_")
+                ? workItem.pendingRequest
+                : undefined
+          }
           onSubmit={onResolveBlock}
           onOpenApproval={onOpenApproval}
           isSubmitting={isSubmitting}
@@ -362,6 +470,14 @@ const NowPanel = ({
               {currentStep.stepType.replace(/_/g, " ")}
             </span>
           )}
+          <button
+            type="button"
+            onClick={onOpenStageOwnership}
+            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-outline-variant/40 bg-white px-3 py-2 text-xs font-semibold text-primary transition hover:border-primary/30 hover:bg-primary/5"
+          >
+            <User size={13} />
+            Assign human / upload docs
+          </button>
         </div>
       )}
 
@@ -371,15 +487,83 @@ const NowPanel = ({
           <p className="workspace-meta-label flex items-center gap-1">
             <GitBranch size={10} /> Git workspace
           </p>
+          {gitWorkspace.sourceWorkspaceState && (
+            <span
+              className={cn(
+                "mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[0.62rem] font-semibold uppercase",
+                gitWorkspace.sourceWorkspaceState === "AST_READY"
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                  : gitWorkspace.sourceWorkspaceState === "BLOCKED"
+                    ? "border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+                    : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+              )}
+            >
+              {gitWorkspace.sourceWorkspaceState.replace(/_/g, " ")}
+            </span>
+          )}
           <p
             className="mt-1.5 break-all font-mono text-[0.68rem] text-secondary"
-            title={gitWorkspace.workspacePath}
+            title={gitWorkspace.repoRoot || gitWorkspace.workspacePath}
           >
-            {gitWorkspace.workspacePath}
+            {gitWorkspace.repoRoot || gitWorkspace.workspacePath}
           </p>
           <span className="mt-1 inline-flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[0.62rem] text-emerald-700 dark:text-emerald-300">
             <GitBranch size={9} /> {gitWorkspace.branchName}
           </span>
+          {gitWorkspace.operatorWorkDir && (
+            <p className="mt-1 break-all font-mono text-[0.62rem] text-outline">
+              workDir: {gitWorkspace.operatorWorkDir}
+            </p>
+          )}
+          {gitWorkspace.astStatus && gitWorkspace.astStatus !== "NOT_REQUIRED" && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {(() => {
+                const astMeta =
+                  AST_STATUS_META[gitWorkspace.astStatus] ?? {
+                    label: gitWorkspace.astStatus,
+                    color: "text-secondary",
+                    bg: "bg-surface-container",
+                  };
+                return (
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[0.62rem] font-semibold uppercase tracking-wide",
+                      astMeta.bg,
+                      astMeta.color,
+                    )}
+                  >
+                    {astMeta.spin && <Loader2 size={9} className="animate-spin" />}
+                    {astMeta.label}
+                  </span>
+                );
+              })()}
+              {gitWorkspace.astFreshness && (
+                <span className="text-[0.62rem] text-outline">
+                  built {new Date(gitWorkspace.astFreshness).toLocaleTimeString()}
+                </span>
+              )}
+              {AST_STATUS_META[gitWorkspace.astStatus]?.canRefresh && (
+                <button
+                  type="button"
+                  onClick={() => void onRefreshAst()}
+                  disabled={isSubmitting || gitWorkspace.astStatus === "BUILDING"}
+                  className={cn(
+                    "ml-auto inline-flex items-center gap-1 rounded text-[0.62rem] font-semibold text-primary hover:underline",
+                    (isSubmitting || gitWorkspace.astStatus === "BUILDING") &&
+                      "cursor-not-allowed opacity-50",
+                  )}
+                >
+                  Refresh AST
+                </button>
+              )}
+            </div>
+          )}
+          {gitWorkspace.sourceWorkspaceError && (
+            <p className="mt-1.5 rounded-lg border border-amber-500/30 bg-amber-500/8 px-2 py-1 text-[0.65rem] text-amber-700 dark:text-amber-300">
+              {gitWorkspace.sourceWorkspaceError}
+              {gitWorkspace.remediation ? ` ${gitWorkspace.remediation}` : ""}
+            </p>
+          )}
           <p className="mt-1.5 text-[0.65rem] text-outline">
             Source code checked out here · AST index built from this path
           </p>
@@ -713,6 +897,9 @@ export const CockpitRightPanel = ({
   onStartRun,
   onResumeRun,
   onRestartRun,
+  onOpenStageOwnership,
+  onRefreshAst,
+  onMarkStepComplete,
 }: Props) => {
   const hasApproval =
     workItem?.status === "BLOCKED" &&
@@ -760,6 +947,9 @@ export const CockpitRightPanel = ({
             onStartRun={onStartRun}
             onResumeRun={onResumeRun}
             onRestartRun={onRestartRun}
+            onOpenStageOwnership={onOpenStageOwnership}
+            onRefreshAst={onRefreshAst}
+            onMarkStepComplete={onMarkStepComplete}
           />
         )}
         {mode === "ARTIFACT" && (

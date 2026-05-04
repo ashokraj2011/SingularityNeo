@@ -84,6 +84,7 @@ export const WorkflowApprovalGate = ({
   // ── UI state ──────────────────────────────────────────────────────────────
   const [artifactFilter, setArtifactFilter] =
     useState<ArtifactWorkbenchFilter>("ALL");
+  const [artifactSearch, setArtifactSearch] = useState("");
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(
     null,
   );
@@ -145,10 +146,43 @@ export const WorkflowApprovalGate = ({
 
   const artifacts: Artifact[] = approvalContext?.artifacts ?? [];
 
-  const filteredArtifacts = useMemo(
-    () => artifacts.filter((a) => matchesArtifactWorkbenchFilter(a, artifactFilter)),
-    [artifacts, artifactFilter],
-  );
+  const filteredArtifacts = useMemo(() => {
+    const q = artifactSearch.trim().toLowerCase();
+    return artifacts.filter((a) => {
+      if (!matchesArtifactWorkbenchFilter(a, artifactFilter)) return false;
+      if (!q) return true;
+      return (
+        a.name?.toLowerCase().includes(q) ||
+        a.description?.toLowerCase().includes(q) ||
+        a.summary?.toLowerCase().includes(q) ||
+        false
+      );
+    });
+  }, [artifacts, artifactFilter, artifactSearch]);
+
+  /**
+   * Pre-filter counts per category — what a chip would show before search.
+   * Counts ignore the active search so the user can see total category sizes.
+   */
+  const filterCounts = useMemo<
+    Partial<Record<ArtifactWorkbenchFilter, number>>
+  >(() => {
+    const filters: ArtifactWorkbenchFilter[] = [
+      "ALL",
+      "INPUTS",
+      "OUTPUTS",
+      "DIFFS",
+      "APPROVALS",
+      "HANDOFFS",
+    ];
+    const counts: Partial<Record<ArtifactWorkbenchFilter, number>> = {};
+    for (const f of filters) {
+      counts[f] = artifacts.filter((a) =>
+        matchesArtifactWorkbenchFilter(a, f),
+      ).length;
+    }
+    return counts;
+  }, [artifacts]);
 
   const selectedArtifact = useMemo(
     () => artifacts.find((a) => a.id === selectedArtifactId) ?? null,
@@ -352,6 +386,9 @@ export const WorkflowApprovalGate = ({
       filteredApprovalArtifacts={filteredArtifacts}
       approvalArtifactFilter={artifactFilter}
       onApprovalArtifactFilterChange={setArtifactFilter}
+      approvalArtifactFilterCounts={filterCounts}
+      approvalArtifactSearch={artifactSearch}
+      onApprovalArtifactSearchChange={setArtifactSearch}
       selectedApprovalArtifact={selectedArtifact}
       selectedApprovalArtifactDocument={selectedArtifactDocument}
       onSelectApprovalArtifact={setSelectedArtifactId}
