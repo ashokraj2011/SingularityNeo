@@ -27,6 +27,11 @@ import { CockpitRightPanel } from "./cockpit/CockpitRightPanel";
 import { CockpitCommandBar } from "./cockpit/CockpitCommandBar";
 import { useCockpitState } from "./cockpit/useCockpitState";
 import OrchestratorStageOwnershipModal from "../components/orchestrator/OrchestratorStageOwnershipModal";
+import LlmContextDrawer, {
+  type LlmContextDrawerPayload,
+} from "../components/LlmContextDrawer";
+import { fetchLlmContextLogEntryByTraceId } from "../lib/api";
+import type { CapabilityChatMessage } from "../types";
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -58,6 +63,55 @@ const Cockpit = () => {
 
   const [showPicker, setShowPicker] = useState(false);
   const [showStageOwnership, setShowStageOwnership] = useState(false);
+  // ── "View context" drawer ──────────────────────────────────────────────
+  // Fetched lazily by traceId when an operator clicks the ℹ icon on an
+  // agent message in the timeline. Shows the exact assembled prompt that
+  // produced that response — system + history + user + budget receipt.
+  const [contextDrawerPayload, setContextDrawerPayload] =
+    useState<LlmContextDrawerPayload | null>(null);
+  const [contextDrawerOpen, setContextDrawerOpen] = useState(false);
+  const [contextDrawerLoading, setContextDrawerLoading] = useState(false);
+  const [contextDrawerError, setContextDrawerError] = useState<string | null>(
+    null,
+  );
+
+  const handleViewMessageContext = useCallback(
+    async (message: CapabilityChatMessage) => {
+      if (!message.traceId) return;
+      setContextDrawerOpen(true);
+      setContextDrawerLoading(true);
+      setContextDrawerError(null);
+      setContextDrawerPayload(null);
+      try {
+        const entry = await fetchLlmContextLogEntryByTraceId(
+          activeCapability.id,
+          message.traceId,
+        );
+        setContextDrawerPayload({
+          title: "LLM context — chat turn",
+          subtitle: `${message.agentName ?? "Agent"} · ${message.timestamp ?? ""}`,
+          provider: entry.provider,
+          model: entry.model,
+          traceId: entry.traceId,
+          createdAt: entry.createdAt,
+          messages: entry.messages,
+          budgetReceipt: entry.budgetReceipt,
+          promptTokens: entry.promptTokens,
+          completionTokens: entry.completionTokens,
+          costUsd: entry.costUsd,
+        });
+      } catch (err) {
+        setContextDrawerError(
+          err instanceof Error
+            ? err.message
+            : "Could not load context envelope for this turn.",
+        );
+      } finally {
+        setContextDrawerLoading(false);
+      }
+    },
+    [activeCapability.id],
+  );
 
   const currentRunStepId = useMemo(
     () =>
@@ -259,6 +313,7 @@ const Cockpit = () => {
             onOpenApproval={() =>
               dispatch({ type: "SET_APPROVAL_GATE", open: true })
             }
+            onViewMessageContext={handleViewMessageContext}
           />
 
           {/* Right decision panel */}
@@ -352,6 +407,14 @@ const Cockpit = () => {
             await loadWorkItem(state.workItem.id);
           }
         }}
+      />
+
+      <LlmContextDrawer
+        open={contextDrawerOpen}
+        loading={contextDrawerLoading}
+        error={contextDrawerError}
+        payload={contextDrawerPayload}
+        onClose={() => setContextDrawerOpen(false)}
       />
     </div>
   );

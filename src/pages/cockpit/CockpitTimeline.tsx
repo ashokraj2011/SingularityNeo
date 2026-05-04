@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   FileCode,
   FileText,
+  Info,
   Loader2,
   MessageSquare,
   Shield,
@@ -39,6 +40,12 @@ type Props = {
   onFilterChange: (f: TimelineFilter) => void;
   onSelectArtifact: (id: string) => void;
   onOpenApproval: () => void;
+  /**
+   * Open the "View context" drawer for a chat message. Passed the
+   * agent message's traceId; the drawer fetches by trace and renders
+   * the assembled prompt that produced the response.
+   */
+  onViewMessageContext?: (message: CapabilityChatMessage) => void;
 };
 
 // ── Individual event cards ────────────────────────────────────────────────────
@@ -255,10 +262,16 @@ const ArtifactCard = ({
 
 const MessageCard = ({
   message,
+  onViewContext,
 }: {
   message: CapabilityChatMessage;
+  onViewContext?: (message: CapabilityChatMessage) => void;
 }) => {
   const isUser = message.role === "user";
+  // Only agent turns have a context envelope to view (the user turn IS
+  // the input). Show the info icon when we have a callback AND a
+  // traceId we can look up.
+  const canViewContext = !isUser && Boolean(onViewContext && message.traceId);
   return (
     <div
       className={cn(
@@ -288,10 +301,22 @@ const MessageCard = ({
             : "border border-outline-variant/25 bg-surface-container-low",
         )}
       >
-        <p className="mb-1 text-[0.65rem] font-semibold uppercase tracking-wide text-outline">
-          {isUser ? "You" : (message.agentName ?? "Agent")}
-          {message.timestamp ? ` · ${message.timestamp}` : ""}
-        </p>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-outline">
+            {isUser ? "You" : (message.agentName ?? "Agent")}
+            {message.timestamp ? ` · ${message.timestamp}` : ""}
+          </p>
+          {canViewContext && (
+            <button
+              type="button"
+              onClick={() => onViewContext?.(message)}
+              title="View the context envelope sent to the model"
+              className="shrink-0 rounded p-0.5 text-outline hover:bg-primary/10 hover:text-primary"
+            >
+              <Info size={12} />
+            </button>
+          )}
+        </div>
         <div className="text-xs leading-relaxed text-primary">
           <MarkdownContent content={message.content} />
         </div>
@@ -323,6 +348,7 @@ export const CockpitTimeline = ({
   onFilterChange,
   onSelectArtifact,
   onOpenApproval,
+  onViewMessageContext,
 }: Props) => {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -405,6 +431,7 @@ export const CockpitTimeline = ({
                     <MessageCard
                       key={`msg-${item.message.id}`}
                       message={item.message}
+                      onViewContext={onViewMessageContext}
                     />
                   );
               }

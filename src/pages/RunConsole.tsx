@@ -17,6 +17,9 @@ import {
 import { useNavigate } from 'react-router-dom';
 import MarkdownContent from '../components/MarkdownContent';
 import { ExplainWorkItemDrawer } from '../components/ExplainWorkItemDrawer';
+import LlmContextDrawer, {
+  type LlmContextDrawerPayload,
+} from '../components/LlmContextDrawer';
 import {
   fetchCopilotSessionMonitor,
   fetchCapabilityWorkflowRun,
@@ -94,6 +97,41 @@ const getRunEventLabel = (event: RunEvent) => {
   return formatEnumLabel(stage);
 };
 
+/**
+ * Map an LLM_CONTEXT_PREPARED RunEvent into the shape the shared
+ * `<LlmContextDrawer>` expects. The event's `details` already carries
+ * `messages` + `budgetReceipt` (added by execution/service.ts), so this
+ * is a thin adapter — but isolating it here keeps the JSX call site
+ * readable.
+ */
+const buildPayloadFromContextEvent = (
+  event: RunEvent,
+): LlmContextDrawerPayload | null => {
+  const details = event.details || {};
+  const messages = Array.isArray(details.messages)
+    ? (details.messages as Array<{ role: string; content: string }>)
+    : null;
+  if (!messages?.length) return null;
+  const usage =
+    (details.actualUsage as
+      | { promptTokens?: number; completionTokens?: number; estimatedCostUsd?: number }
+      | undefined) ?? undefined;
+  return {
+    title: 'LLM context — workflow step',
+    subtitle: event.message,
+    provider:
+      typeof details.provider === 'string' ? details.provider : undefined,
+    model: typeof details.model === 'string' ? details.model : undefined,
+    traceId: event.traceId,
+    createdAt: event.timestamp,
+    messages,
+    budgetReceipt: (details.budgetReceipt as LlmContextDrawerPayload['budgetReceipt']) ?? undefined,
+    promptTokens: usage?.promptTokens,
+    completionTokens: usage?.completionTokens,
+    costUsd: usage?.estimatedCostUsd,
+  };
+};
+
 const RunConsole = () => {
   const navigate = useNavigate();
   const { activeCapability, getCapabilityWorkspace, setActiveChatAgent } = useCapability();
@@ -110,6 +148,8 @@ const RunConsole = () => {
   const [error, setError] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isExplainOpen, setIsExplainOpen] = useState(false);
+  const [contextDrawerPayload, setContextDrawerPayload] =
+    useState<LlmContextDrawerPayload | null>(null);
   const [runActionBusy, setRunActionBusy] = useState<'restart' | 'cancel' | null>(null);
   const [runActionError, setRunActionError] = useState('');
 
@@ -672,29 +712,41 @@ const RunConsole = () => {
                 icon={ShieldCheck}
               >
                 <div className="space-y-3">
-                  {liveTimelineEvents.map(event => (
-                    <div key={event.id} className="rounded-2xl border border-outline-variant/35 px-4 py-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-sm font-semibold text-on-surface">{event.message}</p>
-                        <StatusBadge tone={getRunEventTone(event)}>
-                          {getRunEventLabel(event)}
-                        </StatusBadge>
+                  {liveTimelineEvents.map(event => {
+                    const isContextEvent = event.type === 'LLM_CONTEXT_PREPARED';
+                    return (
+                      <div key={event.id} className="rounded-2xl border border-outline-variant/35 px-4 py-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-sm font-semibold text-on-surface">{event.message}</p>
+                          <StatusBadge tone={getRunEventTone(event)}>
+                            {getRunEventLabel(event)}
+                          </StatusBadge>
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-secondary">
+                          <span>{formatTimestamp(event.timestamp)}</span>
+                          <span>{event.level}</span>
+                          {typeof event.details?.toolId === 'string' ? (
+                            <span>Tool: {formatEnumLabel(event.details.toolId)}</span>
+                          ) : null}
+                          {typeof event.details?.model === 'string' ? (
+                            <span>Model: {event.details.model}</span>
+                          ) : null}
+                          {typeof event.details?.retrievalCount === 'number' ? (
+                            <span>{event.details.retrievalCount} references</span>
+                          ) : null}
+                        </div>
+                        {isContextEvent && Array.isArray(event.details?.messages) ? (
+                          <button
+                            type="button"
+                            onClick={() => setContextDrawerPayload(buildPayloadFromContextEvent(event))}
+                            className="mt-2 inline-flex items-center gap-1 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1 text-[0.7rem] font-semibold text-primary hover:bg-primary/10"
+                          >
+                            View context →
+                          </button>
+                        ) : null}
                       </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-secondary">
-                        <span>{formatTimestamp(event.timestamp)}</span>
-                        <span>{event.level}</span>
-                        {typeof event.details?.toolId === 'string' ? (
-                          <span>Tool: {formatEnumLabel(event.details.toolId)}</span>
-                        ) : null}
-                        {typeof event.details?.model === 'string' ? (
-                          <span>Model: {event.details.model}</span>
-                        ) : null}
-                        {typeof event.details?.retrievalCount === 'number' ? (
-                          <span>{event.details.retrievalCount} references</span>
-                        ) : null}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </SectionCard>
             </>
@@ -713,6 +765,11 @@ const RunConsole = () => {
         workItem={selectedWorkItem}
         isOpen={isExplainOpen}
         onClose={() => setIsExplainOpen(false)}
+      />
+      <LlmContextDrawer
+        open={Boolean(contextDrawerPayload)}
+        payload={contextDrawerPayload}
+        onClose={() => setContextDrawerPayload(null)}
       />
         </>
       ) : null}

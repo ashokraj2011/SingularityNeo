@@ -46,6 +46,7 @@ import {
   EvalRunDetail,
   EvalSuite,
   LedgerArtifactRecord,
+  LlmContextLogEntry,
   MemoryDocument,
   MemoryReference,
   MemorySearchResult,
@@ -1083,6 +1084,42 @@ export const fetchLedgerArtifacts = async (
   requestJson<LedgerArtifactRecord[]>(
     `/api/capabilities/${encodeURIComponent(capabilityId)}/ledger/artifacts`,
   );
+
+// ── LLM context log ───────────────────────────────────────────────────────
+
+export const fetchCapabilityLlmContextLog = async (
+  capabilityId: string,
+  options?: { workItemId?: string; limit?: number },
+): Promise<LlmContextLogEntry[]> => {
+  const params = new URLSearchParams();
+  if (options?.workItemId) params.set("workItemId", options.workItemId);
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  const qs = params.toString();
+  const result = await requestJson<{ entries: LlmContextLogEntry[] }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/llm-context-log${qs ? `?${qs}` : ""}`,
+  );
+  return result.entries;
+};
+
+export const fetchLlmContextLogEntry = async (
+  capabilityId: string,
+  entryId: string,
+): Promise<LlmContextLogEntry> => {
+  const result = await requestJson<{ entry: LlmContextLogEntry }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/llm-context-log/${encodeURIComponent(entryId)}`,
+  );
+  return result.entry;
+};
+
+export const fetchLlmContextLogEntryByTraceId = async (
+  capabilityId: string,
+  traceId: string,
+): Promise<LlmContextLogEntry> => {
+  const result = await requestJson<{ entry: LlmContextLogEntry }>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/llm-context-log/by-trace/${encodeURIComponent(traceId)}`,
+  );
+  return result.entry;
+};
 
 export const fetchCompletedWorkOrders = async (
   capabilityId: string,
