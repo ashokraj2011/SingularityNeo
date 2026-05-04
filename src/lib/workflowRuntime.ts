@@ -17,6 +17,7 @@ import type {
 import { getCapabilityBoardPhaseIds } from './capabilityLifecycle';
 import { compileStepOwnership } from './capabilityOwnership';
 import { BUILD_STEP_OUTPUT_LABEL, isBuildStep } from './buildStepContract';
+import { extractHeadingSlugs } from './outputContract';
 import { TOOL_ADAPTER_IDS, getToolCatalogEntry } from './toolCatalog';
 
 type CompileStepContextArgs = {
@@ -52,6 +53,16 @@ const summarizeText = (value?: string | null, limit = 120) => {
 
   return value!.replace(/\s+/g, ' ').trim().slice(0, limit);
 };
+
+const resolveStepWorkspacePath = ({
+  capability,
+  workItem,
+  step,
+}: Pick<CompileStepContextArgs, 'capability' | 'workItem' | 'step'>) =>
+  step.preferredWorkspacePath ||
+  workItem.sourceWorkspace?.repoRoot ||
+  workItem.sourceWorkspace?.operatorWorkDir ||
+  stepPreferredWorkspace(capability);
 
 const dedupeById = <T extends { id: string }>(items: T[]) => {
   const seen = new Set<string>();
@@ -187,6 +198,7 @@ const evaluateRequiredInput = ({
   field,
   capability,
   workItem,
+  step,
   handoffContext,
   resolvedWaitContext,
   artifactEvidenceText,
@@ -194,6 +206,7 @@ const evaluateRequiredInput = ({
   field: RequiredInputField;
   capability: Capability;
   workItem: WorkItem;
+  step: WorkflowStep;
   handoffContext?: string;
   resolvedWaitContext?: string;
   artifactEvidenceText: string;
@@ -222,7 +235,13 @@ const evaluateRequiredInput = ({
     }
     case 'WORKSPACE': {
       const summary =
-        summarizeText(stepPreferredWorkspace(capability)) ||
+        summarizeText(
+          resolveStepWorkspacePath({
+            capability,
+            workItem,
+            step,
+          }),
+        ) ||
         summarizeText(capability.executionConfig.allowedWorkspacePaths[0]);
       return withStatus(summary ? 'READY' : 'MISSING', summary);
     }
@@ -261,14 +280,70 @@ const stepPreferredWorkspace = (capability: Capability) =>
 const buildArtifactChecklist = ({
   step,
   handoffContext,
-}: Pick<CompileStepContextArgs, 'step' | 'handoffContext'>): CompiledArtifactChecklistItem[] => {
-  const requiredInputs = (step.artifactContract?.requiredInputs || []).map((label, index) => ({
-    id: `input-${index}-${label}`,
-    label,
-    direction: 'INPUT' as const,
-    status: hasText(handoffContext) ? 'READY' as const : 'EXPECTED' as const,
-    description: step.artifactContract?.notes,
-  }));
+  artifacts = [],
+}: Pick<CompileStepContextArgs, 'step' | 'handoffContext' | 'artifacts'>): CompiledArtifactChecklistItem[] => {
+  // Build two heading slug-sets so we can give honest READY/MISSING signals
+  // per item instead of always returning EXPECTED.
+  //
+  // - `upstreamHeadings` covers every artifact NOT attributed to the current
+  //   step's agent. We treat those as candidate sources for the requiredInputs
+  //   that upstream agents are expected to author.
+  // - `selfHeadings` covers artifacts produced by THIS step's agent — which
+  //   is where the expectedOutputs sections are supposed to appear after the
+  //   step completes.
+  //
+  // Heading match honors `## <label>` (and any heading depth 1-6) inside
+  // the artifact's contentText/contentJson, slugified for case/punctuation
+  // tolerance. Sections inside fenced code blocks are ignored.
+  const collectHeadingsFor = (
+    matcher: (artifact: Artifact) => boolean,
+  ): Set<string> => {
+    const headings = new Set<string>();
+    for (const artifact of artifacts) {
+      if (!matcher(artifact)) continue;
+      const text =
+        artifact.contentText ||
+        (typeof artifact.contentJson === 'string'
+          ? artifact.contentJson
+          : artifact.contentJson
+            ? JSON.stringify(artifact.contentJson)
+            : '') ||
+        artifact.summary ||
+        '';
+      for (const slug of extractHeadingSlugs(text)) {
+        headings.add(slug);
+      }
+    }
+    return headings;
+  };
+
+  const upstreamHeadings = collectHeadingsFor(
+    artifact => artifact.connectedAgentId !== step.agentId,
+  );
+  const selfHeadings = collectHeadingsFor(
+    artifact => artifact.connectedAgentId === step.agentId,
+  );
+  const headingSlugFor = (label: string): string =>
+    extractHeadingSlugs(`## ${label}`)[0] || '';
+
+  const requiredInputs = (step.artifactContract?.requiredInputs || []).map((label, index) => {
+    const slug = headingSlugFor(label);
+    const present = slug ? upstreamHeadings.has(slug) : false;
+    return {
+      id: `input-${index}-${label}`,
+      label,
+      direction: 'INPUT' as const,
+      // READY when an upstream artifact actually has the named section.
+      // Fall back to EXPECTED when there's no handoff yet, MISSING when
+      // upstream produced something but not this section.
+      status: present
+        ? ('READY' as const)
+        : hasText(handoffContext)
+          ? ('MISSING' as const)
+          : ('EXPECTED' as const),
+      description: step.artifactContract?.notes,
+    };
+  });
 
   // For BUILD steps we inject the canonical CODE_PATCH contract label
   // if the step author didn't spell it out. Keeps the "expected outputs"
@@ -283,13 +358,24 @@ const buildArtifactChecklist = ({
       : [...authorExpectedOutputs, BUILD_STEP_OUTPUT_LABEL]
     : authorExpectedOutputs;
 
-  const expectedOutputs = expectedOutputLabels.map((label, index) => ({
-    id: `output-${index}-${label}`,
-    label,
-    direction: 'OUTPUT' as const,
-    status: 'EXPECTED' as const,
-    description: step.artifactContract?.notes,
-  }));
+  const stepHasProducedOutput = selfHeadings.size > 0;
+  const expectedOutputs = expectedOutputLabels.map((label, index) => {
+    const slug = headingSlugFor(label);
+    const present = slug ? selfHeadings.has(slug) : false;
+    return {
+      id: `output-${index}-${label}`,
+      label,
+      direction: 'OUTPUT' as const,
+      // EXPECTED until the step produces any output, then READY/MISSING
+      // based on whether this specific section appears in the response.
+      status: present
+        ? ('READY' as const)
+        : stepHasProducedOutput
+          ? ('MISSING' as const)
+          : ('EXPECTED' as const),
+      description: step.artifactContract?.notes,
+    };
+  });
 
   return [...requiredInputs, ...expectedOutputs];
 };
@@ -329,6 +415,7 @@ export const compileStepContext = ({
       field,
       capability,
       workItem,
+      step,
       handoffContext,
       resolvedWaitContext,
       artifactEvidenceText,
@@ -386,11 +473,15 @@ export const compileStepContext = ({
     objective: step.action,
     description: step.description,
     executionNotes: step.executionNotes,
-    preferredWorkspacePath: step.preferredWorkspacePath || stepPreferredWorkspace(capability),
+    preferredWorkspacePath: resolveStepWorkspacePath({
+      capability,
+      workItem,
+      step,
+    }),
     executionBoundary,
     requiredInputs: compiledInputs,
     missingInputs,
-    artifactChecklist: buildArtifactChecklist({ step, handoffContext }),
+    artifactChecklist: buildArtifactChecklist({ step, handoffContext, artifacts }),
     agentSuggestedInputs: cloneAgentArtifactExpectations(
       agent?.contract?.suggestedInputArtifacts,
       'INPUT',

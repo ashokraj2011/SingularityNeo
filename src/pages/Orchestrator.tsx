@@ -727,8 +727,20 @@ const renderArtifactChecklist = (items: CompiledArtifactChecklistItem[]) =>
             <StatusBadge tone={item.direction === "INPUT" ? "info" : "neutral"}>
               {item.direction}
             </StatusBadge>
-            <StatusBadge tone={item.status === "READY" ? "success" : "warning"}>
-              {item.status === "READY" ? "Ready" : "Expected"}
+            <StatusBadge
+              tone={
+                item.status === "READY"
+                  ? "success"
+                  : item.status === "MISSING"
+                    ? "danger"
+                    : "warning"
+              }
+            >
+              {item.status === "READY"
+                ? "Ready"
+                : item.status === "MISSING"
+                  ? "Missing"
+                  : "Expected"}
             </StatusBadge>
           </div>
         </div>

@@ -53,6 +53,10 @@ import {
 } from "../../src/lib/capabilityBriefing";
 import { hasGitHubCapabilityRepository } from "../../src/lib/githubRepositories";
 import {
+  auditOutputContractSections,
+  buildOutputContractInstruction,
+} from "../../src/lib/outputContract";
+import {
   buildAgentKnowledgeLens,
   buildAgentKnowledgePrompt,
 } from "../../src/lib/agentKnowledge";
@@ -2675,6 +2679,14 @@ const requestStepDecision = async ({
   ].join("\n\n");
 
   const stepContractJson = JSON.stringify(compiledStepContext, null, 2);
+  // The artifact contract's expectedOutputs are advisory metadata in the
+  // JSON dump above, but the agent often misses them when they're buried
+  // inside the JSON. Lift them into a top-level instruction at the END of
+  // the step-contract block so the LLM treats them as a hard requirement
+  // on the response shape (one `## <Output>` section per expected output).
+  const expectedOutputContractInstruction = buildOutputContractInstruction(
+    step.artifactContract?.expectedOutputs || [],
+  );
   const stepContractText = [
     `Step contract:\n${stepContractJson}`,
     `Step objective: ${compiledStepContext.objective}`,
@@ -2682,7 +2694,10 @@ const requestStepDecision = async ({
     `Execution notes: ${compiledStepContext.executionNotes || "None"}`,
     executionContinuity.handoffText,
     executionContinuity.resolvedWaitText,
-  ].join("\n\n");
+    expectedOutputContractInstruction || undefined,
+  ]
+    .filter((entry): entry is string => Boolean(entry?.trim()))
+    .join("\n\n");
 
   const memoryHitsText = `Attached work item input files:\n${workItemInputArtifactPrompt}`;
   const conversationContextText = executionContinuity.conversationText;
@@ -8634,6 +8649,30 @@ const prepareWorkflowRunExecutionContext = async (
       },
     });
 
+    await persistProjection({
+      capabilityId: detail.run.capabilityId,
+      workspace: projection.workspace,
+      workflow: projection.workflow,
+      workItem: {
+        ...projection.workItem,
+        sourceWorkspace: {
+          sourceWorkspaceState:
+            prepared.sourceWorkspace?.sourceWorkspaceState ||
+            "WORK_ITEM_CHECKOUT_READY",
+          operatorWorkDir: prepared.sourceWorkspace?.operatorWorkDir,
+          repoRoot: prepared.sourceWorkspace?.repoRoot || prepared.workspacePath,
+          branchName: prepared.branchName,
+          expectedBranchName: prepared.branchName,
+          repositoryId: prepared.repository.id,
+          repositoryLabel: prepared.repository.label,
+          astStatus: prepared.sourceWorkspace?.astStatus || "BUILDING",
+          astFreshness: prepared.sourceWorkspace?.astFreshness,
+          sourceWorkspaceError: prepared.sourceWorkspace?.sourceWorkspaceError,
+          remediation: prepared.sourceWorkspace?.remediation,
+        },
+      },
+    });
+
     return getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
   } catch (error) {
     const remediationMessage = buildExecutionPreparationErrorMessage(error);
@@ -9501,6 +9540,37 @@ const executeAutomatedStep = async (
         costUsd: decisionEnvelope.usage.estimatedCostUsd,
         latencyMs: decisionEnvelope.latencyMs,
       });
+
+      // Audit the agent's response against the step's expectedOutputs
+      // contract. Non-fatal: we record a run event so operators see which
+      // named outputs are missing without blocking the run. The agent
+      // already received the explicit `## <Name>` instruction in its
+      // system prompt, so a mismatch here is a real signal.
+      const outputContractAudit = auditOutputContractSections(
+        decision.summary,
+        step.artifactContract?.expectedOutputs || [],
+      );
+      if (!outputContractAudit.vacuous && outputContractAudit.missing.length > 0) {
+        await emitRunProgressEvent({
+          capabilityId: detail.run.capabilityId,
+          runId: detail.run.id,
+          workItemId: detail.run.workItemId,
+          runStepId: currentRunStep.id,
+          traceId: detail.run.traceId,
+          spanId: currentRunStep.spanId,
+          type: "STEP_OUTPUT_CONTRACT_INCOMPLETE",
+          level: "WARN",
+          message: `${step.name} produced ${outputContractAudit.present.length} of ${outputContractAudit.present.length + outputContractAudit.missing.length} expected output sections. Missing: ${outputContractAudit.missing.join(", ")}.`,
+          details: {
+            stage: "STEP_OUTPUT_CONTRACT_INCOMPLETE",
+            stepName: step.name,
+            expectedOutputs: step.artifactContract?.expectedOutputs || [],
+            present: outputContractAudit.present,
+            missing: outputContractAudit.missing,
+            artifactId: artifact.id,
+          },
+        });
+      }
       const codeDiffArtifact =
         stepTouchedPaths.size > 0
           ? await captureCodeDiffReviewArtifact({

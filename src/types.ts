@@ -2606,7 +2606,15 @@ export interface CompiledArtifactChecklistItem {
   id: string;
   label: string;
   direction: "INPUT" | "OUTPUT";
-  status: "READY" | "EXPECTED";
+  /**
+   * READY     — the named section was authored as a `## <label>` heading
+   *             in the relevant artifact's text.
+   * EXPECTED  — the step (or upstream) hasn't produced output yet, so we
+   *             can't tell.
+   * MISSING   — output exists but the named section is not present in it
+   *             (output-contract violation).
+   */
+  status: "READY" | "EXPECTED" | "MISSING";
   description?: string;
 }
 
