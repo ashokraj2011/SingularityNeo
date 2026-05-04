@@ -10,7 +10,8 @@ const electronCommand = path.join(
   process.platform === 'win32' ? 'electron.cmd' : 'electron',
 );
 
-const devServerUrl = process.env.SINGULARITY_ELECTRON_DEV_SERVER_URL || 'http://127.0.0.1:3000';
+const devServerUrl =
+  process.env.SINGULARITY_ELECTRON_DEV_SERVER_URL || 'http://127.0.0.1:3200';
 const controlPlaneUrl = process.env.SINGULARITY_CONTROL_PLANE_URL || 'http://127.0.0.1:3001';
 
 let isShuttingDown = false;
@@ -46,6 +47,11 @@ const waitForCondition = (predicate, timeoutLabel, timeoutMs = 120_000) =>
 const devProcess = spawn(npmCommand, ['run', 'dev:web'], {
   cwd: process.cwd(),
   stdio: 'inherit',
+  env: {
+    ...process.env,
+    SINGULARITY_ELECTRON_DEV_SERVER_URL: devServerUrl,
+    SINGULARITY_CONTROL_PLANE_URL: controlPlaneUrl,
+  },
 });
 
 let electronProcess = null;
@@ -66,14 +72,17 @@ const shutdown = (signal = 'SIGTERM') => {
 };
 
 const startElectron = async () => {
+  console.log(`[desktop:dev] Waiting for renderer at ${devServerUrl} ...`);
   await waitForCondition(
     () => probeRendererUrl(devServerUrl),
     `Singularity renderer at ${devServerUrl}`,
   );
+  console.log(`[desktop:dev] Renderer ready at ${devServerUrl}. Waiting for control plane at ${controlPlaneUrl} ...`);
   await waitForCondition(
     () => probeHttpSuccessUrl(`${controlPlaneUrl}/api/state`),
     `control plane at ${controlPlaneUrl}/api/state`,
   );
+  console.log('[desktop:dev] Control plane is ready. Launching Electron...');
 
   electronProcess = spawn(electronCommand, ['.'], {
     cwd: process.cwd(),

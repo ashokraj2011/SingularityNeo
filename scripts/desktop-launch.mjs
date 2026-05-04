@@ -11,7 +11,7 @@ const electronCommand = path.join(
   process.platform === 'win32' ? 'electron.cmd' : 'electron',
 );
 
-const devServerUrl = process.env.SINGULARITY_ELECTRON_DEV_SERVER_URL || 'http://127.0.0.1:3000';
+const devServerUrl = process.env.SINGULARITY_ELECTRON_DEV_SERVER_URL || 'http://127.0.0.1:3200';
 const controlPlaneUrl = process.env.SINGULARITY_CONTROL_PLANE_URL || 'http://127.0.0.1:3001';
 
 const inspectDesktopRendererBuild = () => {

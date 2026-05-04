@@ -17,7 +17,7 @@ import type {
   WorkspaceWriteLock,
 } from '../../types';
 import { getDesktopBridge } from '../desktop';
-import { jsonHeaders, requestJson } from './shared';
+import { getCurrentActorContext, jsonHeaders, requestJson } from './shared';
 
 export interface RuntimeStatus {
   configured: boolean;
@@ -57,6 +57,9 @@ export interface RuntimeStatus {
   ownedCapabilityIds?: string[];
   workingDirectory?: string;
   lastRuntimeError?: string | null;
+  lastExecutorDispatchState?: "idle" | "skipped" | "claimed" | "error";
+  lastExecutorDispatchReason?: string | null;
+  lastExecutorDispatchAt?: string | null;
   streaming?: boolean;
   githubIdentity?: {
     id: number;
@@ -93,7 +96,9 @@ export interface CapabilityRepoSyncReport {
 export const fetchRuntimeStatus = async (): Promise<RuntimeStatus> => {
   const desktop = getDesktopBridge();
   if (desktop?.isDesktop) {
-    return desktop.getRuntimeStatus() as Promise<RuntimeStatus>;
+    return desktop.getRuntimeStatus({
+      actorContext: getCurrentActorContext(),
+    }) as Promise<RuntimeStatus>;
   }
 
   return requestJson<RuntimeStatus>('/api/runtime/status');

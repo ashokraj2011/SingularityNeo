@@ -153,6 +153,8 @@ import {
   PersistedPromptReceiptEviction,
   PersistedPromptReceipt,
   PromptReceiptReplayResponse,
+  SourceWorkspaceAstStatus,
+  SourceWorkspaceState,
 } from "../types";
 import { getDesktopBridge, isDesktopRuntime, resolveApiUrl } from "./desktop";
 import {
@@ -2094,6 +2096,7 @@ export const createCapabilityWorkItem = async (
 
 export interface WorkItemGitWorkspaceStatus {
   workspacePath: string;
+  workItemDir?: string;
   exists: boolean;
   isGitRepo: boolean;
   branchName: string;
@@ -2102,13 +2105,28 @@ export interface WorkItemGitWorkspaceStatus {
   changedFiles: string[];
   ahead: number;
   branchNameExpected: string;
+  sourceWorkspaceState?: SourceWorkspaceState;
+  operatorWorkDir?: string;
+  repoRoot?: string;
+  astStatus?: SourceWorkspaceAstStatus;
+  astFreshness?: string;
+  sourceWorkspaceError?: string;
+  remediation?: string;
 }
 
 export interface WorkItemGitWorkspaceInitResult {
   workspacePath: string;
+  workItemDir?: string;
   branchName: string;
   created: boolean;
   source: "existing" | "worktree" | "clone";
+  sourceWorkspaceState?: SourceWorkspaceState;
+  operatorWorkDir?: string;
+  repoRoot?: string;
+  astStatus?: SourceWorkspaceAstStatus;
+  astFreshness?: string;
+  sourceWorkspaceError?: string;
+  remediation?: string;
 }
 
 export interface WorkItemGitWorkspaceFinalizeResult {
@@ -2143,6 +2161,7 @@ export const initWorkItemGitWorkspace = async (
   options?: {
     repositoryUrl?: string;
     defaultBranch?: string;
+    forceAstRefresh?: boolean;
   },
 ): Promise<WorkItemGitWorkspaceInitResult> =>
   requestJson<WorkItemGitWorkspaceInitResult>(
@@ -3347,6 +3366,7 @@ export const continueCapabilityWorkItemStageControl = async (
     }>;
     carryForwardNote?: string;
     resolvedBy?: string;
+    markComplete?: boolean;
   },
 ): Promise<StageControlContinueResponse> =>
   requestJson<StageControlContinueResponse>(

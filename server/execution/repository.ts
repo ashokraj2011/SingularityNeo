@@ -521,6 +521,7 @@ export const createWorkflowRun = async ({
   workflow,
   restartFromPhase,
   segment,
+  queuedDispatchOverride,
 }: {
   capabilityId: string;
   workItem: WorkItem;
@@ -534,6 +535,10 @@ export const createWorkflowRun = async ({
     id: string;
     prioritySnapshot: 'High' | 'Med' | 'Low';
     isRetry: boolean;
+  };
+  queuedDispatchOverride?: {
+    assignedExecutorId?: string;
+    queueReason?: WorkflowRunQueueReason;
   };
 }): Promise<WorkflowRunDetail> => {
   return transaction(async client => {
@@ -589,7 +594,8 @@ export const createWorkflowRun = async ({
     const completedNodeIds = orderedNodes
       .slice(0, Math.max(startingIndex, 0))
       .map(node => node!.id);
-    const queuedDispatch = await resolveQueuedRunDispatch({ capabilityId });
+    const queuedDispatch =
+      queuedDispatchOverride || (await resolveQueuedRunDispatch({ capabilityId }));
     const run: WorkflowRun = {
       id: runId,
       capabilityId,
@@ -1738,7 +1744,10 @@ export const claimNextRunnableRunForExecutor = async ({
         UPDATE capability_workflow_runs runs
         SET
           status = CASE WHEN runs.status = 'QUEUED' THEN 'RUNNING' ELSE runs.status END,
-          queue_reason = NULL,
+          queue_reason = CASE
+            WHEN runs.queue_reason = 'PREPARING_EXECUTION_CONTEXT' THEN runs.queue_reason
+            ELSE NULL
+          END,
           assigned_executor_id = $2,
           lease_owner = $3,
           lease_expires_at = NOW() + ($4 * INTERVAL '1 millisecond'),

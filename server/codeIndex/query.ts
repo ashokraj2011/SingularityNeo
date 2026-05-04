@@ -273,17 +273,18 @@ export const searchCodeSymbols = async (
     params.push(options.kind);
   }
 
-  // Bare `ORDER BY 0` is parsed by Postgres as an invalid ordinal reference.
-  // Use `NULL` for the "no ranking preference" case so the clause becomes a
-  // harmless no-op when repository/path hints are absent.
-  let repositoryRankClause = 'NULL';
+  // Bare `ORDER BY 0` is parsed by Postgres as an invalid ordinal reference,
+  // and bare `ORDER BY NULL` is also rejected as a non-integer constant.
+  // Use a neutral CASE expression instead so the fallback remains valid SQL
+  // while preserving the "no ranking preference" behavior.
+  let repositoryRankClause = 'CASE WHEN TRUE THEN 0 ELSE 0 END';
   if (options.repositoryId) {
     parameterIndex += 1;
     params.push(options.repositoryId);
     repositoryRankClause = `CASE WHEN repository_id = $${parameterIndex} THEN 0 ELSE 1 END`;
   }
 
-  let pathRankClause = 'NULL';
+  let pathRankClause = 'CASE WHEN TRUE THEN 0 ELSE 0 END';
   if (options.nearFilePath) {
     parameterIndex += 1;
     params.push(options.nearFilePath);

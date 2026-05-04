@@ -1105,7 +1105,7 @@ const buildReadinessItems = (
       path: '/capabilities/metadata',
       isBlocking: !hasMinimalCapabilityContract(capability),
       blockingReason:
-        'Execution stays gated until the capability has an owner and a basic description.',
+        'Owner and description are recommended context. Missing ownership no longer blocks execution.',
       nextRequiredAction: hasMinimalCapabilityContract(capability)
         ? 'Optionally add business outcome, success metrics, required evidence, or an operating policy summary.'
         : 'Add a capability owner and a short description before starting workflow execution.',

@@ -6,7 +6,6 @@
  * excluded — they remain in `.env.local` only.
  *
  * Preference keys:
- *   workingDirectory     ← SINGULARITY_WORKING_DIRECTORY
  *   copilotCliUrl        ← COPILOT_CLI_URL
  *   allowHttpFallback    ← ALLOW_GITHUB_MODELS_HTTP_FALLBACK
  *   embeddingBaseUrl     ← LOCAL_OPENAI_BASE_URL
@@ -66,7 +65,6 @@ const asInt = (value: unknown): number | undefined => {
 const preferencesFromRow = (row: Record<string, any>): DesktopPreferences => ({
   id: row.id,
   hostname: row.hostname,
-  workingDirectory: asString(row.working_directory),
   copilotCliUrl: asString(row.copilot_cli_url),
   allowHttpFallback: asBoolean(row.allow_http_fallback),
   embeddingBaseUrl: asString(row.embedding_base_url),
@@ -104,14 +102,13 @@ export const upsertDesktopPreferences = async (
     `
       INSERT INTO desktop_preferences (
         id, hostname,
-        working_directory, copilot_cli_url, allow_http_fallback,
+        copilot_cli_url, allow_http_fallback,
         embedding_base_url, embedding_model, runtime_port, executor_id, extra,
         created_at, updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())
       ON CONFLICT (id) DO UPDATE SET
         hostname              = EXCLUDED.hostname,
-        working_directory     = COALESCE(EXCLUDED.working_directory,     desktop_preferences.working_directory),
         copilot_cli_url       = COALESCE(EXCLUDED.copilot_cli_url,       desktop_preferences.copilot_cli_url),
         allow_http_fallback   = COALESCE(EXCLUDED.allow_http_fallback,   desktop_preferences.allow_http_fallback),
         embedding_base_url    = COALESCE(EXCLUDED.embedding_base_url,    desktop_preferences.embedding_base_url),
@@ -125,7 +122,6 @@ export const upsertDesktopPreferences = async (
     [
       desktopId,
       hostname.trim() || os.hostname(),
-      prefs.workingDirectory?.trim() || null,
       prefs.copilotCliUrl?.trim() || null,
       prefs.allowHttpFallback ?? null,
       prefs.embeddingBaseUrl?.trim() || null,
@@ -148,14 +144,13 @@ export const patchDesktopPreferences = async (
     `
       INSERT INTO desktop_preferences (
         id, hostname,
-        working_directory, copilot_cli_url, allow_http_fallback,
+        copilot_cli_url, allow_http_fallback,
         embedding_base_url, embedding_model, runtime_port, executor_id, extra,
         created_at, updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())
       ON CONFLICT (id) DO UPDATE SET
         hostname              = EXCLUDED.hostname,
-        working_directory     = EXCLUDED.working_directory,
         copilot_cli_url       = EXCLUDED.copilot_cli_url,
         allow_http_fallback   = EXCLUDED.allow_http_fallback,
         embedding_base_url    = EXCLUDED.embedding_base_url,
@@ -169,7 +164,6 @@ export const patchDesktopPreferences = async (
     [
       desktopId,
       hostname.trim() || os.hostname(),
-      patch.workingDirectory !== undefined ? (patch.workingDirectory?.trim() || null) : null,
       patch.copilotCliUrl !== undefined ? (patch.copilotCliUrl?.trim() || null) : null,
       patch.allowHttpFallback !== undefined ? patch.allowHttpFallback : null,
       patch.embeddingBaseUrl !== undefined ? (patch.embeddingBaseUrl?.trim() || null) : null,
@@ -196,9 +190,6 @@ export const patchDesktopPreferences = async (
  * Tokens and passwords are NOT touched here.
  */
 export const applyPreferencesToEnv = (prefs: DesktopPreferences): void => {
-  if (prefs.workingDirectory) {
-    process.env.SINGULARITY_WORKING_DIRECTORY = prefs.workingDirectory;
-  }
   if (prefs.copilotCliUrl) {
     process.env.COPILOT_CLI_URL = prefs.copilotCliUrl;
   }

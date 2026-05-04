@@ -50,6 +50,10 @@ const openSafeExternalUrl = url => {
   void shell.openExternal(url);
 };
 
+const logDesktopStartup = message => {
+  console.log(`[desktop:main] ${message}`);
+};
+
 const controlPlaneUrl = normalizeUrl(
   process.env.SINGULARITY_CONTROL_PLANE_URL || 'http://127.0.0.1:3001',
 );
@@ -703,8 +707,71 @@ const createWindow = async () => {
     },
   });
 
+  let forcedShowTimer = null;
+  const clearForcedShowTimer = () => {
+    if (forcedShowTimer) {
+      clearTimeout(forcedShowTimer);
+      forcedShowTimer = null;
+    }
+  };
+  const showAndFocusWindow = reason => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+    clearForcedShowTimer();
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    if (!mainWindow.isVisible()) {
+      logDesktopStartup(`Showing desktop window (${reason}).`);
+      mainWindow.show();
+    } else {
+      logDesktopStartup(`Focusing desktop window (${reason}).`);
+    }
+    mainWindow.focus();
+    try {
+      app.focus({ steal: true });
+    } catch {
+      app.focus();
+    }
+  };
+
   mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
+    showAndFocusWindow('ready-to-show');
+  });
+  mainWindow.on('show', () => {
+    logDesktopStartup('Desktop window is visible.');
+  });
+  mainWindow.on('unresponsive', () => {
+    console.error('[desktop:main] Desktop window became unresponsive.');
+  });
+  mainWindow.on('closed', () => {
+    clearForcedShowTimer();
+    if (mainWindow?.isDestroyed?.()) {
+      logDesktopStartup('Desktop window closed.');
+    }
+  });
+  mainWindow.webContents.on('did-start-loading', () => {
+    logDesktopStartup('Renderer started loading.');
+  });
+  mainWindow.webContents.on('did-finish-load', () => {
+    const currentUrl = mainWindow?.webContents.getURL() || '';
+    logDesktopStartup(`Renderer finished loading ${currentUrl || '(unknown url)'}.`);
+    showAndFocusWindow('did-finish-load');
+  });
+  mainWindow.webContents.on(
+    'did-fail-load',
+    (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
+      console.error(
+        `[desktop:main] Renderer failed to load (${isMainFrame ? 'main-frame' : 'subframe'}) ${validatedUrl || '(unknown url)'}: [${errorCode}] ${errorDescription}`,
+      );
+      showAndFocusWindow('did-fail-load');
+    },
+  );
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error(
+      `[desktop:main] Renderer process exited unexpectedly: ${details?.reason || 'unknown reason'}.`,
+    );
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -724,6 +791,19 @@ const createWindow = async () => {
     openSafeExternalUrl(targetUrl);
   });
 
+  forcedShowTimer = setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) {
+      return;
+    }
+    console.warn(
+      '[desktop:main] Desktop window was still hidden after 5s. Forcing it visible for debugging.',
+    );
+    showAndFocusWindow('forced-show-timeout');
+  }, 5_000);
+  if (typeof forcedShowTimer.unref === 'function') {
+    forcedShowTimer.unref();
+  }
+
   if (rendererDevUrl) {
     const devRendererIsValid = await probeRendererUrl(rendererDevUrl, 2_500);
     if (devRendererIsValid) {
@@ -731,8 +811,10 @@ const createWindow = async () => {
         startupRouteHash && !rendererDevUrl.includes('#')
           ? `${rendererDevUrl.replace(/\/+$/, '')}/${startupRouteHash}`
           : rendererDevUrl;
+      logDesktopStartup(`Loading live renderer from ${targetUrl}.`);
       await mainWindow.loadURL(targetUrl);
       mainWindow.webContents.openDevTools({ mode: 'detach' });
+      showAndFocusWindow('live-renderer-loaded');
       return;
     }
 
@@ -743,16 +825,20 @@ const createWindow = async () => {
 
   const rendererIssue = detectDesktopRendererIssue();
   if (rendererIssue) {
+    logDesktopStartup('Loading startup issue page because the desktop renderer is not ready.');
     await loadStartupIssuePage(rendererIssue);
+    showAndFocusWindow('startup-issue-page');
     return;
   }
 
   const packagedRendererUrl = pathToFileURL(
     path.join(projectRoot, 'dist', 'index.html'),
   ).toString();
+  logDesktopStartup(`Loading packaged renderer from ${packagedRendererUrl}.`);
   await mainWindow.loadURL(
     startupRouteHash ? `${packagedRendererUrl}${startupRouteHash}` : packagedRendererUrl,
   );
+  showAndFocusWindow('packaged-renderer-loaded');
 };
 
 ipcMain.handle('desktop:get-shell-context', async () => createDesktopContext());
@@ -761,8 +847,8 @@ ipcMain.handle('desktop:worker:ping', async () =>
     requestedAt: new Date().toISOString(),
   }),
 );
-ipcMain.handle('desktop:runtime:status', async () =>
-  requestWorker('runtime:status', {}, {
+ipcMain.handle('desktop:runtime:status', async (_event, payload) =>
+  requestWorker('runtime:status', payload || {}, {
     timeoutMs: RUNTIME_STATUS_WORKER_TIMEOUT_MS,
   }),
 );

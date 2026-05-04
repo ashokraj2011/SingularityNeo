@@ -142,6 +142,11 @@ type ToolLoopDecision =
       action: "clarify";
       reasoning: string;
       message: string;
+    }
+  | {
+      action: "unblock_workflow";
+      reasoning: string;
+      summary: string;
     };
 
 // Maximum number of LLM tool-loop iterations before the runtime falls back to
@@ -362,6 +367,18 @@ const parseToolLoopDecision = (
     };
   }
 
+  if (action === "unblock_workflow") {
+    const summary = normalizeString(parsed.summary || parsed.content || parsed.message);
+    if (!summary) {
+      return null;
+    }
+    return {
+      action: "unblock_workflow",
+      reasoning,
+      summary,
+    };
+  }
+
   return null;
 };
 
@@ -373,6 +390,7 @@ const buildToolLoopPrompt = (allowedToolIds: ToolAdapterId[]) =>
     '1. {"action":"invoke_tool","reasoning":"...","summary":"...","toolCall":{"toolId":"browse_code","args":{"query":"How many operators are there in the rule engine?","kind":"class"}}}',
     '2. {"action":"answer","reasoning":"...","content":"final user-facing answer"}',
     '3. {"action":"clarify","reasoning":"...","message":"one concise follow-up question"}',
+    '4. {"action":"unblock_workflow","reasoning":"...","summary":"explicit instructions on how to unblock the workflow"}',
     "Rules:",
     "- Prefer browse_code or workspace_search for structure and inventory questions.",
     "- For browse_code on code inventory questions, include args.query using the user's request.",
@@ -399,7 +417,8 @@ const buildRejectedToolIntentPrompt = ({
     `Allowed read-only tools for this turn: ${allowedToolIds.join(", ") || "none"}.`,
     "Return exactly one JSON object with no markdown.",
     '- If one of the allowed tools can help, invoke it.',
-    '- Otherwise return {"action":"answer",...} or {"action":"clarify",...}.',
+    '- Otherwise return {"action":"answer",...}, {"action":"clarify",...}, or {"action":"unblock_workflow",...}.',
+    "- If the user has provided enough information to resolve the issue, return unblock_workflow with a summary.",
     "- Do not emit raw tool JSON for a disallowed or unavailable tool.",
   ]
     .filter(Boolean)
@@ -1395,6 +1414,27 @@ export const invokeCommonAgentRuntime = async ({
           // Persist tool narration for non-self-managing providers (see B.4).
           toolHistory:
             !selfManagesContext && toolHistory.length > 0 ? [...toolHistory] : undefined,
+        };
+      }
+
+      if (decision.action === "unblock_workflow") {
+        return {
+          content: decision.summary || "Workflow unblocked.",
+          model: loopResponse.model,
+          createdAt: loopResponse.createdAt,
+          usage: aggregatedUsage || loopResponse.usage,
+          sessionScope: scope,
+          sessionScopeId: scopeId,
+          toolLoopEnabled,
+          toolLoopReason,
+          ...deriveDiscoveryMetadata(attemptedToolIds, toolResults),
+          resolvedAllowedToolIds: readOnlyToolIds,
+          resolvedAgentSource,
+          parsedToolIntent,
+          toolIntentDisposition,
+          toolIntentRejectionReason,
+          runtimeLane,
+          followUpIntent: "active-work-scope",
         };
       }
 

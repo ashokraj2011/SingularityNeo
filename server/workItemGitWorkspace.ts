@@ -29,8 +29,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { runGitCommand } from "./app/executionSupport";
 import { getCapabilityBaseClones, resolveOperatorWorkingDirectory } from "./desktopRepoSync";
+import {
+  getLocalCheckoutAstFreshness,
+  queueLocalCheckoutAstRefresh,
+} from "./localCodeIndex";
 import { normalizeDirectoryPath } from "./workspacePaths";
-import type { Capability } from "../src/types";
+import type {
+  Capability,
+  SourceWorkspaceAstStatus,
+  SourceWorkspaceState,
+} from "../src/types";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -53,6 +61,13 @@ export interface WorkItemGitWorkspaceResult {
   /** True when the workspace was freshly created (false when it already existed). */
   created: boolean;
   source: WorkItemGitWorkspaceSource;
+  sourceWorkspaceState: SourceWorkspaceState;
+  operatorWorkDir: string;
+  repoRoot: string;
+  astStatus: SourceWorkspaceAstStatus;
+  astFreshness?: string;
+  sourceWorkspaceError?: string;
+  remediation?: string;
 }
 
 export interface WorkItemGitFinalizeResult {
@@ -75,6 +90,13 @@ export interface WorkItemGitWorkspaceStatus {
   dirty: boolean;
   changedFiles: string[];
   ahead: number;
+  sourceWorkspaceState: SourceWorkspaceState;
+  operatorWorkDir: string;
+  repoRoot?: string;
+  astStatus: SourceWorkspaceAstStatus;
+  astFreshness?: string;
+  sourceWorkspaceError?: string;
+  remediation?: string;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -92,7 +114,7 @@ const sanitizeBranchSegment = (value: string): string =>
  * Canonical branch name for a work item: `wi/{sanitised-id}`.
  */
 export const buildWorkItemBranchName = (workItemId: string): string =>
-  `wi/${sanitizeBranchSegment(workItemId)}`;
+  `wi/${sanitizeBranchSegment(workItemId) || "work-item"}`;
 
 /**
  * The parent directory for a work item's isolated workspace:
@@ -211,6 +233,48 @@ const removeDirSilently = (dirPath: string) => {
   }
 };
 
+const buildAstWorkspaceFields = ({
+  workingDir,
+  workspacePath,
+  queueAst,
+  capabilityId,
+  repositoryId,
+}: {
+  workingDir: string;
+  workspacePath: string;
+  queueAst?: boolean;
+  capabilityId?: string;
+  repositoryId?: string;
+}): Pick<
+  WorkItemGitWorkspaceResult,
+  "sourceWorkspaceState" | "operatorWorkDir" | "repoRoot" | "astStatus" | "astFreshness"
+> => {
+  const astFreshness = getLocalCheckoutAstFreshness(workspacePath);
+  const astQueued = Boolean(queueAst && capabilityId && repositoryId && !astFreshness);
+  if (astQueued && capabilityId && repositoryId) {
+    queueLocalCheckoutAstRefresh({
+      checkoutPath: workspacePath,
+      capabilityId,
+      repositoryId,
+    });
+  }
+  const nextAstFreshness = getLocalCheckoutAstFreshness(workspacePath) || astFreshness;
+  const astStatus: SourceWorkspaceAstStatus = nextAstFreshness
+    ? "READY"
+    : astQueued
+      ? "BUILDING"
+      : "MISSING";
+  const sourceWorkspaceState: SourceWorkspaceState =
+    astStatus === "READY" ? "AST_READY" : astStatus === "BUILDING" ? "AST_BUILDING" : "WORK_ITEM_CHECKOUT_READY";
+  return {
+    sourceWorkspaceState,
+    operatorWorkDir: workingDir,
+    repoRoot: workspacePath,
+    astStatus,
+    astFreshness: nextAstFreshness,
+  };
+};
+
 // ────────────────────────────────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────────────────────────────────
@@ -238,6 +302,7 @@ export const initWorkItemGitWorkspace = async ({
   workingDir: explicitWorkingDir,
   repositoryUrl,
   repositoryLabel,
+  repositoryId,
   defaultBranch = "main",
 }: {
   capability: Pick<Capability, "name" | "id">;
@@ -248,6 +313,8 @@ export const initWorkItemGitWorkspace = async ({
   repositoryUrl?: string;
   /** Human-readable label used to derive the clone dir name when no URL is given. */
   repositoryLabel?: string;
+  /** Repository id used for AST refresh provenance. */
+  repositoryId?: string;
   defaultBranch?: string;
 }): Promise<WorkItemGitWorkspaceResult> => {
   const workingDir =
@@ -257,7 +324,7 @@ export const initWorkItemGitWorkspace = async ({
   if (!workingDir) {
     throw new Error(
       "No operator working directory is configured. " +
-        "Set one in Desktop Settings or via SINGULARITY_WORKING_DIRECTORY.",
+        "Set one in Desktop Settings or via workingDir.",
     );
   }
 
@@ -282,6 +349,13 @@ export const initWorkItemGitWorkspace = async ({
       branchName,
       created: false,
       source: "existing",
+      ...buildAstWorkspaceFields({
+        workingDir,
+        workspacePath: existingPath,
+        queueAst: true,
+        capabilityId: capability.id,
+        repositoryId,
+      }),
     };
   }
 
@@ -331,6 +405,13 @@ export const initWorkItemGitWorkspace = async ({
         branchName,
         created: true,
         source: "worktree",
+        ...buildAstWorkspaceFields({
+          workingDir,
+          workspacePath,
+          queueAst: true,
+          capabilityId: capability.id,
+          repositoryId,
+        }),
       };
     } catch (err) {
       console.warn(
@@ -394,6 +475,13 @@ export const initWorkItemGitWorkspace = async ({
     branchName,
     created: true,
     source: "clone",
+    ...buildAstWorkspaceFields({
+      workingDir,
+      workspacePath,
+      queueAst: true,
+      capabilityId: capability.id,
+      repositoryId,
+    }),
   };
 };
 
@@ -519,6 +607,14 @@ export const getWorkItemGitWorkspaceStatus = async (
       dirty: false,
       changedFiles: [],
       ahead: 0,
+      sourceWorkspaceState: fs.existsSync(workItemDir) ? "CHECKING" : "BLOCKED",
+      operatorWorkDir: normalizeDirectoryPath(workingDir),
+      repoRoot: workspacePath || undefined,
+      astStatus: "MISSING",
+      sourceWorkspaceError: fs.existsSync(workItemDir)
+        ? "Work-item directory exists but no git checkout was found."
+        : "Work-item checkout has not been initialized.",
+      remediation: "Use Refresh source / AST or start execution to create the checkout.",
     };
   }
 
@@ -552,5 +648,10 @@ export const getWorkItemGitWorkspaceStatus = async (
     dirty: changedFiles.length > 0,
     changedFiles,
     ahead: Number.parseInt(aheadOutput.trim() || "0", 10) || 0,
+    ...buildAstWorkspaceFields({
+      workingDir: normalizeDirectoryPath(workingDir),
+      workspacePath,
+      queueAst: false,
+    }),
   };
 };

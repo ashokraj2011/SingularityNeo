@@ -7,7 +7,10 @@ vi.mock('../db', () => ({
 }));
 
 import { query } from '../db';
-import { claimCapabilityExecution } from '../executionOwnership';
+import {
+  claimCapabilityExecution,
+  heartbeatDesktopExecutor,
+} from '../executionOwnership';
 
 const queryMock = vi.mocked(query);
 
@@ -109,9 +112,56 @@ const installQueryMock = (state: MockState) => {
       return rowResult(record ? [record] : []);
     }
 
+    if (text.includes('SELECT capability_id') && text.includes('FROM capability_execution_ownership') && text.includes('WHERE executor_id = $1')) {
+      const executorId = String(params[0]);
+      const rows = Array.from(state.ownerships.values())
+        .filter(row => row.executor_id === executorId)
+        .map(row => ({ capability_id: row.capability_id }));
+      return rowResult(rows);
+    }
+
+    if (text.includes('SELECT *') && text.includes('FROM desktop_user_workspace_mappings')) {
+      return rowResult([]);
+    }
+
     if (text.includes('SELECT *') && text.includes('FROM capability_execution_ownership') && text.includes('WHERE capability_id = $1')) {
       const record = state.ownerships.get(String(params[0]));
       return rowResult(record ? [record] : []);
+    }
+
+    if (text.includes('INSERT INTO desktop_executor_registrations')) {
+      const executorId = String(params[0]);
+      const next: RegistrationRow = {
+        id: executorId,
+        actor_user_id: params[1] || null,
+        actor_display_name: String(params[2] || 'Workspace Operator'),
+        actor_team_ids: Array.isArray(params[3]) ? params[3] : [],
+        owned_capability_ids: Array.isArray(params[4]) ? params[4] : [],
+        approved_workspace_roots:
+          params[5] && typeof params[5] === 'string'
+            ? JSON.parse(params[5])
+            : {},
+        runtime_summary:
+          params[6] && typeof params[6] === 'string'
+            ? JSON.parse(params[6])
+            : {},
+        heartbeat_at: nowIso,
+        created_at: state.registrations.get(executorId)?.created_at || nowIso,
+        updated_at: nowIso,
+      };
+      state.registrations.set(executorId, next);
+      return rowResult([next]);
+    }
+
+    if (text.includes('UPDATE capability_execution_ownership') && text.includes('heartbeat_at = NOW()')) {
+      const executorId = String(params[0]);
+      for (const row of state.ownerships.values()) {
+        if (row.executor_id === executorId) {
+          row.heartbeat_at = nowIso;
+          row.updated_at = nowIso;
+        }
+      }
+      return rowResult([]);
     }
 
     if (text.includes('DELETE FROM capability_execution_ownership') && text.includes('RETURNING capability_id')) {
@@ -302,5 +352,27 @@ describe('claimCapabilityExecution', () => {
         approvedWorkspaceRoots: ['/tmp/app'],
       }),
     ).rejects.toThrow('already owns execution');
+  });
+
+  it('hydrates owned capability ids during executor heartbeat registration', async () => {
+    const state: MockState = {
+      staleExecutors: [],
+      registrations: new Map([['exec-1', createRegistration('exec-1')]]),
+      ownerships: new Map([['CAP-1', createOwnership('CAP-1', 'exec-1')]]),
+      runAssignmentUpdates: [],
+    };
+    installQueryMock(state);
+
+    const registration = await heartbeatDesktopExecutor({
+      executorId: 'exec-1',
+      actor: baseActor,
+      approvedWorkspaceRoots: { 'CAP-1': ['/tmp/app'] },
+      runtimeSummary: {},
+      workingDirectory: '/tmp/app',
+    });
+
+    expect(registration.ownedCapabilityIds).toContain('CAP-1');
+    expect(state.registrations.get('exec-1')?.owned_capability_ids).toContain('CAP-1');
+    expect(state.ownerships.get('CAP-1')?.heartbeat_at).toBe(nowIso);
   });
 });

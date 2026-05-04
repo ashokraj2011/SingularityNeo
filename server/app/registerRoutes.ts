@@ -106,9 +106,7 @@ export const registerAllRoutes = (
     applyManualBranchPolicy,
     assertCapabilitySupportsExecution,
     createRuntimeId,
-    inspectCodeWorkspace,
     parseActor,
-    runGitCommand,
   });
   registerStoryProposalRoutes(app, {
     parseActorContext,

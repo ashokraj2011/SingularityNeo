@@ -62,6 +62,7 @@ import {
   getAgentHealth,
 } from '../lib/capabilityExperience';
 import { isDesktopRuntime } from '../lib/desktop';
+import { getRuntimeStatusIssueMessage } from '../lib/runtimeStatusMessages';
 
 type SessionMode = 'resume' | 'fresh';
 type InspectorTab =
@@ -662,7 +663,7 @@ const Chat = () => {
         }
 
         setRuntimeStatus(nextStatus);
-        setConfigError('');
+        setConfigError(getRuntimeStatusIssueMessage(nextStatus) || '');
       })
       .catch(nextError => {
         if (!isMounted) {
@@ -849,9 +850,11 @@ const Chat = () => {
       return;
     }
 
+    const runtimeIssue = getRuntimeStatusIssueMessage(runtimeStatus);
     if (!runtimeStatus?.configured) {
       setError(
-        `The ${getRuntimeDisplayLabel()} is not configured yet. Configure a runtime provider in Operations, then restart the ${isDesktopRuntime() ? 'desktop app' : 'dev server'} if prompted.`,
+        runtimeIssue ||
+          `The ${getRuntimeDisplayLabel()} is not configured yet. Configure a runtime provider in Operations, then restart the ${isDesktopRuntime() ? 'desktop app' : 'dev server'} if prompted.`,
       );
       return;
     }

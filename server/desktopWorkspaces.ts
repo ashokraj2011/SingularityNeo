@@ -7,6 +7,10 @@ import type {
 } from "../src/types";
 import { query } from "./db";
 import {
+  deriveDesktopId,
+  getDesktopPreferences,
+} from "./desktopPreferences";
+import {
   isPathInsideWorkspaceRoot,
   normalizeDirectoryPath,
 } from "./workspacePaths";
@@ -413,32 +417,7 @@ export const listValidatedWorkspaceRootsByCapability = async ({
   );
 };
 
-/**
- * Fetch the `working_directory` column on `desktop_executor_registrations`
- * for an executor. Inlined here (instead of importing
- * `getDesktopExecutorRegistration`) because `executionOwnership.ts`
- * already imports from this module — a reverse import would create a
- * cycle. A single-column lookup is cheap enough to duplicate.
- */
-const loadExecutorWorkingDirectory = async (
-  executorId: string,
-): Promise<string | null> => {
-  try {
-    const { rows } = await query<{ working_directory: string | null }>(
-      `SELECT working_directory
-         FROM desktop_executor_registrations
-        WHERE id = $1
-        LIMIT 1`,
-      [executorId],
-    );
-    const raw = rows[0]?.working_directory;
-    if (!raw || typeof raw !== "string") return null;
-    const trimmed = raw.trim();
-    return trimmed ? trimmed : null;
-  } catch {
-    return null;
-  }
-};
+
 
 export const resolveDesktopWorkspace = async ({
   executorId,
@@ -470,45 +449,6 @@ export const resolveDesktopWorkspace = async ({
   );
 
   if (!mapping) {
-    // No explicit per-capability mapping exists. Fall back to the
-    // executor-level `working_directory` that the desktop worker sends
-    // on registration (driven by the operator's
-    // `SINGULARITY_WORKING_DIRECTORY` env). This is now the primary way
-    // to configure a workspace for a personal machine — per-capability
-    // mappings become an opt-in override for power users / shared
-    // runners.
-    const executorWorkingDirectory =
-      await loadExecutorWorkingDirectory(executorId);
-    if (executorWorkingDirectory) {
-      const normalizedRoot = normalizeDirectoryPath(executorWorkingDirectory);
-      // The configured working directory is a parent workspace area. Runtime
-      // callers derive the per-capability / per-work-item checkout path from
-      // this root so multiple work items never collide on the same checkout.
-      const synthesizedWorkingDirectoryPath = normalizedRoot;
-      const synthesizedValidation = validateWorkspacePaths({
-        localRootPath: normalizedRoot,
-        workingDirectoryPath: synthesizedWorkingDirectoryPath,
-      });
-
-      return {
-        executorId,
-        userId,
-        capabilityId,
-        repositoryId,
-        // Synthesized resolutions have no mappingId on purpose — there
-        // is no row in `desktop_user_workspace_mappings`. Downstream
-        // consumers that require a mappingId (write-back, deletion,
-        // etc.) will still fail; this only unblocks read-side clone +
-        // tool resolution.
-        localRootPath: normalizedRoot || undefined,
-        workingDirectoryPath: synthesizedWorkingDirectoryPath || undefined,
-        approvedWorkspaceRoots: Array.from(
-          new Set([...(approvedWorkspaceRoots ?? []), normalizedRoot].filter(Boolean)),
-        ),
-        validation: synthesizedValidation,
-      };
-    }
-
     return {
       executorId,
       userId,
@@ -519,8 +459,8 @@ export const resolveDesktopWorkspace = async ({
         code: "MAPPING_MISSING",
         valid: false,
         message: repositoryId
-          ? "No desktop workspace mapping is stored for this repository on the current desktop, and the executor has no SINGULARITY_WORKING_DIRECTORY fallback."
-          : "No desktop workspace mapping is stored for this capability on the current desktop, and the executor has no SINGULARITY_WORKING_DIRECTORY fallback.",
+          ? "No desktop workspace mapping is stored for this repository on the current desktop."
+          : "No desktop workspace mapping is stored for this capability on the current desktop.",
       },
     };
   }
@@ -546,7 +486,7 @@ export const requireValidDesktopWorkspaceResolution = (
   validation: DesktopWorkspaceMappingValidation & { valid: true };
 } => {
   // `mappingId` is intentionally NOT required here — a resolution may be
-  // synthesized from the executor's `SINGULARITY_WORKING_DIRECTORY`
+  // synthesized from the executor's `workingDir`
   // fallback with no corresponding row in `desktop_user_workspace_mappings`.
   // Callers that need a real mappingId (write-back, deletion) must
   // check for it themselves.
@@ -557,7 +497,7 @@ export const requireValidDesktopWorkspaceResolution = (
   ) {
     throw new Error(
       resolution.validation.message ||
-        "No valid desktop workspace is available for this operator on the current desktop. Set SINGULARITY_WORKING_DIRECTORY in the desktop operator's .env.local, or add a per-capability workspace mapping.",
+        "No valid desktop workspace is available for this operator on the current desktop.",
     );
   }
 

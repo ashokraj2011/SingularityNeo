@@ -239,6 +239,7 @@ const buildLocalCheckoutIndex = async ({
     const absolutePath = path.join(normalizedCheckoutPath, relativePath);
     const content = await fs.readFile(absolutePath, "utf8");
     const parsed = parseSourceFile(relativePath, content);
+    await new Promise((resolve) => setImmediate(resolve));
     parsed.symbols.forEach((symbol) => {
       symbols.push(
         toCapabilityCodeSymbol({

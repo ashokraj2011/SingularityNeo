@@ -75,14 +75,17 @@ export const buildReadinessContractFromSignals = ({
     createGate({
       id: "OWNER_ASSIGNED",
       label: "Owner assigned",
-      satisfied: hasCapabilityOwnerAssigned(capability),
+      satisfied: true,
       summary:
-        "A real team or stakeholder must be accountable for this capability.",
+        hasCapabilityOwnerAssigned(capability)
+          ? "A real team or stakeholder is accountable for this capability."
+          : "Ownership metadata is still recommended so delivery has a clear accountable team or stakeholder.",
       blockingReason:
-        "Execution stays blocked until a capability owner or owning team is assigned.",
+        "This gate is warning-only. Execution can continue, but adding an owner team or stakeholder keeps accountability clear.",
       actionLabel: "Assign owner",
       path: "/capabilities/metadata",
-      nextRequiredAction: "Add an owner team, stakeholder, or team assignment.",
+      nextRequiredAction:
+        "Optionally add an owner team, stakeholder, or team assignment.",
     }),
     createGate({
       id: "OUTCOME_CONTRACT_COMPLETE",

@@ -11,6 +11,7 @@ import {
   StopCircle,
   User,
   X,
+  CheckCircle,
 } from 'lucide-react';
 import { ModalShell, StatusBadge } from './EnterpriseUI';
 import {
@@ -280,6 +281,11 @@ export const StageControlModal = ({
       if (result.termination === 'recovered') {
         info('Recovered draft', 'A partial stage-control response was preserved.');
       }
+
+      if (result.completeEvent?.followUpIntent === 'active-work-scope') {
+        setCarryForwardNote(content);
+        setTimeout(() => void handleContinue(true), 500);
+      }
     } catch (nextError) {
       if (!isMountedRef.current || requestRef.current !== requestToken) {
         return;
@@ -301,7 +307,7 @@ export const StageControlModal = ({
     }
   };
 
-  const handleContinue = async () => {
+  const handleContinue = async (markComplete = false) => {
     if (!agent) {
       return;
     }
@@ -327,6 +333,7 @@ export const StageControlModal = ({
           })),
           carryForwardNote: carryForwardNote.trim() || undefined,
           resolvedBy: 'Capability Owner',
+          markComplete,
         },
       );
 
@@ -676,8 +683,17 @@ export const StageControlModal = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => void handleContinue()}
-                  disabled={(!messages.length && !carryForwardNote.trim()) || isContinuing || !agent}
+                  onClick={() => void handleContinue(true)}
+                  disabled={isContinuing || !agent}
+                  className="enterprise-button enterprise-button-success"
+                >
+                  <CheckCircle size={16} />
+                  Mark complete
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleContinue(false)}
+                  disabled={(!messages.length && !carryForwardNote.trim() && !openWait) || isContinuing || !agent}
                   className="enterprise-button enterprise-button-brand-muted disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {isContinuing ? (

@@ -31,11 +31,16 @@ vi.mock('../githubModels', () => ({
   normalizeModel: (value: string) => value,
 }));
 
+const getLocalOpenAIBaseUrl = vi.fn(() => '');
+const getLocalOpenAIDefaultModel = vi.fn(() => 'local-model');
+const isLocalOpenAIConfigured = vi.fn(() => false);
+const listLocalOpenAIModels = vi.fn(async () => []);
+
 vi.mock('../localOpenAIProvider', () => ({
-  getLocalOpenAIBaseUrl: vi.fn(() => ''),
-  getLocalOpenAIDefaultModel: vi.fn(() => 'local-model'),
-  isLocalOpenAIConfigured: vi.fn(() => false),
-  listLocalOpenAIModels: vi.fn(async () => []),
+  getLocalOpenAIBaseUrl,
+  getLocalOpenAIDefaultModel,
+  isLocalOpenAIConfigured,
+  listLocalOpenAIModels,
 }));
 
 const getStoredRuntimeProviderConfig = vi.fn(async () => undefined);
@@ -52,10 +57,6 @@ vi.mock('../runtimeProviderConfig', () => ({
   setDefaultRuntimeProviderKey,
 }));
 
-// `getConfiguredDefaultRuntimeProviderKey()` now reads `.llm-providers.local.json`
-// FIRST so the Runtime Settings UI default takes effect across the app. Tests
-// must mock this layer too — otherwise a non-empty user config file leaks
-// through and clobbers the runtime-provider mock above.
 const getDefaultLLMProviderKey = vi.fn(() => undefined);
 const getLLMProviderConfig = vi.fn(() => undefined);
 vi.mock('../llmProviderConfig', () => ({
@@ -105,11 +106,16 @@ vi.mock('../runtimeCli', () => ({
 
 describe('runtimeProviders', () => {
   beforeEach(() => {
+    vi.resetModules();
     getStoredRuntimeProviderConfig.mockReset();
     getStoredRuntimeProviderConfigSync.mockReset();
     getConfiguredDefaultRuntimeProviderKeySync.mockReset();
     validateCliRuntimeProvider.mockClear();
     listCliProviderModels.mockClear();
+    getLocalOpenAIBaseUrl.mockReset();
+    getLocalOpenAIDefaultModel.mockReset();
+    isLocalOpenAIConfigured.mockReset();
+    listLocalOpenAIModels.mockReset();
     getConfiguredDefaultRuntimeProviderKeySync.mockReturnValue('codex-cli');
     getStoredRuntimeProviderConfig.mockImplementation(async ({ providerKey }: { providerKey: string }) =>
       providerKey === 'codex-cli'
@@ -131,6 +137,10 @@ describe('runtimeProviders', () => {
           }
         : undefined,
     );
+    getLocalOpenAIBaseUrl.mockReturnValue('');
+    getLocalOpenAIDefaultModel.mockReturnValue('local-model');
+    isLocalOpenAIConfigured.mockReturnValue(false);
+    listLocalOpenAIModels.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -168,5 +178,28 @@ describe('runtimeProviders', () => {
     const selected = await resolveSelectedRuntimeProvider();
 
     expect(selected.key).toBe('github-copilot');
+  });
+
+  it('marks local-openai invalid when the endpoint is OpenAI but the model looks local', async () => {
+    getConfiguredDefaultRuntimeProviderKeySync.mockReturnValue('local-openai');
+    getLocalOpenAIBaseUrl.mockReturnValue('https://api.openai.com/v1');
+    getLocalOpenAIDefaultModel.mockReturnValue('qwen2.5-coder:7b');
+    isLocalOpenAIConfigured.mockReturnValue(true);
+    listLocalOpenAIModels.mockResolvedValue([
+      {
+        id: 'gpt-4.1-mini',
+        label: 'gpt-4.1-mini',
+        profile: 'OpenAI',
+        apiModelId: 'gpt-4.1-mini',
+      },
+    ]);
+
+    const { getConfiguredRuntimeProviderStatus } = await import('../runtimeProviders');
+    const status = await getConfiguredRuntimeProviderStatus('local-openai');
+
+    expect(status.configured).toBe(false);
+    expect(status.validation?.status).toBe('invalid');
+    expect(status.validation?.message).toContain('api.openai.com');
+    expect(status.validation?.message).toContain('qwen2.5-coder:7b');
   });
 });

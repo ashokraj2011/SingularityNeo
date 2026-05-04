@@ -97,6 +97,7 @@ import {
   buildRecentWorkItemConversationText,
 } from "./llmContextEnvelope";
 import { resolveModelForTurn } from "./modelRouter";
+import { prepareWorkItemExecutionWorkspace } from "./startPreparation";
 import {
   buildExecutionRuntimeAgent,
   resolveExecutionRuntimeForStep,
@@ -740,6 +741,24 @@ const emitRunProgressEvent = async ({
   } catch (error) {
     console.warn("Failed to emit workflow progress event.", error);
   }
+};
+
+const buildExecutionPreparationErrorMessage = (error: unknown) => {
+  const baseMessage =
+    error instanceof Error
+      ? error.message
+      : "Execution preparation failed unexpectedly.";
+
+  if (/Choose an operator before using desktop workspaces/i.test(baseMessage)) {
+    return `${baseMessage} Select the active workspace operator, then retry the run.`;
+  }
+  if (/could not be initialized/i.test(baseMessage)) {
+    return `${baseMessage} Verify the repository URL and desktop working directory, then retry.`;
+  }
+  if (/desktop workspace/i.test(baseMessage) || /working directory/i.test(baseMessage)) {
+    return `${baseMessage} Fix the desktop workspace mapping in Operations before restarting this run.`;
+  }
+  return baseMessage;
 };
 
 const createHistoryEntry = (
@@ -2602,18 +2621,29 @@ const requestStepDecision = async ({
     scope: workItem.id ? "WORK_ITEM" : "TASK",
     scopeId: workItem.id || runStep.id,
   });
+  const liveExecutionContextText = [
+    `Work item ${workItem.id}: ${workItem.title}`,
+    `Workflow: ${workflow.name}`,
+    `Current step: ${step.name}`,
+    `Objective: ${compiledStepContext.objective}`,
+    `Plan summary: ${compiledWorkItemPlan.planSummary}`,
+  ].join("\n");
   const executionContinuity = buildExecutionLlmContinuitySections({
     mode: "workflow-step",
     workItem,
     workflow,
     step,
     runStep,
+    rawMessage: `${step.name}\n${step.action}`,
+    effectiveMessage: `${step.name}\n${step.action}`,
     recentConversationText: recentWorkItemConversationText,
     sessionMemoryPrompt: executionSessionMemoryPrompt,
     toolHistory: effectiveToolHistory,
     handoffContext: compiledStepContext.handoffContext,
     resolvedWaitContext: compiledStepContext.resolvedWaitContext,
     operatorGuidanceContext,
+    liveContext: liveExecutionContextText,
+    advisoryMemory: memoryContext.prompt,
   });
   const historyText = executionContinuity.toolTranscriptText;
 
@@ -2773,6 +2803,12 @@ const requestStepDecision = async ({
     // when `model-adaptive-routing` is explicitly automatic.
     modelOverride: effectiveRuntimeModel || undefined,
   });
+  console.log(`\n[orchestrator:debug] ══════ LLM RAW RESPONSE ══════`);
+  console.log(`[orchestrator:debug]   step: ${step.name}`);
+  console.log(`[orchestrator:debug]   model: ${response.model}`);
+  console.log(`[orchestrator:debug]   content: ${response.content}`);
+  console.log(`[orchestrator:debug] ════════════════════════════════\n`);
+  
   await persistExecutionSessionMemory({
     capability,
     agent: effectiveRuntimeAgent,
@@ -2829,6 +2865,12 @@ const requestStepDecision = async ({
           routingReason: modelRoutingRecommendation.routingReason,
           contextEnvelopeSource: executionContinuity.contextEnvelopeSource,
           executionContextHydrated: executionContinuity.executionContextHydrated,
+          liveWorkContextIncluded: Boolean(
+            executionContinuity.envelope.liveContext,
+          ),
+          advisoryMemoryIncluded: Boolean(
+            executionContinuity.envelope.advisoryMemory,
+          ),
           conversationTailCount: recentWorkItemConversationText
             ? recentWorkItemConversationText.split("\n").length
             : 0,
@@ -2909,8 +2951,10 @@ const requestStepDecision = async ({
 
   try {
     const parsed = extractJsonObject(response.content) as Record<string, any>;
+    console.log(`[orchestrator:debug]   parsed json object successfully`);
     const repairReason = getExecutionDecisionRepairReason(parsed);
     if (repairReason) {
+      console.log(`[orchestrator:debug]   malformed decision, triggering repair. reason: ${repairReason}`);
       const repaired = await repairMalformedExecutionDecision({
         capability,
         workItem,
@@ -2948,6 +2992,7 @@ const requestStepDecision = async ({
       ),
     } as DecisionEnvelope;
   } catch (error) {
+    console.warn(`[orchestrator:debug]   error extracting json:`, error);
     if (!(error instanceof Error) || !/valid JSON/i.test(error.message)) {
       throw error;
     }
@@ -4848,6 +4893,7 @@ export const continueWorkflowStageControl = async ({
   conversation,
   carryForwardNote,
   resolvedBy,
+  markComplete,
   actor,
 }: {
   capabilityId: string;
@@ -4855,6 +4901,7 @@ export const continueWorkflowStageControl = async ({
   conversation: StageControlConversationEntry[];
   carryForwardNote?: string;
   resolvedBy: string;
+  markComplete?: boolean;
   actor?: ActorContext;
 }) => {
   const trimmedConversation = conversation.filter((entry) =>
@@ -4974,6 +5021,48 @@ export const continueWorkflowStageControl = async ({
 
   const openWait =
     runDetail?.waits.find((wait) => wait.status === "OPEN") || null;
+
+  if (markComplete && runDetail) {
+    if (openWait) {
+      await resolveRunWait({
+        capabilityId,
+        waitId: openWait.id,
+        resolution: carryForward,
+        resolvedBy,
+        resolvedByActorUserId: actor?.userId,
+        resolvedByActorTeamIds: getActorTeamIds(actor),
+      });
+    }
+    const currentRunStep = getCurrentRunStep(runDetail);
+    const updatedRunStep = await updateWorkflowRunStep({
+      ...currentRunStep,
+      status: "COMPLETED",
+      outputSummary: "Forced complete by " + resolvedBy,
+      completedAt: new Date().toISOString(),
+    });
+    const currentNode = getCurrentWorkflowNode(runDetail);
+    const transition = await resolveGraphTransition({
+      detail: runDetail,
+      completedNode: currentNode,
+      completedRunStep: updatedRunStep,
+      summary: carryForward,
+    });
+    await syncCompletedProjection({
+      detail: runDetail,
+      completedStep: currentStep as WorkflowStep,
+      completedRunStep: updatedRunStep,
+      nextStep: transition.nextStep,
+      summary: carryForward || "Forced complete by " + resolvedBy,
+      artifacts: [stageControlArtifact],
+      completeHumanOverride: true,
+    });
+    return {
+      action: "COMPLETED_STAGE" as any,
+      summary: `${projection.workItem.title} stage was manually completed from stage control.`,
+      artifactId: stageControlArtifact.id,
+      run: runDetail.run,
+    };
+  }
 
   if (runDetail && openWait) {
     if (openWait.type === "APPROVAL") {
@@ -5489,6 +5578,7 @@ export const startWorkflowExecution = async ({
   stopAfterPhase,
   intention,
   segmentId,
+  queuedDispatchOverride,
 }: {
   capabilityId: string;
   workItemId: string;
@@ -5503,6 +5593,10 @@ export const startWorkflowExecution = async ({
   stopAfterPhase?: WorkItemPhase;
   intention?: string;
   segmentId?: string;
+  queuedDispatchOverride?: {
+    assignedExecutorId?: string;
+    queueReason?: WorkflowRunQueueReason;
+  };
 }) => {
   const existingActiveRun = await getActiveRunForWorkItem(
     capabilityId,
@@ -5669,6 +5763,7 @@ export const startWorkflowExecution = async ({
     workflow: projection.workflow,
     restartFromPhase,
     segment: segmentForRun,
+    queuedDispatchOverride,
   });
 
   // Note: stop_after_phase lives on the segment row, not duplicated on
@@ -8362,6 +8457,213 @@ export const reconcileWorkflowRunFailure = async ({
   return nextDetail;
 };
 
+const prepareWorkflowRunExecutionContext = async (
+  detail: WorkflowRunDetail,
+): Promise<WorkflowRunDetail> => {
+  if (detail.run.queueReason !== "PREPARING_EXECUTION_CONTEXT") {
+    return detail;
+  }
+
+  const currentStep = getCurrentWorkflowStep(detail);
+  const currentRunStep = getCurrentRunStep(detail);
+  const projection = await resolveProjectionContext(
+    detail.run.capabilityId,
+    detail.run.workItemId,
+    detail.run.workflowSnapshot,
+  );
+  const activeClaims = await listActiveWorkItemClaims(
+    detail.run.capabilityId,
+    detail.run.workItemId,
+  );
+  const actorUserId =
+    projection.workItem.claimOwnerUserId || activeClaims[0]?.userId;
+  const executorId = detail.run.assignedExecutorId;
+
+  await emitRunProgressEvent({
+    capabilityId: detail.run.capabilityId,
+    runId: detail.run.id,
+    workItemId: detail.run.workItemId,
+    runStepId: currentRunStep.id,
+    traceId: detail.run.traceId,
+    spanId: currentRunStep.spanId,
+    type: "RUN_PREPARATION_STARTED",
+    message: `Preparing execution context for ${currentStep.name}.`,
+    details: {
+      stage: "RUN_PREPARATION_STARTED",
+      queueReason: detail.run.queueReason,
+      executorId: executorId || null,
+      actorUserId: actorUserId || null,
+      stepName: currentStep.name,
+      phase: currentStep.phase,
+    },
+  });
+
+  if (!executorId) {
+    const queuedDispatch = await resolveQueuedRunDispatch({
+      capabilityId: detail.run.capabilityId,
+    });
+    const nextRun = (
+      await updateWorkflowRun({
+        ...detail.run,
+        status: "QUEUED",
+        queueReason:
+          queuedDispatch.queueReason || "WAITING_FOR_EXECUTOR",
+        assignedExecutorId: queuedDispatch.assignedExecutorId,
+        leaseOwner: undefined,
+        leaseExpiresAt: undefined,
+      })
+    ).run;
+    return getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
+  }
+
+  if (!actorUserId) {
+    return completeRunWithWait({
+      detail,
+      waitType: "INPUT",
+      waitMessage:
+        "Execution preparation needs an assigned operator before the desktop workspace can be prepared. Choose the operator, then resume the run.",
+      waitPayload: {
+        stage: "RUN_PREPARATION_BLOCKED",
+        remediation:
+          "Choose the active workspace operator, then resume execution.",
+      },
+    });
+  }
+
+  try {
+    const prepared = await prepareWorkItemExecutionWorkspace({
+      capabilityId: detail.run.capabilityId,
+      workItemId: detail.run.workItemId,
+      actorUserId,
+      executorId,
+    });
+    const nextRun = (
+      await updateWorkflowRun({
+        ...detail.run,
+        queueReason: undefined,
+        assignedExecutorId: executorId,
+      })
+    ).run;
+
+    await emitRunProgressEvent({
+      capabilityId: detail.run.capabilityId,
+      runId: detail.run.id,
+      workItemId: detail.run.workItemId,
+      runStepId: currentRunStep.id,
+      traceId: detail.run.traceId,
+      spanId: currentRunStep.spanId,
+      type: prepared.cloned
+        ? "SOURCE_WORKSPACE_CLONED"
+        : "SOURCE_WORKSPACE_REUSED",
+      message: prepared.cloned
+        ? `Created work-item checkout at ${prepared.workspacePath}.`
+        : `Reused work-item checkout at ${prepared.workspacePath}.`,
+      details: {
+        stage: prepared.cloned
+          ? "SOURCE_WORKSPACE_CLONED"
+          : "SOURCE_WORKSPACE_REUSED",
+        sourceWorkspaceState: prepared.sourceWorkspace?.sourceWorkspaceState,
+        operatorWorkDir: prepared.sourceWorkspace?.operatorWorkDir,
+        repoRoot: prepared.sourceWorkspace?.repoRoot || prepared.workspacePath,
+        repositoryId: prepared.repository.id,
+        repositoryLabel: prepared.repository.label,
+      },
+    });
+
+    await emitRunProgressEvent({
+      capabilityId: detail.run.capabilityId,
+      runId: detail.run.id,
+      workItemId: detail.run.workItemId,
+      runStepId: currentRunStep.id,
+      traceId: detail.run.traceId,
+      spanId: currentRunStep.spanId,
+      type: "WORK_ITEM_BRANCH_READY",
+      message: `Work-item branch ${prepared.branchName} is ready.`,
+      details: {
+        stage: "WORK_ITEM_BRANCH_READY",
+        branchName: prepared.branchName,
+        baseBranch: prepared.baseBranch,
+        headSha: prepared.headSha || null,
+      },
+    });
+
+    await emitRunProgressEvent({
+      capabilityId: detail.run.capabilityId,
+      runId: detail.run.id,
+      workItemId: detail.run.workItemId,
+      runStepId: currentRunStep.id,
+      traceId: detail.run.traceId,
+      spanId: currentRunStep.spanId,
+      type:
+        prepared.sourceWorkspace?.astStatus === "READY"
+          ? "AST_REFRESH_COMPLETED"
+          : "AST_REFRESH_QUEUED",
+      message:
+        prepared.sourceWorkspace?.astStatus === "READY"
+          ? "AST is ready for the work-item checkout."
+          : "AST refresh queued for the work-item checkout.",
+      details: {
+        stage:
+          prepared.sourceWorkspace?.astStatus === "READY"
+            ? "AST_REFRESH_COMPLETED"
+            : "AST_REFRESH_QUEUED",
+        astStatus: prepared.sourceWorkspace?.astStatus || "BUILDING",
+        astFreshness: prepared.sourceWorkspace?.astFreshness || null,
+        repoRoot: prepared.sourceWorkspace?.repoRoot || prepared.workspacePath,
+      },
+    });
+
+    await emitRunProgressEvent({
+      capabilityId: detail.run.capabilityId,
+      runId: detail.run.id,
+      workItemId: detail.run.workItemId,
+      runStepId: currentRunStep.id,
+      traceId: detail.run.traceId,
+      spanId: currentRunStep.spanId,
+      type: "RUN_PREPARATION_COMPLETED",
+      message: `Prepared ${prepared.repository.label} on branch ${prepared.branchName}.`,
+      details: {
+        stage: "RUN_PREPARATION_COMPLETED",
+        workspacePath: prepared.workspacePath,
+        branchName: prepared.branchName,
+        baseBranch: prepared.baseBranch,
+        repositoryId: prepared.repository.id,
+        repositoryLabel: prepared.repository.label,
+        headSha: prepared.headSha || null,
+        cloned: prepared.cloned,
+      },
+    });
+
+    return getWorkflowRunDetail(detail.run.capabilityId, nextRun.id);
+  } catch (error) {
+    const remediationMessage = buildExecutionPreparationErrorMessage(error);
+    await emitRunProgressEvent({
+      capabilityId: detail.run.capabilityId,
+      runId: detail.run.id,
+      workItemId: detail.run.workItemId,
+      runStepId: currentRunStep.id,
+      traceId: detail.run.traceId,
+      spanId: currentRunStep.spanId,
+      type: "RUN_PREPARATION_BLOCKED",
+      level: "WARN",
+      message: remediationMessage,
+      details: {
+        stage: "RUN_PREPARATION_BLOCKED",
+        failureReason: remediationMessage,
+      },
+    });
+    return completeRunWithWait({
+      detail,
+      waitType: "INPUT",
+      waitMessage: remediationMessage,
+      waitPayload: {
+        stage: "RUN_PREPARATION_BLOCKED",
+        remediation: remediationMessage,
+      },
+    });
+  }
+};
+
 const executeAutomatedStep = async (
   detail: WorkflowRunDetail,
 ): Promise<WorkflowRunDetail> => {
@@ -8666,6 +8968,14 @@ const executeAutomatedStep = async (
       lastToolName,
     });
     const decision = decisionEnvelope.decision;
+    
+    console.log(`\n[orchestrator:debug] ══════ LLM DECISION EVALUATION ══════`);
+    console.log(`[orchestrator:debug]   action: ${decision.action}`);
+    console.log(`[orchestrator:debug]   summary: ${decision.summary}`);
+    if (decision.action === 'invoke_tool') {
+      console.log(`[orchestrator:debug]   toolCall: ${decision.toolCall?.toolId}`);
+    }
+    console.log(`[orchestrator:debug] ═════════════════════════════════════════\n`);
 
     if (
       ["CANCELLED", "PAUSED"].includes(
@@ -9490,6 +9800,22 @@ export const processWorkflowRun = async (
         currentDetail.run.capabilityId,
         currentDetail.run.id,
       );
+    }
+
+    if (currentDetail.run.queueReason === "PREPARING_EXECUTION_CONTEXT") {
+      currentDetail = await prepareWorkflowRunExecutionContext(currentDetail);
+      if (
+        currentDetail.run.status === "QUEUED" ||
+        currentDetail.run.status === "FAILED" ||
+        currentDetail.run.status === "WAITING_APPROVAL" ||
+        currentDetail.run.status === "WAITING_HUMAN_TASK" ||
+        currentDetail.run.status === "WAITING_INPUT" ||
+        currentDetail.run.status === "WAITING_CONFLICT" ||
+        currentDetail.run.status === "PAUSED" ||
+        currentDetail.run.status === "CANCELLED"
+      ) {
+        return currentDetail;
+      }
     }
 
     const currentStep = getCurrentWorkflowStep(currentDetail);

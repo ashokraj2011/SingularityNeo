@@ -6,6 +6,7 @@ import {
   resolveProviderDisplayName,
 } from './providerRegistry';
 import { getLLMProviderConfig } from './llmProviderConfig';
+import { getLocalOpenAIConfigIssue } from '../src/contracts/runtimeProviderDiagnostics';
 
 export type ProviderMessage = {
   role: 'developer' | 'system' | 'user' | 'assistant';
@@ -323,8 +324,7 @@ export const requestOpenAICompatModel = async ({
         `[LLM REQUEST] provider=${providerLabel} | model=${model} | messages=${messages.length} | chars=${totalChars} | tools=${tools?.length ?? 0} | attempt=${attempt + 1} | url=${baseUrl}/chat/completions`,
       );
       for (const m of messages) {
-        const preview = m.content.length > 300 ? m.content.slice(0, 300) + '…' : m.content;
-        console.log(`[LLM REQUEST]   [${m.role}] (${m.content.length} chars): ${preview}`);
+        console.log(`[LLM REQUEST]   [${m.role}] (${m.content.length} chars):\n${m.content}`);
       }
       // ──────────────────────────────────────────────────────────────
 
@@ -408,7 +408,7 @@ export const requestOpenAICompatModel = async ({
       console.log(
         `[LLM RESPONSE] provider=${providerLabel} | model=${payload.model || model} | promptTokens=${usage.promptTokens} | completionTokens=${usage.completionTokens} | totalTokens=${usage.totalTokens} | cost=$${usage.estimatedCostUsd} | responseId=${payload.id || 'n/a'}`,
       );
-      console.log(`[LLM RESPONSE] content (${content.length} chars):\n${content}`);
+      console.log(`[LLM RAW RESPONSE]:\n${JSON.stringify(payload, null, 2)}`);
       // ──────────────────────────────────────────────────────────────
 
       return {
@@ -479,10 +479,18 @@ export const requestLocalOpenAIModel = async ({
       `${resolveProviderDisplayName(LOCAL_OPENAI_PROVIDER_KEY)} is not configured. Set LOCAL_OPENAI_BASE_URL and restart the app.`,
     );
   }
+  const resolvedModel = model || getLocalOpenAIDefaultModel();
+  const configIssue = getLocalOpenAIConfigIssue({
+    baseUrl: getLocalOpenAIBaseUrl(),
+    model: resolvedModel,
+  });
+  if (configIssue) {
+    throw new Error(configIssue.message);
+  }
   return requestOpenAICompatModel({
     baseUrl:       getLocalOpenAIBaseUrl(),
     apiKey:        LOCAL_OPENAI_API_KEY(),
-    model:         model || getLocalOpenAIDefaultModel(),
+    model:         resolvedModel,
     messages,
     timeoutMs,
     tools,

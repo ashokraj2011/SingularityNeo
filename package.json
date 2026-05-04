@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "node scripts/electron-dev.mjs",
     "dev:web": "node scripts/dev.mjs",
-    "dev:client": "vite --port=3000 --host=0.0.0.0",
+    "dev:client": "vite --port=3200 --host=0.0.0.0",
     "dev:server": "tsx watch server/index.ts",
     "desktop:dev": "node scripts/electron-dev.mjs",
     "desktop": "node scripts/electron-dev.mjs",

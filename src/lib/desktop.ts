@@ -36,7 +36,7 @@ export interface SingularityDesktopBridge {
   controlPlaneUrl: string;
   getShellContext: () => Promise<DesktopShellContext>;
   pingWorker: () => Promise<DesktopWorkerPing>;
-  getRuntimeStatus: () => Promise<unknown>;
+  getRuntimeStatus: (payload?: { actorContext?: unknown }) => Promise<unknown>;
   setActorContext: (actor: unknown) => Promise<unknown>;
   setRuntimeToken: (token: string) => Promise<unknown>;
   clearRuntimeToken: () => Promise<unknown>;

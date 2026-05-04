@@ -2990,6 +2990,7 @@ export type ExecutionDispatchState =
   | "STALE_EXECUTOR";
 
 export type WorkflowRunQueueReason =
+  | "PREPARING_EXECUTION_CONTEXT"
   | "WAITING_FOR_EXECUTOR"
   | "EXECUTOR_DISCONNECTED"
   | "EXECUTOR_RELEASED"
@@ -3056,7 +3057,6 @@ export interface DesktopPreferences {
   /** Hash-based stable machine identity, e.g. "DID-3A7F…" */
   id: string;
   hostname: string;
-  workingDirectory?: string;
   copilotCliUrl?: string;
   allowHttpFallback?: boolean;
   embeddingBaseUrl?: string;
@@ -3282,6 +3282,38 @@ export interface WorkItemCheckoutSession {
   lastSyncedAt?: string;
 }
 
+export type SourceWorkspaceState =
+  | "NOT_REQUIRED"
+  | "CHECKING"
+  | "BASE_CLONE_READY"
+  | "WORK_ITEM_CHECKOUT_READY"
+  | "CLONING"
+  | "AST_BUILDING"
+  | "AST_READY"
+  | "BLOCKED";
+
+export type SourceWorkspaceAstStatus =
+  | "NOT_REQUIRED"
+  | "MISSING"
+  | "BUILDING"
+  | "READY"
+  | "STALE"
+  | "ERROR";
+
+export interface WorkItemSourceWorkspaceStatus {
+  sourceWorkspaceState: SourceWorkspaceState;
+  operatorWorkDir?: string;
+  repoRoot?: string;
+  branchName?: string;
+  expectedBranchName?: string;
+  repositoryId?: string;
+  repositoryLabel?: string;
+  astStatus: SourceWorkspaceAstStatus;
+  astFreshness?: string;
+  sourceWorkspaceError?: string;
+  remediation?: string;
+}
+
 export interface WorkItemHandoffPacket {
   id: string;
   workItemId: string;
@@ -3331,6 +3363,7 @@ export interface WorkItem {
   lastRunId?: string;
   recordVersion?: number;
   executionContext?: WorkItemExecutionContext;
+  sourceWorkspace?: WorkItemSourceWorkspaceStatus;
   stageOverrides?: WorkItemStageOverride[];
   history: WorkItemHistoryEntry[];
   // Long-lived cross-segment goal, visible at every segment start.

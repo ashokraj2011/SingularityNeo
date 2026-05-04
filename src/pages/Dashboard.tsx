@@ -560,7 +560,9 @@ const Dashboard = () => {
                   <p className="form-kicker">Desktop execution</p>
                   <p className="mt-2 text-lg font-bold text-on-surface">{executionOwnerLabel}</p>
                   <p className="mt-2 text-xs text-secondary">
-                    {workspace.executionQueueReason === 'EXECUTOR_DISCONNECTED'
+                    {workspace.executionQueueReason === 'PREPARING_EXECUTION_CONTEXT'
+                      ? 'A run is queued while the desktop prepares the workspace and shared branch before execution begins.'
+                      : workspace.executionQueueReason === 'EXECUTOR_DISCONNECTED'
                       ? 'The previous desktop owner disconnected. Queued runs will resume after a desktop claims this capability again.'
                       : workspace.executionQueueReason === 'EXECUTOR_RELEASED'
                       ? 'Execution was released and queued runs are waiting for a desktop owner.'

@@ -1,12 +1,11 @@
 import type { Capability, CapabilityRepository, WorkItem } from "../src/types";
-import {
-  requireValidDesktopWorkspaceResolution,
-  resolveDesktopWorkspace,
-} from "./desktopWorkspaces";
-import { getCapabilityExecutionOwnership } from "./executionOwnership";
+import { resolveOperatorWorkingDirectory } from "./desktopRepoSync";
 import { forceLocalCheckoutAstRefresh, queueLocalCheckoutAstRefresh } from "./localCodeIndex";
 import { refreshCapabilityCodeIndex } from "./codeIndex/ingest";
-import { buildWorkItemCheckoutPath } from "./workItemCheckouts";
+import {
+  discoverWorkItemCheckoutPath,
+  initWorkItemGitWorkspace,
+} from "./workItemGitWorkspace";
 
 const pickRepositoryForWorkItem = (
   capability: Pick<Capability, "repositories">,
@@ -35,29 +34,27 @@ const resolveCheckoutPath = async ({
   workItem: Pick<WorkItem, "id" | "executionContext">;
   repository: CapabilityRepository;
 }) => {
-  const ownership = await getCapabilityExecutionOwnership(capability.id).catch(
-    () => null,
-  );
-  if (!ownership?.executorId || !ownership.actorUserId) {
+  const workingDir = await resolveOperatorWorkingDirectory().catch(() => "");
+  if (!workingDir) {
     return null;
   }
 
-  const resolution = requireValidDesktopWorkspaceResolution(
-    await resolveDesktopWorkspace({
-      executorId: ownership.executorId,
-      userId: ownership.actorUserId,
-      capabilityId: capability.id,
-      repositoryId: repository.id,
-    }),
-  );
+  const existingCheckout = discoverWorkItemCheckoutPath(workingDir, workItem.id);
+  if (existingCheckout) {
+    return existingCheckout;
+  }
 
-  return buildWorkItemCheckoutPath({
-    workingDirectoryPath: resolution.workingDirectoryPath,
+  const workspace = await initWorkItemGitWorkspace({
     capability,
     workItemId: workItem.id,
-    repository,
-    repositoryCount: (capability.repositories || []).length,
-  });
+    workingDir,
+    repositoryUrl: repository.url,
+    repositoryLabel: repository.label,
+    repositoryId: repository.id,
+    defaultBranch: repository.defaultBranch || "main",
+  }).catch(() => null);
+
+  return workspace?.workspacePath || null;
 };
 
 const resolveWorkItemAstTarget = async ({

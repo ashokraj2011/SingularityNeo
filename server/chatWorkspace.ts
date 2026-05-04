@@ -387,7 +387,7 @@ const looksLikeExecutionOverviewRequest = (normalizedMessage: string) =>
   );
 
 const getOpenWait = (detail?: WorkflowRunDetail | null) =>
-  detail?.waits.find(wait => wait.status === 'OPEN');
+  detail?.waits ? [...detail.waits].reverse().find(wait => wait.status === 'OPEN') : undefined;
 
 const asCompiledStepContext = (value: unknown): CompiledStepContext | undefined =>
   value && typeof value === 'object' ? (value as CompiledStepContext) : undefined;
@@ -893,7 +893,7 @@ const parseWorkspaceAction = (
     return { type: 'REQUEST_CHANGES', workItemId, runId, note };
   }
 
-  if (/\bapprove\b|\bapprove and continue\b|\bgo ahead\b|\ballow it\b/.test(normalized)) {
+  if (/\bapprove\b|\bapprove and continue\b|\bgo ahead\b|\ballow it\b|\bmark complete\b|\bmark as complete\b/.test(normalized)) {
     return { type: 'APPROVE', workItemId, runId, note };
   }
 
@@ -1167,47 +1167,59 @@ export const maybeHandleCapabilityChatAction = async ({
   if (!action) {
     if (isExecutionAgent(agent)) {
       const resolved = resolveTargetWorkItem(bundle, message);
-      const looksLikeSkipGuidance =
-        /\bskip\b/.test(normalizedMessage) &&
-        /\b(build|test|docs|validation|step|it|this)\b/.test(normalizedMessage);
-      if (looksLikeSkipGuidance && resolved.workItem) {
-        action = {
-          type: 'GUIDE_AGENT',
-          workItemId: resolved.workItem.id,
-          note: message.trim(),
-        };
+      
+      if (resolved.workItem) {
+        const looksLikeSkipGuidance =
+          /\bskip\b/.test(normalizedMessage) &&
+          /\b(build|test|docs|validation|step|it|this)\b/.test(normalizedMessage);
+          
+        const runDetail = await resolveRunForAction(bundle.capability.id, resolved.workItem);
+        const openWait = runDetail ? getOpenWait(runDetail) : undefined;
+        
+        if (looksLikeSkipGuidance) {
+          action = {
+            type: 'GUIDE_AGENT',
+            workItemId: resolved.workItem.id,
+            note: message.trim(),
+          };
+        } else if (openWait?.type === 'INPUT') {
+          action = { type: 'PROVIDE_INPUT', workItemId: resolved.workItem.id, note: message.trim() };
+        } else if (openWait?.type === 'CONFLICT_RESOLUTION') {
+          action = { type: 'RESOLVE_CONFLICT', workItemId: resolved.workItem.id, note: message.trim() };
+        } else if (openWait?.type === 'APPROVAL' && /\b(?:yes|ok|okay|looks good|lgtm|proceed|continue|done)\b/i.test(normalizedMessage)) {
+          action = { type: 'APPROVE', workItemId: resolved.workItem.id, note: message.trim() };
+        }
+      }
+
+      if (!action) {
+        if (resolved.ambiguous?.length) {
+          return {
+            handled: true,
+            content: buildAmbiguousTargetMessage(resolved.ambiguous),
+          };
+        }
+        if (
+          resolved.workItem &&
+          looksLikeWorkItemStatusShortcutRequest(normalizedMessage)
+        ) {
+          return {
+            handled: true,
+            content: await buildWorkItemStatusSummary(bundle, resolved.workItem),
+          };
+        }
+
+        if (looksLikeExecutionOverviewRequest(normalizedMessage)) {
+          return {
+            handled: true,
+            content: buildExecutionOverviewSummary(bundle),
+          };
+        }
       }
     }
-  }
-
-  if (!action) {
-    if (isExecutionAgent(agent)) {
-      const resolved = resolveTargetWorkItem(bundle, message);
-      if (resolved.ambiguous?.length) {
-        return {
-          handled: true,
-          content: buildAmbiguousTargetMessage(resolved.ambiguous),
-        };
-      }
-      if (
-        resolved.workItem &&
-        looksLikeWorkItemStatusShortcutRequest(normalizedMessage)
-      ) {
-        return {
-          handled: true,
-          content: await buildWorkItemStatusSummary(bundle, resolved.workItem),
-        };
-      }
-
-      if (looksLikeExecutionOverviewRequest(normalizedMessage)) {
-        return {
-          handled: true,
-          content: buildExecutionOverviewSummary(bundle),
-        };
-      }
+    
+    if (!action) {
+      return { handled: false };
     }
-
-    return { handled: false };
   }
 
   if (action.type === 'CORRECT_LEARNING' || action.type === 'SHOW_LEARNING') {
@@ -1550,6 +1562,42 @@ export const maybeHandleCapabilityChatAction = async ({
   }
 
   if (action.type === 'APPROVE') {
+    if (openWait?.type === 'INPUT') {
+      const detail = await provideWorkflowRunInput({
+        capabilityId: bundle.capability.id,
+        runId: runDetail.run.id,
+        resolution: action.note || 'Marked complete from chat.',
+        resolvedBy: resolutionActor,
+      });
+      return {
+        handled: true,
+        changedState: true,
+        wakeWorker: true,
+        content: [
+          `Provided input for ${formatWorkItemHeading(workItem)}.`,
+          `Run ${detail.run.id} is now ${detail.run.status}.`,
+        ].join('\n'),
+      };
+    }
+    
+    if (openWait?.type === 'CONFLICT_RESOLUTION') {
+      const detail = await resolveWorkflowRunConflict({
+        capabilityId: bundle.capability.id,
+        runId: runDetail.run.id,
+        resolution: action.note || 'Resolved from chat.',
+        resolvedBy: resolutionActor,
+      });
+      return {
+        handled: true,
+        changedState: true,
+        wakeWorker: true,
+        content: [
+          `Resolved conflict for ${formatWorkItemHeading(workItem)}.`,
+          `Run ${detail.run.id} is now ${detail.run.status}.`,
+        ].join('\n'),
+      };
+    }
+
     const detail = await approveWorkflowRun({
       capabilityId: bundle.capability.id,
       runId: runDetail.run.id,

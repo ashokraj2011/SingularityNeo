@@ -85,9 +85,6 @@ const executorRegistrationFromRow = (
   actorTeamIds: asStringArray(row.actor_team_ids),
   ownedCapabilityIds: asStringArray(row.owned_capability_ids),
   approvedWorkspaceRoots: asApprovedWorkspaceRootMap(row.approved_workspace_roots),
-  workingDirectory: typeof row.working_directory === 'string' && row.working_directory.trim()
-    ? row.working_directory.trim()
-    : undefined,
   heartbeatStatus: getExecutorHeartbeatStatus(asIso(row.heartbeat_at)),
   heartbeatAt: asIso(row.heartbeat_at),
   createdAt: asIso(row.created_at),
@@ -118,20 +115,34 @@ export const getExecutionRuntimeMode = () =>
 
 export const isDesktopExecutionRuntime = () => getExecutionRuntimeMode() === 'desktop';
 
+const listOwnedCapabilityIdsForExecutorInternal = async (
+  executorId: string,
+): Promise<string[]> => {
+  const result = await query<{ capability_id: string }>(
+    `
+      SELECT capability_id
+      FROM capability_execution_ownership
+      WHERE executor_id = $1
+      ORDER BY capability_id ASC
+    `,
+    [executorId],
+  );
+
+  return result.rows
+    .map(row => String(row.capability_id || '').trim())
+    .filter(Boolean);
+};
+
 export const registerDesktopExecutor = async ({
   executorId,
   actor,
   approvedWorkspaceRoots,
   runtimeSummary,
-  workingDirectory,
 }: {
   executorId: string;
   actor?: ActorContext | null;
   approvedWorkspaceRoots?: Record<string, string[]>;
   runtimeSummary?: Record<string, unknown>;
-  /** User-level workspace root for this desktop. Overrides capability-level
-   *  localDirectories for all work items executed on this machine. */
-  workingDirectory?: string;
 }): Promise<DesktopExecutorRegistration> => {
   const existingRegistration = await getDesktopExecutorRegistration(executorId);
   if (
@@ -157,10 +168,8 @@ export const registerDesktopExecutor = async ({
         }),
       )
     : normalizeApprovedWorkspaceRoots(approvedWorkspaceRoots);
-  const normalizedWorkingDirectory =
-    typeof workingDirectory === 'string' && workingDirectory.trim()
-      ? workingDirectory.trim()
-      : null;
+  const ownedCapabilityIds =
+    await listOwnedCapabilityIdsForExecutorInternal(executorId);
   const result = await query(
     `
       INSERT INTO desktop_executor_registrations (
@@ -168,9 +177,9 @@ export const registerDesktopExecutor = async ({
         actor_user_id,
         actor_display_name,
         actor_team_ids,
+        owned_capability_ids,
         approved_workspace_roots,
         runtime_summary,
-        working_directory,
         heartbeat_at,
         updated_at
       )
@@ -203,13 +212,8 @@ export const registerDesktopExecutor = async ({
             THEN desktop_executor_registrations.approved_workspace_roots
           ELSE EXCLUDED.approved_workspace_roots
         END,
+        owned_capability_ids = EXCLUDED.owned_capability_ids,
         runtime_summary = EXCLUDED.runtime_summary,
-        -- Preserve existing working_directory when the new registration
-        -- doesn't send one (COALESCE keeps old value on heartbeats).
-        working_directory = COALESCE(
-          EXCLUDED.working_directory,
-          desktop_executor_registrations.working_directory
-        ),
         heartbeat_at = NOW(),
         updated_at = NOW()
       RETURNING *
@@ -219,10 +223,21 @@ export const registerDesktopExecutor = async ({
       actor?.userId || null,
       normalizeActorDisplayName(actor),
       normalizeActorTeamIds(actor),
+      ownedCapabilityIds,
       JSON.stringify(normalizedRoots),
       JSON.stringify(runtimeSummary || {}),
-      normalizedWorkingDirectory,
     ],
+  );
+
+  await query(
+    `
+      UPDATE capability_execution_ownership
+      SET
+        heartbeat_at = NOW(),
+        updated_at = NOW()
+      WHERE executor_id = $1
+    `,
+    [executorId],
   );
 
   return executorRegistrationFromRow(result.rows[0]);
@@ -233,20 +248,17 @@ export const heartbeatDesktopExecutor = async ({
   actor,
   approvedWorkspaceRoots,
   runtimeSummary,
-  workingDirectory,
 }: {
   executorId: string;
   actor?: ActorContext | null;
   approvedWorkspaceRoots?: Record<string, string[]>;
   runtimeSummary?: Record<string, unknown>;
-  workingDirectory?: string;
 }): Promise<DesktopExecutorRegistration> =>
   registerDesktopExecutor({
     executorId,
     actor,
     approvedWorkspaceRoots,
     runtimeSummary,
-    workingDirectory,
   });
 
 export const getDesktopExecutorRegistration = async (
@@ -356,21 +368,7 @@ export const listCapabilityExecutionOwnerships = async (): Promise<
 
 export const listOwnedCapabilityIdsForExecutor = async (
   executorId: string,
-): Promise<string[]> => {
-  const result = await query<{ capability_id: string }>(
-    `
-      SELECT capability_id
-      FROM capability_execution_ownership
-      WHERE executor_id = $1
-      ORDER BY capability_id ASC
-    `,
-    [executorId],
-  );
-
-  return result.rows
-    .map(row => String(row.capability_id || '').trim())
-    .filter(Boolean);
-};
+): Promise<string[]> => listOwnedCapabilityIdsForExecutorInternal(executorId);
 
 export const buildExecutorRegistrySummary = async (): Promise<ExecutorRegistrySummary> => {
   await reconcileDesktopExecutionOwnerships();
@@ -609,7 +607,7 @@ export const claimCapabilityExecution = async ({
 
   // Use the caller-supplied desktop workspace roots directly.  The route
   // handler already builds this list server-side (including the
-  // executor's SINGULARITY_WORKING_DIRECTORY fallback when no
+  // executor's workingDir fallback when no
   // per-capability mapping exists), so re-querying here would discard
   // that fallback and cause a spurious "no desktop workspace root"
   // error even when the operator has set a working directory.

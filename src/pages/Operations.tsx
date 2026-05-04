@@ -519,13 +519,11 @@ const Operations = () => {
   // Desktop preferences
   const [desktopPrefs, setDesktopPrefs] = useState<DesktopPreferences | null>(null);
   const [prefsDraft, setPrefsDraft] = useState<{
-    workingDirectory: string;
     copilotCliUrl: string;
     allowHttpFallback: boolean;
     embeddingBaseUrl: string;
     embeddingModel: string;
   }>({
-    workingDirectory: "",
     copilotCliUrl: "",
     allowHttpFallback: false,
     embeddingBaseUrl: "",
@@ -860,7 +858,6 @@ const Operations = () => {
         const savedPrefs = await saveDesktopPreferences(probe.preferencePatch);
         setDesktopPrefs(savedPrefs);
         setPrefsDraft({
-          workingDirectory: savedPrefs.workingDirectory ?? "",
           copilotCliUrl: savedPrefs.copilotCliUrl ?? "",
           allowHttpFallback: savedPrefs.allowHttpFallback ?? false,
           embeddingBaseUrl: savedPrefs.embeddingBaseUrl ?? "",
@@ -1219,7 +1216,6 @@ const Operations = () => {
         if (!prefs) return;
         setDesktopPrefs(prefs);
         setPrefsDraft({
-          workingDirectory: prefs.workingDirectory ?? "",
           copilotCliUrl: prefs.copilotCliUrl ?? "",
           allowHttpFallback: prefs.allowHttpFallback ?? false,
           embeddingBaseUrl: prefs.embeddingBaseUrl ?? "",
@@ -1453,7 +1449,6 @@ const Operations = () => {
     setPrefsBusy(true);
     try {
       const saved = await saveDesktopPreferences({
-        workingDirectory: prefsDraft.workingDirectory.trim() || undefined,
         copilotCliUrl: prefsDraft.copilotCliUrl.trim() || undefined,
         allowHttpFallback: prefsDraft.allowHttpFallback,
         embeddingBaseUrl: prefsDraft.embeddingBaseUrl.trim() || undefined,
@@ -2286,19 +2281,7 @@ const Operations = () => {
           </p>
         ) : null}
         <div className="grid gap-4 sm:grid-cols-2">
-          <label className="col-span-2 space-y-2">
-            <span className="form-kicker">Working directory</span>
-            <input
-              value={prefsDraft.workingDirectory}
-              onChange={e => setPrefsDraft(d => ({ ...d, workingDirectory: e.target.value }))}
-              placeholder="/Users/you/projects"
-              className="field-input font-mono text-[0.8rem]"
-            />
-            <p className="text-xs text-secondary">
-              Replaces <code className="rounded bg-surface-container-low px-1">SINGULARITY_WORKING_DIRECTORY</code>.
-              Stored in DB — no need to set it in .env.local.
-            </p>
-          </label>
+
 
           <label className="space-y-2">
             <span className="form-kicker">SDK session URL</span>

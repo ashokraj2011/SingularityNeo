@@ -59,12 +59,17 @@ export const buildExecutionLlmContinuitySections = ({
   workflow,
   step,
   runStep,
+  rawMessage,
+  effectiveMessage,
   recentConversationText,
   sessionMemoryPrompt,
   toolHistory,
   handoffContext,
   resolvedWaitContext,
   operatorGuidanceContext,
+  liveContext,
+  verifiedCodeEvidence,
+  advisoryMemory,
 }: {
   mode:
     | 'workflow-step'
@@ -75,12 +80,17 @@ export const buildExecutionLlmContinuitySections = ({
   workflow: Pick<Workflow, 'name'>;
   step: Pick<WorkflowStep, 'name' | 'phase' | 'action' | 'description'>;
   runStep?: Pick<WorkflowRunStep, 'attemptCount'> | null;
+  rawMessage?: string;
+  effectiveMessage?: string;
   recentConversationText?: string;
   sessionMemoryPrompt?: string;
   toolHistory?: ToolTranscriptTurn[];
   handoffContext?: string;
   resolvedWaitContext?: string;
   operatorGuidanceContext?: string;
+  liveContext?: string;
+  verifiedCodeEvidence?: string;
+  advisoryMemory?: string;
 }) => {
   const conversationText = recentConversationText
     ? `Recent operator and stage conversation:\n${recentConversationText}`
@@ -116,14 +126,14 @@ export const buildExecutionLlmContinuitySections = ({
     .join('\n\n');
 
   const envelope: LlmContextEnvelope = {
-    rawMessage: '',
-    effectiveMessage: '',
+    rawMessage: rawMessage || '',
+    effectiveMessage: effectiveMessage || rawMessage || '',
     conversationHistory: conversationText || undefined,
     sessionMemorySummary: sessionMemoryText || undefined,
-    liveContext: undefined,
+    liveContext: liveContext?.trim() || undefined,
     toolTranscript: toolTranscriptText || undefined,
-    verifiedCodeEvidence: undefined,
-    advisoryMemory: undefined,
+    verifiedCodeEvidence: verifiedCodeEvidence?.trim() || undefined,
+    advisoryMemory: advisoryMemory?.trim() || undefined,
     contextEnvelopeSource: 'shared-execution-envelope',
   };
 

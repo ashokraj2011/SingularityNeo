@@ -61,6 +61,7 @@ export const registerDeliveryAssetRoutes = (
         }>;
         carryForwardNote?: string;
         resolvedBy?: string;
+        markComplete?: boolean;
       };
 
       try {
@@ -96,6 +97,7 @@ export const registerDeliveryAssetRoutes = (
                 ? body.carryForwardNote
                 : undefined,
             resolvedBy: actor.displayName,
+            markComplete: !!body.markComplete,
             actor,
           }),
         );

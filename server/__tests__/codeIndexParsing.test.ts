@@ -118,7 +118,7 @@ describe('code index stage 1 upgrades', () => {
     });
   });
 
-  it('does not emit ORDER BY 0 when repository and path hints are absent', async () => {
+  it('does not emit invalid constant ORDER BY fallbacks when repository and path hints are absent', async () => {
     queryMock.mockResolvedValueOnce({
       rows: [
         {
@@ -147,7 +147,8 @@ describe('code index stage 1 upgrades', () => {
 
     const [sql] = queryMock.mock.calls[0] || [];
     expect(String(sql)).not.toContain('ORDER BY 0');
-    expect(String(sql)).toContain('NULL');
+    expect(String(sql)).not.toContain('ORDER BY NULL');
+    expect(String(sql)).toContain('CASE WHEN TRUE THEN 0 ELSE 0 END');
   });
 
   it('resolves qualified symbol reads even for legacy rows without slice columns', async () => {

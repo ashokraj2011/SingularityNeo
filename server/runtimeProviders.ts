@@ -22,6 +22,7 @@ import {
   isLocalOpenAIConfigured,
   listLocalOpenAIModels,
 } from './localOpenAIProvider';
+import { getLocalOpenAIConfigIssue } from '../src/contracts/runtimeProviderDiagnostics';
 import {
   AIDER_CLI_PROVIDER_KEY,
   CLAUDE_CODE_CLI_PROVIDER_KEY,
@@ -255,18 +256,31 @@ const getGitHubProviderStatus = async (): Promise<RuntimeProviderStatus> => {
 const getLocalOpenAIProviderStatus = async (): Promise<RuntimeProviderStatus> => {
   const configured = isLocalOpenAIConfigured();
   const models = configured ? await listLocalOpenAIModels().catch(() => []) : [];
+  const endpoint = getLocalOpenAIBaseUrl() || null;
+  const model = configured ? getLocalOpenAIDefaultModel() : null;
+  const configIssue = getLocalOpenAIConfigIssue({
+    baseUrl: endpoint,
+    model,
+  });
+  const valid = configured && !configIssue;
   return buildConfiguredStatus({
     providerKey: LOCAL_OPENAI_PROVIDER_KEY,
     transportMode: 'local-openai',
-    configured,
-    endpoint: getLocalOpenAIBaseUrl() || null,
-    model: configured ? getLocalOpenAIDefaultModel() : null,
+    configured: valid,
+    endpoint,
+    model,
     availableModels: models,
     validation: {
       providerKey: LOCAL_OPENAI_PROVIDER_KEY,
-      ok: configured,
-      status: configured ? 'configured' : 'missing',
-      message: configured
+      ok: valid,
+      status: configIssue
+        ? configIssue.status
+        : configured
+        ? 'configured'
+        : 'missing',
+      message: configIssue
+        ? configIssue.message
+        : configured
         ? 'Local OpenAI-compatible runtime is configured.'
         : 'Set LOCAL_OPENAI_BASE_URL to enable this provider.',
       transportMode: 'local-openai',
@@ -275,6 +289,7 @@ const getLocalOpenAIProviderStatus = async (): Promise<RuntimeProviderStatus> =>
       workingDirectoryAllowed: null,
       usageEstimated: false,
       models,
+      details: configIssue?.details,
       checkedAt: new Date().toISOString(),
     },
   });

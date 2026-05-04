@@ -1,4 +1,5 @@
 import { Pool, PoolClient, QueryResult } from 'pg';
+import dotenv from 'dotenv';
 import type {
   EmbeddingProviderKey,
   MemoryRetrievalMode,
@@ -6,6 +7,14 @@ import type {
   WorkspaceDatabaseBootstrapStatus,
 } from '../src/types';
 import { isLocalOpenAIConfigured } from './localOpenAIProvider';
+
+// DB config is derived at module load time, so load the local env files before
+// `createRuntimeDatabaseConfig()` snapshots process.env. Otherwise server-side
+// imports that touch `db.ts` before `startServer.ts` runs would silently fall
+// back to the built-in defaults (for example `singularity` instead of the
+// saved PGDATABASE from `.env.local`).
+dotenv.config({ path: '.env.local' });
+dotenv.config();
 
 type RuntimeDatabaseConfig = Required<
   Omit<WorkspaceDatabaseBootstrapConfig, 'password'>

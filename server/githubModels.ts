@@ -586,6 +586,9 @@ export const resolveRuntimeWorkingDirectory = (
 ) =>
   selectExistingDirectory([
     process.env.SINGULARITY_WORKING_DIRECTORY,
+    process.env.workingDir,
+    process.env.WORKING_DIR,
+    process.env.WORKING_DIRECTORY,
     ...getCapabilityWorkspaceRoots(capability),
     homedir(),
     tmpdir(),

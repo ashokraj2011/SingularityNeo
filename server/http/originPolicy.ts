@@ -63,6 +63,8 @@ export const getAllowedOrigins = () => {
   const configuredOrigins = [
     'http://localhost:3000',
     'http://127.0.0.1:3000',
+    'http://localhost:3200',
+    'http://127.0.0.1:3200',
     'http://localhost:4173',
     'http://127.0.0.1:4173',
     originFromUrl(process.env.SINGULARITY_ELECTRON_DEV_SERVER_URL),

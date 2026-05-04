@@ -611,8 +611,6 @@ export const registerExecutionRuntimeRoutes = (app: express.Express) => {
         executorId?: string;
         approvedWorkspaceRoots?: Record<string, string[]>;
         runtimeSummary?: Record<string, unknown>;
-        /** User-level working directory for this desktop (Fix: user-level workdir). */
-        workingDirectory?: string;
       };
       const executorId = String(body.executorId || "").trim();
       if (!executorId) {
@@ -635,7 +633,6 @@ export const registerExecutionRuntimeRoutes = (app: express.Express) => {
           actor,
           approvedWorkspaceRoots: body.approvedWorkspaceRoots,
           runtimeSummary: body.runtimeSummary,
-          workingDirectory: body.workingDirectory,
         }),
       );
     } catch (error) {
@@ -656,7 +653,6 @@ export const registerExecutionRuntimeRoutes = (app: express.Express) => {
             actor,
             approvedWorkspaceRoots: request.body?.approvedWorkspaceRoots,
             runtimeSummary: request.body?.runtimeSummary,
-            workingDirectory: request.body?.workingDirectory,
           }),
         );
       } catch (error) {

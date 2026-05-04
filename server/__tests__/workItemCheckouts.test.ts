@@ -21,11 +21,11 @@ describe("buildWorkItemCheckoutPath", () => {
     });
 
     expect(checkoutPath).toBe(
-      path.join("/Users/example/code", "order-service", "WI-123ABC"),
+      path.join("/Users/example/code", "WI-123ABC", "order-service"),
     );
   });
 
-  it("adds a repository segment for multi-repo capabilities", () => {
+  it("keeps multi-repo checkouts under the work item before the repository segment", () => {
     const checkoutPath = buildWorkItemCheckoutPath({
       workingDirectoryPath: "/Users/example/code",
       capability: {
@@ -44,7 +44,6 @@ describe("buildWorkItemCheckoutPath", () => {
     expect(checkoutPath).toBe(
       path.join(
         "/Users/example/code",
-        "payments-platform",
         "WI-789XYZ",
         "gateway-api",
       ),

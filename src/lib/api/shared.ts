@@ -14,6 +14,44 @@ export const jsonHeaders = {
   'Content-Type': 'application/json',
 };
 
+const DEFAULT_JSON_REQUEST_TIMEOUT_MS = 20_000;
+
+type TimedRequestInit = RequestInit & {
+  timeoutMs?: number;
+};
+
+const buildTimedRequestSignal = (
+  signal?: AbortSignal | null,
+  timeoutMs = DEFAULT_JSON_REQUEST_TIMEOUT_MS,
+) => {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  if (!signal) {
+    return timeoutSignal;
+  }
+  if (typeof AbortSignal.any === 'function') {
+    return AbortSignal.any([signal, timeoutSignal]);
+  }
+  return signal;
+};
+
+const asTimedRequestError = (
+  error: unknown,
+  method: string,
+  input: string,
+  timeoutMs: number,
+) => {
+  if (
+    error instanceof Error &&
+    (error.name === 'AbortError' || error.name === 'TimeoutError')
+  ) {
+    return new Error(
+      `Request timed out after ${timeoutMs}ms (${method.toUpperCase()} ${input}).`,
+    );
+  }
+
+  return error;
+};
+
 let currentActorContext: ActorContext | null = null;
 
 export const getCurrentActorContext = () => currentActorContext;
@@ -48,12 +86,25 @@ export const withActorHeaders = (headers?: HeadersInit): HeadersInit => {
 
 export const requestJson = async <T>(
   input: string,
-  init?: RequestInit,
+  init?: TimedRequestInit,
 ): Promise<T> => {
-  const response = await fetch(resolveApiUrl(input), {
-    ...init,
-    headers: withActorHeaders(init?.headers),
-  });
+  const timeoutMs = init?.timeoutMs ?? DEFAULT_JSON_REQUEST_TIMEOUT_MS;
+  let response: Response;
+  try {
+    response = await fetch(resolveApiUrl(input), {
+      ...init,
+      headers: withActorHeaders(init?.headers),
+      signal: buildTimedRequestSignal(init?.signal, timeoutMs),
+    });
+  } catch (error) {
+    throw asTimedRequestError(
+      error,
+      init?.method || 'GET',
+      input,
+      timeoutMs,
+    );
+  }
+
   if (!response.ok) {
     throw new Error(await getError(response));
   }
@@ -67,12 +118,24 @@ export const requestJson = async <T>(
 
 export const requestText = async (
   input: string,
-  init?: RequestInit,
+  init?: TimedRequestInit,
 ): Promise<string> => {
-  const response = await fetch(resolveApiUrl(input), {
-    ...init,
-    headers: withActorHeaders(init?.headers),
-  });
+  const timeoutMs = init?.timeoutMs ?? DEFAULT_JSON_REQUEST_TIMEOUT_MS;
+  let response: Response;
+  try {
+    response = await fetch(resolveApiUrl(input), {
+      ...init,
+      headers: withActorHeaders(init?.headers),
+      signal: buildTimedRequestSignal(init?.signal, timeoutMs),
+    });
+  } catch (error) {
+    throw asTimedRequestError(
+      error,
+      init?.method || 'GET',
+      input,
+      timeoutMs,
+    );
+  }
   if (!response.ok) {
     throw new Error(await getError(response));
   }

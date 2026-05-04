@@ -5,6 +5,7 @@ import {
   releaseCapabilityExecution,
   type RuntimeStatus,
 } from '../../lib/api';
+import { getRuntimeStatusIssueMessage } from '../../lib/runtimeStatusMessages';
 
 type UseOrchestratorRuntimeArgs = {
   activeCapabilityId: string;
@@ -31,7 +32,7 @@ export const useOrchestratorRuntime = ({
     try {
       const status = await fetchRuntimeStatus();
       setRuntimeStatus(status);
-      setRuntimeError('');
+      setRuntimeError(getRuntimeStatusIssueMessage(status) || '');
       return status;
     } catch (error) {
       const message =

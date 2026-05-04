@@ -22,6 +22,10 @@ import type { CapabilityRepository } from '../src/types';
 import {
   buildCapabilityBaseRepositoryPath,
 } from './workItemCheckouts';
+import {
+  deriveDesktopId,
+  getDesktopPreferences,
+} from './desktopPreferences';
 import { getDesktopExecutorRegistration } from './executionOwnership';
 import {
   getCapabilityBundle,
@@ -83,6 +87,9 @@ const CLONE_REGISTRY_FILENAME = '.singularity-clone-registry.json';
 const resolveRegistryFilePath = (): string | null => {
   const workingDir =
     process.env.SINGULARITY_WORKING_DIRECTORY ||
+    process.env.workingDir ||
+    process.env.WORKING_DIR ||
+    process.env.WORKING_DIRECTORY ||
     process.env.HOME ||
     process.env.USERPROFILE;
   if (!workingDir) return null;
@@ -225,31 +232,18 @@ export const getPrimaryBaseClone = (
  * registration.  This is the **single source of truth** for where code
  * clones live — all AST indexing, browse_code searches, and workspace
  * reads should resolve from this path, NOT from capability.localDirectories.
- *
- * Falls back to SINGULARITY_WORKING_DIRECTORY env var when no executor
- * registration exists (e.g. running in bare-server mode).
  */
 export const resolveOperatorWorkingDirectory = async (): Promise<string> => {
-  // Try the most recent executor registration.
-  try {
-    const { rows } = await (await import('./db')).query<{ working_directory: string | null }>(
-      `SELECT working_directory
-         FROM desktop_executor_registrations
-        WHERE working_directory IS NOT NULL AND working_directory != ''
-        ORDER BY updated_at DESC NULLS LAST
-        LIMIT 1`,
-    );
-    const raw = rows[0]?.working_directory?.trim();
-    if (raw) return normalizeDirectoryPath(raw);
-  } catch {
-    // DB not available — fall through.
+  const projectRoot = normalizeDirectoryPath(process.cwd());
+  const isProjectRootFallback = (value: string) =>
+    Boolean(projectRoot && normalizeDirectoryPath(value) === projectRoot);
+
+  const envDir = process.env.SINGULARITY_WORKING_DIRECTORY || process.env.workingDir || process.env.WORKING_DIR || process.env.WORKING_DIRECTORY || '';
+  if (envDir && !isProjectRootFallback(envDir)) {
+    return normalizeDirectoryPath(envDir);
   }
 
-  // Env var fallback.
-  const envDir = process.env.SINGULARITY_WORKING_DIRECTORY || '';
-  if (envDir) return normalizeDirectoryPath(envDir);
-
-  return '';
+  return projectRoot;
 };
 
 /**
@@ -545,7 +539,7 @@ export const syncCapabilityRepositoriesForDesktop = async ({
   executorId: string;
   /**
    * The operator's user ID.  When provided and the executor has no global
-   * `SINGULARITY_WORKING_DIRECTORY` set, the function falls back to the
+   * `workingDir` set, the function falls back to the
    * per-capability workspace mapping that the operator saved in the UI
    * (stored in `desktop_user_workspace_mappings`).
    */
@@ -558,7 +552,7 @@ export const syncCapabilityRepositoriesForDesktop = async ({
 }): Promise<CapabilityRepoSyncReport> => {
   // 1. Resolve working directory.
   //    Priority order:
-  //    a. executor.workingDirectory  (set via SINGULARITY_WORKING_DIRECTORY env var)
+  //    a. executor.workingDirectory  (set via workingDir env var)
   //    b. per-capability workspace mapping saved through the UI
   //       (desktop_user_workspace_mappings.working_directory_path)
   const registration = await getDesktopExecutorRegistration(executorId);
@@ -580,7 +574,7 @@ export const syncCapabilityRepositoriesForDesktop = async ({
   if (!workingDirectory) {
     console.warn(
       `[desktopRepoSync] executor ${executorId} has no workingDirectory for ${capabilityId} — ` +
-      `set SINGULARITY_WORKING_DIRECTORY or save a Desktop Workspace mapping in the Operations page`,
+      `set workingDir or save a Desktop Workspace mapping in the Operations page`,
     );
     return {
       capabilityId,

@@ -412,7 +412,7 @@ describe("invokeCommonAgentRuntime", () => {
     expect(result.attemptedToolIds).toEqual(["browse_code"]);
   });
 
-  it("auto-runs workspace_read after browse_code when inventory questions need file contents", async () => {
+  it("auto-runs workspace_read after broad browse prompts when discovery finds candidate files", async () => {
     invokeCapabilityChatMock
       .mockResolvedValueOnce({
         content:
@@ -470,7 +470,8 @@ describe("invokeCommonAgentRuntime", () => {
         preferredToolIds: ["browse_code", "workspace_search", "workspace_read"],
       },
       history: [],
-      message: "What are the operators in the rule engine?",
+      message:
+        "Browse code for existing operator classes or functions to understand current implementation and design patterns for operators in the rule engine.",
       preferReadOnlyToolLoop: true,
       runtimeLane: "desktop-runtime-worker",
     });
@@ -495,6 +496,93 @@ describe("invokeCommonAgentRuntime", () => {
     expect(result.attemptedToolIds).toEqual(["browse_code", "workspace_read"]);
     expect(result.content).toBe(
       "The rule engine defines operators in the Operator enum.",
+    );
+  });
+
+  it("auto-runs workspace_read for implementation questions after browse_code finds a candidate file", async () => {
+    invokeCapabilityChatMock
+      .mockResolvedValueOnce({
+        content:
+          '{"action":"browse_code","reasoning":"Need to inspect the retry implementation.","summary":"Browsing code.","toolCall":{"query":"retry"}}',
+        model: "test-model",
+        usage,
+        responseId: "resp-impl-read-1",
+        createdAt: "2026-04-30T00:00:00.000Z",
+      })
+      .mockResolvedValueOnce({
+        content:
+          '{"action":"answer","reasoning":"Grounded after reading the implementation.","content":"Retry behavior is implemented in RetryManager.handleRetry."}',
+        model: "test-model",
+        usage,
+        responseId: "resp-impl-read-2",
+        createdAt: "2026-04-30T00:00:01.000Z",
+      });
+    executeToolMock
+      .mockResolvedValueOnce({
+        summary: "Found RetryManager from the local checkout index.",
+        details: {
+          codeIndexSource: "local-checkout",
+          mode: "symbol-search",
+          codeQuestionType: "implementation",
+          symbols: [
+            {
+              symbolId: "SYM-RETRY",
+              symbolName: "RetryManager",
+              qualifiedSymbolName: "org.example.runtime.RetryManager",
+              kind: "CLASS",
+              filePath: "/tmp/runtime/src/main/java/org/example/runtime/RetryManager.java",
+            },
+          ],
+        },
+        stdoutPreview:
+          "/tmp/runtime/src/main/java/org/example/runtime/RetryManager.java",
+      })
+      .mockResolvedValueOnce({
+        summary: "Read RetryManager implementation.",
+        details: {
+          path: "/tmp/runtime/src/main/java/org/example/runtime/RetryManager.java",
+          mode: "semantic-hunk",
+          codeIndexSource: "local-checkout",
+        },
+        stdoutPreview: "class RetryManager { void handleRetry() {} }",
+      });
+
+    const result = await invokeCommonAgentRuntime({
+      capability: {
+        id: "CAP-RULES",
+        name: "Rule Engine",
+      },
+      agent: {
+        id: "AGENT-OWNER",
+        name: "Owner",
+        preferredToolIds: ["browse_code", "workspace_search", "workspace_read"],
+      },
+      history: [],
+      message: "How does retry logic work?",
+      preferReadOnlyToolLoop: true,
+      runtimeLane: "desktop-runtime-worker",
+    });
+
+    expect(executeToolMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        toolId: "browse_code",
+      }),
+    );
+    expect(executeToolMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        toolId: "workspace_read",
+        args: {
+          path: "/tmp/runtime/src/main/java/org/example/runtime/RetryManager.java",
+          symbol: "RetryManager",
+          maxBytes: 12000,
+        },
+      }),
+    );
+    expect(result.attemptedToolIds).toEqual(["browse_code", "workspace_read"]);
+    expect(result.content).toBe(
+      "Retry behavior is implemented in RetryManager.handleRetry.",
     );
   });
 

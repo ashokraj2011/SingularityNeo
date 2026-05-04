@@ -178,7 +178,9 @@ export const OrchestratorCapabilityCockpit = ({
             <p className="workspace-meta-label">Desktop execution owner</p>
             <p className="mt-2 text-sm font-semibold text-on-surface">{executionOwnerLabel}</p>
             <p className="mt-2 text-xs leading-relaxed text-secondary">
-              {executionDispatchState === 'ASSIGNED'
+              {executionQueueReason === 'PREPARING_EXECUTION_CONTEXT'
+                ? 'A run is queued while the desktop prepares the workspace, checkout, and shared branch before agent execution begins.'
+                : executionDispatchState === 'ASSIGNED'
                 ? `Automation is routed through ${executionOwnerLabel}.`
                 : executionQueueReason === 'EXECUTOR_DISCONNECTED'
                   ? 'The previous desktop owner disconnected. Queued runs will resume after a desktop takes ownership again.'

@@ -70,6 +70,7 @@ import {
   initWorkItemGitWorkspace,
 } from "../workItemGitWorkspace";
 import { resolveOperatorWorkingDirectory } from "../desktopRepoSync";
+import { forceWorkItemAstRefresh } from "../workItemAst";
 import { isPathInsideWorkspaceRoot } from "../workspacePaths";
 
 type WorkItemRouteDeps = {
@@ -1448,9 +1449,44 @@ export const registerWorkItemRoutes = (
           workingDir,
           repositoryUrl,
           repositoryLabel: primaryRepo?.label,
+          repositoryId: primaryRepo?.id,
           defaultBranch,
         });
-        response.json(result);
+        const forceAstRefresh = Boolean(request.body?.forceAstRefresh);
+        if (forceAstRefresh && primaryRepo?.id) {
+          await forceWorkItemAstRefresh({
+            capability: bundle.capability,
+            workItem: {
+              id: workItemId,
+              executionContext: {
+                workItemId,
+                primaryRepositoryId: primaryRepo.id,
+                branch: {
+                  id: "",
+                  workItemId,
+                  repositoryId: primaryRepo.id,
+                  baseBranch: defaultBranch,
+                  sharedBranch: result.branchName,
+                  createdAt: new Date().toISOString(),
+                  status: "ACTIVE",
+                },
+                repositoryAssignments: [],
+                strategy: "SHARED_BRANCH",
+              },
+            },
+            repositoryId: primaryRepo.id,
+            checkoutPath: result.workspacePath,
+          }).catch(() => undefined);
+        }
+        response.json(
+          forceAstRefresh
+            ? {
+                ...result,
+                sourceWorkspaceState: "AST_BUILDING",
+                astStatus: "BUILDING",
+              }
+            : result,
+        );
       } catch (error) {
         sendApiError(response, error);
       }

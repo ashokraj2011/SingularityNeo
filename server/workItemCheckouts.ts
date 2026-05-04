@@ -19,6 +19,13 @@ const extractRepositoryNameFromUrl = (url?: string) => {
   return parts[parts.length - 1] || "";
 };
 
+const sanitizeWorkItemSegment = (value: string) =>
+  String(value || "")
+    .trim()
+    .replace(/[\\/]+/g, "-")
+    .replace(/^\.+|\.+$/g, "")
+    .trim() || "work-item";
+
 export const buildCapabilityCheckoutSlug = (
   capability: Pick<Capability, "name" | "id">,
 ) => slugifySegment(capability.name || capability.id || "", "capability");
@@ -64,10 +71,8 @@ export const buildCapabilityBaseRepositoryPath = ({
 
 export const buildWorkItemCheckoutPath = ({
   workingDirectoryPath,
-  capability,
   workItemId,
   repository,
-  repositoryCount = 1,
 }: {
   workingDirectoryPath: string;
   capability: Pick<Capability, "name" | "id">;
@@ -79,16 +84,10 @@ export const buildWorkItemCheckoutPath = ({
   if (!workspaceRoot) {
     return "";
   }
-
-  const capabilityDirectory = path.join(
+  const workItemSegment = sanitizeWorkItemSegment(workItemId);
+  return path.join(
     workspaceRoot,
-    buildCapabilityCheckoutSlug(capability),
-    String(workItemId || "").trim(),
+    workItemSegment,
+    buildRepositoryCheckoutSlug(repository),
   );
-
-  if (repositoryCount > 1) {
-    return path.join(capabilityDirectory, buildRepositoryCheckoutSlug(repository));
-  }
-
-  return capabilityDirectory;
 };

@@ -232,7 +232,15 @@ const workItemHandoffPacketFromRow = (
         : undefined,
 })
 
-const buildSharedBranchName = (workItemId: string) => String(workItemId || '').trim()
+const buildSharedBranchName = (workItemId: string) => {
+  const segment = String(workItemId || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80)
+  return `wi/${segment || 'work-item'}`
+}
 
 const assertCapabilityEditableTx = async (
   client: PoolClient,
