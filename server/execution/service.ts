@@ -92,6 +92,7 @@ import {
   normalizeWorkItemPhaseStakeholders,
 } from "../../src/lib/workItemStakeholders";
 import { invokeScopedCapabilitySession } from "../githubModels";
+import { logLlmContextEnvelope } from "../llmContextLog";
 import { normalizeToolAdapterId } from "../toolIds";
 import { publishRunEvent } from "../eventBus";
 import { DEFAULT_PROVIDER_KEY, resolveAgentProviderKey } from "../providerRegistry";
@@ -2799,6 +2800,25 @@ const requestStepDecision = async ({
     fragments,
     maxInputTokens: phaseBudget.maxInputTokens,
     reservedOutputTokens: phaseBudget.reservedOutputTokens,
+  });
+
+  // Terminal log of the FULL assembled context for execution-mode calls.
+  // Chat-mode prints this from invokeCapabilityChat; execution mode goes
+  // around invokeCapabilityChat (calls invokeScopedCapabilitySession
+  // directly), so we mirror the log here. Gated by
+  // SINGULARITY_LOG_LLM_CONTEXT (off / summary / verbose).
+  logLlmContextEnvelope({
+    scope: workItem.id ? "WORK_ITEM" : "TASK",
+    scopeId: workItem.id || runStep.id,
+    capabilityId: capability.id,
+    workItemId: workItem.id,
+    traceId,
+    provider: effectiveRuntimeProviderKey,
+    model: effectiveRuntimeModel || effectiveRuntimeAgent.model || "default",
+    // Execution mode wraps the entire instruction in the system block —
+    // there's no separate user turn. The single message IS the prompt.
+    messages: [{ role: "system", content: budgeted.assembled }],
+    budgetReceipt: budgeted.receipt,
   });
 
   const response = await invokeScopedCapabilitySession({

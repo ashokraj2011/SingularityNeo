@@ -191,15 +191,31 @@ export const resolveExecutionRuntimeForStep = ({
   const externalRuntimeEligible =
     isExternalRuntimeEligibleStep(step) && hasGitHubCodeRepository;
 
+  // Precedence (operator-first):
+  //
+  //   step override  >  operator's configured default  >  agent's saved
+  //   provider  >  hardcoded fallback
+  //
+  // The operator's choice in the desktop console must win over an
+  // agent's saved `providerKey` so a runtime swap (e.g. GitHub Copilot →
+  // local-openai) takes effect everywhere immediately, without each
+  // agent record needing to be re-saved. Workflow-step authors can
+  // still pin a specific provider via `step.runtimeProviderKey` when a
+  // particular tier is genuinely required for that step.
+  //
+  // The agent's provider remains a fallback used only when the
+  // operator hasn't configured a default at all.
   let providerKey =
     requestedProviderKey ||
-    explicitAgentProvider ||
-    normalizedDefaultProvider;
+    normalizedDefaultProvider ||
+    explicitAgentProvider;
   let source: ExecutionRuntimeSelectionSource = requestedProviderKey
     ? "step"
-    : explicitAgentProvider
-      ? "agent"
-      : "desktop-default";
+    : normalizedDefaultProvider
+      ? "desktop-default"
+      : explicitAgentProvider
+        ? "agent"
+        : "desktop-default";
 
   if (isCliRuntimeProviderKey(providerKey) && !externalRuntimeEligible) {
     providerKey = resolveInternalExecutionProvider({

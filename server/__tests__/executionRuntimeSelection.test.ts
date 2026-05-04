@@ -200,6 +200,49 @@ describe("execution runtime selection", () => {
     });
   });
 
+  it("operator default wins over agent.providerKey when no step override is set", () => {
+    // Pinned by precedence: step > operator default > agent. Even if the
+    // agent record was last saved with provider=github-copilot, the
+    // operator's currently-active runtime (here local-openai) drives
+    // execution so swapping providers in the desktop console is
+    // immediately reflected without re-saving every agent.
+    const selection = resolveExecutionRuntimeForStep({
+      step: buildStep({
+        phase: "PLANNING",
+        stepType: "DELIVERY",
+      }),
+      agent: buildAgent({
+        providerKey: "github-copilot",
+        provider: "GitHub Copilot",
+        model: "gpt-4.1",
+      }),
+      defaultProviderKey: "local-openai",
+      localOpenAIAvailable: true,
+      localOpenAIModel: "qwen2.5-coder",
+      resolveTransportMode: () => "local-openai",
+    });
+
+    expect(selection.providerKey).toBe("local-openai");
+    expect(selection.source).toBe("desktop-default");
+  });
+
+  it("step.runtimeProviderKey still overrides the operator default when explicitly set", () => {
+    const selection = resolveExecutionRuntimeForStep({
+      step: buildStep({
+        runtimeProviderKey: "codex-cli",
+      }),
+      agent: buildAgent({
+        providerKey: "github-copilot",
+        provider: "GitHub Copilot",
+      }),
+      defaultProviderKey: "local-openai",
+      resolveTransportMode: () => "desktop-cli",
+    });
+
+    expect(selection.providerKey).toBe("codex-cli");
+    expect(selection.source).toBe("step");
+  });
+
   it("marks only code-oriented steps as eligible for external runtime adapters", () => {
     expect(
       isExternalRuntimeEligibleStep(
