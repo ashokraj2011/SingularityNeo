@@ -706,6 +706,36 @@ const fireAttachmentsForTrigger = async (
       const dueAt = new Date(
         Date.now() + att.durationMinutes * 60_000,
       ).toISOString();
+      // INSERT into scheduled_timers BEFORE emitting the event so a
+      // crash between the two leaves us with a fired timer that the
+      // sweep can still pick up (the event is the audit; the row is
+      // the work-queue).
+      const timerRowId = createId("BTIMER");
+      await query(
+        `
+        INSERT INTO capability_business_scheduled_timers
+          (id, capability_id, instance_id, node_id, attachment_id, fire_at,
+           action, channel, recipients, message,
+           escalate_to_user_id, escalate_to_role)
+        VALUES ($1, $2, $3, $4, $5, $6,
+                $7, $8, $9::jsonb, $10,
+                $11, $12)
+        `,
+        [
+          timerRowId,
+          capabilityId,
+          instanceId,
+          node.id,
+          att.id,
+          dueAt,
+          att.onFire || "NOTIFY",
+          att.channel || null,
+          JSON.stringify(att.recipients || []),
+          att.message || att.label || null,
+          att.escalateToUserId || null,
+          att.escalateToRole || null,
+        ],
+      );
       await emitEvent({
         capabilityId,
         instanceId,
@@ -714,6 +744,7 @@ const fireAttachmentsForTrigger = async (
         actorId,
         payload: {
           attachmentId: att.id,
+          timerRowId,
           label: att.label,
           durationMinutes: att.durationMinutes,
           onFire: att.onFire,
@@ -724,6 +755,33 @@ const fireAttachmentsForTrigger = async (
       });
     }
   }
+};
+
+/**
+ * Cancel any pending scheduled timers for a node so the sweep worker
+ * doesn't fire them after the parent task is gone. Called from every
+ * node-completion / node-eviction path.
+ *
+ * Idempotent — running twice is harmless because we only flip the
+ * cancelled_at timestamp on rows that don't already have one.
+ */
+const cancelScheduledTimersForNode = async (
+  capabilityId: string,
+  instanceId: string,
+  nodeId: string,
+): Promise<void> => {
+  await query(
+    `
+    UPDATE capability_business_scheduled_timers
+    SET cancelled_at = NOW()
+    WHERE capability_id = $1
+      AND instance_id = $2
+      AND node_id = $3
+      AND fired_at IS NULL
+      AND cancelled_at IS NULL
+    `,
+    [capabilityId, instanceId, nodeId],
+  );
 };
 
 /**
@@ -1061,6 +1119,16 @@ export const cancelBusinessInstance = async ({
            notes = COALESCE(notes, '') || E'\n[cancelled with instance]'
        WHERE capability_id = $1 AND instance_id = $2 AND status = 'PENDING'`,
       [capabilityId, instanceId, actorId],
+    );
+    // Cancel every armed timer for the instance so the sweep worker
+    // skips them. Same TX as the rest of the cascade — no chance of
+    // a fire-after-cancel race.
+    await client.query(
+      `UPDATE capability_business_scheduled_timers
+       SET cancelled_at = NOW()
+       WHERE capability_id = $1 AND instance_id = $2
+         AND fired_at IS NULL AND cancelled_at IS NULL`,
+      [capabilityId, instanceId],
     );
   });
   await emitEvent({
@@ -1419,6 +1487,10 @@ const advanceFromCompletedNode = async ({
     "ON_COMPLETE",
     actorId,
   );
+
+  // Cancel any timers that were scheduled against this node — the
+  // task is closed, the timer would fire on a ghost.
+  await cancelScheduledTimersForNode(capabilityId, instanceId, completedNodeId);
 
   // Apply output bindings to context.
   instance.context = applyOutputBindings(instance.context, node, output);
@@ -1931,6 +2003,15 @@ export const sendBackBusinessTask = async ({
     payload: { targetNodeId, reason, taskId },
   });
 
+  // Cancel timers armed against the source node — the work has moved
+  // back; the timer would now fire on a stale context. The freshly-
+  // activated target node will arm its own timers via activateNode.
+  await cancelScheduledTimersForNode(
+    capabilityId,
+    instance.id,
+    closedTaskBefore.nodeId,
+  );
+
   const customBaseTypes = await loadCustomNodeBaseTypeMap(capabilityId);
   await activateNode(
     {
@@ -2037,6 +2118,13 @@ export const sendBackBusinessApproval = async ({
     actorId,
     payload: { targetNodeId, reason, approvalId },
   });
+
+  // Cancel timers armed against the source approval's node.
+  await cancelScheduledTimersForNode(
+    capabilityId,
+    instance.id,
+    before.nodeId,
+  );
 
   const customBaseTypes = await loadCustomNodeBaseTypeMap(capabilityId);
   await activateNode(

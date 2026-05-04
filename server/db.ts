@@ -3642,6 +3642,46 @@ export const migrationStatements = [
       ON capability_business_tasks (capability_id, due_at)
       WHERE status IN ('OPEN','CLAIMED','IN_PROGRESS')
   `,
+  // ── V2.1: scheduled timers + overdue tracking + bell-icon plumbing ──────────
+  //
+  // A scheduled timer is created when an enabled TIMER attachment runs
+  // through fireAttachmentsForTrigger(ON_ACTIVATE). The sweep worker
+  // (server/businessWorkflowSweeper.ts) drains rows whose fire_at has
+  // passed, fires the action, and stamps fired_at. Action snapshot is
+  // captured at schedule time so editing a node's attachments mid-run
+  // doesn't corrupt timers already armed against the prior config.
+  `
+    CREATE TABLE IF NOT EXISTS capability_business_scheduled_timers (
+      id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      attachment_id TEXT NOT NULL,
+      fire_at TIMESTAMPTZ NOT NULL,
+      fired_at TIMESTAMPTZ,
+      cancelled_at TIMESTAMPTZ,
+      action TEXT NOT NULL,
+      channel TEXT,
+      recipients JSONB NOT NULL DEFAULT '[]'::jsonb,
+      message TEXT,
+      escalate_to_user_id TEXT,
+      escalate_to_role TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS capability_business_scheduled_timers_pending_idx
+      ON capability_business_scheduled_timers (fire_at)
+      WHERE fired_at IS NULL AND cancelled_at IS NULL
+  `,
+  `
+    ALTER TABLE capability_business_tasks
+      ADD COLUMN IF NOT EXISTS overdue_notified_at TIMESTAMPTZ
+  `,
+  `
+    ALTER TABLE notifications
+      ADD COLUMN IF NOT EXISTS business_instance_id TEXT
+  `,
 ];
 
 const detectOptionalPlatformExtensions = async (client: PoolClient) => {
