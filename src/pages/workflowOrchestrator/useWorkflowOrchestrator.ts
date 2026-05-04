@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import {
   completeCapabilityWorkItemHumanStage,
+  completeCapabilityWorkflowRunHumanTask,
   continueCapabilityWorkItemStageControl,
   createCapabilityWorkItem,
   finalizeWorkItemGitWorkspace,
   initWorkItemGitWorkspace,
+  provideCapabilityWorkflowRunInput,
+  resolveCapabilityWorkflowRunConflict,
   streamCapabilityChat,
   type WorkItemGitWorkspaceInitResult,
 } from "../../lib/api";
@@ -708,6 +711,75 @@ export const useWorkflowOrchestrator = ({
     dispatch({ type: "RESET" });
   }, []);
 
+  // ── Resolve a blocked work item ──────────────────────────────────────
+  /**
+   * Unblock the current work item by submitting a resolution for the open
+   * wait.  The block type is read from `workItem.blocker` or
+   * `workItem.pendingRequest` and mapped to the appropriate API call.
+   * After success the stage is re-bound so the UI reflects the new status.
+   */
+  const resolveBlock = useCallback(
+    async (resolution: string) => {
+      const snapshot = stateRef.current;
+      const { workItem } = snapshot;
+      if (!workItem?.activeRunId) {
+        toastError(
+          "Cannot resolve block",
+          "No active run found for this work item.",
+        );
+        return;
+      }
+
+      const blockType =
+        workItem.blocker?.type || workItem.pendingRequest?.type;
+      if (!blockType) return;
+
+      dispatch({ type: "BEGIN_ADVANCE" });
+      try {
+        const payload = {
+          resolution,
+          resolvedBy: "workflow-orchestrator",
+        };
+
+        if (blockType === "HUMAN_INPUT" || blockType === "INPUT") {
+          await provideCapabilityWorkflowRunInput(
+            capability.id,
+            workItem.activeRunId,
+            payload,
+          );
+        } else if (blockType === "CONFLICT_RESOLUTION") {
+          await resolveCapabilityWorkflowRunConflict(
+            capability.id,
+            workItem.activeRunId,
+            payload,
+          );
+        } else if (blockType === "HUMAN_TASK") {
+          await completeCapabilityWorkflowRunHumanTask(
+            capability.id,
+            workItem.activeRunId,
+            payload,
+          );
+        }
+
+        success(
+          "Block resolved",
+          "The work item is now unblocked and will continue.",
+        );
+        // Re-bind the stage so the UI picks up the updated work-item status.
+        await bindStage(workItem.id, { skipIntro: true });
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to resolve block.";
+        dispatch({
+          type: "SET_ERROR",
+          error: { phase: "advance", message, retryable: true },
+        });
+        toastError("Failed to resolve block", message);
+      }
+    },
+    [bindStage, capability.id, success, toastError],
+  );
+
   // ── Stable refs for polling callbacks ───────────────────────────────
   // `getCapabilityWorkspace` and `refreshCapabilityBundle` are plain functions
   // inside the context provider (not memoized), so they receive new references
@@ -777,5 +849,6 @@ export const useWorkflowOrchestrator = ({
     markStageDone,
     setAutoAdvance,
     reset,
+    resolveBlock,
   };
 };

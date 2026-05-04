@@ -25,6 +25,8 @@ import { cn } from "../lib/utils";
 import type { WorkItem } from "../types";
 import { StageRail } from "./workflowOrchestrator/StageRail";
 import { NewWorkItemForm } from "./workflowOrchestrator/NewWorkItemForm";
+import { BlockedPanel } from "./workflowOrchestrator/BlockedPanel";
+import { WorkflowApprovalGate } from "./workflowOrchestrator/WorkflowApprovalGate";
 import {
   isHumanStage,
   useWorkflowOrchestrator,
@@ -37,7 +39,10 @@ const STREAMING_STATUSES = new Set([
   "CREATING",
 ]);
 
-const statusBadgeStyles = (status: string) => {
+const statusBadgeStyles = (status: string, isBlocked?: boolean) => {
+  if (isBlocked) {
+    return "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  }
   switch (status) {
     case "STREAMING":
     case "LOADING_STAGE":
@@ -58,7 +63,8 @@ const statusBadgeStyles = (status: string) => {
   }
 };
 
-const statusLabel = (status: string) => {
+const statusLabel = (status: string, isBlocked?: boolean) => {
+  if (isBlocked) return "Blocked — action required";
   switch (status) {
     case "IDLE":
       return "Pick a work item";
@@ -112,8 +118,25 @@ const WorkflowOrchestrator = () => {
   const [showCreateForm, setShowCreateForm] = useState(initialShowCreate);
   const [composerInput, setComposerInput] = useState("");
   const [showWorkItemPicker, setShowWorkItemPicker] = useState(false);
+  /** When true the WorkflowApprovalGate modal is open. */
+  const [showApprovalGate, setShowApprovalGate] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+
+  // Is the current work item waiting for a human action (blocked or in a
+  // pending-request state)?
+  const isBlocked =
+    orchestrator.state.workItem?.status === "BLOCKED" ||
+    Boolean(orchestrator.state.workItem?.pendingRequest?.type);
+
+  // Close the approval gate and re-bind the stage so the fresh workItem
+  // status is reflected without a full page reload.
+  const handleApprovalResolved = useCallback(async () => {
+    setShowApprovalGate(false);
+    if (orchestrator.state.workItem) {
+      await orchestrator.pickWorkItem(orchestrator.state.workItem.id);
+    }
+  }, [orchestrator]);
 
   // Sync URL when workItem / autoAdvance change
   useEffect(() => {
@@ -322,6 +345,19 @@ const WorkflowOrchestrator = () => {
       {/* ── Chat thread + composer ─────────────────────────────────── */}
       {orchestrator.state.workItem ? (
         <section className="section-card ambient-shadow flex flex-col gap-3 p-5">
+          {/* ── Blocked banner (above chat) ─────────────────────────── */}
+          {isBlocked ? (
+            <BlockedPanel
+              blocker={orchestrator.state.workItem.blocker}
+              pendingRequest={orchestrator.state.workItem.pendingRequest}
+              onSubmit={(resolution) =>
+                orchestrator.resolveBlock(resolution)
+              }
+              onOpenApproval={() => setShowApprovalGate(true)}
+              isSubmitting={orchestrator.state.status === "ADVANCING"}
+            />
+          ) : null}
+
           <OrchestratorCopilotThread
             messages={orchestrator.state.messages}
             currentActorDisplayName="You"
@@ -449,7 +485,7 @@ const WorkflowOrchestrator = () => {
           <span
             className={cn(
               "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium",
-              statusBadgeStyles(orchestrator.state.status),
+              statusBadgeStyles(orchestrator.state.status, isBlocked),
             )}
           >
             {orchestrator.state.status === "ADVANCING" ||
@@ -459,7 +495,7 @@ const WorkflowOrchestrator = () => {
             ) : orchestrator.state.status === "WORKFLOW_DONE" ? (
               <CheckCircle2 size={10} />
             ) : null}
-            {statusLabel(orchestrator.state.status)}
+            {statusLabel(orchestrator.state.status, isBlocked)}
           </span>
           {orchestrator.state.workItem ? (
             <label className="inline-flex cursor-pointer items-center gap-2 text-secondary">
@@ -476,9 +512,10 @@ const WorkflowOrchestrator = () => {
           ) : null}
         </div>
         <div className="flex items-center gap-2">
-          {orchestrator.state.status === "STREAMING" ||
-          orchestrator.state.status === "STAGE_AWAITING_USER" ||
-          orchestrator.state.status === "PAUSED" ? (
+          {!isBlocked &&
+          (orchestrator.state.status === "STREAMING" ||
+            orchestrator.state.status === "STAGE_AWAITING_USER" ||
+            orchestrator.state.status === "PAUSED") ? (
             <button
               type="button"
               onClick={orchestrator.pause}
@@ -491,7 +528,10 @@ const WorkflowOrchestrator = () => {
               <Pause size={10} /> Pause
             </button>
           ) : null}
-          {!isAgentStage &&
+          {/* Hide "Mark stage done" when the work item is blocked — the
+              block panel owns the action in that case. */}
+          {!isBlocked &&
+          !isAgentStage &&
           orchestrator.state.workItem &&
           orchestrator.state.status !== "WORKFLOW_DONE" ? (
             <button
@@ -515,6 +555,18 @@ const WorkflowOrchestrator = () => {
           ) : null}
         </div>
       </footer>
+
+      {/* ── Approval gate modal (portal-style, rendered at root level) ── */}
+      {showApprovalGate && orchestrator.state.workItem?.activeRunId ? (
+        <WorkflowApprovalGate
+          capabilityId={activeCapability.id}
+          workItemId={orchestrator.state.workItem.id}
+          runId={orchestrator.state.workItem.activeRunId}
+          workItemTitle={orchestrator.state.workItem.title}
+          onClose={() => setShowApprovalGate(false)}
+          onResolved={() => void handleApprovalResolved()}
+        />
+      ) : null}
     </div>
   );
 };
