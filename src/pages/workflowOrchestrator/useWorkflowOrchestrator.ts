@@ -3,7 +3,10 @@ import {
   completeCapabilityWorkItemHumanStage,
   continueCapabilityWorkItemStageControl,
   createCapabilityWorkItem,
+  finalizeWorkItemGitWorkspace,
+  initWorkItemGitWorkspace,
   streamCapabilityChat,
+  type WorkItemGitWorkspaceInitResult,
 } from "../../lib/api";
 import { useCapability } from "../../context/CapabilityContext";
 import { useToast } from "../../context/ToastContext";
@@ -72,6 +75,11 @@ interface State {
   turnsSinceSentinel: number;
   /** Bumped on every send; lets stream callbacks drop deltas from superseded requests. */
   requestToken: number;
+  /**
+   * The per-work-item git workspace initialised by `initWorkItemGitWorkspace`.
+   * Null until the workspace has been created (or if the server is unavailable).
+   */
+  gitWorkspace: WorkItemGitWorkspaceInitResult | null;
 }
 
 const initialState: State = {
@@ -87,6 +95,7 @@ const initialState: State = {
   hint: null,
   turnsSinceSentinel: 0,
   requestToken: 0,
+  gitWorkspace: null,
 };
 
 type Action =
@@ -104,7 +113,8 @@ type Action =
   | { type: "PAUSE" }
   | { type: "RESUME" }
   | { type: "SET_ERROR"; error: OrchestratorErrorPayload }
-  | { type: "CLEAR_ERROR" };
+  | { type: "CLEAR_ERROR" }
+  | { type: "SET_GIT_WORKSPACE"; gitWorkspace: WorkItemGitWorkspaceInitResult | null };
 
 const reducer = (state: State, action: Action): State => {
   switch (action.type) {
@@ -179,6 +189,8 @@ const reducer = (state: State, action: Action): State => {
       return { ...state, status: "ERROR", error: action.error };
     case "CLEAR_ERROR":
       return { ...state, error: null };
+    case "SET_GIT_WORKSPACE":
+      return { ...state, gitWorkspace: action.gitWorkspace };
     default:
       return state;
   }
@@ -338,6 +350,26 @@ export const useWorkflowOrchestrator = ({
           agent,
           intro,
         });
+
+        // Initialise (or reuse) the per-work-item git workspace so that all
+        // agent tools in every stage operate on the isolated checkout rather
+        // than the shared base clone.  Errors are soft — they don't block the
+        // chat; the workspace status badge will show "not initialised".
+        initWorkItemGitWorkspace(capability.id, workItemId)
+          .then((ws) => {
+            if (isMountedRef.current) {
+              dispatch({ type: "SET_GIT_WORKSPACE", gitWorkspace: ws });
+              console.log(
+                `[WorkflowOrchestrator] git workspace ready for ${workItemId}: ${ws.workspacePath} (${ws.source})`,
+              );
+            }
+          })
+          .catch((err) => {
+            console.warn(
+              `[WorkflowOrchestrator] git workspace init failed for ${workItemId}:`,
+              err instanceof Error ? err.message : err,
+            );
+          });
       } catch (err) {
         dispatch({
           type: "SET_ERROR",
@@ -449,6 +481,25 @@ export const useWorkflowOrchestrator = ({
       if (!refreshed || !refreshed.currentStepId) {
         dispatch({ type: "WORKFLOW_DONE" });
         success("Workflow complete", `${workItem.title} reached its terminal stage.`);
+        // Finalize the git workspace: commit all agent-written changes and
+        // offer them on branch wi/{workItemId} ready for review / merge.
+        finalizeWorkItemGitWorkspace(capability.id, workItem.id, {
+          commitMessage: `Workflow complete: ${workItem.title}`,
+        })
+          .then((result) => {
+            if (result.committed) {
+              info(
+                "Changes committed",
+                `${result.changedFiles.length} file(s) committed to branch ${result.branchName}.`,
+              );
+            }
+          })
+          .catch((err) => {
+            console.warn(
+              `[WorkflowOrchestrator] git finalize failed for ${workItem.id}:`,
+              err instanceof Error ? err.message : err,
+            );
+          });
         return;
       }
       if (refreshed.currentStepId === currentStep.id) {

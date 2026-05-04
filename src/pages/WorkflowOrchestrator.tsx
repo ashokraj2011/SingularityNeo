@@ -217,6 +217,28 @@ const WorkflowOrchestrator = () => {
                 Pick an existing work item or create a new one to begin.
               </p>
             )}
+            {orchestrator.state.gitWorkspace ? (
+              <p className="mt-0.5 flex items-center gap-2 text-xs text-outline">
+                <span
+                  className="rounded bg-surface-container px-1.5 py-0.5 font-mono text-[0.65rem] text-secondary"
+                  title={orchestrator.state.gitWorkspace.workspacePath}
+                >
+                  {orchestrator.state.gitWorkspace.workspacePath.split("/").slice(-2).join("/")}
+                </span>
+                <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[0.65rem] text-emerald-700 dark:text-emerald-300">
+                  ⎇ {orchestrator.state.gitWorkspace.branchName}
+                </span>
+                {orchestrator.state.gitWorkspace.source !== "existing" ? (
+                  <span className="text-[0.65rem] text-outline opacity-70">
+                    ({orchestrator.state.gitWorkspace.source})
+                  </span>
+                ) : null}
+              </p>
+            ) : orchestrator.state.workItem ? (
+              <p className="mt-0.5 text-xs text-outline opacity-60">
+                Initialising git workspace…
+              </p>
+            ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative">

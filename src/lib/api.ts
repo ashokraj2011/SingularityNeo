@@ -2090,6 +2090,94 @@ export const createCapabilityWorkItem = async (
     },
   );
 
+// ── Per-work-item git workspace (Workflow Orchestrator) ──────────────────────
+
+export interface WorkItemGitWorkspaceStatus {
+  workspacePath: string;
+  exists: boolean;
+  isGitRepo: boolean;
+  branchName: string;
+  headSha: string;
+  dirty: boolean;
+  changedFiles: string[];
+  ahead: number;
+  branchNameExpected: string;
+}
+
+export interface WorkItemGitWorkspaceInitResult {
+  workspacePath: string;
+  branchName: string;
+  created: boolean;
+  source: "existing" | "worktree" | "clone";
+}
+
+export interface WorkItemGitWorkspaceFinalizeResult {
+  workspacePath: string;
+  branchName: string;
+  committed: boolean;
+  pushed: boolean;
+  headSha: string;
+  commitMessage: string;
+  changedFiles: string[];
+}
+
+/**
+ * Returns the git status of the work-item's isolated checkout.
+ * Safe to call before the workspace has been initialised (`exists: false`).
+ */
+export const getWorkItemGitWorkspaceStatus = async (
+  capabilityId: string,
+  workItemId: string,
+): Promise<WorkItemGitWorkspaceStatus> =>
+  requestJson<WorkItemGitWorkspaceStatus>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/git-workspace/status`,
+  );
+
+/**
+ * Initialise (or reuse) the per-work-item git workspace.
+ * Idempotent — safe to call multiple times.
+ */
+export const initWorkItemGitWorkspace = async (
+  capabilityId: string,
+  workItemId: string,
+  options?: {
+    repositoryUrl?: string;
+    defaultBranch?: string;
+  },
+): Promise<WorkItemGitWorkspaceInitResult> =>
+  requestJson<WorkItemGitWorkspaceInitResult>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/git-workspace/init`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(options ?? {}),
+    },
+  );
+
+/**
+ * Commit all pending changes in the work-item workspace and optionally push.
+ */
+export const finalizeWorkItemGitWorkspace = async (
+  capabilityId: string,
+  workItemId: string,
+  options?: {
+    commitMessage?: string;
+    push?: boolean;
+    authorName?: string;
+    authorEmail?: string;
+  },
+): Promise<WorkItemGitWorkspaceFinalizeResult> =>
+  requestJson<WorkItemGitWorkspaceFinalizeResult>(
+    `/api/capabilities/${encodeURIComponent(capabilityId)}/work-items/${encodeURIComponent(workItemId)}/git-workspace/finalize`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(options ?? {}),
+    },
+  );
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const listStoryProposalBatches = async (
   capabilityId: string,
 ): Promise<StoryProposalBatchSummary[]> =>

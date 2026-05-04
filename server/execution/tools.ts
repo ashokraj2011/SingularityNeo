@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -500,9 +501,18 @@ const resolveWorkspaceContext = async (
       resolution.approvedWorkspaceRoots.length > 0
         ? resolution.approvedWorkspaceRoots
         : [resolution.localRootPath];
-    const workItemRepository = (capability.repositories || []).find(
-      (repository) => repository.id === workItemRepositoryId,
-    );
+    const workItemRepository =
+      (capability.repositories || []).find(
+        (repository) => repository.id === workItemRepositoryId,
+      ) ||
+      // Fallback: use the primary (or first) repo even when executionContext
+      // isn't set — needed by the Workflow Orchestrator which initialises the
+      // git workspace separately via initWorkItemGitWorkspace.
+      (workItem?.id
+        ? ((capability.repositories || []).find((r) => r.isPrimary) ??
+           (capability.repositories || [])[0])
+        : undefined);
+
     const rawBaseClonePath =
       !workItem?.id && capability.id
         ? normalizeDirectoryPath(
@@ -534,17 +544,27 @@ const resolveWorkspaceContext = async (
             repositoryCount: (capability.repositories || []).length,
           })
         : "";
+    // Only promote the derived work-item path to the primary workspace when
+    // the Workflow Orchestrator (or any other flow) has already initialised
+    // it on disk.  If the directory does not exist yet, fall through to the
+    // base clone / working-directory fallback so code lookups still work.
+    const verifiedWorkItemCheckoutPath =
+      derivedWorkItemCheckoutPath &&
+      fsSync.existsSync(derivedWorkItemCheckoutPath)
+        ? derivedWorkItemCheckoutPath
+        : "";
+
     // Generic workspace tools still anchor to the desktop workspace, but
     // repo-backed code tools resolve against discovered code roots separately.
     const defaultPath =
-      derivedWorkItemCheckoutPath ||
+      verifiedWorkItemCheckoutPath ||
       baseClonePath ||
       resolution.workingDirectoryPath ||
       resolution.localRootPath;
     const requestedPath = normalizeDirectoryPath(preferredPath || "");
     const candidate = requestedPath || defaultPath;
 
-    console.log(`[resolveWorkspacePath]   derivedCheckout=${derivedWorkItemCheckoutPath || 'EMPTY'} | baseClone=${baseClonePath || 'EMPTY'} | workingDir=${resolution.workingDirectoryPath || 'EMPTY'} | defaultPath=${defaultPath || 'EMPTY'} | candidate=${candidate || 'EMPTY'}`);
+    console.log(`[resolveWorkspacePath]   derivedCheckout=${derivedWorkItemCheckoutPath || 'EMPTY'} | verifiedCheckout=${verifiedWorkItemCheckoutPath || 'EMPTY'} | baseClone=${baseClonePath || 'EMPTY'} | workingDir=${resolution.workingDirectoryPath || 'EMPTY'} | defaultPath=${defaultPath || 'EMPTY'} | candidate=${candidate || 'EMPTY'}`);
 
     if (!candidate) {
       throw new Error(

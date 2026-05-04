@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
 import type express from "express";
 import type {
   Capability,
@@ -21,6 +19,8 @@ import {
   listWorkItemPresence,
   listWorkflowRunsForWorkItem,
   releaseWorkItemClaim,
+  createRunEvent,
+  insertRunEvent,
   upsertWorkItemClaim,
   upsertWorkItemPresence,
 } from "../execution/repository";
@@ -40,6 +40,11 @@ import {
   updateWorkItemBrief,
   updateWorkItemNextSegmentPreset,
 } from "../execution/service";
+import {
+  prepareWorkItemExecutionWorkspace,
+  resolveWorkItemExecutionPreparationPlan,
+} from "../execution/startPreparation";
+import { validateExecutionStartRuntime } from "../execution/runtimeValidation";
 import { wakeExecutionWorker } from "../execution/worker";
 import { parseActorContext } from "../requestActor";
 import {
@@ -49,7 +54,6 @@ import {
   initializeWorkItemExecutionContextRecord,
   listWorkItemHandoffPacketsRecord,
   releaseWorkItemCodeClaimRecord,
-  updateWorkItemBranchRecord,
   upsertWorkItemCheckoutSessionRecord,
   upsertWorkItemCodeClaimRecord,
 } from "../domains/tool-plane";
@@ -58,17 +62,15 @@ import {
   replaceCapabilityWorkspaceContentRecord,
 } from "../domains/self-service";
 import { buildWorkItemCheckoutPath } from "../workItemCheckouts";
+import {
+  buildWorkItemBranchName,
+  finalizeWorkItemGitWorkspace,
+  getWorkItemGitWorkspaceStatus,
+  getWorkItemWorkspacePath,
+  initWorkItemGitWorkspace,
+} from "../workItemGitWorkspace";
+import { resolveOperatorWorkingDirectory } from "../desktopRepoSync";
 import { isPathInsideWorkspaceRoot } from "../workspacePaths";
-
-type CodeWorkspaceStatus = {
-  path: string;
-  exists: boolean;
-  isGitRepository: boolean;
-  currentBranch: string | null;
-  pendingChanges: number;
-  lastCommit: string | null;
-  error?: string;
-};
 
 type WorkItemRouteDeps = {
   applyManualBranchPolicy: (args: {
@@ -85,9 +87,7 @@ type WorkItemRouteDeps = {
   }>;
   assertCapabilitySupportsExecution: (capability: Capability) => void;
   createRuntimeId: (prefix: string) => string;
-  inspectCodeWorkspace: (directoryPath: string) => Promise<CodeWorkspaceStatus>;
   parseActor: (value: unknown, fallback: string) => string;
-  runGitCommand: (directoryPath: string, args: string[]) => Promise<string>;
 };
 
 export const registerWorkItemRoutes = (
@@ -96,9 +96,7 @@ export const registerWorkItemRoutes = (
     applyManualBranchPolicy,
     assertCapabilitySupportsExecution,
     createRuntimeId,
-    inspectCodeWorkspace,
     parseActor,
-    runGitCommand,
   }: WorkItemRouteDeps,
 ) => {
   const resolveRequiredDesktopWorkspace = async ({
@@ -129,116 +127,7 @@ export const registerWorkItemRoutes = (
     );
   };
 
-  const cloneRepositoryIntoWorkingDirectory = async ({
-    repositoryUrl,
-    checkoutPath,
-    baseBranch,
-  }: {
-    repositoryUrl: string;
-    checkoutPath: string;
-    baseBranch: string;
-  }) => {
-    const normalizedCheckoutPath = path.resolve(checkoutPath);
-    const parentDirectory = path.dirname(normalizedCheckoutPath);
-    fs.mkdirSync(parentDirectory, { recursive: true });
-
-    try {
-      await runGitCommand(parentDirectory, [
-        "clone",
-        "--branch",
-        baseBranch,
-        "--single-branch",
-        repositoryUrl,
-        normalizedCheckoutPath,
-      ]);
-    } catch {
-      await runGitCommand(parentDirectory, [
-        "clone",
-        repositoryUrl,
-        normalizedCheckoutPath,
-      ]);
-    }
-  };
-
-  const ensureRepositoryCheckoutReady = async ({
-    capability,
-    workItemId,
-    desktopWorkspace,
-    repository,
-    baseBranch,
-  }: {
-    capability: Capability;
-    workItemId: string;
-    desktopWorkspace: Awaited<
-      ReturnType<typeof resolveRequiredDesktopWorkspace>
-    >;
-    repository: Capability["repositories"][number];
-    baseBranch: string;
-  }) => {
-    const checkoutPath = buildWorkItemCheckoutPath({
-      workingDirectoryPath: desktopWorkspace.workingDirectoryPath,
-      capability,
-      workItemId,
-      repository,
-      repositoryCount: (capability.repositories || []).length,
-    });
-    if (
-      !isPathInsideWorkspaceRoot(checkoutPath, desktopWorkspace.localRootPath)
-    ) {
-      throw new Error(
-        `Working directory ${checkoutPath} must stay inside mapped root ${desktopWorkspace.localRootPath}.`,
-      );
-    }
-
-    const workspaceStatus = await inspectCodeWorkspace(checkoutPath);
-    if (workspaceStatus.exists && workspaceStatus.isGitRepository) {
-      return {
-        workspacePath: checkoutPath,
-        workspaceStatus,
-        cloned: false,
-      };
-    }
-
-    if (workspaceStatus.exists) {
-      const stats = fs.statSync(checkoutPath);
-      if (!stats.isDirectory()) {
-        throw new Error(
-          `Working directory ${checkoutPath} exists but is not a directory.`,
-        );
-      }
-
-      const entries = fs
-        .readdirSync(checkoutPath)
-        .filter((entry) => entry !== ".DS_Store");
-      if (entries.length > 0) {
-        throw new Error(
-          `Working directory ${checkoutPath} exists but is not a Git repository. Empty the directory or point the mapping at a clean checkout target.`,
-        );
-      }
-    }
-
-    await cloneRepositoryIntoWorkingDirectory({
-      repositoryUrl: repository.url,
-      checkoutPath,
-      baseBranch,
-    });
-
-    const clonedWorkspace = await inspectCodeWorkspace(checkoutPath);
-    if (!clonedWorkspace.exists || !clonedWorkspace.isGitRepository) {
-      throw new Error(
-        clonedWorkspace.error ||
-          `Repository ${repository.url} could not be initialized in ${checkoutPath}.`,
-      );
-    }
-
-    return {
-      workspacePath: checkoutPath,
-      workspaceStatus: clonedWorkspace,
-      cloned: true,
-    };
-  };
-
-  const ensureWorkItemSharedBranchReady = async ({
+  const resolveExecutionPreparationPolicy = async ({
     capabilityId,
     workItemId,
     actorUserId,
@@ -251,117 +140,23 @@ export const registerWorkItemRoutes = (
     executorId: string;
     permissionContext: Awaited<ReturnType<typeof assertCapabilityPermission>>;
   }) => {
-    const context = await initializeWorkItemExecutionContextRecord({
+    const plan = await resolveWorkItemExecutionPreparationPlan({
       capabilityId,
       workItemId,
       actorUserId,
-    });
-    if (!context.branch || !context.primaryRepositoryId) {
-      throw new Error(
-        "Work item execution context did not resolve a primary repository.",
-      );
-    }
-
-    const bundle = await getCapabilityBundle(capabilityId);
-    const repository = (bundle.capability.repositories || []).find(
-      (item) => item.id === context.primaryRepositoryId,
-    );
-    if (!repository) {
-      throw new Error(
-        `Primary repository ${context.primaryRepositoryId} was not found for ${workItemId}.`,
-      );
-    }
-
-    const desktopWorkspace = await resolveRequiredDesktopWorkspace({
-      capabilityId,
       executorId,
-      actorUserId,
-      repositoryId: context.primaryRepositoryId,
     });
-    const branchName = context.branch.sharedBranch;
-    const baseBranch =
-      context.branch.baseBranch || repository.defaultBranch || "main";
-    const { workspacePath, workspaceStatus } =
-      await ensureRepositoryCheckoutReady({
-        capability: bundle.capability,
-        workItemId,
-        desktopWorkspace,
-        repository,
-        baseBranch,
-      });
 
     const { policyDecision, blocked } = await applyManualBranchPolicy({
       capability: permissionContext.capability,
       permissionSet: permissionContext.permissionSet,
-      workspacePath,
-      branchName,
-    });
-
-    if (blocked) {
-      return {
-        blocked: true as const,
-        policyDecision,
-      };
-    }
-
-    const existingBranch = await runGitCommand(workspacePath, [
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      `refs/heads/${branchName}`,
-    ]).catch(() => "");
-
-    if (existingBranch) {
-      await runGitCommand(workspacePath, ["switch", branchName]);
-    } else {
-      try {
-        await runGitCommand(workspacePath, [
-          "switch",
-          "-c",
-          branchName,
-          baseBranch,
-        ]);
-      } catch {
-        await runGitCommand(workspacePath, ["switch", "-c", branchName]);
-      }
-    }
-
-    const headSha = await runGitCommand(workspacePath, [
-      "rev-parse",
-      "HEAD",
-    ]).catch(() => "");
-    const nextContext = await updateWorkItemBranchRecord({
-      capabilityId,
-      workItemId,
-      branch: {
-        ...context.branch,
-        createdByUserId: actorUserId || context.branch.createdByUserId,
-        headSha: headSha || context.branch.headSha,
-        status: "ACTIVE",
-      },
-    });
-
-    await upsertWorkItemCheckoutSessionRecord({
-      capabilityId,
-      session: {
-        executorId,
-        workItemId,
-        userId: actorUserId,
-        repositoryId: context.primaryRepositoryId,
-        localPath: workspacePath,
-        workingDirectoryPath: workspacePath,
-        branch: branchName,
-        lastSeenHeadSha: headSha || undefined,
-        lastSyncedAt: new Date().toISOString(),
-      },
+      workspacePath: plan.checkoutPath,
+      branchName: plan.branchName,
     });
 
     return {
-      blocked: false as const,
-      context: nextContext,
-      repository,
-      desktopWorkspace,
-      workspace: workspaceStatus,
+      blocked,
+      plan,
       policyDecision,
     };
   };
@@ -664,28 +459,35 @@ export const registerWorkItemRoutes = (
           actor,
           action: "workitem.control",
         });
-        const result = await ensureWorkItemSharedBranchReady({
+        const preflight = await resolveExecutionPreparationPolicy({
           capabilityId: request.params.capabilityId,
           workItemId: request.params.workItemId,
           actorUserId: actor.userId,
           executorId,
           permissionContext,
         });
-        if (result.blocked) {
+        if (preflight.blocked) {
           response.status(403).json({
-            error: (result.policyDecision as { reason?: string }).reason,
+            error: (preflight.policyDecision as { reason?: string }).reason,
             requiresApproval: true,
-            policyDecision: result.policyDecision,
+            policyDecision: preflight.policyDecision,
           });
           return;
         }
+        const prepared = await prepareWorkItemExecutionWorkspace({
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          actorUserId: actor.userId,
+          executorId,
+          plan: preflight.plan,
+        });
 
         response.status(201).json({
-          context: result.context,
-          workspace: result.workspace,
-          repository: result.repository,
-          desktopWorkspace: result.desktopWorkspace,
-          policyDecision: result.policyDecision,
+          context: prepared.nextContext,
+          workspace: prepared.workspaceStatus,
+          repository: prepared.repository,
+          desktopWorkspace: prepared.desktopWorkspace,
+          policyDecision: preflight.policyDecision,
         });
       } catch (error) {
         sendApiError(response, error);
@@ -1215,9 +1017,8 @@ export const registerWorkItemRoutes = (
     "/api/capabilities/:capabilityId/work-items/:workItemId/runs",
     async (request, response) => {
       try {
-        assertCapabilitySupportsExecution(
-          (await getCapabilityBundle(request.params.capabilityId)).capability,
-        );
+        const bundle = await getCapabilityBundle(request.params.capabilityId);
+        assertCapabilitySupportsExecution(bundle.capability);
         const actor = parseActorContext(
           request,
           parseActor(request.body?.guidedBy, "Capability Owner"),
@@ -1233,8 +1034,47 @@ export const registerWorkItemRoutes = (
           workItemId: request.params.workItemId,
           actorUserId: actor.userId,
         }).catch(() => null);
+        // `startPhase` is a client-side alias for `restartFromPhase` that
+        // reads more naturally in the new segment model. Accept either;
+        // precedence: explicit startPhase > legacy restartFromPhase.
+        const startPhase =
+          (request.body?.startPhase as WorkItemPhase | undefined) ||
+          (request.body?.restartFromPhase as WorkItemPhase | undefined);
+        const stopAfterPhase = request.body?.stopAfterPhase as
+          | WorkItemPhase
+          | undefined;
+        const intention =
+          typeof request.body?.intention === "string"
+            ? request.body.intention.trim() || undefined
+            : undefined;
+        const startRequestId = createRuntimeId("START");
+        const workItem = bundle.workspace.workItems.find(
+          (item) => item.id === request.params.workItemId,
+        );
+        if (!workItem) {
+          throw new Error(
+            `Work item ${request.params.workItemId} was not found on ${bundle.capability.name}.`,
+          );
+        }
+        const workflow = bundle.workspace.workflows.find(
+          (item) => item.id === workItem.workflowId,
+        );
+        if (!workflow) {
+          throw new Error(
+            `Workflow ${workItem.workflowId} was not found for ${workItem.id}.`,
+          );
+        }
+        const runtimeSelection = await validateExecutionStartRuntime({
+          capability: bundle.capability,
+          workItem,
+          workflow,
+          agents: bundle.workspace.agents,
+          restartFromPhase: startPhase,
+        });
+
+        let requiresAsyncPreparation = false;
         if (executorId && actor.userId && context?.primaryRepositoryId) {
-          const result = await ensureWorkItemSharedBranchReady({
+          const result = await resolveExecutionPreparationPolicy({
             capabilityId: request.params.capabilityId,
             workItemId: request.params.workItemId,
             actorUserId: actor.userId,
@@ -1249,20 +1089,8 @@ export const registerWorkItemRoutes = (
             });
             return;
           }
+          requiresAsyncPreparation = true;
         }
-        // `startPhase` is a client-side alias for `restartFromPhase` that
-        // reads more naturally in the new segment model. Accept either;
-        // precedence: explicit startPhase > legacy restartFromPhase.
-        const startPhase =
-          (request.body?.startPhase as WorkItemPhase | undefined) ||
-          (request.body?.restartFromPhase as WorkItemPhase | undefined);
-        const stopAfterPhase = request.body?.stopAfterPhase as
-          | WorkItemPhase
-          | undefined;
-        const intention =
-          typeof request.body?.intention === "string"
-            ? request.body.intention.trim() || undefined
-            : undefined;
 
         const detail = await startWorkflowExecution({
           capabilityId: request.params.capabilityId,
@@ -1273,6 +1101,64 @@ export const registerWorkItemRoutes = (
           guidance: String(request.body?.guidance || "").trim() || undefined,
           guidedBy: actor.displayName,
           actor,
+          queuedDispatchOverride: requiresAsyncPreparation
+            ? {
+                assignedExecutorId: executorId || undefined,
+                queueReason: "PREPARING_EXECUTION_CONTEXT",
+              }
+            : undefined,
+        });
+        await insertRunEvent(
+          createRunEvent({
+            capabilityId: detail.run.capabilityId,
+            runId: detail.run.id,
+            workItemId: detail.run.workItemId,
+            traceId: detail.run.traceId,
+            type: "START_REQUEST_ACCEPTED",
+            level: "INFO",
+            message: `Start request accepted for ${workItem.title}.`,
+            details: {
+              stage: "START_REQUEST_ACCEPTED",
+              startRequestId,
+              restartFromPhase: startPhase || null,
+              stopAfterPhase: stopAfterPhase || null,
+              intention: intention || null,
+              executorId: executorId || null,
+              queueReason: detail.run.queueReason || null,
+              runtimeProviderKey: runtimeSelection.selection.providerKey,
+              runtimeModel: runtimeSelection.selection.model,
+              runtimeTransportMode: runtimeSelection.selection.transportMode,
+            },
+          }),
+        );
+        if (requiresAsyncPreparation) {
+          await insertRunEvent(
+            createRunEvent({
+              capabilityId: detail.run.capabilityId,
+              runId: detail.run.id,
+              workItemId: detail.run.workItemId,
+              traceId: detail.run.traceId,
+              type: "RUN_PREPARATION_QUEUED",
+              level: "INFO",
+              message: "Execution start queued while the desktop workspace is prepared.",
+              details: {
+                stage: "RUN_PREPARATION_QUEUED",
+                startRequestId,
+                queueReason: "PREPARING_EXECUTION_CONTEXT",
+                executorId: executorId || null,
+              },
+            }),
+          );
+        }
+        console.info("[execution-start]", {
+          capabilityId: request.params.capabilityId,
+          workItemId: request.params.workItemId,
+          runId: detail.run.id,
+          startRequestId,
+          executorId: executorId || null,
+          queueReason: detail.run.queueReason || null,
+          runtimeProviderKey: runtimeSelection.selection.providerKey,
+          runtimeModel: runtimeSelection.selection.model,
         });
         wakeExecutionWorker();
         response.status(201).json(detail);
@@ -1483,6 +1369,136 @@ export const registerWorkItemRoutes = (
             request.params.workItemId,
           ),
         );
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  // ── Per-work-item git workspace (Workflow Orchestrator) ───────────────────
+  //
+  // These three endpoints manage the isolated git checkout that the Workflow
+  // Orchestrator creates for every work item.  They are intentionally thin
+  // wrappers around `workItemGitWorkspace.ts` — all git logic lives there.
+
+  /**
+   * GET  …/git-workspace/status
+   * Returns the current git status of the work-item workspace.  Safe to call
+   * before the workspace has been initialised (`exists: false` is returned).
+   */
+  app.get(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/git-workspace/status",
+    async (request, response) => {
+      try {
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor: parseActorContext(request, "Workspace Operator"),
+          action: "workitem.read",
+        });
+        const { capabilityId, workItemId } = request.params;
+        const bundle = await getCapabilityBundle(capabilityId);
+        const workingDir = await resolveOperatorWorkingDirectory();
+        const workspacePath = getWorkItemWorkspacePath(
+          workingDir,
+          bundle.capability,
+          workItemId,
+        );
+        const status = await getWorkItemGitWorkspaceStatus(workspacePath);
+        response.json({
+          ...status,
+          branchNameExpected: buildWorkItemBranchName(workItemId),
+        });
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  /**
+   * POST  …/git-workspace/init
+   * Creates (or reuses) the per-work-item git workspace.  Idempotent.
+   *
+   * Body (all optional):
+   *   repositoryUrl  — fallback URL when no base clone is registered
+   *   defaultBranch  — branch to clone from (default "main")
+   */
+  app.post(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/git-workspace/init",
+    async (request, response) => {
+      try {
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor: parseActorContext(request, "Workspace Operator"),
+          action: "workitem.control",
+        });
+        const { capabilityId, workItemId } = request.params;
+        const bundle = await getCapabilityBundle(capabilityId);
+        const workingDir = await resolveOperatorWorkingDirectory();
+
+        // Prefer the capability's primary repository URL as the fallback
+        // when no base clone is registered.
+        const primaryRepo =
+          (bundle.capability.repositories || []).find((r) => r.isPrimary) ??
+          (bundle.capability.repositories || [])[0];
+        const repositoryUrl =
+          (request.body?.repositoryUrl as string | undefined) ||
+          primaryRepo?.url;
+        const defaultBranch =
+          (request.body?.defaultBranch as string | undefined) ||
+          primaryRepo?.defaultBranch ||
+          "main";
+
+        const result = await initWorkItemGitWorkspace({
+          capability: bundle.capability,
+          workItemId,
+          workingDir,
+          repositoryUrl,
+          defaultBranch,
+        });
+        response.json(result);
+      } catch (error) {
+        sendApiError(response, error);
+      }
+    },
+  );
+
+  /**
+   * POST  …/git-workspace/finalize
+   * Stages all changes, commits them, and optionally pushes to origin.
+   *
+   * Body (all optional):
+   *   commitMessage  — custom commit message
+   *   push           — boolean; push to remote when true (default false)
+   *   authorName     — git author name
+   *   authorEmail    — git author email
+   */
+  app.post(
+    "/api/capabilities/:capabilityId/work-items/:workItemId/git-workspace/finalize",
+    async (request, response) => {
+      try {
+        await assertCapabilityPermission({
+          capabilityId: request.params.capabilityId,
+          actor: parseActorContext(request, "Workspace Operator"),
+          action: "workitem.control",
+        });
+        const { capabilityId, workItemId } = request.params;
+        const bundle = await getCapabilityBundle(capabilityId);
+        const workingDir = await resolveOperatorWorkingDirectory();
+        const workspacePath = getWorkItemWorkspacePath(
+          workingDir,
+          bundle.capability,
+          workItemId,
+        );
+        const branchName = buildWorkItemBranchName(workItemId);
+        const result = await finalizeWorkItemGitWorkspace({
+          workspacePath,
+          branchName,
+          commitMessage: request.body?.commitMessage as string | undefined,
+          authorName: request.body?.authorName as string | undefined,
+          authorEmail: request.body?.authorEmail as string | undefined,
+          push: Boolean(request.body?.push),
+        });
+        response.json(result);
       } catch (error) {
         sendApiError(response, error);
       }
