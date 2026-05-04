@@ -1621,6 +1621,27 @@ export const invokeCommonAgentRuntime = async ({
       }
       console.log(`[agentRuntime:debug]   evidence fed to LLM: ${String(toolHistory[toolHistory.length - 1]?.content || '').slice(0, 600)}`);
       // ──────────────────────────────────────────────────────────────
+
+      // ── No-index early exit ────────────────────────────────────────
+      // When browse_code (or any index-dependent tool) signals that no code
+      // index exists for this capability (`details.error === 'no-index'`),
+      // every subsequent call with different search terms will produce the
+      // same empty result.  Break the loop immediately so the forced-answer
+      // recovery path fires with only 2 LLM calls instead of the full budget.
+      const hasNoIndexResult = executedToolCalls.some(
+        (call) =>
+          (call.result.details as Record<string, unknown> | undefined)?.error === "no-index",
+      );
+      if (hasNoIndexResult) {
+        console.warn("[agentRuntime] no-index detected — breaking tool loop early", {
+          runtimeLane,
+          toolId: decision.toolCall.toolId,
+          iteration,
+        });
+        break;
+      }
+      // ──────────────────────────────────────────────────────────────
+
       currentMessage = `Continue answering the original request: ${message}`;
     }
 
