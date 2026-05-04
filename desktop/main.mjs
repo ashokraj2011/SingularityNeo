@@ -626,6 +626,14 @@ const startLocalWorker = () => {
     try {
       message = JSON.parse(line);
     } catch {
+      // Non-JSON lines are diagnostic logs from the worker (`console.log`).
+      // The stdio pipe is shared with IPC, so we previously dropped them
+      // silently — which made every worker-side `console.log`
+      // (`[llm:context]`, `[chat:llm]`, `[orchestrator:debug]`, etc.)
+      // invisible to the operator's terminal. Echo them now so all
+      // worker diagnostics surface in the same terminal where Electron
+      // was launched.
+      process.stdout.write(`${line}\n`);
       return;
     }
 

@@ -87,7 +87,21 @@ const formatBudgetSummary = (
 /**
  * Print the assembled context envelope to the backend terminal. Honors
  * the `SINGULARITY_LOG_LLM_CONTEXT` env toggle.
+ *
+ * Uses `console.error` (stderr) instead of `console.log` (stdout)
+ * because the desktop worker's stdout doubles as the IPC channel back
+ * to the Electron parent — non-JSON lines on stdout were historically
+ * dropped silently. main.mjs now also echoes those, but writing to
+ * stderr (which is `inherit`-mapped to the launching terminal) is the
+ * belt-and-suspenders path that works regardless.
  */
+const writeLine = (line: string): void => {
+  // stderr is configured `inherit` for the worker → reaches the operator's
+  // terminal directly. For control-plane / unit-test contexts, stderr is
+  // also their natural diagnostic channel.
+  process.stderr.write(`${line}\n`);
+};
+
 export const logLlmContextEnvelope = (payload: LlmContextLogPayload): void => {
   const mode = resolveLogMode();
   if (mode === "off") return;
@@ -97,12 +111,12 @@ export const logLlmContextEnvelope = (payload: LlmContextLogPayload): void => {
     payload;
   const summary = summarizeMessages(messages);
 
-  console.log(`\n${tag} ${ROW}`);
-  console.log(
+  writeLine(`\n${tag} ${ROW}`);
+  writeLine(
     `${tag} traceId: ${traceId || "n/a"} · scope: ${scope || "?"}${scopeId ? `:${scopeId}` : ""}`,
   );
-  console.log(`${tag} provider: ${provider} · model: ${model}`);
-  console.log(
+  writeLine(`${tag} provider: ${provider} · model: ${model}`);
+  writeLine(
     `${tag} messages: ${messages.length} (${summary.total} chars, ${Object.entries(
       summary.counts,
     )
@@ -110,25 +124,25 @@ export const logLlmContextEnvelope = (payload: LlmContextLogPayload): void => {
       .join(" ")})`,
   );
   const budgetLine = formatBudgetSummary(budgetReceipt);
-  if (budgetLine) console.log(`${tag} budget: ${budgetLine}`);
+  if (budgetLine) writeLine(`${tag} budget: ${budgetLine}`);
 
   if (mode === "verbose") {
     // Print full content, role-by-role, with section dividers.
     for (let i = 0; i < messages.length; i += 1) {
       const m = messages[i];
-      console.log(`${tag} ${SUB}`);
-      console.log(`${tag} [${i + 1}] role: ${m.role} · ${m.content.length} chars`);
-      console.log(m.content);
+      writeLine(`${tag} ${SUB}`);
+      writeLine(`${tag} [${i + 1}] role: ${m.role} · ${m.content.length} chars`);
+      writeLine(m.content);
     }
 
     if (budgetReceipt) {
-      console.log(`${tag} ${SUB}`);
-      console.log(`${tag} budget receipt:`);
+      writeLine(`${tag} ${SUB}`);
+      writeLine(`${tag} budget receipt:`);
       for (const f of budgetReceipt.included || []) {
-        console.log(`${tag}   + ${f.source.padEnd(22)} ${f.estimatedTokens} tok`);
+        writeLine(`${tag}   + ${f.source.padEnd(22)} ${f.estimatedTokens} tok`);
       }
       for (const f of budgetReceipt.evicted || []) {
-        console.log(
+        writeLine(
           `${tag}   - ${f.source.padEnd(22)} ${f.estimatedTokens} tok (evicted${
             f.reason ? `: ${f.reason}` : ""
           })`,
@@ -137,7 +151,7 @@ export const logLlmContextEnvelope = (payload: LlmContextLogPayload): void => {
     }
   }
 
-  console.log(`${tag} ${ROW}\n`);
+  writeLine(`${tag} ${ROW}\n`);
 };
 
 // ── Persistence (chat-mode) ───────────────────────────────────────────────
