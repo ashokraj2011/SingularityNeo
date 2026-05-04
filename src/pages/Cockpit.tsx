@@ -49,6 +49,9 @@ const Cockpit = () => {
     stopStream,
     resolveBlock,
     sendGuidance,
+    startRun,
+    resumeRun,
+    restartRun,
   } = useCockpitState(activeCapability);
 
   const [showPicker, setShowPicker] = useState(false);
@@ -260,6 +263,9 @@ const Cockpit = () => {
             }
             onResolveBlock={resolveBlock}
             onSendGuidance={sendGuidance}
+            onStartRun={startRun}
+            onResumeRun={resumeRun}
+            onRestartRun={restartRun}
           />
         </div>
       ) : (

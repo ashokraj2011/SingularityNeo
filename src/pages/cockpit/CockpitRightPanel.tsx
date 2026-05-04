@@ -43,6 +43,9 @@ type Props = {
   onOpenApproval: () => void;
   onResolveBlock: (resolution: string) => Promise<void>;
   onSendGuidance: (instruction: string) => Promise<void>;
+  onStartRun: (guidance?: string) => Promise<void>;
+  onResumeRun: (note?: string) => Promise<void>;
+  onRestartRun: (guidance?: string) => Promise<void>;
 };
 
 const PANEL_TABS: { id: RightPanelMode; label: string }[] = [
@@ -62,6 +65,86 @@ const GUIDANCE_INTENTS: GuidanceIntent[] = [
   "STOP_AND_WAIT",
 ];
 
+// ── Run status helpers ────────────────────────────────────────────────────────
+
+type RunStatusMeta = {
+  label: string;
+  color: string;          // badge text color class
+  bg: string;             // badge bg class
+  actionLabel?: string;   // CTA button label
+  actionVariant?: "start" | "resume" | "restart";
+  hint?: string;          // one-line explanation below the badge
+};
+
+const RUN_STATUS_META: Record<string, RunStatusMeta> = {
+  RUNNING: {
+    label: "Running",
+    color: "text-emerald-700 dark:text-emerald-300",
+    bg: "bg-emerald-500/10",
+    hint: "Agent is executing — chat is active.",
+  },
+  QUEUED: {
+    label: "Queued",
+    color: "text-sky-700 dark:text-sky-300",
+    bg: "bg-sky-500/10",
+    hint: "Waiting for an executor to pick this up.",
+  },
+  PAUSED: {
+    label: "Paused",
+    color: "text-amber-700 dark:text-amber-300",
+    bg: "bg-amber-500/10",
+    actionLabel: "Resume run",
+    actionVariant: "resume",
+    hint: "Run is paused. Resume to continue execution.",
+  },
+  WAITING_APPROVAL: {
+    label: "Waiting — approval",
+    color: "text-violet-700 dark:text-violet-300",
+    bg: "bg-violet-500/10",
+    hint: "Pending human approval before the run can continue.",
+  },
+  WAITING_HUMAN_TASK: {
+    label: "Waiting — human task",
+    color: "text-amber-700 dark:text-amber-300",
+    bg: "bg-amber-500/10",
+    hint: "Agent delegated a task to a human. Complete it below.",
+  },
+  WAITING_INPUT: {
+    label: "Waiting — input",
+    color: "text-amber-700 dark:text-amber-300",
+    bg: "bg-amber-500/10",
+    hint: "Agent is waiting for your input to continue.",
+  },
+  WAITING_CONFLICT: {
+    label: "Waiting — conflict",
+    color: "text-rose-700 dark:text-rose-300",
+    bg: "bg-rose-500/10",
+    hint: "A conflict was detected. Resolve it below to continue.",
+  },
+  FAILED: {
+    label: "Failed",
+    color: "text-rose-700 dark:text-rose-300",
+    bg: "bg-rose-500/10",
+    actionLabel: "Restart step",
+    actionVariant: "restart",
+    hint: "The run failed. Provide guidance and restart.",
+  },
+  CANCELLED: {
+    label: "Cancelled",
+    color: "text-secondary",
+    bg: "bg-surface-container",
+    actionLabel: "Restart step",
+    actionVariant: "restart",
+    hint: "Run was cancelled. Restart to continue.",
+  },
+  COMPLETED: {
+    label: "Completed",
+    color: "text-emerald-700 dark:text-emerald-300",
+    bg: "bg-emerald-500/10",
+    hint: "This run completed. The work item may be done.",
+  },
+};
+
 // ── NOW panel ─────────────────────────────────────────────────────────────────
 
 const NowPanel = ({
@@ -75,6 +158,9 @@ const NowPanel = ({
   onOpenApproval,
   onResolveBlock,
   onSelectArtifact,
+  onStartRun,
+  onResumeRun,
+  onRestartRun,
 }: Pick<
   Props,
   | "workItem"
@@ -87,16 +173,33 @@ const NowPanel = ({
   | "onOpenApproval"
   | "onResolveBlock"
   | "onSelectArtifact"
+  | "onStartRun"
+  | "onResumeRun"
+  | "onRestartRun"
 >) => {
+  const [guidanceInput, setGuidanceInput] = useState("");
+
   const run = runDetail?.run;
+  const runMeta = run ? (RUN_STATUS_META[run.status] ?? null) : null;
+
   const isBlocked =
     workItem?.status === "BLOCKED" ||
     Boolean(workItem?.pendingRequest?.type);
+
+  const hasNoRun = !workItem?.activeRunId;
 
   const recentArtifacts = ledgerArtifacts
     .filter((r) => r.artifact.workItemId === workItem?.id)
     .slice(-5)
     .reverse();
+
+  const handleAction = () => {
+    if (!runMeta?.actionVariant) return;
+    const g = guidanceInput.trim() || undefined;
+    if (runMeta.actionVariant === "resume") void onResumeRun?.(g);
+    else if (runMeta.actionVariant === "restart") void onRestartRun?.(g);
+    setGuidanceInput("");
+  };
 
   if (!workItem) {
     return (
@@ -111,7 +214,109 @@ const NowPanel = ({
 
   return (
     <div className="space-y-4 p-4">
-      {/* Block banner */}
+
+      {/* ── No active run — start it ─────────────────────────────── */}
+      {hasNoRun && (
+        <div className="overflow-hidden rounded-xl border border-sky-300 bg-white shadow-sm dark:bg-surface-container">
+          <div className="h-1 w-full bg-sky-400" />
+          <div className="p-4">
+            <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              No active run
+            </p>
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              This work item has not been started yet. Add optional guidance and
+              click Start to begin execution.
+            </p>
+            <textarea
+              value={guidanceInput}
+              onChange={(e) => setGuidanceInput(e.target.value)}
+              placeholder="Optional guidance for the agent…"
+              rows={2}
+              className="mt-3 w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-900 placeholder-gray-400 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400 dark:border-gray-700 dark:bg-black/20 dark:text-gray-100"
+            />
+            <button
+              type="button"
+              disabled={isSubmitting}
+              onClick={() => {
+                void onStartRun?.(guidanceInput.trim() || undefined);
+                setGuidanceInput("");
+              }}
+              className={cn(
+                "mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700",
+                isSubmitting && "cursor-not-allowed opacity-60",
+              )}
+            >
+              {isSubmitting ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : (
+                <CheckCircle2 size={13} />
+              )}
+              Start run
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Run status card ──────────────────────────────────────── */}
+      {run && runMeta && (
+        <div className="workspace-meta-card">
+          <div className="flex items-center justify-between">
+            <p className="workspace-meta-label">Run status</p>
+            <span
+              className={cn(
+                "rounded-full px-2 py-0.5 text-[0.62rem] font-semibold uppercase tracking-wide",
+                runMeta.bg,
+                runMeta.color,
+              )}
+            >
+              {runMeta.label}
+            </span>
+          </div>
+          {runMeta.hint && (
+            <p className="mt-1.5 text-xs text-secondary">{runMeta.hint}</p>
+          )}
+          <p className="mt-1 font-mono text-[0.62rem] text-outline">
+            {run.id.slice(-14)}
+            {run.startedAt
+              ? ` · started ${new Date(run.startedAt).toLocaleTimeString()}`
+              : ""}
+          </p>
+
+          {/* Action for FAILED / PAUSED / CANCELLED */}
+          {runMeta.actionVariant && (
+            <div className="mt-3 space-y-2">
+              <textarea
+                value={guidanceInput}
+                onChange={(e) => setGuidanceInput(e.target.value)}
+                placeholder="Optional guidance before restarting…"
+                rows={2}
+                className="w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-900 placeholder-gray-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary dark:border-gray-700 dark:bg-black/20 dark:text-gray-100"
+              />
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={handleAction}
+                className={cn(
+                  "inline-flex w-full items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition-colors",
+                  runMeta.actionVariant === "resume"
+                    ? "bg-sky-600 hover:bg-sky-700"
+                    : "bg-rose-600 hover:bg-rose-700",
+                  isSubmitting && "cursor-not-allowed opacity-60",
+                )}
+              >
+                {isSubmitting ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <CheckCircle2 size={13} />
+                )}
+                {runMeta.actionLabel}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Block panel (WAITING_* states and explicit BLOCKED status) ─ */}
       {isBlocked && (
         <BlockedPanel
           blocker={workItem.blocker}
@@ -122,7 +327,7 @@ const NowPanel = ({
         />
       )}
 
-      {/* Current agent */}
+      {/* ── Current agent ────────────────────────────────────────── */}
       {agent && (
         <div className="workspace-meta-card">
           <p className="workspace-meta-label">Current agent</p>
@@ -140,7 +345,7 @@ const NowPanel = ({
         </div>
       )}
 
-      {/* Current step */}
+      {/* ── Current step ─────────────────────────────────────────── */}
       {currentStep && (
         <div className="workspace-meta-card">
           <p className="workspace-meta-label">Current step</p>
@@ -152,29 +357,15 @@ const NowPanel = ({
               {currentStep.description}
             </p>
           )}
+          {currentStep.stepType && (
+            <span className="mt-1.5 inline-block rounded bg-primary/5 px-1.5 py-0.5 text-[0.62rem] text-secondary">
+              {currentStep.stepType.replace(/_/g, " ")}
+            </span>
+          )}
         </div>
       )}
 
-      {/* Run summary */}
-      {run && (
-        <div className="workspace-meta-card">
-          <p className="workspace-meta-label">Run</p>
-          <div className="mt-2 space-y-1 text-xs text-secondary">
-            <p>
-              Status:{" "}
-              <strong className="text-primary">
-                {run.status.replace(/_/g, " ")}
-              </strong>
-            </p>
-            <p>Run: <span className="font-mono">{run.id.slice(-12)}</span></p>
-            {run.startedAt && (
-              <p>Started: {new Date(run.startedAt).toLocaleString()}</p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Git workspace */}
+      {/* ── Git workspace ────────────────────────────────────────── */}
       {gitWorkspace && (
         <div className="workspace-meta-card">
           <p className="workspace-meta-label flex items-center gap-1">
@@ -201,7 +392,7 @@ const NowPanel = ({
         </div>
       )}
 
-      {/* Evidence artifacts */}
+      {/* ── Evidence artifacts ───────────────────────────────────── */}
       <div className="workspace-meta-card">
         <div className="flex items-center justify-between">
           <p className="workspace-meta-label">Evidence</p>
@@ -519,6 +710,9 @@ export const CockpitRightPanel = ({
   onOpenApproval,
   onResolveBlock,
   onSendGuidance,
+  onStartRun,
+  onResumeRun,
+  onRestartRun,
 }: Props) => {
   const hasApproval =
     workItem?.status === "BLOCKED" &&
@@ -563,6 +757,9 @@ export const CockpitRightPanel = ({
             onOpenApproval={onOpenApproval}
             onResolveBlock={onResolveBlock}
             onSelectArtifact={onSelectArtifact}
+            onStartRun={onStartRun}
+            onResumeRun={onResumeRun}
+            onRestartRun={onRestartRun}
           />
         )}
         {mode === "ARTIFACT" && (

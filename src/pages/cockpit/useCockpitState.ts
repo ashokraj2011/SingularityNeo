@@ -15,6 +15,9 @@ import {
   initWorkItemGitWorkspace,
   provideCapabilityWorkflowRunInput,
   resolveCapabilityWorkflowRunConflict,
+  restartCapabilityWorkflowRun,
+  resumeCapabilityWorkflowRun,
+  startCapabilityWorkflowRun,
   streamCapabilityChat,
   type WorkItemGitWorkspaceInitResult,
 } from "../../lib/api";
@@ -525,6 +528,82 @@ export const useCockpitState = (capability: Capability) => {
     abortControllerRef.current = null;
   }, []);
 
+  // ── Run lifecycle actions ─────────────────────────────────────────────────
+
+  /** Start a fresh run for a STAGED work item (no activeRunId). */
+  const startRun = useCallback(
+    async (guidance?: string) => {
+      const { workItem } = stateRef.current;
+      if (!workItem) return;
+      dispatch({ type: "BEGIN_SUBMIT" });
+      try {
+        await startCapabilityWorkflowRun(capability.id, workItem.id, {
+          guidance,
+          guidedBy: guidance ? "cockpit-operator" : undefined,
+        });
+        success("Run started", "The workflow is now executing.");
+        dispatch({ type: "SUBMIT_DONE" });
+        await loadWorkItem(workItem.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to start run.";
+        dispatch({ type: "SET_ERROR", error: msg });
+        toastError("Start failed", msg);
+      }
+    },
+    [capability.id, loadWorkItem, success, toastError],
+  );
+
+  /** Resume a PAUSED run. */
+  const resumeRun = useCallback(
+    async (note?: string) => {
+      const { workItem } = stateRef.current;
+      const runId = workItem?.activeRunId ?? workItem?.lastRunId;
+      if (!workItem || !runId) {
+        toastError("Cannot resume", "No run to resume.");
+        return;
+      }
+      dispatch({ type: "BEGIN_SUBMIT" });
+      try {
+        await resumeCapabilityWorkflowRun(capability.id, runId, { note });
+        success("Run resumed", "The workflow is continuing.");
+        dispatch({ type: "SUBMIT_DONE" });
+        await loadWorkItem(workItem.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to resume run.";
+        dispatch({ type: "SET_ERROR", error: msg });
+        toastError("Resume failed", msg);
+      }
+    },
+    [capability.id, loadWorkItem, success, toastError],
+  );
+
+  /** Restart a FAILED / CANCELLED run (optionally with guidance). */
+  const restartRun = useCallback(
+    async (guidance?: string) => {
+      const { workItem } = stateRef.current;
+      const runId = workItem?.activeRunId ?? workItem?.lastRunId;
+      if (!workItem || !runId) {
+        toastError("Cannot restart", "No run to restart.");
+        return;
+      }
+      dispatch({ type: "BEGIN_SUBMIT" });
+      try {
+        await restartCapabilityWorkflowRun(capability.id, runId, {
+          guidance,
+          guidedBy: guidance ? "cockpit-operator" : undefined,
+        });
+        success("Run restarted", "The step is executing again.");
+        dispatch({ type: "SUBMIT_DONE" });
+        await loadWorkItem(workItem.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to restart run.";
+        dispatch({ type: "SET_ERROR", error: msg });
+        toastError("Restart failed", msg);
+      }
+    },
+    [capability.id, loadWorkItem, success, toastError],
+  );
+
   // ── Resolve block (input / conflict / task) ───────────────────────────────
 
   const resolveBlock = useCallback(
@@ -613,5 +692,8 @@ export const useCockpitState = (capability: Capability) => {
     stopStream,
     resolveBlock,
     sendGuidance,
+    startRun,
+    resumeRun,
+    restartRun,
   };
 };
