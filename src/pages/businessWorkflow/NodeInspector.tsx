@@ -1,12 +1,13 @@
-import { useMemo } from "react";
 import type {
   AssignmentMode,
   BusinessAttachment,
   BusinessNode,
+  FormSchema,
   TaskPriority,
 } from "../../contracts/businessWorkflow";
 import type { CapabilityAgent as Agent } from "../../types";
 import { BehaviorsEditor } from "./BehaviorsEditor";
+import { FormSchemaBuilder } from "./FormSchemaBuilder";
 
 const ASSIGNMENT_MODES: AssignmentMode[] = [
   "DIRECT_USER",
@@ -123,15 +124,6 @@ export const NodeInspector = ({
 }: Props) => {
   const cfg = node.config;
 
-  const formSchemaText = useMemo(() => {
-    if (!cfg.formSchema) return "";
-    try {
-      return JSON.stringify(cfg.formSchema, null, 2);
-    } catch {
-      return "";
-    }
-  }, [cfg.formSchema]);
-
   const updateConfig = (patch: Record<string, unknown>) =>
     onChange({ config: { ...cfg, ...patch } as typeof cfg });
 
@@ -228,30 +220,16 @@ export const NodeInspector = ({
         </>
       )}
 
-      {(node.type === "HUMAN_TASK" || node.type === "FORM_FILL") && (
-        <label className="block text-xs">
-          <span className="mb-1 block text-[0.62rem] font-semibold uppercase tracking-wider text-secondary">
-            Form Schema (JSON)
-          </span>
-          <textarea
-            value={formSchemaText}
-            onChange={(e) => {
-              const text = e.target.value;
-              if (!text.trim()) {
-                updateConfig({ formSchema: null });
-                return;
-              }
-              try {
-                updateConfig({ formSchema: JSON.parse(text) });
-              } catch {
-                // Leave invalid JSON in the textarea; parse on next valid edit.
-              }
-            }}
-            rows={6}
-            className="w-full rounded-lg border border-outline-variant/40 bg-white px-2 py-1.5 font-mono text-[0.65rem]"
-            placeholder='{"type":"object","properties":{...}}'
-          />
-        </label>
+      {(node.type === "HUMAN_TASK" ||
+        node.type === "FORM_FILL" ||
+        node.type === "START") && (
+        <FormSchemaBuilder
+          value={cfg.formSchema}
+          onChange={(next: FormSchema | null) =>
+            updateConfig({ formSchema: next })
+          }
+          surface={node.type === "START" ? "launch" : "task"}
+        />
       )}
 
       {node.type === "AGENT_TASK" && (

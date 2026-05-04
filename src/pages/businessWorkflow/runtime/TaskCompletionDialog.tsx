@@ -17,6 +17,7 @@ import { interpretFormSchema } from "../../../lib/businessFormSchema";
 import { cn } from "../../../lib/utils";
 import { SlaChip } from "./components/SlaChip";
 import { PriorityBadge } from "./components/PriorityBadge";
+import { StructuredFormFieldInput } from "./components/StructuredFormFieldInput";
 import type {
   BusinessDocument,
   BusinessTask,
@@ -272,32 +273,20 @@ export const TaskCompletionDialog = ({
                         </span>
                       )}
                     </span>
-                    {f.multiline ? (
-                      <textarea
-                        value={structured[f.key] ?? ""}
-                        onChange={(e) =>
-                          setStructured((prev) => ({
-                            ...prev,
-                            [f.key]: e.target.value,
-                          }))
-                        }
-                        placeholder={f.placeholder}
-                        rows={3}
-                        className="w-full resize-y rounded-lg border border-outline-variant/40 bg-white px-2 py-1.5 text-xs"
-                      />
-                    ) : (
-                      <input
-                        type="text"
-                        value={structured[f.key] ?? ""}
-                        onChange={(e) =>
-                          setStructured((prev) => ({
-                            ...prev,
-                            [f.key]: e.target.value,
-                          }))
-                        }
-                        placeholder={f.placeholder}
-                        className="w-full rounded-lg border border-outline-variant/40 bg-white px-2 py-1.5 text-xs"
-                      />
+                    <StructuredFormFieldInput
+                      field={f}
+                      value={structured[f.key] ?? ""}
+                      onChange={(next) =>
+                        setStructured((prev) => ({
+                          ...prev,
+                          [f.key]: next,
+                        }))
+                      }
+                    />
+                    {f.helpText && (
+                      <p className="mt-0.5 text-[0.6rem] text-outline">
+                        {f.helpText}
+                      </p>
                     )}
                     <p className="mt-0.5 font-mono text-[0.55rem] text-outline">
                       formData.{f.key}

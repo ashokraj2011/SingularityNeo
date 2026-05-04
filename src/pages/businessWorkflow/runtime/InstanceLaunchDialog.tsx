@@ -13,6 +13,7 @@ import type {
 } from "../../../contracts/businessWorkflow";
 import { interpretFormSchema } from "../../../lib/businessFormSchema";
 import { DocumentsPanel } from "./DocumentsPanel";
+import { StructuredFormFieldInput } from "./components/StructuredFormFieldInput";
 
 /**
  * Launch dialog opened from the Studio's "Start instance" button.
@@ -280,35 +281,28 @@ export const InstanceLaunchDialog = ({
               </p>
               {interp.fields.map((f) => (
                 <label key={f.key} className="block text-xs">
-                  <span className="mb-1 block text-[0.62rem] font-semibold uppercase tracking-wider text-secondary">
+                  <span className="mb-1 flex items-center gap-1 text-[0.62rem] font-semibold uppercase tracking-wider text-secondary">
                     {f.label}
+                    {f.required && (
+                      <span className="text-rose-600" title="Required">
+                        *
+                      </span>
+                    )}
                   </span>
-                  {f.multiline ? (
-                    <textarea
-                      value={structured[f.key] ?? f.defaultValue ?? ""}
-                      onChange={(e) =>
-                        setStructured((prev) => ({
-                          ...prev,
-                          [f.key]: e.target.value,
-                        }))
-                      }
-                      placeholder={f.placeholder}
-                      rows={3}
-                      className="w-full resize-y rounded-lg border border-outline-variant/40 bg-white px-2 py-1.5 text-xs"
-                    />
-                  ) : (
-                    <input
-                      type="text"
-                      value={structured[f.key] ?? f.defaultValue ?? ""}
-                      onChange={(e) =>
-                        setStructured((prev) => ({
-                          ...prev,
-                          [f.key]: e.target.value,
-                        }))
-                      }
-                      placeholder={f.placeholder}
-                      className="w-full rounded-lg border border-outline-variant/40 bg-white px-2 py-1.5 text-xs"
-                    />
+                  <StructuredFormFieldInput
+                    field={f}
+                    value={structured[f.key] ?? f.defaultValue ?? ""}
+                    onChange={(next) =>
+                      setStructured((prev) => ({
+                        ...prev,
+                        [f.key]: next,
+                      }))
+                    }
+                  />
+                  {f.helpText && (
+                    <p className="mt-0.5 text-[0.6rem] text-outline">
+                      {f.helpText}
+                    </p>
                   )}
                   <p className="mt-0.5 font-mono text-[0.55rem] text-outline">
                     params.{f.key}

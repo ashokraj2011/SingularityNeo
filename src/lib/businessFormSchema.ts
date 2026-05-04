@@ -27,14 +27,51 @@
 
 import type { FormSchema } from "../contracts/businessWorkflow";
 
+/**
+ * Field type the renderer uses to pick the right input. The parser
+ * keeps backward compat with the older `multiline` boolean by
+ * coercing it into `type` at parse time.
+ *
+ * Values are always stored as strings on the wire (formData /
+ * output) so edge-condition evaluation stays uniform — numeric ops
+ * coerce, boolean comparisons match `"yes"` / `"no"` / `"true"` /
+ * `"false"` literals, choice values are the literal value strings.
+ */
+export type FormFieldType =
+  | "text"
+  | "longtext"
+  | "number"
+  | "date"
+  | "boolean"
+  | "choice";
+
 export interface StructuredFormField {
   key: string;
   label: string;
+  /** "text" if absent (or "longtext" when legacy `multiline: true`). */
+  type?: FormFieldType;
   placeholder?: string;
+  /** Legacy flag — preserved on the wire for round-trip with older
+   *  templates. New templates use `type: "longtext"` instead. */
   multiline?: boolean;
   defaultValue?: string;
   required?: boolean;
+  /** For `type: "choice"` — list of selectable values. Each option's
+   *  `value` is what gets stored; `label` is what the operator sees. */
+  options?: { value: string; label: string }[];
+  /** Free-form help text rendered below the input. */
+  helpText?: string;
 }
+
+/** Resolve the actual rendered input type for a field, applying the
+ *  legacy `multiline` fallback. */
+export const resolveFieldType = (
+  field: StructuredFormField,
+): FormFieldType => {
+  if (field.type) return field.type;
+  if (field.multiline) return "longtext";
+  return "text";
+};
 
 export type InterpretedFormSchema =
   | { kind: "structured"; fields: StructuredFormField[] }
@@ -54,15 +91,53 @@ export const interpretFormSchema = (
       const r = raw as Record<string, unknown>;
       const key = typeof r.key === "string" ? r.key : "";
       if (!key) continue;
+      // Validate the type is one we know how to render. Unknown
+      // values fall back to text so the form still renders.
+      const knownTypes: FormFieldType[] = [
+        "text",
+        "longtext",
+        "number",
+        "date",
+        "boolean",
+        "choice",
+      ];
+      const type =
+        typeof r.type === "string" &&
+        knownTypes.includes(r.type as FormFieldType)
+          ? (r.type as FormFieldType)
+          : undefined;
+      // Parse choice options, ignoring malformed entries.
+      let options: { value: string; label: string }[] | undefined;
+      if (Array.isArray(r.options)) {
+        options = (r.options as unknown[])
+          .map((opt) => {
+            if (!opt || typeof opt !== "object") return null;
+            const o = opt as Record<string, unknown>;
+            const value = typeof o.value === "string" ? o.value : null;
+            if (value == null) return null;
+            return {
+              value,
+              label: typeof o.label === "string" ? o.label : value,
+            };
+          })
+          .filter(
+            (x): x is { value: string; label: string } => x !== null,
+          );
+        if (options.length === 0) options = undefined;
+      }
       fields.push({
         key,
         label: typeof r.label === "string" ? r.label : key,
+        type,
         placeholder:
           typeof r.placeholder === "string" ? r.placeholder : undefined,
         multiline: r.multiline === true,
         defaultValue:
           typeof r.defaultValue === "string" ? r.defaultValue : undefined,
         required: r.required === true,
+        options,
+        helpText:
+          typeof r.helpText === "string" ? r.helpText : undefined,
       });
     }
     if (fields.length > 0) return { kind: "structured", fields };
