@@ -625,6 +625,97 @@ const resolveWorkspacePath = async (
   preferredPath?: string,
 ) => (await resolveWorkspaceContext(capability, workItem, preferredPath)).workspacePath;
 
+/**
+ * Strip Markdown link wrapping from a file-path string before any `fs.readFile`
+ * call.  LLMs frequently emit filenames as `[ContainsOperator.java](http://…)`
+ * (the `.java` triggers some renderers' auto-linkify, which then sticks even
+ * after a follow-up turn).  When a downstream tool call passes that whole
+ * string through as the path, `fs.open` fails with ENOENT on the literal
+ * `[name](url)` characters.  This helper extracts the inner link text and
+ * returns the basename only — the caller's existing relative-path resolution
+ * picks the right code root.
+ *
+ * Returns the cleaned path, or the original if no markdown wrapping is found.
+ */
+const sanitizeRequestedFilePath = (filePath: string): string => {
+  const trimmed = String(filePath || "").trim();
+  if (!trimmed) return trimmed;
+  const markdownLink = trimmed.match(
+    /^(.*?)\[([^\]]+)\]\(([^)]*)\)(.*)$/,
+  );
+  if (markdownLink) {
+    const linkText = markdownLink[2].trim();
+    const before = markdownLink[1].replace(/[\s/]+$/, "");
+    // Reconstruct as before + linkText.  If `before` ends with a directory
+    // (had a trailing slash before our trim), keep it as the parent dir.
+    return [before, linkText].filter(Boolean).join("/");
+  }
+  return trimmed;
+};
+
+/**
+ * Recursively scan each code root for a file whose basename matches `target`.
+ * Used as the last-ditch fallback in `workspace_read` when both Strategy A
+ * (sibling-root lookup) and Strategy B (work-item-prefix strip) come up empty.
+ *
+ * Hard-capped to keep cold-cache ENOENT recovery snappy:
+ * - Skips the usual junk dirs (`node_modules`, `.git`, `dist`, etc.).
+ * - Caps the per-root walk at 4,000 entries.
+ * - Stops on the first match.
+ */
+const SKIP_DIRS_FOR_BASENAME_SEARCH = new Set([
+  "node_modules",
+  ".git",
+  ".next",
+  ".turbo",
+  ".cache",
+  "dist",
+  "build",
+  "out",
+  "target",
+  "coverage",
+  ".gradle",
+  ".idea",
+  ".vscode",
+]);
+const MAX_BASENAME_SEARCH_ENTRIES = 4_000;
+
+const findFileByBasenameInRoots = async (
+  roots: string[],
+  basename: string,
+): Promise<string | null> => {
+  if (!basename) return null;
+  for (const root of roots) {
+    if (!root) continue;
+    let entriesScanned = 0;
+    const stack: string[] = [root];
+    while (stack.length) {
+      const current = stack.pop()!;
+      if (entriesScanned >= MAX_BASENAME_SEARCH_ENTRIES) break;
+      let dirents: import("node:fs").Dirent[];
+      try {
+        dirents = await fs.readdir(current, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of dirents) {
+        entriesScanned += 1;
+        if (entriesScanned > MAX_BASENAME_SEARCH_ENTRIES) break;
+        const full = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          if (SKIP_DIRS_FOR_BASENAME_SEARCH.has(entry.name)) continue;
+          stack.push(full);
+          continue;
+        }
+        if (entry.isFile() && entry.name === basename) {
+          return full;
+        }
+      }
+    }
+  }
+  return null;
+};
+
 const resolvePathWithinWorkspace = (
   workspacePath: string,
   filePath: string,
@@ -1070,11 +1161,19 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
           includeWorkspaceFallbackRoot: true,
         });
       const workspacePath = workspaceContext.workspacePath;
-      const requestedPath = getRequiredStringArg(
+      const rawRequestedPath = getRequiredStringArg(
         args,
         "path",
         "workspace_read",
       );
+      // Strip Markdown link wrapping (`[file](url)`) the LLM may have carried
+      // forward from a prior turn before doing any path resolution.
+      const requestedPath = sanitizeRequestedFilePath(rawRequestedPath);
+      if (requestedPath !== rawRequestedPath) {
+        console.warn(
+          `[workspace_read] sanitized markdown-wrapped path: ${rawRequestedPath} → ${requestedPath}`,
+        );
+      }
       const pathResolution = await canonicalizeRepoBackedPath({
         requestedPath,
         codeRoots,
@@ -1182,6 +1281,32 @@ export const TOOL_REGISTRY: Record<ToolAdapterId, ToolAdapter> = {
                 break;
               } catch {
                 // keep trying
+              }
+            }
+          }
+
+          // Strategy C: basename-search fallback.  Walk every code root
+          // (which already includes operator-workdir-discovered clones — see
+          // resolveCapabilityCodeRoots) looking for a file whose basename
+          // matches the requested filename.  This recovers from cases where
+          // the LLM remembered a stale absolute path under a checkout that
+          // no longer exists, but the file is still present in the operator
+          // workdir under a different layout.
+          if (fallbackContent === null) {
+            const targetBasename = path.basename(targetPath);
+            const found = await findFileByBasenameInRoots(
+              codeRoots.map((root) => root.checkoutPath),
+              targetBasename,
+            );
+            if (found) {
+              try {
+                fallbackContent = await fs.readFile(found, "utf8");
+                actualReadPath = found;
+                console.warn(
+                  `[workspace_read] ENOENT at ${targetPath} — basename search found ${found}`,
+                );
+              } catch {
+                // fall through to surface original error
               }
             }
           }
