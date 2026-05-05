@@ -724,6 +724,12 @@ export const invokeCliRuntime = async ({
           model: resolvedModel,
         });
 
+  console.log(
+    `[LLM REQUEST] provider=${resolveProviderDisplayName(providerKey)} | model=${resolvedModel || 'default'} | endpoint=cli:${resolvedCommand} | cwd=${workingDirectory} | timeoutMs=${timeoutMs || DEFAULT_TIMEOUT_MS}`,
+  );
+  console.log(`[LLM REQUEST]   cliArgs: ${invocation.args.join(' ')}`);
+  console.log(`[LLM REQUEST]   prompt (${prompt.length} chars):\n${prompt}`);
+
   const result = await runCliProcess({
     command: resolvedCommand,
     args: invocation.args,
@@ -746,6 +752,17 @@ export const invokeCliRuntime = async ({
   if (onDelta) {
     onDelta(content);
   }
+
+  console.log(
+    `[LLM RESPONSE] provider=${resolveProviderDisplayName(providerKey)} | model=${resolvedModel || resolveProviderDisplayName(providerKey)} | endpoint=cli:${resolvedCommand}`,
+  );
+  if (trim(result.stdout)) {
+    console.log(`[LLM RESPONSE]   stdout:\n${result.stdout}`);
+  }
+  if (trim(result.stderr)) {
+    console.log(`[LLM RESPONSE]   stderr:\n${result.stderr}`);
+  }
+  console.log(`[LLM RESPONSE]   content (${content.length} chars):\n${content}`);
 
   return {
     content,
