@@ -194,6 +194,52 @@ describe('workflowRuntime', () => {
     expect(compiled.artifactChecklist[0]?.status).toBe('READY');
   });
 
+  it('treats a live work-item checkout as satisfying the workspace input', () => {
+    const step = buildStep({
+      id: 'STEP-ARCH',
+      name: 'Solution Shaping & Architecture',
+      phase: 'ANALYSIS',
+      allowedToolIds: ['workspace_read', 'browse_code'],
+    });
+    const capability = buildCapability({
+      localDirectories: [],
+      executionConfig: {
+        defaultWorkspacePath: '',
+        allowedWorkspacePaths: [],
+        commandTemplates: [],
+        deploymentTargets: [],
+      },
+    });
+
+    const compiled = compileStepContext({
+      capability,
+      workItem: buildWorkItem({
+        sourceWorkspace: {
+          sourceWorkspaceState: 'WORK_ITEM_CHECKOUT_READY',
+          operatorWorkDir: '/operator/workdir',
+          repoRoot: '/operator/workdir/WI-RUNTIME/ruleengine',
+          branchName: 'wi/wi-runtime',
+          expectedBranchName: 'wi/wi-runtime',
+          repositoryId: 'REPO-1',
+          repositoryLabel: 'ruleengine',
+          astStatus: 'READY',
+        },
+      }),
+      workflow: buildWorkflow([step]),
+      step,
+    });
+
+    expect(compiled.preferredWorkspacePath).toBe(
+      '/operator/workdir/WI-RUNTIME/ruleengine',
+    );
+    expect(compiled.requiredInputs.find(item => item.id === 'approved-workspace')?.status).toBe(
+      'READY',
+    );
+    expect(compiled.missingInputs.map(item => item.id)).not.toContain(
+      'approved-workspace',
+    );
+  });
+
   it('includes agent artifact suggestions without treating optional inputs as missing', () => {
     const step = buildStep({
       artifactContract: {
